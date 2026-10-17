@@ -45,6 +45,14 @@ jobs:
         run: go mod tidy -diff
       - name: go vet
         run: go vet -tags integrationtests ./...
+      - name: No proof-of-stake code in the node
+        run: |
+          # The beacon wrapper is kept only for upstream tests and the evm
+          # test runner; the node itself must not link it.
+          if go list -deps ./cmd/geth | grep -x -E 'github.com/ethereum/go-ethereum/(consensus/beacon|eth/catalyst|beacon/.*)'; then
+            echo "geth links proof-of-stake code"
+            exit 1
+          fi
 
   build:
     name: build

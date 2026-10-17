@@ -46,7 +46,6 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/crypto/kzg4844"
 	"github.com/ethereum/go-ethereum/eth"
-	"github.com/ethereum/go-ethereum/eth/catalyst"
 	"github.com/ethereum/go-ethereum/eth/downloader"
 	"github.com/ethereum/go-ethereum/eth/ethconfig"
 	"github.com/ethereum/go-ethereum/eth/filters"
@@ -160,12 +159,7 @@ var (
 	// Dev mode
 	DeveloperFlag = &cli.BoolFlag{
 		Name:     "dev",
-		Usage:    "Ephemeral proof-of-authority network with a pre-funded developer account, mining enabled",
-		Category: flags.DevCategory,
-	}
-	DeveloperPeriodFlag = &cli.Uint64Flag{
-		Name:     "dev.period",
-		Usage:    "Block period for proof-of-authority network to use in developer mode (0 = mine only if transaction pending)",
+		Usage:    "Ephemeral proof-of-work network with a pre-funded developer account, mining enabled (same as --dev.pow)",
 		Category: flags.DevCategory,
 	}
 	DeveloperPoWFlag = &cli.BoolFlag{
@@ -703,12 +697,6 @@ var (
 	}
 
 	// MISC settings
-	SyncTargetFlag = &cli.StringFlag{
-		Name:      "synctarget",
-		Usage:     `Hash of the block to full sync to (dev testing feature)`,
-		TakesFile: true,
-		Category:  flags.MiscCategory,
-	}
 
 	// RPC settings
 	IPCDisabledFlag = &cli.BoolFlag{
@@ -1795,9 +1783,7 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 	log.Debug("Sanitizing Go's GC trigger", "percent", int(gogc))
 	godebug.SetGCPercent(int(gogc))
 
-	if ctx.IsSet(SyncTargetFlag.Name) {
-		cfg.SyncMode = downloader.FullSync // dev sync target forces full sync
-	} else if ctx.IsSet(SyncModeFlag.Name) {
+	if ctx.IsSet(SyncModeFlag.Name) {
 		cfg.SyncMode = *flags.GlobalTextMarshaler(ctx, SyncModeFlag.Name).(*downloader.SyncMode)
 	}
 
@@ -2020,26 +2006,11 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 		log.Info("Using developer account", "address", developer.Address)
 
 		// Create a new developer genesis block or reuse existing one
-		cfg.Genesis = params.DeveloperGenesisBlock(ctx.Uint64(DeveloperGasLimitFlag.Name), &developer.Address, ctx.Bool(DeveloperPoWFlag.Name))
+		cfg.Genesis = params.DeveloperGenesisBlock(ctx.Uint64(DeveloperGasLimitFlag.Name), &developer.Address)
 		if ctx.IsSet(DataDirFlag.Name) {
 			chaindb := tryMakeReadOnlyDatabase(ctx, stack)
 			if rawdb.ReadCanonicalHash(chaindb, 0) != (common.Hash{}) {
 				cfg.Genesis = nil // fallback to db content
-
-				// validate genesis has PoS enabled in block 0
-				genesis, err := core.ReadGenesis(chaindb)
-				if err != nil {
-					Fatalf("Could not read genesis from database: %v", err)
-				}
-				if !genesis.Config.GetEthashTerminalTotalDifficultyPassed() {
-					Fatalf("Bad developer-mode genesis configuration: terminalTotalDifficultyPassed must be true in developer mode")
-				}
-				if genesis.Config.GetEthashTerminalTotalDifficulty() == nil {
-					Fatalf("Bad developer-mode genesis configuration: terminalTotalDifficulty must be specified.")
-				}
-				if genesis.Difficulty.Cmp(genesis.Config.GetEthashTerminalTotalDifficulty()) != 1 {
-					Fatalf("Bad developer-mode genesis configuration: genesis block difficulty must be > terminalTotalDifficulty")
-				}
 			}
 			chaindb.Close()
 		}
@@ -2085,12 +2056,6 @@ func RegisterFilterAPI(stack *node.Node, backend ethapi.Backend, ethcfg *ethconf
 		Service:   filters.NewFilterAPI(filterSystem, false),
 	}})
 	return filterSystem
-}
-
-// RegisterFullSyncTester adds the full-sync tester service into node.
-func RegisterFullSyncTester(stack *node.Node, eth *eth.Ethereum, target common.Hash) {
-	catalyst.RegisterFullSyncTester(stack, eth, target)
-	log.Info("Registered full-sync tester", "hash", target)
 }
 
 func SetupMetrics(ctx *cli.Context) {
