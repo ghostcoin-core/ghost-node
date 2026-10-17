@@ -45,6 +45,8 @@ jobs:
         run: go mod tidy -diff
       - name: go vet
         run: go vet -tags integrationtests ./...
+      - name: Release builds have no fake seals
+        run: go test -tags ghostrelease -run '^TestRelease' ./consensus/ethash
       - name: No proof-of-stake code in the node
         run: |
           # The beacon wrapper is kept only for upstream tests and the evm

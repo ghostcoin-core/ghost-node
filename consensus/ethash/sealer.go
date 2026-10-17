@@ -67,7 +67,7 @@ func (ethash *Ethash) makePoissonFakeDelay() float64 {
 // the block's difficulty requirements.
 func (ethash *Ethash) Seal(chain consensus.ChainHeaderReader, block *types.Block, results chan<- *types.Block, stop <-chan struct{}) error {
 	// If we're running a fake PoW, simply return a 0 nonce immediately
-	if ethash.config.PowMode == ModeFake || ethash.config.PowMode == ModeFullFake {
+	if FakeSealsAllowed && (ethash.config.PowMode == ModeFake || ethash.config.PowMode == ModeFullFake) {
 		header := block.Header()
 		header.Nonce, header.MixDigest = types.BlockNonce{}, common.Hash{}
 		select {
@@ -76,7 +76,7 @@ func (ethash *Ethash) Seal(chain consensus.ChainHeaderReader, block *types.Block
 			ethash.config.Log.Warn("Sealing result is not read by miner", "mode", "fake", "sealhash", ethash.SealHash(block.Header()))
 		}
 		return nil
-	} else if ethash.config.PowMode == ModePoissonFake {
+	} else if FakeSealsAllowed && ethash.config.PowMode == ModePoissonFake {
 		go func(header *types.Header) {
 			// Assign random (but non-zero) values to header nonce and mix.
 			header.Nonce = types.EncodeNonce(uint64(rand.Int63n(math.MaxInt64)))

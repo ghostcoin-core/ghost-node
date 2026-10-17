@@ -525,6 +525,19 @@ const (
 	ModeFullFake
 )
 
+// IsFake reports whether the mode accepts seals without checking them. It is
+// always false in release builds.
+func (m Mode) IsFake() bool {
+	return FakeSealsAllowed && (m == ModeFake || m == ModePoissonFake || m == ModeFullFake)
+}
+
+// requireFakeSeals panics in release builds, which have no fake modes.
+func requireFakeSeals(m Mode) {
+	if !FakeSealsAllowed && (m == ModeFake || m == ModePoissonFake || m == ModeFullFake) {
+		panic("ethash: the " + m.String() + " proof-of-work mode is not available in release builds")
+	}
+}
+
 func (m Mode) String() string {
 	switch m {
 	case ModeNormal:
@@ -605,6 +618,7 @@ func New(config Config, notify []string, noverify bool) *Ethash {
 	if config.DatasetDir != "" && config.DatasetsOnDisk > 0 {
 		config.Log.Info("Disk storage enabled for ethash DAGs", "dir", config.DatasetDir, "count", config.DatasetsOnDisk)
 	}
+	requireFakeSeals(config.PowMode)
 	ethash := &Ethash{
 		config:   config,
 		caches:   newlru(config.CachesInMem, newCache),
@@ -629,6 +643,7 @@ func NewTester(notify []string, noverify bool) *Ethash {
 // all blocks' seal as valid, though they still have to conform to the Ethereum
 // consensus rules.
 func NewFaker() *Ethash {
+	requireFakeSeals(ModeFake)
 	return &Ethash{
 		config: Config{
 			PowMode: ModeFake,
@@ -641,6 +656,7 @@ func NewFaker() *Ethash {
 // accepts all blocks as valid apart from the single one specified, though they
 // still have to conform to the Ethereum consensus rules.
 func NewFakeFailer(fail uint64) *Ethash {
+	requireFakeSeals(ModeFake)
 	return &Ethash{
 		config: Config{
 			PowMode: ModeFake,
@@ -654,6 +670,7 @@ func NewFakeFailer(fail uint64) *Ethash {
 // accepts all blocks as valid, but delays verifications by some time, though
 // they still have to conform to the Ethereum consensus rules.
 func NewFakeDelayer(delay time.Duration) *Ethash {
+	requireFakeSeals(ModeFake)
 	return &Ethash{
 		config: Config{
 			PowMode: ModeFake,
@@ -667,6 +684,7 @@ func NewFakeDelayer(delay time.Duration) *Ethash {
 // accepts all blocks as valid, but delays mining by some time based on miner.threads, though
 // they still have to conform to the Ethereum consensus rules.
 func NewPoissonFaker() *Ethash {
+	requireFakeSeals(ModePoissonFake)
 	return &Ethash{
 		config: Config{
 			PowMode: ModePoissonFake,
@@ -678,6 +696,7 @@ func NewPoissonFaker() *Ethash {
 // NewFullFaker creates an ethash consensus engine with a full fake scheme that
 // accepts all blocks as valid, without checking any consensus rules whatsoever.
 func NewFullFaker() *Ethash {
+	requireFakeSeals(ModeFullFake)
 	return &Ethash{
 		config: Config{
 			PowMode: ModeFullFake,
