@@ -71,7 +71,6 @@ var (
 		"crypto/bn256/",
 		"crypto/bls12381/",
 		"crypto/ecies/",
-		"graphql/graphiql.go",
 		"internal/jsre/deps",
 		"log/",
 		"metrics/",

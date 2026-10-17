@@ -62,7 +62,6 @@ var DefaultConfig = Config{
 	WSModules:            []string{"net", "web3"},
 	BatchRequestLimit:    1000,
 	BatchResponseMaxSize: 25 * 1000 * 1000,
-	GraphQLVirtualHosts:  []string{"localhost"},
 	P2P: p2p.Config{
 		ListenAddr: ":30303",
 		MaxPeers:   50,

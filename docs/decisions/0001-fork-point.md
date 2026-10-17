@@ -11,11 +11,18 @@ upstream history kept. That commit is the candidate the Ghost project named,
 46 commits that bring in go-ethereum's toolchain updates (Go 1.23 to 1.25,
 golangci-lint v2) and nothing else of substance.
 
-Two fixes that only the `ethereumclassic/core-geth` v1.13.0 release has are
+Two fixes that only the `ethereumclassic/core-geth` v1.13.0 release has were
 applied on top, with credit in the commit messages:
 
 - the GraphQL query depth limit (GHSA-mh3m-8c74-74xh);
 - a limit of 2048 block announcements per `NewBlockHashes` message.
+
+The GraphQL server was then removed altogether. In the pinned graphql-go
+v1.3.0, the depth check remembers each fragment it has already visited, so a
+fragment first used at a shallow level is not checked again when it is reused
+deeper, and a short query can still make the node expand an exponential
+selection. Ghost's tools use JSON-RPC only, so removing the server closes the
+problem instead of patching the library.
 
 ## What was compared
 
@@ -41,7 +48,7 @@ title.
 | `UnmarshalPubkey` rejects off-curve points (CVE-2025-24883) | yes, upstream patch | yes, its own patch |
 | Trie embedded node size check (go-ethereum #33803) | yes | yes |
 | RLPx handshake messages limited to 2 KB (go-ethereum #30029) | yes | **no** |
-| GraphQL query depth limit (GHSA-mh3m-8c74-74xh) | no | yes, **taken** |
+| GraphQL query depth limit (GHSA-mh3m-8c74-74xh) | no | yes; taken, then the GraphQL server was removed |
 | Limit on block announcements per message | no | yes, **taken** |
 | Disconnect peers sending invalid KZG proofs (CVE-2026-22868) | no | yes; not needed, Ghost has no blob transactions |
 | Bounded snapshot serving | no | yes; logged for the security catch-up |
