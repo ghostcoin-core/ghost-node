@@ -20,7 +20,6 @@ require (
 	github.com/crate-crypto/go-ipa v0.0.0-20231025140028-3c0104f4b233
 	github.com/crate-crypto/go-kzg-4844 v0.7.0
 	github.com/davecgh/go-spew v1.1.1
-	github.com/deckarep/golang-set v1.8.0
 	github.com/deckarep/golang-set/v2 v2.3.1
 	github.com/dop251/goja v0.0.0-20230806174421-c933cf95e127
 	github.com/edsrzf/mmap-go v1.1.0
@@ -80,7 +79,6 @@ require (
 	gonum.org/v1/gonum v0.14.0
 	gonum.org/v1/plot v0.14.0
 	gopkg.in/natefinch/lumberjack.v2 v2.0.0
-	gopkg.in/urfave/cli.v1 v1.20.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
