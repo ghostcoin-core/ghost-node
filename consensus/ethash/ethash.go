@@ -531,9 +531,11 @@ func (m Mode) IsFake() bool {
 	return FakeSealsAllowed && (m == ModeFake || m == ModePoissonFake || m == ModeFullFake)
 }
 
-// requireFakeSeals panics in release builds, which have no fake modes.
+// requireFakeSeals panics in release builds for the modes they leave out: the
+// fake modes, and the test mode, whose tiny cache and dataset make seals that
+// normal ethash rejects.
 func requireFakeSeals(m Mode) {
-	if !FakeSealsAllowed && (m == ModeFake || m == ModePoissonFake || m == ModeFullFake) {
+	if !FakeSealsAllowed && (m == ModeFake || m == ModePoissonFake || m == ModeFullFake || m == ModeTest) {
 		panic("ethash: the " + m.String() + " proof-of-work mode is not available in release builds")
 	}
 }
@@ -636,6 +638,7 @@ func New(config Config, notify []string, noverify bool) *Ethash {
 // NewTester creates a small sized ethash PoW scheme useful only for testing
 // purposes.
 func NewTester(notify []string, noverify bool) *Ethash {
+	requireFakeSeals(ModeTest)
 	return New(Config{PowMode: ModeTest}, notify, noverify)
 }
 

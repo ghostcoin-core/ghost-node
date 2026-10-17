@@ -24,7 +24,9 @@ import (
 )
 
 // TestReleaseHasNoFakeSeals checks that a release build cannot make an engine
-// that skips seal verification, by any constructor or configured mode.
+// that skips seal verification or uses the test mode's tiny dataset, by any
+// constructor or configured mode, and that its remote sealer always verifies
+// submitted work.
 func TestReleaseHasNoFakeSeals(t *testing.T) {
 	if FakeSealsAllowed {
 		t.Fatal("release build allows fake seals")
@@ -43,6 +45,13 @@ func TestReleaseHasNoFakeSeals(t *testing.T) {
 		"New(ModeFake)":     func() { New(Config{PowMode: ModeFake}, nil, false) },
 		"New(ModeFullFake)": func() { New(Config{PowMode: ModeFullFake}, nil, false) },
 		"New(ModePoisson)":  func() { New(Config{PowMode: ModePoissonFake}, nil, false) },
+		"New(ModeTest)":     func() { New(Config{PowMode: ModeTest}, nil, false) },
+		"NewTester":         func() { NewTester(nil, false) },
+	}
+	sealer := startRemoteSealer(&Ethash{}, nil, true)
+	defer close(sealer.requestExit)
+	if sealer.noverify {
+		t.Error("release remote sealer skips verification of submitted work")
 	}
 	for name, construct := range constructors {
 		func() {

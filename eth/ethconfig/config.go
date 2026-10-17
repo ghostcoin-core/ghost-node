@@ -223,8 +223,11 @@ func CreateConsensusEngine(stack *node.Node, ethashConfig *ethash.Config, clique
 	} else {
 		if !ethash.FakeSealsAllowed {
 			switch ethashConfig.PowMode {
-			case ethash.ModeFake, ethash.ModePoissonFake, ethash.ModeFullFake:
-				log.Crit("Fake proof-of-work modes are not available in release builds", "mode", ethashConfig.PowMode)
+			case ethash.ModeFake, ethash.ModePoissonFake, ethash.ModeFullFake, ethash.ModeTest:
+				log.Crit("Fake and test proof-of-work modes are not available in release builds", "mode", ethashConfig.PowMode)
+			}
+			if noverify {
+				log.Crit("Release builds always verify mined work; --miner.noverify is not available")
 			}
 		}
 		switch ethashConfig.PowMode {
