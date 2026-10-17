@@ -37,7 +37,6 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/keystore"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/fdlimit"
-	"github.com/ethereum/go-ethereum/consensus/ethash"
 
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/rawdb"
@@ -67,6 +66,7 @@ import (
 	"github.com/ethereum/go-ethereum/p2p/nat"
 	"github.com/ethereum/go-ethereum/p2p/netutil"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/params/ghost"
 	"github.com/ethereum/go-ethereum/params/types/genesisT"
 	"github.com/ethereum/go-ethereum/params/vars"
 	"github.com/ethereum/go-ethereum/rpc"
@@ -241,21 +241,6 @@ var (
 		Name:     "bloomfilter.size",
 		Usage:    "Megabytes of memory allocated to bloom-filter for pruning",
 		Value:    2048,
-		Category: flags.EthCategory,
-	}
-	OverrideShanghai = &cli.Uint64Flag{
-		Name:     "override.shanghai",
-		Usage:    "Manually specify the Shanghai fork timestamp, overriding the bundled setting",
-		Category: flags.EthCategory,
-	}
-	OverrideCancun = &cli.Uint64Flag{
-		Name:     "override.cancun",
-		Usage:    "Manually specify the Cancun fork timestamp, overriding the bundled setting",
-		Category: flags.EthCategory,
-	}
-	OverrideVerkle = &cli.Uint64Flag{
-		Name:     "override.verkle",
-		Usage:    "Manually specify the Verkle fork timestamp, overriding the bundled setting",
 		Category: flags.EthCategory,
 	}
 	SyncModeFlag = &flags.TextMarshalerFlag{
@@ -457,25 +442,6 @@ var (
 		Usage:    "Maximum amount of time non-executable transaction are queued",
 		Value:    ethconfig.Defaults.TxPool.Lifetime,
 		Category: flags.TxPoolCategory,
-	}
-	// Blob transaction pool settings
-	BlobPoolDataDirFlag = &cli.StringFlag{
-		Name:     "blobpool.datadir",
-		Usage:    "Data directory to store blob transactions in",
-		Value:    ethconfig.Defaults.BlobPool.Datadir,
-		Category: flags.BlobPoolCategory,
-	}
-	BlobPoolDataCapFlag = &cli.Uint64Flag{
-		Name:     "blobpool.datacap",
-		Usage:    "Disk space to allocate for pending blob transactions (soft limit)",
-		Value:    ethconfig.Defaults.BlobPool.Datacap,
-		Category: flags.BlobPoolCategory,
-	}
-	BlobPoolPriceBumpFlag = &cli.Uint64Flag{
-		Name:     "blobpool.pricebump",
-		Usage:    "Price bump percentage to replace an already existing blob transaction",
-		Value:    ethconfig.Defaults.BlobPool.PriceBump,
-		Category: flags.BlobPoolCategory,
 	}
 	// Performance tuning settings
 	CacheFlag = &cli.IntFlag{
@@ -679,16 +645,6 @@ var (
 		Name:     "ethstats",
 		Usage:    "Reporting URL of a ethstats service (nodename:secret@host:port)",
 		Category: flags.MetricsCategory,
-	}
-	FakePoWFlag = &cli.BoolFlag{
-		Name:     "fakepow",
-		Usage:    "Disables proof-of-work verification",
-		Category: flags.LoggingCategory, // FIXME(meowsbits) Logging, really? Not Developer?
-	}
-	FakePoWPoissonFlag = &cli.BoolFlag{
-		Name:     "fakepow.poisson",
-		Usage:    "Disables proof-of-work verification and adds mining delay (Poisson) based on --miner.threads",
-		Category: flags.LoggingCategory,
 	}
 	NoCompactionFlag = &cli.BoolFlag{
 		Name:     "nocompaction",
@@ -1010,21 +966,6 @@ Please note that --` + MetricsHTTPFlag.Name + ` must be set to start the server.
 		Name:  "vm.evm",
 		Usage: "External EVM configuration (default = built-in interpreter)",
 		Value: "",
-	}
-	ECBP1100Flag = &cli.Uint64Flag{
-		Name:     "ecbp1100", // should have been override.ecbp1100, but maintained now for backwards compatibility
-		Usage:    "Manually specify the ECBP-1100 (MESS) block activation number, overriding the bundled setting",
-		Category: flags.EthCategory,
-	}
-	OverrideECBP1100DeactivateFlag = &cli.Uint64Flag{
-		Name:     "override.ecbp1100.deactivate",
-		Usage:    "Manually specify the ECBP-1100 (MESS) deactivation block number, overriding the bundled setting",
-		Category: flags.EthCategory,
-	}
-	ECBP1100NoDisableFlag = &cli.BoolFlag{
-		Name:     "ecbp1100.nodisable",
-		Usage:    "Short-circuit ECBP-1100 (MESS) disable mechanisms; (yields a permanent-once-activated state, deactivating auto-shutoff mechanisms)",
-		Category: flags.DeprecatedCategory,
 	}
 
 	MetricsEnableInfluxDBV2Flag = &cli.BoolFlag{
@@ -1631,9 +1572,6 @@ func setEthash(ctx *cli.Context, cfg *eth.Config) {
 	setEthashCacheDir(ctx, cfg)
 	setEthashDatasetDir(ctx, cfg)
 
-	if ctx.Bool(FakePoWPoissonFlag.Name) {
-		cfg.Ethash.PowMode = ethash.ModePoissonFake
-	}
 	if ctx.IsSet(EthashCachesInMemoryFlag.Name) {
 		cfg.Ethash.CachesInMem = ctx.Int(EthashCachesInMemoryFlag.Name)
 	}
@@ -2226,13 +2164,6 @@ func MakeChain(ctx *cli.Context, stack *node.Node, readonly bool) (*core.BlockCh
 		ethashConfig.ECIP1099Block = gspec.GetEthashECIP1099Transition() // This will panic if the genesis config field is not nil.
 	}
 
-	// Toggle PoW modes at user request.
-	if ctx.Bool(FakePoWFlag.Name) {
-		ethashConfig.PowMode = ethash.ModeFake
-	} else if ctx.Bool(FakePoWPoissonFlag.Name) {
-		ethashConfig.PowMode = ethash.ModePoissonFake
-	}
-
 	engine := ethconfig.CreateConsensusEngine(stack, &ethashConfig, cliqueConfig, nil, false, chainDb)
 	if gcmode := ctx.String(GCModeFlag.Name); gcmode != gcModeFull && gcmode != gcModeArchive {
 		Fatalf("--%s must be either 'full' or 'archive'", GCModeFlag.Name)
@@ -2278,6 +2209,10 @@ func MakeChain(ctx *cli.Context, stack *node.Node, readonly bool) (*core.BlockCh
 		Fatalf("Can't create BlockChain: %v", err)
 	}
 	if err := core.CheckProofOfWorkOnly(chain.Config()); err != nil {
+		chain.Stop()
+		Fatalf("%v", err)
+	}
+	if err := ghost.CheckProfile(chain.Config()); err != nil {
 		chain.Stop()
 		Fatalf("%v", err)
 	}

@@ -27,7 +27,6 @@ import (
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/rlp"
-	"github.com/ethereum/go-ethereum/rpc"
 )
 
 // AdminAPI is the collection of Ethereum full node related APIs for node
@@ -141,15 +140,6 @@ func (api *AdminAPI) ImportChain(file string) (bool, error) {
 		blocks = blocks[:0]
 	}
 	return true, nil
-}
-
-func (api *AdminAPI) Ecbp1100(blockNr rpc.BlockNumber) (bool, error) {
-	i := uint64(blockNr.Int64())
-	err := api.eth.blockchain.Config().SetECBP1100Transition(&i)
-	return api.eth.blockchain.IsArtificialFinalityEnabled() &&
-		api.eth.blockchain.Config().IsEnabled(
-			api.eth.blockchain.Config().GetECBP1100Transition,
-			api.eth.blockchain.CurrentBlock().Number), err
 }
 
 // MaxPeers sets the maximum peer limit for the protocol manager and the p2p server.

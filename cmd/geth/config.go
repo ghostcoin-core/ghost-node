@@ -20,7 +20,6 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
-	"math"
 	"os"
 	"reflect"
 	"runtime"
@@ -41,6 +40,7 @@ import (
 	"github.com/ethereum/go-ethereum/metrics"
 	"github.com/ethereum/go-ethereum/node"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/params/ghost"
 	"github.com/naoina/toml"
 	"github.com/urfave/cli/v2"
 )
@@ -167,36 +167,12 @@ func makeConfigNode(ctx *cli.Context) (*node.Node, gethConfig) {
 // makeFullNode loads geth configuration and creates the Ethereum backend.
 func makeFullNode(ctx *cli.Context) (*node.Node, ethapi.Backend) {
 	stack, cfg := makeConfigNode(ctx)
-	if ctx.IsSet(utils.ECBP1100Flag.Name) {
-		if n := ctx.Uint64(utils.ECBP1100Flag.Name); n != math.MaxUint64 {
-			cfg.Eth.OverrideECBP1100 = &n
-		}
-	}
-	if ctx.IsSet(utils.ECBP1100NoDisableFlag.Name) {
-		if enable := ctx.Bool(utils.ECBP1100NoDisableFlag.Name); enable {
-			cfg.Eth.ECBP1100NoDisable = &enable
-		}
-	}
-	if ctx.IsSet(utils.OverrideECBP1100DeactivateFlag.Name) {
-		if n := ctx.Uint64(utils.OverrideECBP1100DeactivateFlag.Name); n != math.MaxUint64 {
-			cfg.Eth.OverrideECBP1100Deactivate = &n
-		}
-	}
-	if ctx.IsSet(utils.OverrideShanghai.Name) {
-		v := ctx.Uint64(utils.OverrideShanghai.Name)
-		cfg.Eth.OverrideShanghai = &v
-	}
-
-	if ctx.IsSet(utils.OverrideCancun.Name) {
-		v := ctx.Uint64(utils.OverrideCancun.Name)
-		cfg.Eth.OverrideCancun = &v
-	}
-
-	if ctx.IsSet(utils.OverrideVerkle.Name) {
-		v := ctx.Uint64(utils.OverrideVerkle.Name)
-		cfg.Eth.OverrideVerkle = &v
-	}
 	backend, eth := utils.RegisterEthService(stack, &cfg.Eth)
+	if eth != nil {
+		if err := ghost.CheckProfile(eth.BlockChain().Config()); err != nil {
+			utils.Fatalf("%v", err)
+		}
+	}
 
 	// Create gauge with geth system and build information
 	if eth != nil { // The 'eth' backend may be nil in light mode

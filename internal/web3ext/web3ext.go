@@ -160,11 +160,6 @@ web3._extend({
 			params: 1
 		}),
 		new web3._extend.Method({
-			name: 'ecbp1100',
-			call: 'admin_ecbp1100',
-			params: 1
-		}),
-		new web3._extend.Method({
 			name: 'sleepBlocks',
 			call: 'admin_sleepBlocks',
 			params: 2

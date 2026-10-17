@@ -212,24 +212,6 @@ type Config struct {
 
 	// CheckpointOracle is the configuration for checkpoint oracle.
 	CheckpointOracle *ctypes.CheckpointOracleConfig `toml:",omitempty"`
-
-	// Manual configuration field for ECBP1100 activation number. Used for modifying genesis config via CLI flag.
-	OverrideECBP1100 *uint64 `toml:",omitempty"`
-	// Manual configuration field for ECBP1100's disablement block number. Used for modifying genesis config via CLI flag.
-	OverrideECBP1100Deactivate *uint64 `toml:",omitempty"`
-
-	// ECBP1100NoDisable overrides
-	// When this value is *true, ECBP100 will not (ever) be disabled; when *false, it will never be enabled.
-	ECBP1100NoDisable *bool `toml:",omitempty"`
-
-	// OverrideShanghai (TODO: remove after the fork)
-	OverrideShanghai *uint64 `toml:",omitempty"`
-
-	// OverrideCancun (TODO: remove after the fork)
-	OverrideCancun *uint64 `toml:",omitempty"`
-
-	// OverrideVerkle (TODO: remove after the fork)
-	OverrideVerkle *uint64 `toml:",omitempty"`
 }
 
 // CreateConsensusEngine creates a consensus engine for the given chain configuration.
@@ -239,6 +221,12 @@ func CreateConsensusEngine(stack *node.Node, ethashConfig *ethash.Config, clique
 	if cliqueConfig != nil {
 		engine = clique.New(cliqueConfig, db)
 	} else {
+		if !ethash.FakeSealsAllowed {
+			switch ethashConfig.PowMode {
+			case ethash.ModeFake, ethash.ModePoissonFake, ethash.ModeFullFake:
+				log.Crit("Fake proof-of-work modes are not available in release builds", "mode", ethashConfig.PowMode)
+			}
+		}
 		switch ethashConfig.PowMode {
 		case ethash.ModeFake:
 			log.Warn("Ethash used in fake mode")

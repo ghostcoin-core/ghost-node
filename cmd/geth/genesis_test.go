@@ -192,8 +192,8 @@ func TestCustomBackend(t *testing.T) {
 	}
 }
 
-// TestProofOfStakeGenesisRefused tests that the node refuses to run a chain
-// whose configuration schedules the proof-of-stake transition.
+// TestProofOfStakeGenesisRefused tests that geth init refuses a chain whose
+// configuration schedules the proof-of-stake transition.
 func TestProofOfStakeGenesisRefused(t *testing.T) {
 	t.Parallel()
 	genesis := `{
@@ -212,13 +212,38 @@ func TestProofOfStakeGenesisRefused(t *testing.T) {
 	if err := os.WriteFile(json, []byte(genesis), 0600); err != nil {
 		t.Fatalf("failed to write genesis file: %v", err)
 	}
-	runGeth(t, "--datadir", datadir, "init", json).WaitExit()
+	geth := runGeth(t, "--datadir", datadir, "init", json)
+	geth.ExpectRegexp("the proof-of-stake transition \\(terminalTotalDifficulty\\)")
+	geth.ExpectExit()
+	if status := geth.ExitStatus(); status == 0 {
+		t.Errorf("expected exit status != 0, got: %d", status)
+	}
+}
 
-	geth := runGeth(t, "--networkid", "1337", "--syncmode=full", "--cache", "16",
-		"--datadir", datadir, "--maxpeers", "0", "--port", "0", "--authrpc.port", "0",
-		"--nodiscover", "--nat", "none", "--ipcdisable",
-		"--exec", "eth.getBlock(0).nonce", "console")
-	geth.ExpectRegexp("this node runs proof of work only")
+// TestGenesisOutsideGhostProfileRefused tests that geth init refuses a genesis
+// that switches on a feature the node turns off.
+func TestGenesisOutsideGhostProfileRefused(t *testing.T) {
+	t.Parallel()
+	genesis := `{
+		"alloc"      : {},
+		"difficulty" : "0x20000",
+		"gasLimit"   : "0x2fefd8",
+		"config"     : {
+			"chainId"        : 1337,
+			"homesteadBlock" : 0,
+			"londonBlock"    : 0,
+			"shanghaiTime"   : 0,
+			"cancunTime"     : 0,
+			"ethash"         : {}
+		}
+	}`
+	datadir := t.TempDir()
+	json := filepath.Join(datadir, "genesis.json")
+	if err := os.WriteFile(json, []byte(genesis), 0600); err != nil {
+		t.Fatalf("failed to write genesis file: %v", err)
+	}
+	geth := runGeth(t, "--datadir", datadir, "init", json)
+	geth.ExpectRegexp("(?s)switches on features this node turns off.*withdrawals \\(EIP-4895\\).*blob transactions \\(EIP-4844\\)")
 	geth.ExpectExit()
 	if status := geth.ExitStatus(); status == 0 {
 		t.Errorf("expected exit status != 0, got: %d", status)
