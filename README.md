@@ -14,11 +14,15 @@ value.
 ## Status
 
 The repository is at its first stage: the fork point is chosen and recorded,
-unused parts of Core-Geth are being switched off and removed, and every change
-is built reproducibly and tested in CI. It does not yet mine with RandomX, and
-the security catch-up on upstream fixes is still to come.
+the parts of Core-Geth that Ghost does not use are removed or turned off, and
+every change is built reproducibly and tested in CI. It does not yet mine with
+RandomX, and the security catch-up on upstream fixes is still to come.
 
 - Fork point: [docs/decisions/0001-fork-point.md](docs/decisions/0001-fork-point.md)
+- What is removed and turned off: [docs/removed-and-turned-off.md](docs/removed-and-turned-off.md)
+
+No network is built in. Initialise a data directory with a genesis file first
+(`geth init genesis.json`), or try the node in developer mode (`geth --dev`).
 
 ## Building
 
@@ -28,9 +32,10 @@ You need Go 1.26 (the exact toolchain is pinned in `go.mod`) and a C compiler.
 go run build/ci.go install ./cmd/geth
 ```
 
-The executable is written to `build/bin/geth`. Builds are reproducible: the
-same commit gives the same bytes on the same platform, whatever directory it is
-built in. To check that yourself:
+The executable is written to `build/bin/geth`. Release builds use the
+`ghostrelease` build tag, which leaves out the fake proof-of-work modes the
+tests use. Builds are reproducible: the same commit gives the same bytes on
+the same platform, whatever directory it is built in. To check that yourself:
 
 ```sh
 build/check-reproducible.sh
