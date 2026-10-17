@@ -1,0 +1,177 @@
+name: CI
+
+# Required checks on main: typecheck, build, unit, fixtures, reproducible.
+#
+# This repository is public, so jobs run on GitHub-hosted runners: anyone can
+# open a pull request, and pull request code must never run on our own hosts.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+env:
+  # Use the toolchain setup-go installs from go.mod, never download another.
+  GOTOOLCHAIN: local
+
+jobs:
+  typecheck:
+    name: typecheck
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: |
+          unformatted="$(git ls-files -z '*.go' | xargs -0 gofmt -l)"
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: go mod tidy
+        run: go mod tidy -diff
+      - name: go vet
+        run: go vet -tags integrationtests ./...
+
+  build:
+    name: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Build every command
+        run: go run build/ci.go install
+      - name: Record the geth hash
+        run: |
+          sha256sum build/bin/geth | cut -d' ' -f1 > geth-linux-amd64-build.sha256
+          cat geth-linux-amd64-build.sha256
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: hash-build
+          path: geth-linux-amd64-build.sha256
+
+  unit-shard:
+    name: unit (${{ matrix.shard }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [core, eth, consensus-cmd-miner, rest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Test
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          mod=github.com/ethereum/go-ethereum
+          all="$(go list ./... | grep -v -x "$mod/tests")"
+          case "$SHARD" in
+            core)               pkgs="$(echo "$all" | grep -E "^$mod/core(/|$)")" ;;
+            eth)                pkgs="$(echo "$all" | grep -E "^$mod/eth(/|$)")" ;;
+            consensus-cmd-miner) pkgs="$(echo "$all" | grep -E "^$mod/(consensus|cmd|miner)(/|$)")" ;;
+            rest)               pkgs="$(echo "$all" | grep -v -E "^$mod/(core|eth|consensus|cmd|miner)(/|$)")" ;;
+            *) echo "unknown shard $SHARD"; exit 1 ;;
+          esac
+          go test -tags integrationtests -timeout 20m $pkgs
+
+  unit:
+    name: unit
+    needs: unit-shard
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Every shard passed
+        env:
+          RESULT: ${{ needs.unit-shard.result }}
+        run: test "$RESULT" = success
+
+  fixtures:
+    name: fixtures
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Ethereum test fixtures
+        run: go test -timeout 20m ./tests
+
+  reproducible-target:
+    name: reproducible (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: linux-amd64, os: ubuntu-24.04 }
+          - { target: linux-arm64, os: ubuntu-24.04-arm }
+          - { target: darwin-arm64, os: macos-15 }
+          - { target: darwin-amd64, os: macos-15-intel }
+          - { target: windows-amd64, os: windows-2025 }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Build twice and compare
+        run: build/check-reproducible.sh "geth-${{ matrix.target }}.sha256"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: hash-${{ matrix.target }}
+          path: geth-${{ matrix.target }}.sha256
+
+  reproducible:
+    name: reproducible
+    needs: [build, reproducible-target]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Every target built twice to the same bytes
+        env:
+          BUILD: ${{ needs.build.result }}
+          TARGETS: ${{ needs.reproducible-target.result }}
+        run: test "$BUILD" = success && test "$TARGETS" = success
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: hash-*
+          merge-multiple: true
+      - name: Two machines built the same linux-amd64 geth
+        run: |
+          cat *.sha256
+          cmp geth-linux-amd64-build.sha256 geth-linux-amd64.sha256
