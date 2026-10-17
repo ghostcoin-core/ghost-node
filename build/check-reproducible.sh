@@ -17,6 +17,20 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Go on Windows needs a native path for GOCACHE, not a Git Bash one.
+cache_root="$work"
+if command -v cygpath >/dev/null 2>&1; then
+	cache_root="$(cygpath -m "$work")"
+fi
+
+sha256() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | cut -d' ' -f1
+	else
+		shasum -a 256 "$1" | cut -d' ' -f1
+	fi
+}
+
 exe=geth
 case "$(go env GOOS)" in windows) exe=geth.exe ;; esac
 
@@ -26,10 +40,10 @@ for name in a second-build-dir; do
 	git -C "$root" worktree add --detach --quiet "$dir" HEAD
 	(
 		cd "$dir"
-		GOCACHE="$work/cache-$name" GOFLAGS= go run build/ci.go install ./cmd/geth >"$work/build-$name.log" 2>&1 ||
+		GOCACHE="$cache_root/cache-$name" GOFLAGS='' go run build/ci.go install ./cmd/geth >"$work/build-$name.log" 2>&1 ||
 			{ cat "$work/build-$name.log"; exit 1; }
 	)
-	hashes+=("$(sha256sum "$dir/build/bin/$exe" | cut -d' ' -f1)")
+	hashes+=("$(sha256 "$dir/build/bin/$exe")")
 done
 
 echo "$(go env GOOS)/$(go env GOARCH) $exe ${hashes[0]}"
