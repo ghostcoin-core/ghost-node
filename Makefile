@@ -23,17 +23,6 @@ all:
 test: all
 	$(GORUN) build/ci.go test -timeout 20m
 
-# DEPRECATED.
-# No attempt will be made after the Istanbul fork to maintain
-# Parity configuration support.
-sync-parity-chainspecs:
-	./params/parity.json.d/sync-parity-remote.sh
-
-test-coregeth: \
- test-coregeth-features \
- test-coregeth-consensus \
- test-coregeth-regression-condensed ## Runs all tests specific to core-geth.
-
 # The following commands acquire external EWASM and EVM interpreter shared objects for
 # testing EVMC support.
 hera:
@@ -49,50 +38,6 @@ test-evmc: hera evmone
 
 clean-evmc:
 	rm -rf ./build/_workspace/hera ./build/_workspace/evmone
-
-test-coregeth-features: \
-	test-coregeth-features-coregeth ## Runs tests specific to multi-geth using Fork/Feature configs.
-
-test-coregeth-consensus: test-coregeth-features-clique-consensus
-
-test-coregeth-features-coregeth:
-	@echo "Testing fork/feature/datatype implementation; equivalence - COREGETH."
-	env COREGETH_TESTS_CHAINCONFIG_FEATURE_EQUIVALENCE_COREGETH=on go test -count=1 -timeout 60m ./tests
-
-test-coregeth-features-clique-consensus:
-	@echo "Testing fork/feature/datatype implementation; equivalence - Clique consensus"
-	env COREGETH_TESTS_CHAINCONFIG_CONSENSUS_EQUIVALENCE_CLIQUE=on go test -count=1 -timeout 60m -run TestState ./tests ## Only run state tests here, since Blockchain tests will care about rewards, etc.
-
-test-coregeth-chainspecs-coregeth: ## Run tests specific to core-geth using coregeth chainspec file configs.
-	@echo "Testing CoreGeth JSON chainspec equivalence."
-	env COREGETH_TESTS_CHAINCONFIG_COREGETH_SPECS=on go test -count=1 ./tests
-
-test-coregeth-regression-condensed: geth
-	@echo "Running condensed regression tests (imports) against simulated canonical blockchains."
-	./tests/regression/simulated/test.sh ./tests/regression/simulated/classic-condense-state/classic.conf.json ./tests/regression/simulated/classic-condense-state/export.rlp.gz
-	./tests/regression/simulated/test.sh ./tests/regression/simulated/foundation-condense-state/foundation.conf.json ./tests/regression/simulated/foundation-condense-state/export.rlp.gz
-	./tests/regression/simulated/test.sh ./tests/regression/simulated/foundation-condense-state-2/foundation.conf.json ./tests/regression/simulated/foundation-condense-state-2/export.rlp.gz
-
-tests-generate: tests-generate-state tests-generate-difficulty ## Generate all tests.
-
-tests-generate-state: ## Generate state tests.
-	@echo "Generating state tests."
-	env COREGETH_TESTS_GENERATE_STATE_TESTS=on \
-	env COREGETH_TESTS_CHAINCONFIG_FEATURE_EQUIVALENCE_COREGETH=on \
-	go test -p 1 -v -timeout 60m ./tests -run TestGenStateAll
-	rm -rf ./tests/testdata-etc/GeneralStateTests
-	mv ./tests/testdata_generated/GeneralStateTests ./tests/testdata-etc/GeneralStateTests
-	rm -rf ./tests/testdata-etc/LegacyTests
-	mv ./tests/testdata_generated/LegacyTests ./tests/testdata-etc/LegacyTests
-	rm -rf ./tests/testdata_generated
-
-tests-generate-difficulty: ## Generate difficulty tests.
-	@echo "Generating difficulty tests."
-	env COREGETH_TESTS_GENERATE_DIFFICULTY_TESTS=on \
-	go run build/ci.go test -v -timeout 10m ./tests -run TestDifficultyGen
-	rm -rf ./tests/testdata-etc/DifficultyTests
-	mv ./tests/testdata_generated/DifficultyTests ./tests/testdata-etc/DifficultyTests
-	rm -rf ./tests/testdata_generated
 
 #? lint: Run certain pre-selected linters
 lint: ## Run linters.
