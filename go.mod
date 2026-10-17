@@ -1,12 +1,13 @@
 module github.com/ethereum/go-ethereum
 
-go 1.24.0
+go 1.26.0
+
+toolchain go1.26.9
 
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v1.2.0
 	github.com/Microsoft/go-winio v0.6.1
 	github.com/VictoriaMetrics/fastcache v1.12.1
-	github.com/alecthomas/jsonschema v0.0.0-20210413112511-5c9c23bdc720
 	github.com/aws/aws-sdk-go-v2 v1.21.2
 	github.com/aws/aws-sdk-go-v2/config v1.18.45
 	github.com/aws/aws-sdk-go-v2/credentials v1.13.43
@@ -23,7 +24,6 @@ require (
 	github.com/deckarep/golang-set/v2 v2.3.1
 	github.com/dop251/goja v0.0.0-20230806174421-c933cf95e127
 	github.com/edsrzf/mmap-go v1.1.0
-	github.com/etclabscore/go-openrpc-reflect v0.0.37
 	github.com/ethereum/c-kzg-4844 v0.4.0
 	github.com/ethereum/evmc/v7 v7.5.0
 	github.com/fatih/color v1.13.0
@@ -58,7 +58,6 @@ require (
 	github.com/mattn/go-isatty v0.0.19
 	github.com/naoina/toml v0.1.2-0.20170918210437-9fafd6967416
 	github.com/olekukonko/tablewriter v0.0.5
-	github.com/open-rpc/meta-schema v0.0.0-20201029221707-1b72ef2ea333
 	github.com/peterh/liner v1.1.1-0.20190123174540-a2c9a5303de7
 	github.com/protolambda/bls12-381-util v0.0.0-20220416220906-d8552aa452c7
 	github.com/rs/cors v1.7.0
@@ -71,7 +70,6 @@ require (
 	github.com/tidwall/gjson v1.6.0
 	github.com/tyler-smith/go-bip39 v1.1.0
 	github.com/urfave/cli/v2 v2.25.7
-	github.com/xeipuuv/gojsonschema v1.2.0
 	go.uber.org/automaxprocs v1.5.2
 	golang.org/x/crypto v0.48.0
 	golang.org/x/exp v0.0.0-20231110203233-9a3e6036ecaa
@@ -92,8 +90,6 @@ require (
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.7.0 // indirect
 	github.com/Azure/azure-sdk-for-go/sdk/internal v1.3.0 // indirect
 	github.com/DataDog/zstd v1.4.5 // indirect
-	github.com/PuerkitoBio/purell v1.1.1 // indirect
-	github.com/PuerkitoBio/urlesc v0.0.0-20170810143723-de5bf2ad4578 // indirect
 	github.com/StackExchange/wmi v1.2.1 // indirect
 	github.com/ajstarks/svgo v0.0.0-20211024235047-1546f124cd8b // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.13.13 // indirect
@@ -119,15 +115,10 @@ require (
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.0.1 // indirect
 	github.com/deepmap/oapi-codegen v1.6.0 // indirect
 	github.com/dlclark/regexp2 v1.7.0 // indirect
-	github.com/etclabscore/go-jsonschema-walk v0.0.6 // indirect
 	github.com/garslo/gogen v0.0.0-20170306192744-1d203ffc1f61 // indirect
 	github.com/go-fonts/liberation v0.3.1 // indirect
 	github.com/go-latex/latex v0.0.0-20230307184459-12ec69307ad9 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
-	github.com/go-openapi/jsonpointer v0.19.5 // indirect
-	github.com/go-openapi/jsonreference v0.19.4 // indirect
-	github.com/go-openapi/spec v0.19.11 // indirect
-	github.com/go-openapi/swag v0.19.11 // indirect
 	github.com/go-pdf/fpdf v0.8.0 // indirect
 	github.com/go-sourcemap/sourcemap v2.1.3+incompatible // indirect
 	github.com/goccy/go-json v0.10.2 // indirect
@@ -137,17 +128,14 @@ require (
 	github.com/google/pprof v0.0.0-20230207041349-798e818bf904 // indirect
 	github.com/hashicorp/go-cleanhttp v0.5.2 // indirect
 	github.com/hashicorp/go-retryablehttp v0.7.4 // indirect
-	github.com/iancoleman/orderedmap v0.1.0 // indirect
 	github.com/inconshreveable/mousetrap v1.0.0 // indirect
 	github.com/influxdata/line-protocol v0.0.0-20200327222509-2487e7298839 // indirect
 	github.com/jmespath/go-jmespath v0.4.0 // indirect
-	github.com/josharian/intern v1.0.0 // indirect
 	github.com/kilic/bls12-381 v0.1.0 // indirect
 	github.com/klauspost/compress v1.15.15 // indirect
 	github.com/klauspost/cpuid/v2 v2.0.9 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/kr/text v0.2.0 // indirect
-	github.com/mailru/easyjson v0.7.6 // indirect
 	github.com/mattn/go-runewidth v0.0.13 // indirect
 	github.com/matttproud/golang_protobuf_extensions v1.0.2-0.20181231171920-c182affec369 // indirect
 	github.com/minio/sha256-simd v1.0.0 // indirect
@@ -170,8 +158,6 @@ require (
 	github.com/tidwall/pretty v1.0.0 // indirect
 	github.com/tklauser/go-sysconf v0.3.12 // indirect
 	github.com/tklauser/numcpus v0.6.1 // indirect
-	github.com/xeipuuv/gojsonpointer v0.0.0-20180127040702-4e3ac2762d5f // indirect
-	github.com/xeipuuv/gojsonreference v0.0.0-20180127040603-bd5ef7bd5415 // indirect
 	github.com/xrash/smetrics v0.0.0-20201216005158-039620a65673 // indirect
 	golang.org/x/image v0.11.0 // indirect
 	golang.org/x/mod v0.32.0 // indirect

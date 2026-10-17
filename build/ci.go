@@ -223,13 +223,9 @@ func doInstall(cmdline []string) {
 		gobuild.Args = append(gobuild.Args, "-p", "1")
 	}
 
-	/*
-		TODO(meowsbits): The -trimpath flag is commented because it breaks openrpc discovery, for which
-		reflection/AST-parsing gets broken when paths are not full.
-		Is there a better solve for this? Can we just turn reflection off for the geth build?
-	*/
-	// We use -trimpath to avoid leaking local paths into the built executables.
-	// gobuild.Args = append(gobuild.Args, "-trimpath")
+	// We use -trimpath to avoid leaking local paths into the built executables,
+	// and so that a build does not depend on the directory it runs in.
+	gobuild.Args = append(gobuild.Args, "-trimpath")
 
 	// Show packages during build.
 	gobuild.Args = append(gobuild.Args, "-v")
