@@ -227,6 +227,10 @@ func doInstall(cmdline []string) {
 	// and so that a build does not depend on the directory it runs in.
 	gobuild.Args = append(gobuild.Args, "-trimpath")
 
+	// The commit and its date are linked in above. Leave out the VCS stamp Go
+	// would add, whose "modified" flag depends on untracked files in the tree.
+	gobuild.Args = append(gobuild.Args, "-buildvcs=false")
+
 	// Show packages during build.
 	gobuild.Args = append(gobuild.Args, "-v")
 

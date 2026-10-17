@@ -20,7 +20,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"regexp"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -98,35 +98,33 @@ func Env() Environment {
 }
 
 // LocalEnv returns build environment metadata gathered from git.
+//
+// It asks git itself rather than reading files under .git, so the result is
+// the same in a plain clone, a linked worktree and a detached checkout.
 func LocalEnv() Environment {
 	env := applyEnvFlags(Environment{Name: "local", Repo: "ethereum/go-ethereum"})
 
-	head := readGitFile("HEAD")
-	if fields := strings.Fields(head); len(fields) == 2 {
-		head = fields[1]
-	} else {
-		// In this case we are in "detached head" state
-		// see: https://git-scm.com/docs/git-checkout#_detached_head
-		// Additional check required to verify, that file contains commit hash
-		commitRe, _ := regexp.Compile("^([0-9a-f]{40})$")
-		if commit := commitRe.FindString(head); commit != "" && env.Commit == "" {
-			env.Commit = commit
-		}
-		return env
-	}
 	if env.Commit == "" {
-		env.Commit = readGitFile(head)
+		env.Commit = gitOutput("rev-parse", "--verify", "-q", "HEAD^{commit}")
 	}
 	env.Date = getDate(env.Commit)
 	if env.Branch == "" {
-		if head != "HEAD" {
-			env.Branch = strings.TrimPrefix(head, "refs/heads/")
-		}
+		env.Branch = gitOutput("symbolic-ref", "-q", "--short", "HEAD")
 	}
-	if info, err := os.Stat(".git/objects"); err == nil && info.IsDir() && env.Tag == "" {
-		env.Tag = firstLine(RunGit("tag", "-l", "--points-at", "HEAD"))
+	if env.Tag == "" && env.Commit != "" {
+		env.Tag = firstLine(gitOutput("tag", "-l", "--points-at", "HEAD"))
 	}
 	return env
+}
+
+// gitOutput runs git with the given arguments and returns its trimmed output,
+// or the empty string if git is missing or the command fails.
+func gitOutput(args ...string) string {
+	out, err := exec.Command("git", args...).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func firstLine(s string) string {

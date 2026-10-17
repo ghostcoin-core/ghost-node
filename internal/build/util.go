@@ -110,15 +110,6 @@ func RunGit(args ...string) string {
 	return strings.TrimSpace(stdout.String())
 }
 
-// readGitFile returns content of file in .git directory.
-func readGitFile(file string) string {
-	content, err := os.ReadFile(path.Join(".git", file))
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(content))
-}
-
 // Render renders the given template file into outputFile.
 func Render(templateFile, outputFile string, outputPerm os.FileMode, x interface{}) {
 	tpl := template.Must(template.ParseFiles(templateFile))
