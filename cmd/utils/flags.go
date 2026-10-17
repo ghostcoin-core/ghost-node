@@ -59,7 +59,6 @@ import (
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/ethdb/remotedb"
 	"github.com/ethereum/go-ethereum/ethstats"
-	"github.com/ethereum/go-ethereum/graphql"
 	"github.com/ethereum/go-ethereum/internal/ethapi"
 	"github.com/ethereum/go-ethereum/internal/flags"
 	"github.com/ethereum/go-ethereum/log"
@@ -797,23 +796,6 @@ var (
 		Value:    "",
 		Category: flags.APICategory,
 	}
-	GraphQLEnabledFlag = &cli.BoolFlag{
-		Name:     "graphql",
-		Usage:    "Enable GraphQL on the HTTP-RPC server. Note that GraphQL can only be started if an HTTP server is started as well.",
-		Category: flags.APICategory,
-	}
-	GraphQLCORSDomainFlag = &cli.StringFlag{
-		Name:     "graphql.corsdomain",
-		Usage:    "Comma separated list of domains from which to accept cross origin requests (browser enforced)",
-		Value:    "",
-		Category: flags.APICategory,
-	}
-	GraphQLVirtualHostsFlag = &cli.StringFlag{
-		Name:     "graphql.vhosts",
-		Usage:    "Comma separated list of virtual hostnames from which to accept requests (server enforced). Accepts '*' wildcard.",
-		Value:    strings.Join(node.DefaultConfig.GraphQLVirtualHosts, ","),
-		Category: flags.APICategory,
-	}
 	WSEnabledFlag = &cli.BoolFlag{
 		Name:     "ws",
 		Usage:    "Enable the WS-RPC server",
@@ -1355,17 +1337,6 @@ func setHTTP(ctx *cli.Context, cfg *node.Config) {
 	}
 }
 
-// setGraphQL creates the GraphQL listener interface string from the set
-// command line flags, returning empty if the GraphQL endpoint is disabled.
-func setGraphQL(ctx *cli.Context, cfg *node.Config) {
-	if ctx.IsSet(GraphQLCORSDomainFlag.Name) {
-		cfg.GraphQLCors = SplitAndTrim(ctx.String(GraphQLCORSDomainFlag.Name))
-	}
-	if ctx.IsSet(GraphQLVirtualHostsFlag.Name) {
-		cfg.GraphQLVirtualHosts = SplitAndTrim(ctx.String(GraphQLVirtualHostsFlag.Name))
-	}
-}
-
 // setWS creates the WebSocket RPC listener interface string from the set
 // command line flags, returning empty if the HTTP endpoint is disabled.
 func setWS(ctx *cli.Context, cfg *node.Config) {
@@ -1576,7 +1547,6 @@ func SetNodeConfig(ctx *cli.Context, cfg *node.Config) {
 	SetP2PConfig(ctx, &cfg.P2P)
 	setIPC(ctx, cfg)
 	setHTTP(ctx, cfg)
-	setGraphQL(ctx, cfg)
 	setWS(ctx, cfg)
 	setNodeUserIdent(ctx, cfg)
 	SetDataDir(ctx, cfg)
@@ -2313,14 +2283,6 @@ func RegisterEthService(stack *node.Node, cfg *ethconfig.Config) (ethapi.Backend
 func RegisterEthStatsService(stack *node.Node, backend ethapi.Backend, url string) {
 	if err := ethstats.New(stack, backend, backend.Engine(), url); err != nil {
 		Fatalf("Failed to register the Ethereum Stats service: %v", err)
-	}
-}
-
-// RegisterGraphQLService adds the GraphQL API to the node.
-func RegisterGraphQLService(stack *node.Node, backend ethapi.Backend, filterSystem *filters.FilterSystem, cfg *node.Config) {
-	err := graphql.New(stack, backend, filterSystem, cfg.GraphQLCors, cfg.GraphQLVirtualHosts)
-	if err != nil {
-		Fatalf("Failed to register the GraphQL service: %v", err)
 	}
 }
 
