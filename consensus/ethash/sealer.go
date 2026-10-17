@@ -292,7 +292,7 @@ func startRemoteSealer(ethash *Ethash, urls []string, noverify bool) *remoteSeal
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &remoteSealer{
 		ethash:       ethash,
-		noverify:     noverify,
+		noverify:     noverify && FakeSealsAllowed, // release builds always verify submitted work
 		notifyURLs:   urls,
 		notifyCtx:    ctx,
 		cancelNotify: cancel,
@@ -466,7 +466,7 @@ func (s *remoteSealer) submitWork(nonce types.BlockNonce, mixDigest common.Hash,
 	header.MixDigest = mixDigest
 
 	start := time.Now()
-	if !s.noverify {
+	if !s.noverify || !FakeSealsAllowed {
 		if err := s.ethash.verifySeal(nil, header, true); err != nil {
 			s.ethash.config.Log.Warn("Invalid proof-of-work submitted", "sealhash", sealhash, "elapsed", common.PrettyDuration(time.Since(start)), "err", err)
 			return false
