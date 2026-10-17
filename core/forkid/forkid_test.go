@@ -18,21 +18,15 @@ package forkid
 
 import (
 	"bytes"
-	"fmt"
 	"hash/crc32"
 	"math"
 	"math/big"
-	"os"
-	"strconv"
-	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/params"
-	"github.com/ethereum/go-ethereum/params/confp"
-	"github.com/ethereum/go-ethereum/params/types/coregeth"
 	"github.com/ethereum/go-ethereum/params/types/ctypes"
 	"github.com/ethereum/go-ethereum/params/types/goethereum"
 	"github.com/ethereum/go-ethereum/rlp"
@@ -88,126 +82,6 @@ func TestCreation(t *testing.T) {
 				{30000000, 1710338134, ID{Hash: checksumToBytes(0xdce96c2d), Next: 1710338135}}, // Last Shanghai block
 				{40000000, 1710338135, ID{Hash: checksumToBytes(0x9f3d2254), Next: 0}},          // First Cancun block
 				{50000000, 2000000000, ID{Hash: checksumToBytes(0x9f3d2254), Next: 0}},          // Future Cancun block
-			},
-		},
-		// Sepolia test cases
-		{
-			"sepolia",
-			params.SepoliaChainConfig,
-			core.GenesisToBlock(params.DefaultSepoliaGenesisBlock(), nil),
-			[]testcase{
-				{0, 0, ID{Hash: checksumToBytes(0xfe3366e7), Next: 1735371}},                   // Unsynced, last Frontier, Homestead, Tangerine, Spurious, Byzantium, Constantinople, Petersburg, Istanbul, Berlin and first London block
-				{1735370, 0, ID{Hash: checksumToBytes(0xfe3366e7), Next: 1735371}},             // Last London block
-				{1735371, 0, ID{Hash: checksumToBytes(0xb96cbd13), Next: 1677557088}},          // First MergeNetsplit block
-				{1735372, 1677557087, ID{Hash: checksumToBytes(0xb96cbd13), Next: 1677557088}}, // Last MergeNetsplit block
-				{1735372, 1677557088, ID{Hash: checksumToBytes(0xf7f9bc08), Next: 1706655072}}, // First Shanghai block
-				{1735372, 1706655071, ID{Hash: checksumToBytes(0xf7f9bc08), Next: 1706655072}}, // Last Shanghai block
-				{1735372, 1706655072, ID{Hash: checksumToBytes(0x88cf81d9), Next: 0}},          // First Cancun block
-				{1735372, 2706655072, ID{Hash: checksumToBytes(0x88cf81d9), Next: 0}},          // Future Cancun block
-			},
-		},
-		// Holesky test cases
-		{
-			"holesky",
-			params.HoleskyChainConfig,
-			core.GenesisToBlock(params.DefaultHoleskyGenesisBlock(), nil),
-			[]testcase{
-				{0, 0, ID{Hash: checksumToBytes(0xc61a6098), Next: 1696000704}},            // Unsynced, last Frontier, Homestead, Tangerine, Spurious, Byzantium, Constantinople, Petersburg, Istanbul, Berlin, London, Paris block
-				{123, 0, ID{Hash: checksumToBytes(0xc61a6098), Next: 1696000704}},          // First MergeNetsplit block
-				{123, 1696000704, ID{Hash: checksumToBytes(0xfd4f016b), Next: 1707305664}}, // First Shanghai block
-				{123, 1707305663, ID{Hash: checksumToBytes(0xfd4f016b), Next: 1707305664}}, // Last Shanghai block
-				{123, 1707305664, ID{Hash: checksumToBytes(0x9b192ad0), Next: 0}},          // First Cancun block
-				{123, 2707305664, ID{Hash: checksumToBytes(0x9b192ad0), Next: 0}},          // Future Cancun block
-			},
-		},
-		{
-			"classic",
-			params.ClassicChainConfig,
-			core.GenesisToBlock(params.DefaultClassicGenesisBlock(), nil),
-			[]testcase{
-				{0, 0, ID{Hash: checksumToBytes(0xfc64ec04), Next: 1150000}},
-				{1, 0, ID{Hash: checksumToBytes(0xfc64ec04), Next: 1150000}},
-				{2, 0, ID{Hash: checksumToBytes(0xfc64ec04), Next: 1150000}},
-				{3, 0, ID{Hash: checksumToBytes(0xfc64ec04), Next: 1150000}},
-				{9, 0, ID{Hash: checksumToBytes(0xfc64ec04), Next: 1150000}},
-				{10, 0, ID{Hash: checksumToBytes(0xfc64ec04), Next: 1150000}},
-				{1149999, 0, ID{Hash: checksumToBytes(0xfc64ec04), Next: 1150000}},
-				{1150000, 0, ID{Hash: checksumToBytes(0x97c2c34c), Next: 2500000}},
-				{1150001, 0, ID{Hash: checksumToBytes(0x97c2c34c), Next: 2500000}},
-				{2499999, 0, ID{Hash: checksumToBytes(0x97c2c34c), Next: 2500000}},
-				{2500000, 0, ID{Hash: checksumToBytes(0xdb06803f), Next: 3000000}},
-				{2500001, 0, ID{Hash: checksumToBytes(0xdb06803f), Next: 3000000}},
-				{2999999, 0, ID{Hash: checksumToBytes(0xdb06803f), Next: 3000000}},
-				{3000000, 0, ID{Hash: checksumToBytes(0xaff4bed4), Next: 5000000}},
-				{3000001, 0, ID{Hash: checksumToBytes(0xaff4bed4), Next: 5000000}},
-				{4999999, 0, ID{Hash: checksumToBytes(0xaff4bed4), Next: 5000000}},
-				{5000000, 0, ID{Hash: checksumToBytes(0xf79a63c0), Next: 5900000}},
-				{5000001, 0, ID{Hash: checksumToBytes(0xf79a63c0), Next: 5900000}},
-				{5899999, 0, ID{Hash: checksumToBytes(0xf79a63c0), Next: 5900000}},
-				{5900000, 0, ID{Hash: checksumToBytes(0x744899d6), Next: 8772000}},
-				{5900001, 0, ID{Hash: checksumToBytes(0x744899d6), Next: 8772000}},
-				{8771999, 0, ID{Hash: checksumToBytes(0x744899d6), Next: 8772000}},
-				{8772000, 0, ID{Hash: checksumToBytes(0x518b59c6), Next: 9573000}},
-				{8772001, 0, ID{Hash: checksumToBytes(0x518b59c6), Next: 9573000}},
-				{9572999, 0, ID{Hash: checksumToBytes(0x518b59c6), Next: 9573000}},
-				{9573000, 0, ID{Hash: checksumToBytes(0x7ba22882), Next: 10500839}},
-				{9573001, 0, ID{Hash: checksumToBytes(0x7ba22882), Next: 10500839}},
-				{10500838, 0, ID{Hash: checksumToBytes(0x7ba22882), Next: 10500839}},
-				{10500839, 0, ID{Hash: checksumToBytes(0x9007bfcc), Next: 11_700_000}},
-				{10500840, 0, ID{Hash: checksumToBytes(0x9007bfcc), Next: 11_700_000}},
-				{11_699_999, 0, ID{Hash: checksumToBytes(0x9007bfcc), Next: 11_700_000}},
-				{11_700_000, 0, ID{Hash: checksumToBytes(0xdb63a1ca), Next: 13_189_133}},
-				{11_700_001, 0, ID{Hash: checksumToBytes(0xdb63a1ca), Next: 13_189_133}},
-				{13_189_132, 0, ID{Hash: checksumToBytes(0xdb63a1ca), Next: 13_189_133}},
-				{13_189_133, 0, ID{Hash: checksumToBytes(0x0f6bf187), Next: 14_525_000}},
-				{13_189_134, 0, ID{Hash: checksumToBytes(0x0f6bf187), Next: 14_525_000}},
-				{14_524_999, 0, ID{Hash: checksumToBytes(0x0f6bf187), Next: 14_525_000}},
-				{14_525_000, 0, ID{Hash: checksumToBytes(0x7fd1bb25), Next: 19_250_000}},
-				{14_525_001, 0, ID{Hash: checksumToBytes(0x7fd1bb25), Next: 19_250_000}},
-				{19_249_999, 0, ID{Hash: checksumToBytes(0x7fd1bb25), Next: 19_250_000}},
-				{19_250_000, 0, ID{Hash: checksumToBytes(0xbe46d57c), Next: 0}},
-				{19_250_001, 0, ID{Hash: checksumToBytes(0xbe46d57c), Next: 0}},
-			},
-		},
-		{
-			"mordor",
-			params.MordorChainConfig,
-			core.GenesisToBlock(params.DefaultMordorGenesisBlock(), nil),
-			[]testcase{
-				{0, 0, ID{Hash: checksumToBytes(0x175782aa), Next: 301243}},
-				{1, 0, ID{Hash: checksumToBytes(0x175782aa), Next: 301243}},
-				{2, 0, ID{Hash: checksumToBytes(0x175782aa), Next: 301243}},
-				{3, 0, ID{Hash: checksumToBytes(0x175782aa), Next: 301243}},
-				{9, 0, ID{Hash: checksumToBytes(0x175782aa), Next: 301243}},
-				{10, 0, ID{Hash: checksumToBytes(0x175782aa), Next: 301243}},
-				{301242, 0, ID{Hash: checksumToBytes(0x175782aa), Next: 301243}},
-				{301243, 0, ID{Hash: checksumToBytes(0x604f6ee1), Next: 999983}},
-				{301244, 0, ID{Hash: checksumToBytes(0x604f6ee1), Next: 999983}},
-				{999982, 0, ID{Hash: checksumToBytes(0x604f6ee1), Next: 999983}},
-				{999983, 0, ID{Hash: checksumToBytes(0xf42f5539), Next: 2_520_000}},
-				{999984, 0, ID{Hash: checksumToBytes(0xf42f5539), Next: 2_520_000}},
-				{2_519_999, 0, ID{Hash: checksumToBytes(0xf42f5539), Next: 2_520_000}},
-				{2_520_000, 0, ID{Hash: checksumToBytes(0x66b5c286), Next: 3_985_893}},
-				{3_985_892, 0, ID{Hash: checksumToBytes(0x66b5c286), Next: 3_985_893}},
-				{3_985_893, 0, ID{Hash: checksumToBytes(0x92b323e0), Next: 5_520_000}},
-				{3_985_894, 0, ID{Hash: checksumToBytes(0x92b323e0), Next: 5_520_000}},
-				{5_519_999, 0, ID{Hash: checksumToBytes(0x92b323e0), Next: 5_520_000}},
-				{5_520_000, 0, ID{Hash: checksumToBytes(0x8c9b1797), Next: 9_957_000}},
-				{5_520_001, 0, ID{Hash: checksumToBytes(0x8c9b1797), Next: 9_957_000}},
-				{9_956_999, 0, ID{Hash: checksumToBytes(0x8c9b1797), Next: 9_957_000}},
-				{9_957_000, 0, ID{Hash: checksumToBytes(0x3a6b00d7), Next: 0}},
-				{9_957_001, 0, ID{Hash: checksumToBytes(0x3a6b00d7), Next: 0}},
-			},
-		},
-		// MintMe test cases
-		{
-			"mintme",
-			params.MintMeChainConfig,
-			core.GenesisToBlock(params.DefaultMintMeGenesisBlock(), nil),
-			[]testcase{
-				{0, 0, ID{Hash: checksumToBytes(0x02bf4180), Next: 252500}},
-				{252500, 0, ID{Hash: checksumToBytes(0x50aed09f), Next: 8_784_700}},
-				{8_784_700, 0, ID{Hash: checksumToBytes(0x0a67075a), Next: 0}},
 			},
 		},
 	}
@@ -478,34 +352,10 @@ func TestGatherForks(t *testing.T) {
 		timeForks  []uint64
 	}{
 		{
-			"classic",
-			params.ClassicChainConfig,
-			[]uint64{1150000, 2500000, 3000000, 5000000, 5900000, 8772000, 9573000, 10500839, 11_700_000, 13_189_133, 14_525_000, 19_250_000},
-			[]uint64{},
-		},
-		{
 			"mainnet",
 			params.MainnetChainConfig,
 			[]uint64{1150000, 1920000, 2463000, 2675000, 4370000, 7280000, 9069000, 9200000, 12_244_000, 12_965_000, 13_773_000, 15050000},
 			[]uint64{1681338455 /* ShanghaiTime */, 1710338135 /* Cancun */},
-		},
-		{
-			"sepolia",
-			params.SepoliaChainConfig,
-			[]uint64{1735371 /* Merge NetSplit */},
-			[]uint64{1677557088 /* ShanghaiTime */, 1706655072 /* Cancun */},
-		},
-		{
-			"mordor",
-			params.MordorChainConfig,
-			[]uint64{301_243, 999_983, 2_520_000, 3_985_893, 5_520_000, 9_957_000},
-			[]uint64{},
-		},
-		{
-			"mintme",
-			params.MintMeChainConfig,
-			[]uint64{252_500, 8_784_700},
-			[]uint64{},
 		},
 	}
 	sliceContains := func(sl []uint64, u uint64) bool {
@@ -535,96 +385,6 @@ func TestGatherForks(t *testing.T) {
 		if !slicesEquivalent(timeForks, c.timeForks) {
 			t.Errorf("config=%s time forks mismatch: have %v, want %v", c.name, timeForks, c.timeForks)
 		}
-	}
-}
-
-// TestGenerateSpecificationCases generates markdown formatted specification
-// for network forkid values.
-func TestGenerateSpecificationCases(t *testing.T) {
-	if os.Getenv("COREGETH_GENERATE_FORKID_TEST_CASES") == "" {
-		t.Skip()
-	}
-	type testCaseJSON struct {
-		ChainConfig *coregeth.CoreGethChainConfig `json:"geth_chain_config"`
-		Genesis     *types.Block                  `json:"genesis_hash"`
-		Head        uint64                        `json:"head"`
-		ForkHash    common.Hash                   `json:"fork_hash"`
-		ForkNext    uint64                        `json:"fork_next"`
-		ForkIDRLP   common.Hash                   `json:"fork_id_rlp"`
-	}
-
-	generatedCases := []*testCaseJSON{}
-
-	tests := []struct {
-		name    string
-		config  ctypes.ChainConfigurator
-		genesis *types.Block
-	}{
-		{"Ethereum Classic Mainnet (ETC)",
-			params.ClassicChainConfig,
-			core.GenesisToBlock(params.DefaultClassicGenesisBlock(), nil),
-		},
-		{
-			"Mordor",
-			params.MordorChainConfig,
-			core.GenesisToBlock(params.DefaultMordorGenesisBlock(), nil),
-		},
-		{
-			"MintMe",
-			params.MintMeChainConfig,
-			core.GenesisToBlock(params.DefaultMintMeGenesisBlock(), nil),
-		},
-	}
-	for _, tt := range tests {
-		cs := []uint64{0}
-		blockForks, _ := gatherForks(tt.config, tt.genesis.Time())
-		for _, f := range blockForks {
-			cs = append(cs, f-1, f, f+1)
-		}
-		fmt.Printf("##### %s\n", tt.name)
-		fmt.Println()
-		fmt.Printf("- Genesis Hash: `0x%x`\n", tt.genesis.Hash())
-		forks, _ := gatherForks(tt.config, 441806400)
-		forksS := []string{}
-		for _, fi := range forks {
-			forksS = append(forksS, strconv.Itoa(int(fi)))
-		}
-		fmt.Printf("- BlockForks: `%s`\n", strings.Join(forksS, "`,`"))
-		fmt.Println()
-		fmt.Println("| Head Block Number | `FORK_HASH` | `FORK_NEXT` | RLP Encoded (Hex) |")
-		fmt.Println("| --- | --- | --- | --- |")
-		for _, c := range cs {
-			id := NewID(tt.config, tt.genesis, c, 0)
-			isCanonical := false
-			for _, fi := range forks {
-				if c == fi {
-					isCanonical = true
-				}
-			}
-			r, _ := rlp.EncodeToBytes(id)
-			if isCanonical {
-				fmt.Printf("| __head=%d__ | FORK_HASH=%x | FORK_NEXT=%d | %x |\n", c, id.Hash, id.Next, r)
-			} else {
-				fmt.Printf("| head=%d | FORK_HASH=%x | FORK_NEXT=%d | %x |\n", c, id.Hash, id.Next, r)
-			}
-
-			gethConfig := &coregeth.CoreGethChainConfig{}
-			err := confp.Crush(gethConfig, tt.config, true)
-			if err != nil {
-				t.Fatal(err)
-			}
-			generatedCases = append(generatedCases, &testCaseJSON{
-				ChainConfig: gethConfig,
-				Genesis:     tt.genesis,
-				Head:        c,
-				ForkHash:    common.BytesToHash(id.Hash[:]),
-				ForkNext:    id.Next,
-				ForkIDRLP:   common.BytesToHash(r),
-			})
-		}
-		fmt.Println()
-		fmt.Println()
-		t.Log("generated cases", generatedCases)
 	}
 }
 

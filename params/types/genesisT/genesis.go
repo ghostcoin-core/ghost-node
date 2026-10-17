@@ -1145,14 +1145,6 @@ func (g *Genesis) SetCliqueEpoch(n uint64) error {
 	return g.Config.SetCliqueEpoch(n)
 }
 
-func (g *Genesis) GetLyra2NonceTransition() *uint64 {
-	return g.Config.GetLyra2NonceTransition()
-}
-
-func (g *Genesis) SetLyra2NonceTransition(n *uint64) error {
-	return g.Config.SetLyra2NonceTransition(n)
-}
-
 func (g *Genesis) String() string {
 	j, _ := json.MarshalIndent(g, "", "    ")
 	return "Genesis: " + string(j)

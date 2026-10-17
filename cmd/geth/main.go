@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -173,7 +172,7 @@ var (
 		configFileFlag,
 		utils.LogDebugFlag,
 		utils.LogBacktraceAtFlag,
-	}, utils.NetworkFlags, utils.DatabaseFlags)
+	}, utils.DatabaseFlags)
 
 	rpcFlags = []cli.Flag{
 		utils.HTTPEnabledFlag,
@@ -299,16 +298,9 @@ func main() {
 	}
 }
 
-func checkMainnet(ctx *cli.Context) bool {
-	isMainnet := false
-
+// logDevMode logs a warning when the node runs in a developer mode.
+func logDevMode(ctx *cli.Context) {
 	switch {
-	case ctx.IsSet(utils.SepoliaFlag.Name):
-		log.Info("Starting Geth on Sepolia testnet...")
-
-	case ctx.IsSet(utils.HoleskyFlag.Name):
-		log.Info("Starting Geth on Holesky testnet...")
-
 	case ctx.IsSet(utils.DeveloperFlag.Name):
 		log.Info("Starting Geth in ephemeral proof-of-authority network dev mode...")
 		log.Warn(`You are running Geth in --dev mode. Please note the following:
@@ -344,39 +336,13 @@ func checkMainnet(ctx *cli.Context) bool {
      to 0, and discovery is disabled.
 `)
 
-	case ctx.IsSet(utils.ClassicFlag.Name):
-		log.Info("Starting Geth on Ethereum Classic...")
-
-	case ctx.IsSet(utils.MordorFlag.Name):
-		log.Info("Starting Geth on Mordor testnet...")
-
-	case ctx.IsSet(utils.MintMeFlag.Name):
-		log.Info("Starting Geth on MintMe.com Coin mainnet...")
-
-	case !ctx.IsSet(utils.NetworkIdFlag.Name):
-		log.Info("Starting Geth on Ethereum mainnet...")
-		isMainnet = true
 	}
-
-	return isMainnet
 }
 
 // prepare manipulates memory cache allowance and setups metric system.
 // This function should be called before launching devp2p stack.
 func prepare(ctx *cli.Context) {
-	// If we're running a known preset, log it for convenience.
-
-	isMainnet := checkMainnet(ctx)
-
-	// If we're a full node on mainnet without --cache specified, bump default cache allowance
-	if !ctx.IsSet(utils.CacheFlag.Name) && !ctx.IsSet(utils.NetworkIdFlag.Name) {
-		// Make sure we're not on any supported preconfigured testnet either
-		if isMainnet {
-			// Nope, we're really on mainnet. Bump that cache up!
-			log.Info("Bumping default cache on mainnet", "provided", ctx.Int(utils.CacheFlag.Name), "updated", 4096)
-			ctx.Set(utils.CacheFlag.Name, strconv.Itoa(4096))
-		}
-	}
+	logDevMode(ctx)
 
 	// Start metrics export if enabled
 	utils.SetupMetrics(ctx)

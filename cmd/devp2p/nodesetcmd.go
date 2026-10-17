@@ -25,10 +25,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ethereum/go-ethereum/core"
-	"github.com/ethereum/go-ethereum/core/forkid"
 	"github.com/ethereum/go-ethereum/p2p/enr"
-	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/urfave/cli/v2"
 )
@@ -135,12 +132,11 @@ type nodeFilterC struct {
 }
 
 var filterFlags = map[string]nodeFilterC{
-	"-limit":       {1, trueFilter}, // needed to skip over -limit
-	"-ip":          {1, ipFilter},
-	"-min-age":     {1, minAgeFilter},
-	"-eth-network": {1, ethFilter},
-	"-les-server":  {0, lesFilter},
-	"-snap":        {0, snapFilter},
+	"-limit":      {1, trueFilter}, // needed to skip over -limit
+	"-ip":         {1, ipFilter},
+	"-min-age":    {1, minAgeFilter},
+	"-les-server": {0, lesFilter},
+	"-snap":       {0, snapFilter},
 }
 
 // parseFilters parses nodeFilters from args.
@@ -221,41 +217,6 @@ func minAgeFilter(args []string) (nodeFilter, error) {
 	f := func(n nodeJSON) bool {
 		age := n.LastResponse.Sub(n.FirstResponse)
 		return age >= minage
-	}
-	return f, nil
-}
-
-func ethFilter(args []string) (nodeFilter, error) {
-	var filter forkid.Filter
-	switch args[0] {
-	case "mainnet":
-		gb := core.GenesisToBlock(params.DefaultGenesisBlock(), nil)
-		filter = forkid.NewStaticFilter(params.MainnetChainConfig, gb)
-	case "sepolia":
-		gb := core.GenesisToBlock(params.DefaultSepoliaGenesisBlock(), nil)
-		filter = forkid.NewStaticFilter(params.SepoliaChainConfig, gb)
-	case "classic":
-		gb := core.GenesisToBlock(params.DefaultGenesisBlock(), nil)
-		filter = forkid.NewStaticFilter(params.ClassicChainConfig, gb)
-	case "mordor":
-		gb := core.GenesisToBlock(params.DefaultMordorGenesisBlock(), nil)
-		filter = forkid.NewStaticFilter(params.MordorChainConfig, gb)
-	case "mintme":
-		gb := core.GenesisToBlock(params.DefaultMintMeGenesisBlock(), nil)
-		filter = forkid.NewStaticFilter(params.MintMeChainConfig, gb)
-	default:
-		return nil, fmt.Errorf("unknown network %q", args[0])
-	}
-
-	f := func(n nodeJSON) bool {
-		var eth struct {
-			ForkID forkid.ID
-			Tail   []rlp.RawValue `rlp:"tail"`
-		}
-		if n.N.Load(enr.WithEntry("eth", &eth)) != nil {
-			return false
-		}
-		return filter(eth.ForkID) == nil
 	}
 	return f, nil
 }

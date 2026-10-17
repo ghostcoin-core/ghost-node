@@ -30,7 +30,6 @@ import (
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/consensus/beacon"
 	"github.com/ethereum/go-ethereum/consensus/clique"
-	"github.com/ethereum/go-ethereum/consensus/lyra2"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/bloombits"
 	"github.com/ethereum/go-ethereum/core/rawdb"
@@ -57,7 +56,6 @@ import (
 	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/params/types/coregeth"
-	"github.com/ethereum/go-ethereum/params/types/ctypes"
 	"github.com/ethereum/go-ethereum/params/types/goethereum"
 	"github.com/ethereum/go-ethereum/params/vars"
 	"github.com/ethereum/go-ethereum/rlp"
@@ -161,14 +159,7 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 		return nil, err
 	}
 
-	var lyra2Config *lyra2.Config
-	if config.Genesis != nil && config.Genesis.Config != nil {
-		if config.Genesis.Config.GetConsensusEngineType() == ctypes.ConsensusEngineT_Lyra2 {
-			lyra2Config = &lyra2.Config{}
-		}
-	}
-
-	engine := ethconfig.CreateConsensusEngine(stack, &ethashConfig, cliqueConfig, lyra2Config, config.Miner.Notify, config.Miner.Noverify, chainDb)
+	engine := ethconfig.CreateConsensusEngine(stack, &ethashConfig, cliqueConfig, config.Miner.Notify, config.Miner.Noverify, chainDb)
 
 	chainConfig, err := core.LoadChainConfig(chainDb, config.Genesis)
 	if err != nil {

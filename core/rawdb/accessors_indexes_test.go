@@ -118,7 +118,7 @@ func TestDeleteBloomBits(t *testing.T) {
 	for i := uint(0); i < 2; i++ {
 		for s := uint64(0); s < 2; s++ {
 			WriteBloomBits(db, i, s, params.MainnetGenesisHash, []byte{0x01, 0x02})
-			WriteBloomBits(db, i, s, params.SepoliaGenesisHash, []byte{0x01, 0x02})
+			WriteBloomBits(db, i, s, common.HexToHash("0x25a5cc106eea7138acab33231d7160d69cb777ee0c2c553fcddf5138993e6dd9"), []byte{0x01, 0x02})
 		}
 	}
 	check := func(bit uint, section uint64, head common.Hash, exist bool) {
@@ -132,25 +132,25 @@ func TestDeleteBloomBits(t *testing.T) {
 	}
 	// Check the existence of written data.
 	check(0, 0, params.MainnetGenesisHash, true)
-	check(0, 0, params.SepoliaGenesisHash, true)
+	check(0, 0, common.HexToHash("0x25a5cc106eea7138acab33231d7160d69cb777ee0c2c553fcddf5138993e6dd9"), true)
 
 	// Check the existence of deleted data.
 	DeleteBloombits(db, 0, 0, 1)
 	check(0, 0, params.MainnetGenesisHash, false)
-	check(0, 0, params.SepoliaGenesisHash, false)
+	check(0, 0, common.HexToHash("0x25a5cc106eea7138acab33231d7160d69cb777ee0c2c553fcddf5138993e6dd9"), false)
 	check(0, 1, params.MainnetGenesisHash, true)
-	check(0, 1, params.SepoliaGenesisHash, true)
+	check(0, 1, common.HexToHash("0x25a5cc106eea7138acab33231d7160d69cb777ee0c2c553fcddf5138993e6dd9"), true)
 
 	// Check the existence of deleted data.
 	DeleteBloombits(db, 0, 0, 2)
 	check(0, 0, params.MainnetGenesisHash, false)
-	check(0, 0, params.SepoliaGenesisHash, false)
+	check(0, 0, common.HexToHash("0x25a5cc106eea7138acab33231d7160d69cb777ee0c2c553fcddf5138993e6dd9"), false)
 	check(0, 1, params.MainnetGenesisHash, false)
-	check(0, 1, params.SepoliaGenesisHash, false)
+	check(0, 1, common.HexToHash("0x25a5cc106eea7138acab33231d7160d69cb777ee0c2c553fcddf5138993e6dd9"), false)
 
 	// Bit1 shouldn't be affect.
 	check(1, 0, params.MainnetGenesisHash, true)
-	check(1, 0, params.SepoliaGenesisHash, true)
+	check(1, 0, common.HexToHash("0x25a5cc106eea7138acab33231d7160d69cb777ee0c2c553fcddf5138993e6dd9"), true)
 	check(1, 1, params.MainnetGenesisHash, true)
-	check(1, 1, params.SepoliaGenesisHash, true)
+	check(1, 1, common.HexToHash("0x25a5cc106eea7138acab33231d7160d69cb777ee0c2c553fcddf5138993e6dd9"), true)
 }

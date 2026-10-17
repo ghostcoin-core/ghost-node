@@ -57,20 +57,6 @@ func TestSetupGenesisBlock(t *testing.T) {
 		}
 	}
 
-	classicGenesisBlock := params.DefaultClassicGenesisBlock()
-
-	clConfig, clHash, clErr := SetupGenesisBlock(db, triedb.NewDatabase(db, nil), classicGenesisBlock)
-	if clErr != nil {
-		t.Errorf("err: %v", clErr)
-	}
-	if wantHash := GenesisToBlock(classicGenesisBlock, nil).Hash(); wantHash != clHash {
-		t.Errorf("mismatch block hash, want: %x, got: %x", wantHash, clHash)
-	}
-	if diffs := confp.Equal(reflect.TypeOf((*ctypes.ChainConfigurator)(nil)), classicGenesisBlock.Config, clConfig); len(diffs) != 0 {
-		for _, diff := range diffs {
-			t.Error("mismatch", "diff=", diff, "in", classicGenesisBlock.Config, "out", clConfig)
-		}
-	}
 }
 
 func TestSetupGenesis(t *testing.T) {
@@ -110,14 +96,14 @@ func testSetupGenesis(t *testing.T, scheme string) {
 			fn: func(db ethdb.Database) (ctypes.ChainConfigurator, common.Hash, error) {
 				return SetupGenesisBlock(db, triedb.NewDatabase(db, newDbConfig(scheme)), nil)
 			},
-			wantHash:   params.MainnetGenesisHash,
-			wantConfig: params.MainnetChainConfig,
+			wantErr: ErrGenesisNotGiven,
 		},
 		{
 			name: "mainnet block in DB, genesis == nil",
 			fn: func(db ethdb.Database) (ctypes.ChainConfigurator, common.Hash, error) {
-				MustCommitGenesis(db, triedb.NewDatabase(db, nil), params.DefaultGenesisBlock())
-				return SetupGenesisBlock(db, triedb.NewDatabase(db, newDbConfig(scheme)), nil)
+				tdb := triedb.NewDatabase(db, newDbConfig(scheme))
+				MustCommitGenesis(db, tdb, params.DefaultGenesisBlock())
+				return SetupGenesisBlock(db, tdb, nil)
 			},
 			wantHash:   params.MainnetGenesisHash,
 			wantConfig: params.MainnetChainConfig,
@@ -133,15 +119,15 @@ func testSetupGenesis(t *testing.T, scheme string) {
 			wantConfig: customg.Config,
 		},
 		{
-			name: "custom block in DB, genesis == mordor",
+			name: "custom block in DB, genesis == mainnet",
 			fn: func(db ethdb.Database) (ctypes.ChainConfigurator, common.Hash, error) {
 				tdb := triedb.NewDatabase(db, newDbConfig(scheme))
 				MustCommitGenesis(db, tdb, &customg)
-				return SetupGenesisBlock(db, tdb, params.DefaultMordorGenesisBlock())
+				return SetupGenesisBlock(db, tdb, params.DefaultGenesisBlock())
 			},
-			wantErr:    &genesisT.GenesisMismatchError{Stored: customghash, New: params.MordorGenesisHash},
-			wantHash:   params.MordorGenesisHash,
-			wantConfig: params.MordorChainConfig,
+			wantErr:    &genesisT.GenesisMismatchError{Stored: customghash, New: params.MainnetGenesisHash},
+			wantHash:   params.MainnetGenesisHash,
+			wantConfig: params.MainnetChainConfig,
 		},
 		{
 			name: "compatible config in DB",
@@ -212,8 +198,6 @@ func TestGenesisHashes(t *testing.T) {
 		want    common.Hash
 	}{
 		{params.DefaultGenesisBlock(), params.MainnetGenesisHash},
-		{params.DefaultMordorGenesisBlock(), params.MordorGenesisHash},
-		{params.DefaultSepoliaGenesisBlock(), params.SepoliaGenesisHash},
 	} {
 		// Test via MustCommit
 		db := rawdb.NewMemoryDatabase()

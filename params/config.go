@@ -28,8 +28,6 @@ import (
 // Genesis hashes to enforce below configs on.
 var (
 	MainnetGenesisHash = common.HexToHash("0xd4e56740f876aef8c010b86a40d5f56745a118d0906a34e69aec8c0db1cb8fa3")
-	HoleskyGenesisHash = common.HexToHash("0xb5f7f912443c940f21fd611f12828d75b534364ed9e95ca4e307729a4661bde4")
-	SepoliaGenesisHash = common.HexToHash("0x25a5cc106eea7138acab33231d7160d69cb777ee0c2c553fcddf5138993e6dd9")
 )
 
 // CheckpointOracles associates each known checkpoint oracles with the genesis hash of
@@ -64,56 +62,6 @@ var (
 		TerminalTotalDifficultyPassed: true,
 		ShanghaiTime:                  newUint64(1681338455),
 		CancunTime:                    newUint64(1710338135),
-		Ethash:                        new(ctypes.EthashConfig),
-	}
-	// HoleskyChainConfig contains the chain parameters to run a node on the Holesky test network.
-	HoleskyChainConfig = &goethereum.ChainConfig{
-		ChainID:                       big.NewInt(17000),
-		HomesteadBlock:                big.NewInt(0),
-		DAOForkBlock:                  nil,
-		DAOForkSupport:                true,
-		EIP150Block:                   big.NewInt(0),
-		EIP155Block:                   big.NewInt(0),
-		EIP158Block:                   big.NewInt(0),
-		ByzantiumBlock:                big.NewInt(0),
-		ConstantinopleBlock:           big.NewInt(0),
-		PetersburgBlock:               big.NewInt(0),
-		IstanbulBlock:                 big.NewInt(0),
-		MuirGlacierBlock:              nil,
-		BerlinBlock:                   big.NewInt(0),
-		LondonBlock:                   big.NewInt(0),
-		ArrowGlacierBlock:             nil,
-		GrayGlacierBlock:              nil,
-		TerminalTotalDifficulty:       big.NewInt(0),
-		TerminalTotalDifficultyPassed: true,
-		MergeNetsplitBlock:            nil,
-		ShanghaiTime:                  newUint64(1696000704),
-		CancunTime:                    newUint64(1707305664),
-		Ethash:                        new(ctypes.EthashConfig),
-	}
-	// SepoliaChainConfig contains the chain parameters to run a node on the Sepolia test network.
-	SepoliaChainConfig = &goethereum.ChainConfig{
-		ChainID:                       big.NewInt(11155111),
-		HomesteadBlock:                big.NewInt(0),
-		DAOForkBlock:                  nil,
-		DAOForkSupport:                true,
-		EIP150Block:                   big.NewInt(0),
-		EIP155Block:                   big.NewInt(0),
-		EIP158Block:                   big.NewInt(0),
-		ByzantiumBlock:                big.NewInt(0),
-		ConstantinopleBlock:           big.NewInt(0),
-		PetersburgBlock:               big.NewInt(0),
-		IstanbulBlock:                 big.NewInt(0),
-		MuirGlacierBlock:              big.NewInt(0),
-		BerlinBlock:                   big.NewInt(0),
-		LondonBlock:                   big.NewInt(0),
-		ArrowGlacierBlock:             nil,
-		GrayGlacierBlock:              nil,
-		TerminalTotalDifficulty:       big.NewInt(17_000_000_000_000_000),
-		TerminalTotalDifficultyPassed: true,
-		MergeNetsplitBlock:            big.NewInt(1735371),
-		ShanghaiTime:                  newUint64(1677557088),
-		CancunTime:                    newUint64(1706655072),
 		Ethash:                        new(ctypes.EthashConfig),
 	}
 
@@ -292,11 +240,7 @@ var (
 )
 
 // NetworkNames are user friendly names to use in the chain spec banner.
-var NetworkNames = map[string]string{
-	MainnetChainConfig.ChainID.String(): "mainnet",
-	SepoliaChainConfig.ChainID.String(): "sepolia",
-	HoleskyChainConfig.ChainID.String(): "holesky",
-}
+var NetworkNames = map[string]string{}
 
 /*
 							https://github.com/ethereum/go-ethereum/blob/master/params/config.go#L242

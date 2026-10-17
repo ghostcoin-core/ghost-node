@@ -301,7 +301,6 @@ type ConsensusEnginator interface {
 
 	EthashConfigurator
 	CliqueConfigurator
-	Lyra2Configurator
 }
 
 type EthashConfigurator interface {
@@ -366,11 +365,6 @@ type CliqueConfigurator interface {
 	SetCliquePeriod(n uint64) error
 	GetCliqueEpoch() uint64
 	SetCliqueEpoch(n uint64) error
-}
-
-type Lyra2Configurator interface {
-	GetLyra2NonceTransition() *uint64
-	SetLyra2NonceTransition(n *uint64) error
 }
 
 type BlockSealer interface {

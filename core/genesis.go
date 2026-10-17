@@ -42,6 +42,10 @@ import (
 
 var errGenesisNoConfig = errors.New("genesis has no chain configuration")
 
+// ErrGenesisNotGiven is returned when the database holds no genesis block and
+// none was given. No network is built in, so there is no default to fall back to.
+var ErrGenesisNotGiven = errors.New("no genesis block: initialise the database with a genesis file first")
+
 // ChainOverrides contains the changes to chain config.
 type ChainOverrides struct {
 	OverrideCancun *uint64
@@ -118,12 +122,10 @@ func SetupGenesisBlockWithOverride(db ethdb.Database, triedb *triedb.Database, g
 	stored := rawdb.ReadCanonicalHash(db, 0)
 	if (stored == common.Hash{}) {
 		if genesis == nil {
-			log.Info("Writing default main-net genesis block")
-			log.Warn("Not specifying a chain flag is deprecated and will be removed in the future, please use --mainnet for Ethereum mainnet")
-			genesis = params.DefaultGenesisBlock()
-		} else {
-			log.Info("Writing custom genesis block")
+			// No network is built in: a node has to be given its genesis.
+			return nil, common.Hash{}, ErrGenesisNotGiven
 		}
+		log.Info("Writing custom genesis block")
 		applyOverrides(genesis.Config)
 		block, err := CommitGenesis(genesis, db, triedb)
 		if err != nil {
@@ -139,7 +141,7 @@ func SetupGenesisBlockWithOverride(db ethdb.Database, triedb *triedb.Database, g
 	header := rawdb.ReadHeader(db, stored, 0)
 	if header.Root != types.EmptyRootHash && !triedb.Initialized(header.Root) {
 		if genesis == nil {
-			genesis = params.DefaultGenesisBlock()
+			return nil, common.Hash{}, ErrGenesisNotGiven
 		}
 		applyOverrides(genesis.Config)
 		// Ensure the stored genesis matches with the given one.
@@ -311,16 +313,6 @@ func configOrDefault(g *genesisT.Genesis, ghash common.Hash) ctypes.ChainConfigu
 		return g.Config
 	case ghash == params.MainnetGenesisHash:
 		return params.MainnetChainConfig
-	case ghash == params.HoleskyGenesisHash:
-		return params.HoleskyChainConfig
-	case ghash == params.SepoliaGenesisHash:
-		return params.SepoliaChainConfig
-	case ghash == params.MordorGenesisHash:
-		return params.MordorChainConfig
-	case ghash == params.SepoliaGenesisHash:
-		return params.SepoliaChainConfig
-	case ghash == params.MintMeGenesisHash:
-		return params.MintMeChainConfig
 	default:
 		return params.AllEthashProtocolChanges
 	}
@@ -425,14 +417,6 @@ func CommitGenesisState(db ethdb.Database, triedb *triedb.Database, blockhash co
 		switch blockhash {
 		case params.MainnetGenesisHash:
 			genesis = params.DefaultGenesisBlock()
-		case params.SepoliaGenesisHash:
-			genesis = params.DefaultSepoliaGenesisBlock()
-		case params.MordorGenesisHash:
-			genesis = params.DefaultMordorGenesisBlock()
-		case params.MintMeGenesisHash:
-			genesis = params.DefaultMintMeGenesisBlock()
-		case params.HoleskyGenesisHash:
-			genesis = params.DefaultHoleskyGenesisBlock()
 		}
 		if genesis != nil {
 			alloc = genesis.Alloc

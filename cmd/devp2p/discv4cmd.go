@@ -32,7 +32,6 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/p2p/discover"
 	"github.com/ethereum/go-ethereum/p2p/enode"
-	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/urfave/cli/v2"
 )
@@ -381,14 +380,14 @@ func listen(ctx *cli.Context, ln *enode.LocalNode) *net.UDPConn {
 }
 
 func parseBootnodes(ctx *cli.Context) ([]*enode.Node, error) {
-	s := params.MainnetBootnodes
-	if ctx.IsSet(bootnodesFlag.Name) {
-		input := ctx.String(bootnodesFlag.Name)
-		if input == "" {
-			return nil, nil
-		}
-		s = strings.Split(input, ",")
+	if !ctx.IsSet(bootnodesFlag.Name) {
+		return nil, nil
 	}
+	input := ctx.String(bootnodesFlag.Name)
+	if input == "" {
+		return nil, nil
+	}
+	s := strings.Split(input, ",")
 	nodes := make([]*enode.Node, len(s))
 	var err error
 	for i, record := range s {

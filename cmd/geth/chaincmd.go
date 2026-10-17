@@ -68,7 +68,7 @@ It expects the genesis file as argument.`,
 		Name:      "dumpgenesis",
 		Usage:     "Dumps genesis block JSON configuration to stdout",
 		ArgsUsage: "",
-		Flags:     append([]cli.Flag{utils.DataDirFlag}, utils.NetworkFlags...),
+		Flags:     []cli.Flag{utils.DataDirFlag},
 		Description: `
 The dumpgenesis command prints the genesis configuration of the network preset
 if one is set.  Otherwise it prints the genesis from the datadir.`,
@@ -135,7 +135,6 @@ be gzipped.`,
 			utils.TxLookupLimitFlag,
 		},
 			utils.DatabaseFlags,
-			utils.NetworkFlags,
 		),
 		Description: `
 The import-history command will import blocks and their corresponding receipts
@@ -242,11 +241,8 @@ func initGenesis(ctx *cli.Context) error {
 }
 
 func dumpGenesis(ctx *cli.Context) error {
-	// check if there is a testnet preset enabled
 	var genesis *genesisT.Genesis
-	if utils.IsNetworkPreset(ctx) {
-		genesis = utils.MakeGenesis(ctx)
-	} else if ctx.IsSet(utils.DeveloperFlag.Name) && !ctx.IsSet(utils.DataDirFlag.Name) {
+	if ctx.IsSet(utils.DeveloperFlag.Name) && !ctx.IsSet(utils.DataDirFlag.Name) {
 		genesis = params.DeveloperGenesisBlock(11_500_000, nil, ctx.Bool(utils.DeveloperPoWFlag.Name))
 	}
 
@@ -419,35 +415,24 @@ func importHistory(ctx *cli.Context) error {
 		network string
 	)
 
-	// Determine network.
-	if utils.IsNetworkPreset(ctx) {
-		switch {
-		case ctx.Bool(utils.MainnetFlag.Name):
-			network = "mainnet"
-		case ctx.Bool(utils.SepoliaFlag.Name):
-			network = "sepolia"
+	// Determine the network from the files present in the directory.
+	var networks []string
+	for _, n := range params.NetworkNames {
+		entries, err := era.ReadDir(dir, n)
+		if err != nil {
+			return fmt.Errorf("error reading %s: %w", dir, err)
 		}
-	} else {
-		// No network flag set, try to determine network based on files
-		// present in directory.
-		var networks []string
-		for _, n := range params.NetworkNames {
-			entries, err := era.ReadDir(dir, n)
-			if err != nil {
-				return fmt.Errorf("error reading %s: %w", dir, err)
-			}
-			if len(entries) > 0 {
-				networks = append(networks, n)
-			}
+		if len(entries) > 0 {
+			networks = append(networks, n)
 		}
-		if len(networks) == 0 {
-			return fmt.Errorf("no era1 files found in %s", dir)
-		}
-		if len(networks) > 1 {
-			return errors.New("multiple networks found, use a network flag to specify desired network")
-		}
-		network = networks[0]
 	}
+	if len(networks) == 0 {
+		return fmt.Errorf("no era1 files found in %s", dir)
+	}
+	if len(networks) > 1 {
+		return errors.New("multiple networks found, use a network flag to specify desired network")
+	}
+	network = networks[0]
 
 	if err := utils.ImportHistory(chain, db, dir, network); err != nil {
 		return err
