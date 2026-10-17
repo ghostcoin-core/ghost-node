@@ -353,3 +353,34 @@ func TestCheckProofOfWorkOnly(t *testing.T) {
 		}
 	}
 }
+
+// TestSetupGenesisKeepsStoredConfig tests that reopening a chain without a
+// genesis keeps its stored configuration, even when its chain ID matches that
+// of a default test configuration.
+func TestSetupGenesisKeepsStoredConfig(t *testing.T) {
+	g := &genesisT.Genesis{
+		Config: &goethereum.ChainConfig{
+			ChainID:        big.NewInt(1337),
+			HomesteadBlock: big.NewInt(0),
+			Ethash:         new(ctypes.EthashConfig),
+		},
+		Difficulty: big.NewInt(0x20000),
+		GasLimit:   0x2fefd8,
+	}
+	db := rawdb.NewMemoryDatabase()
+	tdb := triedb.NewDatabase(db, nil)
+	if _, _, err := SetupGenesisBlock(db, tdb, g); err != nil {
+		t.Fatal(err)
+	}
+	config, _, err := SetupGenesisBlock(db, tdb, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b := config.GetEIP150Transition(); b != nil {
+		t.Errorf("stored configuration was replaced: EIP-150 now at block %d", *b)
+	}
+	stored := rawdb.ReadChainConfig(db, rawdb.ReadCanonicalHash(db, 0))
+	if b := stored.GetEIP150Transition(); b != nil {
+		t.Errorf("stored configuration was overwritten: EIP-150 now at block %d", *b)
+	}
+}

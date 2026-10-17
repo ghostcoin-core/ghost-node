@@ -178,9 +178,21 @@ func SetupGenesisBlockWithOverride(db ethdb.Database, triedb *triedb.Database, g
 		}
 	}
 	// Get the existing chain configuration.
+	storedcfg := rawdb.ReadChainConfig(db, stored)
+	if genesis == nil && stored != params.MainnetGenesisHash {
+		// No network is built in, so with no new genesis given the stored
+		// configuration is the only one there is: keep it. (Comparing it with
+		// a default configuration, as Core-Geth did, replaced the stored one
+		// at block zero whenever the chain IDs matched.)
+		if storedcfg == nil {
+			return nil, stored, errors.New("found genesis block without chain config, and no genesis was given")
+		}
+		log.Info("Found stored genesis block", "config", storedcfg)
+		applyOverrides(storedcfg)
+		return storedcfg, stored, nil
+	}
 	newcfg := configOrDefault(genesis, stored)
 	applyOverrides(newcfg)
-	storedcfg := rawdb.ReadChainConfig(db, stored)
 	if storedcfg == nil {
 		log.Warn("Found genesis block without chain config")
 		rawdb.WriteChainConfig(db, stored, newcfg)

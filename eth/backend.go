@@ -164,9 +164,6 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := core.CheckProofOfWorkOnly(chainConfig); err != nil {
-		return nil, err
-	}
 	networkID := config.NetworkId
 	if networkID == 0 {
 		networkID = chainConfig.GetChainID().Uint64()
@@ -232,6 +229,12 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	}
 	eth.blockchain, err = core.NewBlockChain(chainDb, cacheConfig, config.Genesis, &overrides, eth.engine, vmConfig, eth.shouldPreserve, &config.TransactionHistory)
 	if err != nil {
+		return nil, err
+	}
+	// Check the configuration the chain actually runs with: a supplied genesis
+	// can replace the stored one.
+	if err := core.CheckProofOfWorkOnly(eth.blockchain.Config()); err != nil {
+		eth.blockchain.Stop()
 		return nil, err
 	}
 	eth.bloomIndexer.Start(eth.blockchain)

@@ -203,7 +203,8 @@ func TestProofOfStakeGenesisRefused(t *testing.T) {
 		"config"     : {
 			"chainId"                 : 1337,
 			"homesteadBlock"          : 0,
-			"terminalTotalDifficulty" : 0
+			"terminalTotalDifficulty" : 0,
+			"ethash"                  : {}
 		}
 	}`
 	datadir := t.TempDir()
