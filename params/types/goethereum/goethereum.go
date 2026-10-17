@@ -100,7 +100,6 @@ type ChainConfig struct {
 	// Cache types for use with testing, but will not show up in config API.
 	ecbp1100Transition           *big.Int
 	ecbp1100DeactivateTransition *big.Int
-
 }
 
 // networkNames are user friendly names to use in the chain spec banner.
