@@ -75,7 +75,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [core, eth, consensus-cmd-miner, rest]
+        shard: [consensus, core, core-sub, eth, eth-sub, cmd, p2p, rest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -90,13 +90,20 @@ jobs:
           mod=github.com/ethereum/go-ethereum
           all="$(go list ./... | grep -v -x "$mod/tests")"
           case "$SHARD" in
-            core)               pkgs="$(echo "$all" | grep -E "^$mod/core(/|$)")" ;;
-            eth)                pkgs="$(echo "$all" | grep -E "^$mod/eth(/|$)")" ;;
-            consensus-cmd-miner) pkgs="$(echo "$all" | grep -E "^$mod/(consensus|cmd|miner)(/|$)")" ;;
-            rest)               pkgs="$(echo "$all" | grep -v -E "^$mod/(core|eth|consensus|cmd|miner)(/|$)")" ;;
+            consensus) pkgs="$(echo "$all" | grep -E "^$mod/consensus(/|$)")" ;;
+            core)      pkgs="$mod/core" ;;
+            core-sub)  pkgs="$(echo "$all" | grep -E "^$mod/core/")" ;;
+            eth)       pkgs="$(echo "$all" | grep -x -E "$mod/eth|$mod/eth/fetcher")" ;;
+            eth-sub)   pkgs="$(echo "$all" | grep -E "^$mod/eth/" | grep -v -x "$mod/eth/fetcher")" ;;
+            cmd)       pkgs="$(echo "$all" | grep -E "^$mod/cmd(/|$)")" ;;
+            p2p)       pkgs="$(echo "$all" | grep -E "^$mod/p2p(/|$)")" ;;
+            rest)      pkgs="$(echo "$all" | grep -v -E "^$mod/(consensus|core|eth|cmd|p2p)(/|$)")" ;;
             *) echo "unknown shard $SHARD"; exit 1 ;;
           esac
-          go test -tags integrationtests -timeout 20m $pkgs
+          # One package at a time, as upstream's CI does: several upstream
+          # tests are timing-sensitive and fail when packages run in parallel
+          # on a small runner.
+          go test -p 1 -tags integrationtests -timeout 20m $pkgs
 
   unit:
     name: unit
