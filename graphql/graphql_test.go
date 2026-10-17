@@ -499,8 +499,10 @@ func newGQLService(t *testing.T, stack *node.Node, shanghai bool, gspec *genesis
 func TestGraphQLQueryDepthLimit(t *testing.T) {
 	stack := createNode(t)
 	defer stack.Close()
+	// Use TestChainConfig: the Shanghai tests above set a terminal total
+	// difficulty on the shared AllEthashProtocolChanges.
 	genesis := &genesisT.Genesis{
-		Config:     params.AllEthashProtocolChanges,
+		Config:     params.TestChainConfig,
 		GasLimit:   11500000,
 		Difficulty: big.NewInt(1048576),
 	}
