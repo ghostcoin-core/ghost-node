@@ -2,7 +2,7 @@
 # with Go source code. If you know what GOPATH is then you probably
 # don't need to bother with make.
 
-.PHONY: geth android ios geth-cross evm evmc mkdocs-serve all test clean
+.PHONY: geth android ios geth-cross evm evmc all test clean
 
 GOBIN = ./build/bin
 GO ?= latest
@@ -102,9 +102,6 @@ lint: ## Run linters.
 clean:
 	go clean -cache
 	rm -fr build/_workspace/pkg/ $(GOBIN)/*
-
-mkdocs-serve: ## Serve generated documentation (during development)
-	@build/mkdocs-serve.sh
 
 docs-generate: ## Generate JSON RPC API documentation from the OpenRPC service discovery document.
 	env COREGETH_GEN_OPENRPC_DOCS=on go test -count=1 -run BuildStatic ./ethclient
