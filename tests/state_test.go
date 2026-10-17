@@ -105,9 +105,6 @@ func TestState(t *testing.T) {
 		filepath.Join(baseDir, "EIPTests", "StateTests"),
 		stateTestDir,
 		benchmarksDir,
-
-		stateTestDirETC,
-		legacyTestDirETC,
 	} {
 		st.walk(t, dir, func(t *testing.T, name string, test *StateTest) {
 			execStateTest(t, st, test)

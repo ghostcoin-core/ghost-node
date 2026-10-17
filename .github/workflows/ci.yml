@@ -117,10 +117,14 @@ jobs:
           RESULT: ${{ needs.unit-shard.result }}
         run: test "$RESULT" = success
 
-  fixtures:
-    name: fixtures
+  fixtures-part:
+    name: fixtures (${{ matrix.part }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [state, blockchain, other]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -130,7 +134,27 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Ethereum test fixtures
-        run: go test -timeout 20m ./tests
+        env:
+          PART: ${{ matrix.part }}
+        run: |
+          case "$PART" in
+            state)      go test -timeout 20m -run '^TestState$' ./tests ;;
+            blockchain) go test -timeout 20m -run '^TestBlockchain$' ./tests ;;
+            other)      go test -timeout 20m -skip '^(TestState|TestBlockchain)$' ./tests ;;
+            *) echo "unknown part $PART"; exit 1 ;;
+          esac
+
+  fixtures:
+    name: fixtures
+    needs: fixtures-part
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Every part passed
+        env:
+          RESULT: ${{ needs.fixtures-part.result }}
+        run: test "$RESULT" = success
 
   reproducible-target:
     name: reproducible (${{ matrix.target }})

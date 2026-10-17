@@ -69,11 +69,6 @@ var (
 	executionSpecBlockchainTestDir = filepath.Join(".", "spec-tests", "fixtures", "blockchain_tests")
 	executionSpecStateTestDir      = filepath.Join(".", "spec-tests", "fixtures", "state_tests")
 	benchmarksDir                  = filepath.Join(".", "evm-benchmarks", "benchmarks")
-
-	baseDirETC           = filepath.Join(".", "testdata-etc")
-	stateTestDirETC      = filepath.Join(baseDirETC, "GeneralStateTests")
-	legacyTestDirETC     = filepath.Join(baseDirETC, "LegacyTests", "Constantinople", "GeneralStateTests")
-	difficultyTestDirETC = filepath.Join(baseDirETC, "DifficultyTests")
 )
 
 func readJSON(reader io.Reader, value interface{}) error {
