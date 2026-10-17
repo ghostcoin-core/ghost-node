@@ -21,8 +21,21 @@ RandomX, and the security catch-up on upstream fixes is still to come.
 - Fork point: [docs/decisions/0001-fork-point.md](docs/decisions/0001-fork-point.md)
 - What is removed and turned off: [docs/removed-and-turned-off.md](docs/removed-and-turned-off.md)
 
-No network is built in. Initialise a data directory with a genesis file first
-(`geth init genesis.json`), or try the node in developer mode (`geth --dev`).
+## Running a node
+
+The goal is that anyone can run a Ghost node by pasting one line into a
+terminal, without knowing anything about it. The node is built for that:
+
+- each release is one self-contained executable per platform, built
+  reproducibly (on Linux it is statically linked);
+- when Ghost's network launches, its genesis and bootstrap nodes are built in,
+  so `geth` with no flags and no config file runs a Ghost node, with sensible
+  defaults for everything else.
+
+No Ghost network exists yet, so today nothing is built in and the node will
+not start on an empty data directory rather than join some other chain. To
+try it, use developer mode (`geth --dev`), or initialise a private test
+network with a genesis file (`geth init genesis.json`).
 
 ## Building
 

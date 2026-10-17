@@ -69,6 +69,8 @@ jobs:
           go-version-file: go.mod
       - name: Build every command
         run: go run build/ci.go install
+      - name: The Linux release is one self-contained file
+        run: file build/bin/geth | grep -q 'statically linked'
       - name: Record the geth hash
         run: |
           sha256sum build/bin/geth | cut -d' ' -f1 > geth-linux-amd64-build.sha256

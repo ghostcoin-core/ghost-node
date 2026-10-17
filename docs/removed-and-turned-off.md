@@ -11,7 +11,7 @@ carry over.
 | Part | Where it was |
 |---|---|
 | Ethereum Classic, Mordor, MintMe, Sepolia and Holesky networks, the `--mainnet` flag, and every built-in bootnode and DNS node list | `params`, `cmd/utils`, `core/genesis.go` |
-| Falling back to Ethereum mainnet's genesis when a data directory has none | `core/genesis.go`; the node now refuses to start until `geth init` has run, or a developer mode is used |
+| Falling back to Ethereum mainnet's genesis when a data directory has none | `core/genesis.go`; until Ghost's genesis is built in as the default, the node refuses to start on an empty data directory (developer mode and `geth init` still work) |
 | Replacing a stored chain configuration with a default one at block zero when the chain IDs matched | `core/genesis.go` |
 | The MintMe Lyra2 engine and its contract-address rule in the EVM, receipts and RPC | `consensus/lyra2`, `core`, `internal/ethapi` |
 | The Engine API, its authenticated RPC endpoints and the full-sync tester | `eth/catalyst` |
@@ -47,6 +47,11 @@ or to import, if any is switched on.
 | The proof-of-stake beacon wrapper | The node no longer wraps its engine in it. The package stays only because upstream tests and the evm test runner build post-merge test chains with it; a CI step fails if `geth` links it |
 
 ## Left for later phases
+
+- **Ghost's network as the default.** Running a node must take one pasted
+  line, with no flags or config. When the genesis is frozen (phase 5), it and
+  the bootstrap nodes are built in as the default network, so `geth` alone
+  runs a Ghost node.
 
 - **Uncles, uncle rewards and the difficulty bomb** are rules of the ethash
   engine. The RandomX engine (phase 2) replaces ethash and has none of them.
