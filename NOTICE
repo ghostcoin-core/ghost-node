@@ -1,0 +1,18 @@
+Ghost node
+
+This repository is a fork of Core-Geth (https://github.com/etclabscore/core-geth),
+which is itself derived from go-ethereum (https://github.com/ethereum/go-ethereum).
+
+Copyright The go-ethereum Authors (see AUTHORS).
+Copyright The core-geth Authors.
+Changes made for Ghost are copyright The Ghost Authors.
+
+The library code (everything outside the cmd directory) is licensed under the
+GNU Lesser General Public License version 3 (COPYING.LESSER). The programs
+(everything inside the cmd directory) are licensed under the GNU General Public
+License version 3 (COPYING). Ghost's changes are released under the same terms
+as the files they change.
+
+Two changes were taken from ethereumclassic/core-geth
+(https://github.com/ethereumclassic/core-geth), as recorded in their commit
+messages.
