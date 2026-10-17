@@ -278,7 +278,6 @@ type CoreGethChainConfig struct {
 	BlockRewardSchedule         ctypes.Uint64Uint256MapEncodesHex `json:"blockReward,omitempty"`          // JSON tag matches Parity's
 
 	RequireBlockHashes map[uint64]common.Hash `json:"requireBlockHashes"`
-
 }
 
 // String implements the fmt.Stringer interface.
