@@ -191,3 +191,35 @@ func TestCustomBackend(t *testing.T) {
 		}
 	}
 }
+
+// TestProofOfStakeGenesisRefused tests that the node refuses to run a chain
+// whose configuration schedules the proof-of-stake transition.
+func TestProofOfStakeGenesisRefused(t *testing.T) {
+	t.Parallel()
+	genesis := `{
+		"alloc"      : {},
+		"difficulty" : "0x20000",
+		"gasLimit"   : "0x2fefd8",
+		"config"     : {
+			"chainId"                 : 1337,
+			"homesteadBlock"          : 0,
+			"terminalTotalDifficulty" : 0
+		}
+	}`
+	datadir := t.TempDir()
+	json := filepath.Join(datadir, "genesis.json")
+	if err := os.WriteFile(json, []byte(genesis), 0600); err != nil {
+		t.Fatalf("failed to write genesis file: %v", err)
+	}
+	runGeth(t, "--datadir", datadir, "init", json).WaitExit()
+
+	geth := runGeth(t, "--networkid", "1337", "--syncmode=full", "--cache", "16",
+		"--datadir", datadir, "--maxpeers", "0", "--port", "0", "--authrpc.port", "0",
+		"--nodiscover", "--nat", "none", "--ipcdisable",
+		"--exec", "eth.getBlock(0).nonce", "console")
+	geth.ExpectRegexp("this node runs proof of work only")
+	geth.ExpectExit()
+	if status := geth.ExitStatus(); status == 0 {
+		t.Errorf("expected exit status != 0, got: %d", status)
+	}
+}

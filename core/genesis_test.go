@@ -337,3 +337,19 @@ func TestVerkleGenesisCommit(t *testing.T) {
 		t.Fatal("could not find node")
 	}
 }
+
+func TestCheckProofOfWorkOnly(t *testing.T) {
+	if err := CheckProofOfWorkOnly(params.TestChainConfig); err != nil {
+		t.Errorf("proof-of-work test config refused: %v", err)
+	}
+	for name, config := range map[string]ctypes.ChainConfigurator{
+		"mainnet": params.MainnetChainConfig,
+		"merged":  params.MergedTestChainConfig,
+		"ttd":     &goethereum.ChainConfig{TerminalTotalDifficulty: big.NewInt(1)},
+		"passed":  &goethereum.ChainConfig{TerminalTotalDifficultyPassed: true},
+	} {
+		if err := CheckProofOfWorkOnly(config); err != ErrProofOfStakeConfig {
+			t.Errorf("%s: have %v, want %v", name, err, ErrProofOfStakeConfig)
+		}
+	}
+}

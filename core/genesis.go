@@ -42,6 +42,20 @@ import (
 
 var errGenesisNoConfig = errors.New("genesis has no chain configuration")
 
+// ErrProofOfStakeConfig is returned for a chain configuration that schedules
+// the proof-of-stake transition. The node has no beacon wrapper or Engine API,
+// and its fork choice treats such a chain unsafely, so it refuses to run one.
+var ErrProofOfStakeConfig = errors.New("chain configuration sets a terminal total difficulty (a proof-of-stake transition); this node runs proof of work only")
+
+// CheckProofOfWorkOnly returns ErrProofOfStakeConfig if the configuration sets
+// a terminal total difficulty or marks it as passed.
+func CheckProofOfWorkOnly(config ctypes.ChainConfigurator) error {
+	if config.GetEthashTerminalTotalDifficulty() != nil || config.GetEthashTerminalTotalDifficultyPassed() {
+		return ErrProofOfStakeConfig
+	}
+	return nil
+}
+
 // ErrGenesisNotGiven is returned when the database holds no genesis block and
 // none was given. No network is built in, so there is no default to fall back to.
 var ErrGenesisNotGiven = errors.New("no genesis block: initialise the database with a genesis file first")
@@ -302,9 +316,9 @@ func LoadChainConfig(db ethdb.Database, genesis *genesisT.Genesis) (ctypes.Chain
 		}
 		return genesis.Config, nil
 	}
-	// There is no stored chain config and no new config provided,
-	// In this case the default chain config(mainnet) will be used
-	return params.MainnetChainConfig, nil
+	// There is no stored chain config and no new config provided. No network
+	// is built in, so there is no default to use.
+	return nil, ErrGenesisNotGiven
 }
 
 func configOrDefault(g *genesisT.Genesis, ghash common.Hash) ctypes.ChainConfigurator {
