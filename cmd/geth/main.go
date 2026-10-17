@@ -93,7 +93,6 @@ var (
 		utils.BlobPoolDataCapFlag,
 		utils.BlobPoolPriceBumpFlag,
 		utils.SyncModeFlag,
-		utils.SyncTargetFlag,
 		utils.ExitWhenSyncedFlag,
 		utils.GCModeFlag,
 		utils.SnapshotFlag,
@@ -150,7 +149,6 @@ var (
 		utils.DNSDiscoveryFlag,
 		utils.EthProtocolsFlag,
 		utils.DeveloperFlag,
-		utils.DeveloperPeriodFlag,
 		utils.DeveloperPoWFlag,
 		utils.DeveloperGasLimitFlag,
 		utils.VMEnableDebugFlag,
@@ -300,28 +298,9 @@ func main() {
 
 // logDevMode logs a warning when the node runs in a developer mode.
 func logDevMode(ctx *cli.Context) {
-	switch {
-	case ctx.IsSet(utils.DeveloperFlag.Name):
-		log.Info("Starting Geth in ephemeral proof-of-authority network dev mode...")
-		log.Warn(`You are running Geth in --dev mode. Please note the following:
-
-  1. This mode is only intended for fast, iterative development without assumptions on
-     security or persistence.
-  2. The database is created in memory unless specified otherwise. Therefore, shutting down
-     your computer or losing power will wipe your entire block data and chain state for
-     your dev environment.
-  3. A random, pre-allocated developer account will be available and unlocked as
-     eth.coinbase, which can be used for testing. The random dev account is temporary,
-     stored on a ramdisk, and will be lost if your machine is restarted.
-  4. Mining is enabled by default. However, the client will only seal blocks if transactions
-     are pending in the mempool. The miner's minimum accepted gas price is 1.
-  5. Networking is disabled; there is no listen-address, the maximum number of peers is set
-     to 0, and discovery is disabled.
-`)
-
-	case ctx.IsSet(utils.DeveloperPoWFlag.Name):
+	if ctx.IsSet(utils.DeveloperFlag.Name) || ctx.IsSet(utils.DeveloperPoWFlag.Name) {
 		log.Info("Starting Geth in ephemeral proof-of-work network dev mode...")
-		log.Warn(`You are running Geth in --dev.pow mode. Please note the following:
+		log.Warn(`You are running Geth in developer mode. Please note the following:
 
   1. This mode is only intended for fast, iterative development without assumptions on
      security or persistence.
@@ -335,7 +314,6 @@ func logDevMode(ctx *cli.Context) {
   5. Networking is disabled; there is no listen-address, the maximum number of peers is set
      to 0, and discovery is disabled.
 `)
-
 	}
 }
 

@@ -24,7 +24,6 @@ import (
 	"github.com/ethereum/go-ethereum/params/types/coregeth"
 	"github.com/ethereum/go-ethereum/params/types/ctypes"
 	"github.com/ethereum/go-ethereum/params/types/genesisT"
-	"github.com/ethereum/go-ethereum/params/types/goethereum"
 	"github.com/ethereum/go-ethereum/params/vars"
 )
 
@@ -40,38 +39,9 @@ func DefaultGenesisBlock() *genesisT.Genesis {
 	}
 }
 
-// DeveloperGenesisBlock returns the 'geth --dev' genesis block. Note, this must
-// be seeded with the
-func DeveloperGenesisBlock(gasLimit uint64, faucet *common.Address, useEthash bool) *genesisT.Genesis {
-	if !useEthash {
-		// Make a copy to avoid unpredicted contamination.
-		config := &goethereum.ChainConfig{}
-		*config = *AllDevChainProtocolChanges
-
-		// Assemble and return the genesis with the precompiles and faucet pre-funded
-		genesis := &genesisT.Genesis{
-			Config:     config,
-			GasLimit:   gasLimit,
-			BaseFee:    big.NewInt(vars.InitialBaseFee),
-			Difficulty: big.NewInt(0),
-			Alloc: map[common.Address]genesisT.GenesisAccount{
-				common.BytesToAddress([]byte{1}): {Balance: big.NewInt(1)}, // ECRecover
-				common.BytesToAddress([]byte{2}): {Balance: big.NewInt(1)}, // SHA256
-				common.BytesToAddress([]byte{3}): {Balance: big.NewInt(1)}, // RIPEMD
-				common.BytesToAddress([]byte{4}): {Balance: big.NewInt(1)}, // Identity
-				common.BytesToAddress([]byte{5}): {Balance: big.NewInt(1)}, // ModExp
-				common.BytesToAddress([]byte{6}): {Balance: big.NewInt(1)}, // ECAdd
-				common.BytesToAddress([]byte{7}): {Balance: big.NewInt(1)}, // ECScalarMul
-				common.BytesToAddress([]byte{8}): {Balance: big.NewInt(1)}, // ECPairing
-				common.BytesToAddress([]byte{9}): {Balance: big.NewInt(1)}, // BLAKE2b
-			},
-		}
-		if faucet != nil {
-			genesis.Alloc[*faucet] = genesisT.GenesisAccount{Balance: new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(9))}
-		}
-		return genesis
-	}
-
+// DeveloperGenesisBlock returns the genesis block of the proof-of-work
+// developer mode (geth --dev or --dev.pow), with the faucet pre-funded.
+func DeveloperGenesisBlock(gasLimit uint64, faucet *common.Address) *genesisT.Genesis {
 	// Use an ETC equivalent of AllEthashProtocolChanges.
 	// This will allow initial permanent disposal of the difficulty bomb,
 	// and we'll override the monetary policy block reward schedule to be a non-occurring.
@@ -120,7 +90,7 @@ func DeveloperGenesisBlock(gasLimit uint64, faucet *common.Address, useEthash bo
 	// Assemble and return the genesis with the precompiles and faucet pre-funded
 	genesis := &genesisT.Genesis{
 		Config:     config,
-		GasLimit:   6283185,
+		GasLimit:   gasLimit,
 		Difficulty: vars.MinimumDifficulty,
 		BaseFee:    big.NewInt(vars.InitialBaseFee),
 		Alloc: map[common.Address]genesisT.GenesisAccount{

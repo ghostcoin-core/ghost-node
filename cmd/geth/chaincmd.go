@@ -243,7 +243,7 @@ func initGenesis(ctx *cli.Context) error {
 func dumpGenesis(ctx *cli.Context) error {
 	var genesis *genesisT.Genesis
 	if ctx.IsSet(utils.DeveloperFlag.Name) && !ctx.IsSet(utils.DataDirFlag.Name) {
-		genesis = params.DeveloperGenesisBlock(11_500_000, nil, ctx.Bool(utils.DeveloperPoWFlag.Name))
+		genesis = params.DeveloperGenesisBlock(11_500_000, nil)
 	}
 
 	if genesis != nil {
