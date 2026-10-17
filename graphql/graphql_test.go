@@ -492,3 +492,53 @@ func newGQLService(t *testing.T, stack *node.Node, shanghai bool, gspec *genesis
 	}
 	return handler, chain
 }
+
+// TestGraphQLQueryDepthLimit verifies that deeply nested queries are rejected
+// when maxQueryDepth is set. This is a regression test for the depth limit
+// security fix.
+func TestGraphQLQueryDepthLimit(t *testing.T) {
+	stack := createNode(t)
+	defer stack.Close()
+	genesis := &genesisT.Genesis{
+		Config:     params.AllEthashProtocolChanges,
+		GasLimit:   11500000,
+		Difficulty: big.NewInt(1048576),
+	}
+	newGQLService(t, stack, false, genesis, 1, func(i int, gen *core.BlockGen) {})
+	if err := stack.Start(); err != nil {
+		t.Fatalf("could not start node: %v", err)
+	}
+
+	// post sends a query selecting block.parent.parent... nested to the given number of
+	// fields. The query must be valid GraphQL, and the error must name depth: this test once
+	// sent a query with an extra closing brace and passed on the resulting syntax error.
+	post := func(levels int) (int, string) {
+		var b strings.Builder
+		b.WriteString(`{"query": "{ block `)
+		for i := 1; i < levels; i++ {
+			b.WriteString("{ parent ")
+		}
+		b.WriteString("{ number }")
+		for i := 0; i < levels; i++ {
+			b.WriteString(" }")
+		}
+		b.WriteString(`","variables": null}`)
+		resp, err := http.Post(fmt.Sprintf("%s/graphql", stack.HTTPEndpoint()), "application/json", strings.NewReader(b.String()))
+		if err != nil {
+			t.Fatalf("could not post: %v", err)
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("could not read response: %v", err)
+		}
+		return resp.StatusCode, string(body)
+	}
+	if status, body := post(3); strings.Contains(strings.ToLower(body), "depth") {
+		t.Fatalf("a 3-level query was refused for depth (status %d): %s", status, body)
+	}
+	levels := maxQueryDepth + 5
+	if status, body := post(levels); status != 400 || !strings.Contains(strings.ToLower(body), "depth") {
+		t.Fatalf("a %d-level query was not refused for depth (status %d): %s", levels, status, body)
+	}
+}
