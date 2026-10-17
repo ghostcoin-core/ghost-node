@@ -27,8 +27,4 @@ func TestDefaultGenesisBlock(t *testing.T) {
 	if block.Hash() != params.MainnetGenesisHash {
 		t.Errorf("wrong mainnet genesis hash, got %v, want %v", block.Hash(), params.MainnetGenesisHash)
 	}
-	block = GenesisToBlock(params.DefaultSepoliaGenesisBlock(), nil)
-	if block.Hash() != params.SepoliaGenesisHash {
-		t.Errorf("wrong testnet genesis hash, got %v, want %v", block.Hash(), params.SepoliaGenesisHash)
-	}
 }

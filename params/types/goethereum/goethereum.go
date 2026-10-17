@@ -88,7 +88,6 @@ type ChainConfig struct {
 	// Various consensus engines
 	Ethash    *ctypes.EthashConfig `json:"ethash,omitempty"`
 	Clique    *ctypes.CliqueConfig `json:"clique,omitempty"`
-	Lyra2     *ctypes.Lyra2Config  `json:"lyra2,omitempty"`
 	IsDevMode bool                 `json:"isDev,omitempty"`
 
 	// NOTE: These are not included in this type upstream.
@@ -102,7 +101,6 @@ type ChainConfig struct {
 	ecbp1100Transition           *big.Int
 	ecbp1100DeactivateTransition *big.Int
 
-	Lyra2NonceTransitionBlock *big.Int `json:"lyra2NonceTransitionBlock,omitempty"`
 }
 
 // networkNames are user friendly names to use in the chain spec banner.

@@ -260,7 +260,6 @@ type CoreGethChainConfig struct {
 	// Various consensus engines
 	Ethash    *ctypes.EthashConfig `json:"ethash,omitempty"`
 	Clique    *ctypes.CliqueConfig `json:"clique,omitempty"`
-	Lyra2     *ctypes.Lyra2Config  `json:"lyra2,omitempty"`
 	IsDevMode bool                 `json:"isDev,omitempty"`
 
 	// TerminalTotalDifficulty is the amount of total difficulty reached by
@@ -280,7 +279,6 @@ type CoreGethChainConfig struct {
 
 	RequireBlockHashes map[uint64]common.Hash `json:"requireBlockHashes"`
 
-	Lyra2NonceTransitionBlock *big.Int `json:"lyra2NonceTransitionBlock,omitempty"`
 }
 
 // String implements the fmt.Stringer interface.
@@ -291,8 +289,6 @@ func (c *CoreGethChainConfig) String() string {
 		engine = c.Ethash
 	case c.Clique != nil:
 		engine = c.Clique
-	case c.Lyra2 != nil:
-		engine = c.Lyra2
 	default:
 		engine = "unknown"
 	}

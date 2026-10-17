@@ -28,9 +28,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/user"
-	"path/filepath"
-	"runtime"
 	godebug "runtime/debug"
 	"strconv"
 	"strings"
@@ -41,7 +38,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/fdlimit"
 	"github.com/ethereum/go-ethereum/consensus/ethash"
-	"github.com/ethereum/go-ethereum/consensus/lyra2"
 
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/rawdb"
@@ -160,36 +156,6 @@ var (
 			}
 			return
 		}(), ","),
-	}
-	ClassicFlag = &cli.BoolFlag{
-		Name:     "classic",
-		Usage:    "Ethereum Classic network: pre-configured Ethereum Classic mainnet",
-		Category: flags.EthCategory,
-	}
-	MainnetFlag = &cli.BoolFlag{
-		Name:     "mainnet",
-		Usage:    "Ethereum mainnet",
-		Category: flags.EthCategory,
-	}
-	MintMeFlag = &cli.BoolFlag{
-		Name:     "mintme",
-		Usage:    "MintMe.com Coin mainnet: pre-configured MintMe.com Coin mainnet",
-		Category: flags.EthCategory,
-	}
-	MordorFlag = &cli.BoolFlag{
-		Name:     "mordor",
-		Usage:    "Mordor network: Ethereum Classic's cross-client proof-of-work test network",
-		Category: flags.EthCategory,
-	}
-	SepoliaFlag = &cli.BoolFlag{
-		Name:     "sepolia",
-		Usage:    "Sepolia network: pre-configured proof-of-work test network",
-		Category: flags.EthCategory,
-	}
-	HoleskyFlag = &cli.BoolFlag{
-		Name:     "holesky",
-		Usage:    "Holesky network: pre-configured proof-of-stake test network",
-		Category: flags.EthCategory,
 	}
 	// Dev mode
 	DeveloperFlag = &cli.BoolFlag{
@@ -1102,19 +1068,6 @@ Please note that --` + MetricsHTTPFlag.Name + ` must be set to start the server.
 )
 
 var (
-	// TestnetFlags is the flag group of all built-in supported testnets.
-	TestnetFlags = []cli.Flag{
-		SepoliaFlag,
-		MordorFlag,
-		HoleskyFlag,
-	}
-	// NetworkFlags is the flag group of all built-in supported networks.
-	NetworkFlags = append([]cli.Flag{
-		MainnetFlag,
-		ClassicFlag,
-		MintMeFlag,
-	}, TestnetFlags...)
-
 	// DatabaseFlags is the flag group of all database flags.
 	DatabaseFlags = []cli.Flag{
 		DataDirFlag,
@@ -1127,11 +1080,10 @@ var (
 )
 
 // MakeDataDir retrieves the currently requested data directory, terminating
-// if none (or the empty string) is specified. If the node is starting a testnet,
-// then a subdirectory of the specified datadir will be used.
+// if none (or the empty string) is specified.
 func MakeDataDir(ctx *cli.Context) string {
 	if path := ctx.String(DataDirFlag.Name); path != "" {
-		return dataDirPathForCtxChainConfig(ctx, path)
+		return path
 	}
 	Fatalf("Cannot determine default data directory, please set manually (--%s)", DataDirFlag.Name)
 	return ""
@@ -1171,35 +1123,18 @@ func setNodeUserIdent(ctx *cli.Context, cfg *node.Config) {
 }
 
 // setBootstrapNodes creates a list of bootstrap nodes from the command line
-// flags, reverting to pre-configured ones if none have been specified.
+// flags or the config file. No network is built in, so there are no default
+// bootstrap nodes.
+//
 // Priority order for bootnodes configuration:
 //
 // 1. --bootnodes flag
 // 2. Config file
-// 3. Network preset flags (e.g. --classic)
-// 4. default to mainnet nodes
 func setBootstrapNodes(ctx *cli.Context, cfg *p2p.Config) {
-	urls := params.MainnetBootnodes
-	if ctx.IsSet(BootnodesFlag.Name) {
-		urls = SplitAndTrim(ctx.String(BootnodesFlag.Name))
-	} else {
-		if cfg.BootstrapNodes != nil {
-			return // Already set by config file, don't apply defaults.
-		}
-		switch {
-		case ctx.Bool(ClassicFlag.Name):
-			urls = params.ClassicBootnodes
-		case ctx.Bool(MintMeFlag.Name):
-			urls = params.MintMeBootnodes
-		case ctx.Bool(MordorFlag.Name):
-			urls = params.MordorBootnodes
-		case ctx.Bool(SepoliaFlag.Name):
-			urls = params.SepoliaBootnodes
-		case ctx.Bool(HoleskyFlag.Name):
-			urls = params.HoleskyBootnodes
-		}
+	if !ctx.IsSet(BootnodesFlag.Name) {
+		return // Keep what the config file set, if anything.
 	}
-	cfg.BootstrapNodes = mustParseBootnodes(urls)
+	cfg.BootstrapNodes = mustParseBootnodes(SplitAndTrim(ctx.String(BootnodesFlag.Name)))
 }
 
 func mustParseBootnodes(urls []string) []*enode.Node {
@@ -1217,22 +1152,13 @@ func mustParseBootnodes(urls []string) []*enode.Node {
 	return nodes
 }
 
-// setBootstrapNodesV5 creates a list of bootstrap nodes from the command line
-// flags, reverting to pre-configured ones if none have been specified.
+// setBootstrapNodesV5 creates a list of discovery v5 bootstrap nodes from the
+// command line flags or the config file. There are no defaults.
 func setBootstrapNodesV5(ctx *cli.Context, cfg *p2p.Config) {
-	urls := params.V5Bootnodes
-	switch {
-	case ctx.IsSet(BootnodesFlag.Name):
-		urls = SplitAndTrim(ctx.String(BootnodesFlag.Name))
-	case ctx.IsSet(ClassicFlag.Name):
-		urls = params.ClassicBootnodes
-	case ctx.IsSet(MordorFlag.Name):
-		urls = params.MordorBootnodes
-	case ctx.Bool(MintMeFlag.Name):
-		urls = params.MintMeBootnodes
-	case cfg.BootstrapNodesV5 != nil:
-		return // already set, don't apply defaults.
+	if !ctx.IsSet(BootnodesFlag.Name) {
+		return // Keep what the config file set, if anything.
 	}
+	urls := SplitAndTrim(ctx.String(BootnodesFlag.Name))
 
 	cfg.BootstrapNodesV5 = make([]*enode.Node, 0, len(urls))
 	for _, url := range urls {
@@ -1589,27 +1515,6 @@ func SetNodeConfig(ctx *cli.Context, cfg *node.Config) {
 				}
 				accounts.SetCoinTypeConfiguration(uint32(pathID))
 				log.Info("Using custom HD derivation path", "pathid", uint32(pathID), "basepath", accounts.DefaultBaseDerivationPath)
-			} else {
-				// Set default hd path based on --chain configuration flags, if any.
-				// Set default derivation path to a testnet value if we're configuring for a testnet.
-				for _, f := range TestnetFlags {
-					name := f.Names()[0] // This won't overflow because the flags always have a Name, because they are defined as --name.
-					if ctx.IsSet(name) && ctx.Bool(name) {
-						accounts.SetCoinTypeConfiguration(accounts.BIP0044CoinTypeTestnet)
-						log.Info("Using testnet HD derivation path", "basepath", accounts.DefaultBaseDerivationPath)
-						break
-					}
-				}
-
-				// Configure the HD derivation path for Ethereum Classic (ETC) if
-				// the client is configuring for ETC.
-				// This will not conflict with the testnet configuration handling above
-				// because we trust that the network configuration flags are checked to
-				// be exclusive.
-				if ctx.IsSet(ClassicFlag.Name) && ctx.Bool(ClassicFlag.Name) {
-					accounts.SetCoinTypeConfiguration(accounts.BIP0044CoinTypeEtherClassic)
-					log.Info("Using Ethereum Classic (ETC) HD derivation path", "basepath", accounts.DefaultBaseDerivationPath)
-				}
 			}
 		}
 	}
@@ -1653,22 +1558,6 @@ func setSmartCard(ctx *cli.Context, cfg *node.Config) {
 	cfg.SmartCardDaemonPath = path
 }
 
-func dataDirPathForCtxChainConfig(ctx *cli.Context, baseDataDirPath string) string {
-	switch {
-	case ctx.Bool(ClassicFlag.Name):
-		return filepath.Join(baseDataDirPath, "classic")
-	case ctx.Bool(MordorFlag.Name):
-		return filepath.Join(baseDataDirPath, "mordor")
-	case ctx.Bool(SepoliaFlag.Name):
-		return filepath.Join(baseDataDirPath, "sepolia")
-	case ctx.Bool(MintMeFlag.Name):
-		return filepath.Join(baseDataDirPath, "mintme")
-	case ctx.Bool(HoleskyFlag.Name):
-		return filepath.Join(baseDataDirPath, "holesky")
-	}
-	return baseDataDirPath
-}
-
 func SetDataDir(ctx *cli.Context, cfg *node.Config) {
 	switch {
 	case ctx.IsSet(DataDirFlag.Name):
@@ -1677,8 +1566,6 @@ func SetDataDir(ctx *cli.Context, cfg *node.Config) {
 	case ctx.Bool(DeveloperFlag.Name) || ctx.Bool(DeveloperPoWFlag.Name):
 		cfg.DataDir = "" // unless explicitly requested, use memory databases
 
-	case cfg.DataDir == vars.DefaultDataDir():
-		cfg.DataDir = dataDirPathForCtxChainConfig(ctx, vars.DefaultDataDir())
 	}
 }
 
@@ -1740,53 +1627,19 @@ func setTxPool(ctx *cli.Context, cfg *legacypool.Config) {
 	}
 }
 
-func homeDir() string {
-	if home := os.Getenv("HOME"); home != "" {
-		return home
-	}
-	if usr, err := user.Current(); err == nil {
-		return usr.HomeDir
-	}
-	return ""
-}
-
 func setEthashDatasetDir(ctx *cli.Context, cfg *ethconfig.Config) {
-	switch {
-	case ctx.IsSet(EthashDatasetDirFlag.Name):
+	if ctx.IsSet(EthashDatasetDirFlag.Name) {
 		cfg.Ethash.DatasetDir = ctx.String(EthashDatasetDirFlag.Name)
-
-	case (ctx.Bool(ClassicFlag.Name) || ctx.Bool(MordorFlag.Name)) && cfg.Ethash.DatasetDir == ethconfig.Defaults.Ethash.DatasetDir:
-		// ECIP-1099 is set, use etchash dir for DAGs instead
-		home := homeDir()
-
-		if runtime.GOOS == "darwin" {
-			cfg.Ethash.DatasetDir = filepath.Join(home, "Library", "Etchash")
-		} else if runtime.GOOS == "windows" {
-			localappdata := os.Getenv("LOCALAPPDATA")
-			if localappdata != "" {
-				cfg.Ethash.DatasetDir = filepath.Join(localappdata, "Etchash")
-			} else {
-				cfg.Ethash.DatasetDir = filepath.Join(home, "AppData", "Local", "Etchash")
-			}
-		} else {
-			cfg.Ethash.DatasetDir = filepath.Join(home, ".etchash")
-		}
 	}
 }
 
 func setEthashCacheDir(ctx *cli.Context, cfg *eth.Config) {
-	switch {
-	case ctx.IsSet(EthashCacheDirFlag.Name):
+	if ctx.IsSet(EthashCacheDirFlag.Name) {
 		cfg.Ethash.CacheDir = ctx.String(EthashCacheDirFlag.Name)
-
-	case (ctx.Bool(ClassicFlag.Name) || ctx.Bool(MordorFlag.Name)) && cfg.Ethash.CacheDir == ethconfig.Defaults.Ethash.CacheDir:
-		// ECIP-1099 is set, use etchash dir for caches instead
-		cfg.Ethash.CacheDir = "etchash"
 	}
 }
 
 func setEthash(ctx *cli.Context, cfg *eth.Config) {
-	// ECIP-1099
 	setEthashCacheDir(ctx, cfg)
 	setEthashDatasetDir(ctx, cfg)
 
@@ -1823,11 +1676,6 @@ func setMiner(ctx *cli.Context, cfg *miner.Config) {
 	}
 	if ctx.IsSet(MinerGasLimitFlag.Name) {
 		cfg.GasCeil = ctx.Uint64(MinerGasLimitFlag.Name)
-	} else {
-		// For classic and mordor chains, maintain the gas limit at 8M
-		if ctx.Bool(ClassicFlag.Name) || ctx.Bool(MordorFlag.Name) {
-			cfg.GasCeil = 8000000
-		}
 	}
 	if ctx.IsSet(MinerGasPriceFlag.Name) {
 		cfg.GasPrice = flags.GlobalBig(ctx, MinerGasPriceFlag.Name)
@@ -1915,7 +1763,7 @@ func CheckExclusive(ctx *cli.Context, args ...interface{}) {
 // SetEthConfig applies eth-related command line flags to the config.
 func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 	// Avoid conflicting network flags
-	CheckExclusive(ctx, MainnetFlag, DeveloperFlag, DeveloperPoWFlag, SepoliaFlag, ClassicFlag, MordorFlag, MintMeFlag, HoleskyFlag)
+	CheckExclusive(ctx, DeveloperFlag, DeveloperPoWFlag)
 	CheckExclusive(ctx, LightServeFlag, SyncModeFlag, "light")
 	CheckExclusive(ctx, DeveloperFlag, DeveloperPoWFlag, ExternalSignerFlag) // Can't use both ephemeral unlocked and external signer
 
@@ -2071,15 +1919,6 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 		}
 	}
 
-	// Override any default configs for hard coded networks.
-
-	// Override genesis configuration if a --<chain> flag.
-	if !ctx.Bool(DeveloperFlag.Name) && !ctx.Bool(DeveloperPoWFlag.Name) {
-		if gen := genesisForCtxChainConfig(ctx); gen != nil {
-			cfg.Genesis = gen
-		}
-	}
-
 	// Establish NetworkID.
 	// If dev-mode is used, then NetworkID will be overridden.
 	if ctx.IsSet(NetworkIdFlag.Name) {
@@ -2131,31 +1970,6 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 		cfg.ProtocolVersions = append(cfg.ProtocolVersions, uint(version))
 	}
 	log.Info("Configured Ethereum protocol versions", "capabilities", cfg.ProtocolVersions)
-
-	// Set DNS discovery defaults for hard coded networks with DNS defaults.
-	// core-geth: NetworkID is configured several stanzas above, based on the returned genesis GetNetworkID() value.
-	// GetNetworkID is a configurator method which will either return a custom json:- field NetworkID if set for
-	// the config, or it'll return the ChainID if the NetworkID is not explicitly set.
-	// This behavior matches practical expectations for how network id and chain id are normally defined.
-	switch {
-	case ctx.Bool(MainnetFlag.Name):
-		SetDNSDiscoveryDefaults(cfg, params.MainnetGenesisHash)
-	case ctx.Bool(HoleskyFlag.Name):
-		if !ctx.IsSet(NetworkIdFlag.Name) {
-			cfg.NetworkId = 17000
-		}
-		cfg.Genesis = params.DefaultHoleskyGenesisBlock()
-		SetDNSDiscoveryDefaults(cfg, params.HoleskyGenesisHash)
-	case ctx.Bool(SepoliaFlag.Name):
-		cfg.Genesis = params.DefaultSepoliaGenesisBlock()
-		SetDNSDiscoveryDefaults(cfg, params.SepoliaGenesisHash)
-	case ctx.Bool(ClassicFlag.Name):
-		SetDNSDiscoveryDefaults2(cfg, params.ClassicDNSNetwork1)
-	case ctx.Bool(MordorFlag.Name):
-		SetDNSDiscoveryDefaults2(cfg, params.MordorDNSNetwork1)
-	default:
-		// No --<chain> flag was given.
-	}
 
 	if ctx.Bool(DeveloperFlag.Name) || ctx.Bool(DeveloperPoWFlag.Name) {
 		if !ctx.IsSet(NetworkIdFlag.Name) {
@@ -2240,31 +2054,6 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 	log.Info("Initializing the KZG library", "backend", ctx.String(CryptoKZGFlag.Name))
 	if err := kzg4844.UseCKZG(ctx.String(CryptoKZGFlag.Name) == "ckzg"); err != nil {
 		Fatalf("Failed to set KZG library implementation to %s: %v", ctx.String(CryptoKZGFlag.Name), err)
-	}
-}
-
-// SetDNSDiscoveryDefaults2 configures DNS discovery with the given URL if no URLs are set.
-func SetDNSDiscoveryDefaults2(cfg *ethconfig.Config, url string) {
-	if cfg.EthDiscoveryURLs != nil {
-		return
-	}
-	if cfg.SyncMode == downloader.LightSync {
-		url = strings.Replace(url, "@all.", "@les.", 1)
-	}
-	cfg.EthDiscoveryURLs = []string{url}
-	cfg.SnapDiscoveryURLs = cfg.EthDiscoveryURLs
-}
-
-// SetDNSDiscoveryDefaults configures DNS discovery with the given URL if
-// no URLs are set.
-func SetDNSDiscoveryDefaults(cfg *ethconfig.Config, genesis common.Hash) {
-	if cfg.EthDiscoveryURLs != nil {
-		return // already set through flags/config
-	}
-	protocol := "all"
-	if url := params.KnownDNSNetwork(genesis, protocol); url != "" {
-		cfg.EthDiscoveryURLs = []string{url}
-		cfg.SnapDiscoveryURLs = cfg.EthDiscoveryURLs
 	}
 }
 
@@ -2421,16 +2210,6 @@ func tryMakeReadOnlyDatabase(ctx *cli.Context, stack *node.Node) ethdb.Database 
 	return MakeChainDatabase(ctx, stack, readonly)
 }
 
-func IsNetworkPreset(ctx *cli.Context) bool {
-	for _, flag := range NetworkFlags {
-		bFlag, _ := flag.(*cli.BoolFlag)
-		if ctx.IsSet(bFlag.Name) {
-			return true
-		}
-	}
-	return false
-}
-
 func DialRPCWithHeaders(endpoint string, headers []string) (*rpc.Client, error) {
 	if endpoint == "" {
 		return nil, errors.New("endpoint must be specified")
@@ -2455,36 +2234,14 @@ func DialRPCWithHeaders(endpoint string, headers []string) (*rpc.Client, error) 
 	return rpc.DialOptions(context.Background(), endpoint, opts...)
 }
 
-// genesisForCtxChainConfig returns the corresponding Genesis for a non-default flag chain value.
-// If no --<chain> flag is set in the global context, a nil value is returned.
-// It does not handle genesis for --dev mode, since that mode includes but also exceeds
-// chain configuration.
-func genesisForCtxChainConfig(ctx *cli.Context) *genesisT.Genesis {
-	var genesis *genesisT.Genesis
-	switch {
-	case ctx.Bool(MainnetFlag.Name):
-		genesis = params.DefaultGenesisBlock()
-	case ctx.Bool(ClassicFlag.Name):
-		genesis = params.DefaultClassicGenesisBlock()
-	case ctx.Bool(MordorFlag.Name):
-		genesis = params.DefaultMordorGenesisBlock()
-	case ctx.Bool(SepoliaFlag.Name):
-		genesis = params.DefaultSepoliaGenesisBlock()
-	case ctx.Bool(MintMeFlag.Name):
-		genesis = params.DefaultMintMeGenesisBlock()
-	case ctx.Bool(HoleskyFlag.Name):
-		genesis = params.DefaultHoleskyGenesisBlock()
-	case ctx.Bool(DeveloperFlag.Name):
-		Fatalf("Developer chains are ephemeral")
-	}
-	return genesis
-}
-
+// MakeGenesis returns the genesis given on the command line. No network is
+// built in, so outside developer mode this is always nil and the genesis is
+// read from the database.
 func MakeGenesis(ctx *cli.Context) *genesisT.Genesis {
 	if ctx.Bool(DeveloperFlag.Name) || ctx.Bool(DeveloperPoWFlag.Name) {
 		Fatalf("Developer chains are ephemeral")
 	}
-	return genesisForCtxChainConfig(ctx)
+	return nil
 }
 
 // MakeChain creates a chain manager from set command line flags.
@@ -2504,11 +2261,6 @@ func MakeChain(ctx *cli.Context, stack *node.Node, readonly bool) (*core.BlockCh
 		ethashConfig.ECIP1099Block = gspec.GetEthashECIP1099Transition() // This will panic if the genesis config field is not nil.
 	}
 
-	var lyra2Config *lyra2.Config
-	if ctx.Bool(MintMeFlag.Name) {
-		lyra2Config = &lyra2.Config{}
-	}
-
 	// Toggle PoW modes at user request.
 	if ctx.Bool(FakePoWFlag.Name) {
 		ethashConfig.PowMode = ethash.ModeFake
@@ -2516,7 +2268,7 @@ func MakeChain(ctx *cli.Context, stack *node.Node, readonly bool) (*core.BlockCh
 		ethashConfig.PowMode = ethash.ModePoissonFake
 	}
 
-	engine := ethconfig.CreateConsensusEngine(stack, &ethashConfig, cliqueConfig, lyra2Config, nil, false, chainDb)
+	engine := ethconfig.CreateConsensusEngine(stack, &ethashConfig, cliqueConfig, nil, false, chainDb)
 	if gcmode := ctx.String(GCModeFlag.Name); gcmode != gcModeFull && gcmode != gcModeArchive {
 		Fatalf("--%s must be either 'full' or 'archive'", GCModeFlag.Name)
 	}

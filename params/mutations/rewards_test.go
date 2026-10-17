@@ -10,11 +10,20 @@ import (
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/params/types/coregeth"
 	"github.com/ethereum/go-ethereum/params/types/ctypes"
 	"github.com/holiman/uint256"
 )
+
+// ecip1017TestConfig has the ECIP-1017 reward schedule of the Ethereum Classic
+// configuration this repository no longer carries.
+var ecip1017TestConfig = &coregeth.CoreGethChainConfig{
+	NetworkID:         1,
+	Ethash:            new(ctypes.EthashConfig),
+	ChainID:           big.NewInt(61),
+	ECIP1017FBlock:    big.NewInt(5000000),
+	ECIP1017EraRounds: big.NewInt(5000000),
+}
 
 var (
 	defaultEraLength   *big.Int = big.NewInt(5000000)
@@ -364,7 +373,7 @@ func makeExpectedRewardCasesForConfig(c *coregeth.CoreGethChainConfig, numUncles
 }
 
 func TestAccumulateRewards(t *testing.T) {
-	configs := []*coregeth.CoreGethChainConfig{params.ClassicChainConfig}
+	configs := []*coregeth.CoreGethChainConfig{ecip1017TestConfig}
 	for i, config := range configs {
 		cases := [][]expectedRewardCase{}
 		cases = append(cases, makeExpectedRewardCasesForConfig(config, 2, t))

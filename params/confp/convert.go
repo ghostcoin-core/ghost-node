@@ -134,11 +134,6 @@ func Crush(dest, source interface{}, crushZeroValues bool) error {
 			if err := crush(k, fromProtocolSpecifier, toProtocolSpecifier, crushZeroValues); err != nil {
 				return err
 			}
-		case ctypes.ConsensusEngineT_Lyra2:
-			k := reflect.TypeOf((*ctypes.Lyra2Configurator)(nil)).Elem()
-			if err := crush(k, fromProtocolSpecifier, toProtocolSpecifier, crushZeroValues); err != nil {
-				return err
-			}
 		default:
 			return ctypes.UnsupportedConfigError(ctypes.ErrUnsupportedConfigFatal, "consensus engine", ctypes.ConsensusEngineT_Unknown)
 		}

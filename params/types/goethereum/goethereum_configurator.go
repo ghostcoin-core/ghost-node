@@ -836,9 +836,6 @@ func (c *ChainConfig) GetConsensusEngineType() ctypes.ConsensusEngineT {
 	if c.Clique != nil {
 		return ctypes.ConsensusEngineT_Clique
 	}
-	if c.Lyra2 != nil {
-		return ctypes.ConsensusEngineT_Lyra2
-	}
 	return ctypes.ConsensusEngineT_Ethash
 }
 
@@ -851,11 +848,6 @@ func (c *ChainConfig) MustSetConsensusEngineType(t ctypes.ConsensusEngineT) erro
 	case ctypes.ConsensusEngineT_Clique:
 		c.Clique = new(ctypes.CliqueConfig)
 		c.Ethash = nil
-		return nil
-	case ctypes.ConsensusEngineT_Lyra2:
-		c.Lyra2 = new(ctypes.Lyra2Config)
-		c.Ethash = nil
-		c.Clique = nil
 		return nil
 	default:
 		return ctypes.ErrUnsupportedConfigFatal
@@ -1227,19 +1219,3 @@ func (c *ChainConfig) SetCliqueEpoch(n uint64) error {
 	return nil
 }
 
-func (c *ChainConfig) GetLyra2NonceTransition() *uint64 {
-	if c.GetConsensusEngineType() != ctypes.ConsensusEngineT_Lyra2 {
-		return nil
-	}
-	return bigNewU64(c.Lyra2NonceTransitionBlock)
-}
-
-func (c *ChainConfig) SetLyra2NonceTransition(n *uint64) error {
-	if c.Lyra2 == nil {
-		return ctypes.ErrUnsupportedConfigFatal
-	}
-
-	c.Lyra2NonceTransitionBlock = setBig(c.Lyra2NonceTransitionBlock, n)
-
-	return nil
-}

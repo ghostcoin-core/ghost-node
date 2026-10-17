@@ -19,6 +19,7 @@ package main
 import (
 	"crypto/rand"
 	"math/big"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -37,10 +38,55 @@ const (
 // spawns geth with the given command line args, using a set of flags to minimise
 // memory and disk IO. If the args don't set --datadir, the
 // child g gets a temporary data directory.
+// minimalGenesis is a small proof-of-work genesis for the tests that start a
+// node. No network is built in, so every data directory needs one.
+const minimalGenesis = `{
+	"config": {
+		"chainId": 1337,
+		"homesteadBlock": 0,
+		"eip150Block": 0,
+		"eip155Block": 0,
+		"eip158Block": 0,
+		"byzantiumBlock": 0,
+		"constantinopleBlock": 0,
+		"petersburgBlock": 0,
+		"istanbulBlock": 0,
+		"berlinBlock": 0,
+		"londonBlock": 0,
+		"ethash": {}
+	},
+	"difficulty": "0x20000",
+	"gasLimit": "0x2fefd8",
+	"alloc": {}
+}`
+
+// initMinimalGenesis writes minimalGenesis into the given data directory.
+func initMinimalGenesis(t *testing.T, datadir string) {
+	t.Helper()
+	file := filepath.Join(t.TempDir(), "genesis.json")
+	if err := os.WriteFile(file, []byte(minimalGenesis), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runGeth(t, "--datadir", datadir, "init", file).WaitExit()
+}
+
 func runMinimalGeth(t *testing.T, args ...string) *testgeth {
+	// Give the data directory a genesis first.
+	datadir := ""
+	for i, arg := range args {
+		if arg == "--datadir" && i < len(args)-1 {
+			datadir = args[i+1]
+		}
+	}
+	if datadir == "" {
+		datadir = t.TempDir()
+		args = append([]string{"--datadir", datadir}, args...)
+	}
+	initMinimalGenesis(t, datadir)
+
 	// --networkid=1337 to avoid cache bump
 	// --syncmode=full to avoid allocating fast sync bloom
-	allArgs := []string{"--mordor", "--networkid", "1337", "--authrpc.port", "0", "--syncmode=full", "--port", "0",
+	allArgs := []string{"--networkid", "1337", "--authrpc.port", "0", "--syncmode=full", "--port", "0",
 		"--nat", "none", "--nodiscover", "--maxpeers", "0", "--cache", "64",
 		"--datadir.minfreedisk", "0"}
 	return runGeth(t, append(allArgs, args...)...)
@@ -70,7 +116,7 @@ func TestConsoleWelcome(t *testing.T) {
 	geth.SetTemplateFunc("gover", runtime.Version)
 	geth.SetTemplateFunc("gethver", func() string { return params.VersionWithCommit("", "") })
 	geth.SetTemplateFunc("niltime", func() string {
-		return time.Unix(1570141915, 0).Format("Mon Jan 02 2006 15:04:05 GMT-0700 (MST)")
+		return time.Unix(0, 0).Format("Mon Jan 02 2006 15:04:05 GMT-0700 (MST)")
 	})
 	geth.SetTemplateFunc("apis", func() string { return ipcAPIs })
 
@@ -150,7 +196,7 @@ func testAttachWelcome(t *testing.T, geth *testgeth, endpoint, apis string) {
 	attach.SetTemplateFunc("gethver", func() string { return params.VersionWithCommit("", "") })
 	attach.SetTemplateFunc("etherbase", func() string { return geth.Etherbase })
 	attach.SetTemplateFunc("niltime", func() string {
-		return time.Unix(1570141915, 0).Format("Mon Jan 02 2006 15:04:05 GMT-0700 (MST)")
+		return time.Unix(0, 0).Format("Mon Jan 02 2006 15:04:05 GMT-0700 (MST)")
 	})
 	attach.SetTemplateFunc("ipc", func() bool { return strings.HasPrefix(endpoint, "ipc") })
 	attach.SetTemplateFunc("datadir", func() string { return geth.Datadir })

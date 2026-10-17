@@ -192,43 +192,6 @@ func TestCheckCompatible(t *testing.T) {
 			wantErr:   nil,
 		},
 		{
-			// v1.9.5 -> v1.9.7
-			stored: func() ctypes.ChainConfigurator {
-				c := &coregeth.CoreGethChainConfig{}
-				*c = *ClassicChainConfig
-				c.SetEIP145Transition(nil)
-				c.SetEIP1014Transition(nil)
-				c.SetEIP1052Transition(nil)
-				c.SetEIP152Transition(nil)
-				c.SetEIP1108Transition(nil)
-				c.SetEIP1344Transition(nil)
-				// c.SetEIP1884Transition(nil)
-				c.SetEIP2028Transition(nil)
-				c.SetEIP2200Transition(nil)
-				return c
-			}(),
-			new:       ClassicChainConfig,
-			headBlock: 9550000,
-			wantErr:   nil,
-		},
-		{
-			// v1.9.6 -> v1.9.7
-			stored: func() ctypes.ChainConfigurator {
-				c := &coregeth.CoreGethChainConfig{}
-				*c = *ClassicChainConfig
-				c.SetEIP152Transition(nil)
-				c.SetEIP1108Transition(nil)
-				c.SetEIP1344Transition(nil)
-				// c.SetEIP1884Transition(nil)
-				c.SetEIP2028Transition(nil)
-				c.SetEIP2200Transition(nil)
-				return c
-			}(),
-			new:       ClassicChainConfig,
-			headBlock: 9550000,
-			wantErr:   nil,
-		},
-		{
 			stored: MainnetChainConfig,
 			new: func() ctypes.ChainConfigurator {
 				c := &coregeth.CoreGethChainConfig{}
@@ -280,14 +243,6 @@ func TestFoundationIsForked(t *testing.T) {
 	c := MainnetChainConfig
 	if !c.IsEnabled(c.GetEthashEIP2384Transition, big.NewInt(9200001)) {
 		t.Fatal("nofork muir bad")
-	}
-}
-
-func TestClassicIs649(t *testing.T) {
-	c := ClassicChainConfig
-	got := c.GetEthashEIP649Transition()
-	if got != nil {
-		t.Fatal("classic config doesn't support 649; difficulty bomb was disposed of")
 	}
 }
 
@@ -356,7 +311,7 @@ func TestGenesisHashes(t *testing.T) {
 		hash    common.Hash
 	}{
 		{
-			genesis: DefaultClassicGenesisBlock(),
+			genesis: DefaultGenesisBlock(),
 			hash:    MainnetGenesisHash,
 		},
 	}
