@@ -2277,6 +2277,10 @@ func MakeChain(ctx *cli.Context, stack *node.Node, readonly bool) (*core.BlockCh
 	if err != nil {
 		Fatalf("Can't create BlockChain: %v", err)
 	}
+	if err := core.CheckProofOfWorkOnly(chain.Config()); err != nil {
+		chain.Stop()
+		Fatalf("%v", err)
+	}
 	return chain, chainDb
 }
 
