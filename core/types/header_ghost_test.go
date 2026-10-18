@@ -301,7 +301,7 @@ var (
 		"83020000" + "8203e8" + "837a1200" + "825208" + "846553f100" + "8462617365" + // difficulty to extra
 		baseHash("05") + "880000000000000006" // mix digest, nonce
 
-	emptyWithdrawals ="a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421"
+	emptyWithdrawals = "a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421"
 
 	baseRLPNone        = "f901ff" + baseFixed
 	baseRLPFee         = "f90204" + baseFixed + "843b9aca00"
