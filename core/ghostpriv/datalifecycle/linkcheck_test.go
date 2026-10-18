@@ -68,7 +68,9 @@ type hop struct {
 	raws   []field
 }
 
-func (h *hop) add(name string, v []byte) { h.fields = append(h.fields, field{name, common.CopyBytes(v)}) }
+func (h *hop) add(name string, v []byte) {
+	h.fields = append(h.fields, field{name, common.CopyBytes(v)})
+}
 
 func (h *hop) raw(name string, v []byte) { h.raws = append(h.raws, field{name, common.CopyBytes(v)}) }
 
