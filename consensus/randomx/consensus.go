@@ -28,6 +28,7 @@ import (
 	"github.com/ethereum/go-ethereum/consensus/ghostrules"
 	"github.com/ethereum/go-ethereum/consensus/misc"
 	"github.com/ethereum/go-ethereum/consensus/misc/eip1559"
+	"github.com/ethereum/go-ethereum/core/ghosttree"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/params/vars"
@@ -47,6 +48,8 @@ var (
 	errInvalidMixDigest  = errors.New("mix digest not zero")
 	errInvalidPoW        = errors.New("invalid proof-of-work")
 	errNoWithdrawals     = errors.New("withdrawals not supported")
+	errMissingTreeRoot   = errors.New("header has no tree root")
+	errMissingBaseFee    = errors.New("header has no base fee")
 )
 
 // Author implements consensus.Engine, returning the header's coinbase.
@@ -216,6 +219,11 @@ func (r *RandomX) verifyHeader(chain consensus.ChainHeaderReader, header, parent
 	case header.ParentBeaconRoot != nil:
 		return fmt.Errorf("%w: parentBeaconRoot", errUnsupportedField)
 	}
+	// Both tree roots, in every header with a base fee; block validation
+	// checks their values against the executed state, with the state root.
+	if err := checkTreeRootFields(config.IsEnabled(config.GetEIP1559Transition, header.Number), header); err != nil {
+		return err
+	}
 	// Uncle hash and mix digest.
 	if header.UncleHash != types.EmptyUncleHash {
 		return errInvalidUncleHash
@@ -226,6 +234,24 @@ func (r *RandomX) verifyHeader(chain consensus.ChainHeaderReader, header, parent
 	// The RandomX hash.
 	if seal {
 		return r.verifySeal(header, key)
+	}
+	return nil
+}
+
+// checkTreeRootFields checks that a header carries both tree roots when its
+// chain has EIP-1559 in force, and neither otherwise. The roots take the
+// Ghost layout, which requires the base fee, so a chain without EIP-1559 (so
+// far only developer mode) cannot carry them after its genesis.
+func checkTreeRootFields(london bool, header *types.Header) error {
+	switch {
+	case !london && (header.CoinTreeRoot != nil || header.DataTreeRoot != nil):
+		return fmt.Errorf("%w: tree roots without a base fee", errUnsupportedField)
+	case !london:
+		return nil
+	case header.CoinTreeRoot == nil:
+		return fmt.Errorf("%w: coinTreeRoot", errMissingTreeRoot)
+	case header.DataTreeRoot == nil:
+		return fmt.Errorf("%w: dataTreeRoot", errMissingTreeRoot)
 	}
 	return nil
 }
@@ -284,7 +310,7 @@ func (r *RandomX) Finalize(chain consensus.ChainHeaderReader, header *types.Head
 }
 
 // FinalizeAndAssemble implements consensus.Engine, paying the block reward,
-// setting the state root and assembling the block.
+// setting the tree roots and the state root and assembling the block.
 func (r *RandomX) FinalizeAndAssemble(chain consensus.ChainHeaderReader, header *types.Header, state *state.StateDB, txs []*types.Transaction, uncles []*types.Header, receipts []*types.Receipt, withdrawals []*types.Withdrawal) (*types.Block, error) {
 	if len(withdrawals) > 0 {
 		return nil, errNoWithdrawals
@@ -292,8 +318,25 @@ func (r *RandomX) FinalizeAndAssemble(chain consensus.ChainHeaderReader, header 
 	if len(uncles) > 0 {
 		return nil, errUnclesNotAllowed
 	}
+	config := chain.Config()
+	london := config.IsEnabled(config.GetEIP1559Transition, header.Number)
+	if london && header.BaseFee == nil {
+		return nil, errMissingBaseFee
+	}
 	r.Finalize(chain, header, state, txs, nil, nil)
-	header.Root = state.IntermediateRoot(chain.Config().IsEnabled(chain.Config().GetEIP161dTransition, header.Number))
+	header.CoinTreeRoot, header.DataTreeRoot = nil, nil
+	if london {
+		coinRoot, err := ghosttree.Root(state, ghosttree.Coin)
+		if err != nil {
+			return nil, err
+		}
+		dataRoot, err := ghosttree.Root(state, ghosttree.Data)
+		if err != nil {
+			return nil, err
+		}
+		header.CoinTreeRoot, header.DataTreeRoot = &coinRoot, &dataRoot
+	}
+	header.Root = state.IntermediateRoot(config.IsEnabled(config.GetEIP161dTransition, header.Number))
 	return types.NewBlock(header, txs, nil, receipts, trie.NewStackTrie(nil)), nil
 }
 

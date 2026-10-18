@@ -59,7 +59,6 @@ func (n *BlockNonce) UnmarshalText(input []byte) error {
 }
 
 //go:generate go run github.com/fjl/gencodec -type Header -field-override headerMarshaling -out gen_header_json.go
-//go:generate go run ../../rlp/rlpgen -type Header -out gen_header_rlp.go
 
 // Header represents a block header in the Ethereum blockchain.
 type Header struct {
@@ -93,6 +92,12 @@ type Header struct {
 
 	// ParentBeaconRoot was added by EIP-4788 and is ignored in legacy headers.
 	ParentBeaconRoot *common.Hash `json:"parentBeaconBlockRoot" rlp:"optional"`
+
+	// CoinTreeRoot and DataTreeRoot are the roots of the current coin tree
+	// and data tree after the block. A Ghost header sets both, other headers
+	// neither; header_ghost.go encodes them.
+	CoinTreeRoot *common.Hash `json:"-" rlp:"-"`
+	DataTreeRoot *common.Hash `json:"-" rlp:"-"`
 }
 
 // field type overrides for gencodec
@@ -124,7 +129,14 @@ func (h *Header) Size() common.StorageSize {
 	if h.BaseFee != nil {
 		baseFeeBits = h.BaseFee.BitLen()
 	}
-	return headerSize + common.StorageSize(len(h.Extra)+(h.Difficulty.BitLen()+h.Number.BitLen()+baseFeeBits)/8)
+	var roots int
+	if h.CoinTreeRoot != nil {
+		roots += common.HashLength
+	}
+	if h.DataTreeRoot != nil {
+		roots += common.HashLength
+	}
+	return headerSize + common.StorageSize(len(h.Extra)+roots+(h.Difficulty.BitLen()+h.Number.BitLen()+baseFeeBits)/8)
 }
 
 // SanityCheck checks a few basic things -- these checks are way beyond what
@@ -303,6 +315,14 @@ func CopyHeader(h *Header) *Header {
 	if h.ParentBeaconRoot != nil {
 		cpy.ParentBeaconRoot = new(common.Hash)
 		*cpy.ParentBeaconRoot = *h.ParentBeaconRoot
+	}
+	if h.CoinTreeRoot != nil {
+		cpy.CoinTreeRoot = new(common.Hash)
+		*cpy.CoinTreeRoot = *h.CoinTreeRoot
+	}
+	if h.DataTreeRoot != nil {
+		cpy.DataTreeRoot = new(common.Hash)
+		*cpy.DataTreeRoot = *h.DataTreeRoot
 	}
 	return &cpy
 }

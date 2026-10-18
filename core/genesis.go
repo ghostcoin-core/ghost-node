@@ -24,6 +24,7 @@ import (
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/ghosttree"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -31,6 +32,8 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/params/confp"
+	"github.com/ethereum/go-ethereum/params/ghost"
+	"github.com/ethereum/go-ethereum/params/types/coregeth"
 	"github.com/ethereum/go-ethereum/params/types/ctypes"
 	"github.com/ethereum/go-ethereum/params/types/genesisT"
 	"github.com/ethereum/go-ethereum/params/vars"
@@ -527,7 +530,35 @@ func GenesisToBlock(g *genesisT.Genesis, db ethdb.Database) *types.Block {
 			head.ParentBeaconRoot = new(common.Hash)
 		}
 	}
+	setGenesisTreeRoots(g, head)
 	return types.NewBlock(head, nil, nil, nil, trie.NewStackTrie(nil)).WithWithdrawals(withdrawals)
+}
+
+// setGenesisTreeRoots gives the genesis header of a Ghost chain the roots of
+// the empty coin and data trees. The genesis state holds no tree state, so
+// its state root stays that of the allocation.
+//
+// The Ghost chains are the internal test network and developer mode, both
+// Core-Geth configurations. Upstream test configurations share developer
+// mode's chain ID 1337 as go-ethereum configurations and keep their genesis
+// unchanged, as does a genesis whose header cannot take the Ghost layout
+// (no base fee, or a withdrawals, blob or beacon root field).
+func setGenesisTreeRoots(g *genesisT.Genesis, head *types.Header) {
+	if _, coreGeth := g.Config.(*coregeth.CoreGethChainConfig); !coreGeth {
+		return
+	}
+	id := g.Config.GetChainID()
+	if id == nil || !id.IsUint64() {
+		return
+	}
+	if n := id.Uint64(); n != ghost.InternalNetChainID && n != ghost.DeveloperChainID {
+		return
+	}
+	if head.BaseFee == nil || head.WithdrawalsHash != nil || head.BlobGasUsed != nil || head.ExcessBlobGas != nil || head.ParentBeaconRoot != nil {
+		return
+	}
+	coin, data := ghosttree.EmptyRoot(ghosttree.Coin), ghosttree.EmptyRoot(ghosttree.Data)
+	head.CoinTreeRoot, head.DataTreeRoot = &coin, &data
 }
 
 // CommitGenesis writes the block and state of a genesis specification to the database.

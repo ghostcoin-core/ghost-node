@@ -20,7 +20,9 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
+	"github.com/ethereum/go-ethereum/core/ghosttree"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/params/types/ctypes"
@@ -138,9 +140,43 @@ func (v *BlockValidator) ValidateState(block *types.Block, statedb *state.StateD
 	if receiptSha != header.ReceiptHash {
 		return fmt.Errorf("invalid receipt root hash (remote: %x local: %x)", header.ReceiptHash, receiptSha)
 	}
+	// Validate the tree roots of a header that carries them against the trees
+	// in the state after execution.
+	if err := validateTreeRoots(header, statedb); err != nil {
+		return err
+	}
 	// Validate the state root against the received state root and throw
 	if root := statedb.IntermediateRoot(v.config.IsEnabled(v.config.GetEIP161dTransition, header.Number)); header.Root != root {
 		return fmt.Errorf("invalid merkle root (remote: %x local: %x) dberr: %w", header.Root, root, statedb.Error())
+	}
+	return nil
+}
+
+// validateTreeRoots checks the coin and data tree roots of a header that
+// carries either against the roots of the executed state. A header without
+// roots is left to the consensus engine, which rejects it on Ghost chains.
+func validateTreeRoots(header *types.Header, statedb *state.StateDB) error {
+	if header.CoinTreeRoot == nil && header.DataTreeRoot == nil {
+		return nil
+	}
+	for _, f := range []struct {
+		name   string
+		kind   ghosttree.Kind
+		remote *common.Hash
+	}{
+		{"coinTreeRoot", ghosttree.Coin, header.CoinTreeRoot},
+		{"dataTreeRoot", ghosttree.Data, header.DataTreeRoot},
+	} {
+		local, err := ghosttree.Root(statedb, f.kind)
+		if err != nil {
+			return fmt.Errorf("invalid %s: %w", f.name, err)
+		}
+		if f.remote == nil {
+			return fmt.Errorf("invalid %s (remote: missing local: %x)", f.name, local)
+		}
+		if *f.remote != local {
+			return fmt.Errorf("invalid %s (remote: %x local: %x)", f.name, *f.remote, local)
+		}
 	}
 	return nil
 }
