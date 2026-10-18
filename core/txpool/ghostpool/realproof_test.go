@@ -26,21 +26,23 @@ import (
 	"io"
 	"math/big"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/consensus/ethash"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/ghostpriv"
 	"github.com/ethereum/go-ethereum/core/ghosttree"
 	"github.com/ethereum/go-ethereum/core/rawdb"
+	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/txpool"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/params/ghost"
 	"github.com/ethereum/go-ethereum/params/types/genesisT"
+	"github.com/ethereum/go-ethereum/trie"
 	"github.com/holiman/uint256"
 )
 
@@ -108,7 +110,7 @@ func newRealProof(t *testing.T) *realProof {
 		t.Skipf("wrote the request to %s; now run ghostverifier/examples/revealfixture.rs", path)
 	}
 
-	raw := readRealFixture(t, request)
+	raw := readRealFixture(t)
 	if len(raw) <= realRequestBytes+32+realStatementBytes {
 		t.Fatalf("fixture of %d bytes; %s", len(raw), realProofRegenerate)
 	}
@@ -175,11 +177,8 @@ func realRequest(t *testing.T, f *fixture, fee *uint256.Int) []byte {
 }
 
 // readRealFixture reads the uncompressed fixture.
-func readRealFixture(t *testing.T, request []byte) []byte {
+func readRealFixture(t *testing.T) []byte {
 	t.Helper()
-	if _, err := os.Stat(realProofFixture); os.IsNotExist(err) {
-		proveRealFixture(t, request)
-	}
 	file, err := os.Open(realProofFixture)
 	if err != nil {
 		t.Fatalf("%v; %s", err, realProofRegenerate)
@@ -194,40 +193,6 @@ func readRealFixture(t *testing.T, request []byte) []byte {
 		t.Fatal(err)
 	}
 	return raw
-}
-
-// proveRealFixture runs revealfixture.rs on the request and writes the
-// fixture.
-func proveRealFixture(t *testing.T, request []byte) {
-	t.Helper()
-	dir := t.TempDir()
-	req, out := filepath.Join(dir, "real_reveal.req"), filepath.Join(dir, "real_reveal.bin")
-	if err := os.WriteFile(req, request, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.Command("cargo", "run", "--release", "--locked",
-		"--manifest-path", filepath.Join("..", "..", "..", "ghostverifier", "Cargo.toml"),
-		"--target-dir", filepath.Join(os.TempDir(), "ghostverifier-fixture-target"),
-		"--example", "revealfixture", "--", req, out)
-	cmd.Env = append(os.Environ(), "RUSTUP_HOME=/usr/local/rustup")
-	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("revealfixture: %v", err)
-	}
-	raw, err := os.ReadFile(out)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var buf bytes.Buffer
-	zw, _ := gzip.NewWriterLevel(&buf, gzip.BestCompression)
-	zw.Write(raw)
-	zw.Close()
-	if err := os.MkdirAll(filepath.Dir(realProofFixture), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(realProofFixture, buf.Bytes(), 0o644); err != nil {
-		t.Fatal(err)
-	}
 }
 
 // commit is block 1's commit of one GHOST to the fixture's fingerprint.
@@ -264,13 +229,35 @@ func (rp *realProof) revealTx(r *ghostpriv.Reveal) *types.Transaction {
 	return tx
 }
 
+// treeRootEngine is the fake ethash engine that also writes the coin and
+// data tree roots into the header, as the network's engine does, so that
+// block 1's coin root is one a reveal can prove against.
+type treeRootEngine struct {
+	*ethash.Ethash
+}
+
+func (e treeRootEngine) FinalizeAndAssemble(chain consensus.ChainHeaderReader, header *types.Header, st *state.StateDB, txs []*types.Transaction, uncles []*types.Header, receipts []*types.Receipt, withdrawals []*types.Withdrawal) (*types.Block, error) {
+	e.Finalize(chain, header, st, txs, uncles, withdrawals)
+	coin, err := ghosttree.Root(st, ghosttree.Coin)
+	if err != nil {
+		return nil, err
+	}
+	data, err := ghosttree.Root(st, ghosttree.Data)
+	if err != nil {
+		return nil, err
+	}
+	header.CoinTreeRoot, header.DataTreeRoot = &coin, &data
+	header.Root = st.IntermediateRoot(true)
+	return types.NewBlock(header, txs, uncles, receipts, trie.NewStackTrie(nil)), nil
+}
+
 // makeBlocks makes block 1 with the commit and block 2 with the given
 // reveals, under whatever verifier is active. Block 1 is the same every
 // time.
 func (rp *realProof) makeBlocks(reveals ...*types.Transaction) []*types.Block {
 	rp.t.Helper()
 	commit := rp.commit()
-	_, blocks, _ := core.GenerateChainWithGenesis(rp.gspec, ethash.NewFaker(), 2, func(i int, b *core.BlockGen) {
+	_, blocks, _ := core.GenerateChainWithGenesis(rp.gspec, treeRootEngine{ethash.NewFaker()}, 2, func(i int, b *core.BlockGen) {
 		b.SetCoinbase(common.Address{0x01})
 		switch i {
 		case 0:
@@ -289,7 +276,7 @@ func (rp *realProof) makeBlocks(reveals ...*types.Transaction) []*types.Block {
 func (rp *realProof) newChain(blocks []*types.Block) {
 	t := rp.t
 	t.Helper()
-	chain, err := core.NewBlockChain(rawdb.NewMemoryDatabase(), nil, rp.gspec, nil, ethash.NewFaker(), vm.Config{}, nil, nil)
+	chain, err := core.NewBlockChain(rawdb.NewMemoryDatabase(), nil, rp.gspec, nil, treeRootEngine{ethash.NewFaker()}, vm.Config{}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
