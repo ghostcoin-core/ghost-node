@@ -981,12 +981,19 @@ func (bc *BlockChain) moveRootIndex(batch ethdb.KeyValueWriter, head *types.Head
 }
 
 // syncRootIndex brings the tree-root index to the current head block, building
-// it from the stored headers when the database has none yet.
+// it from the stored headers when the database has none yet. An index that
+// already holds the head is left untouched, so a read-only database whose
+// index is current opens without a write. If the write fails, the index keeps
+// its previous state, which EligibleRoot checks against the canonical chain.
 func (bc *BlockChain) syncRootIndex() {
+	head := bc.CurrentBlock()
+	if number, hash, ok, err := rawdb.ReadGhostRootIndexHead(bc.db); err == nil && ok && number == head.Number.Uint64() && hash == head.Hash() {
+		return
+	}
 	batch := bc.db.NewBatch()
-	bc.moveRootIndex(batch, bc.CurrentBlock())
+	bc.moveRootIndex(batch, head)
 	if err := batch.Write(); err != nil {
-		log.Crit("Failed to update the tree-root index", "err", err)
+		log.Warn("Tree-root index not updated", "number", head.Number, "hash", head.Hash(), "err", err)
 	}
 }
 

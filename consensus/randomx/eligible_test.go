@@ -433,7 +433,7 @@ func TestEligibilityAfterForcedReorg(t *testing.T) {
 	// from the stored headers.
 	reorged.chain.Stop()
 	batch := reorged.db.NewBatch()
-	err :=rawdb.IterateGhostRootHeights(reorged.db, func(kind uint8, root common.Hash, _ uint64) error {
+	err := rawdb.IterateGhostRootHeights(reorged.db, func(kind uint8, root common.Hash, _ uint64) error {
 		return rawdb.DeleteGhostRootHeight(batch, kind, root)
 	})
 	if err != nil {
