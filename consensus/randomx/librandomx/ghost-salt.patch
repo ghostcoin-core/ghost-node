@@ -1,0 +1,17 @@
+Ghost's only change to the vendored RandomX library: its Argon2 salt.
+
+The salt is the 14 bytes "Ghost-RandomX" followed by the byte 0x01. It keys
+every cache, so Ghost's RandomX hashes differ from Monero's and from any other
+chain's. Apply from consensus/randomx/librandomx with `patch -p1`.
+
+--- a/src/configuration.h
++++ b/src/configuration.h
+@@ -38,7 +38,7 @@
+ #define RANDOMX_ARGON_LANES        1
+ 
+ //Argon2d salt
+-#define RANDOMX_ARGON_SALT         "RandomX\x03"
++#define RANDOMX_ARGON_SALT         "Ghost-RandomX\x01"
+ 
+ //Number of random Cache accesses per Dataset item. Minimum is 2.
+ #define RANDOMX_CACHE_ACCESSES     8
