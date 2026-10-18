@@ -45,7 +45,7 @@ const (
 
 	// ProofSize is the length of the proof field: the serialized proof
 	// followed by zeros.
-	ProofSize = 1_028_144
+	ProofSize = 1_310_720
 
 	// PayloadSize is the length of the payload, EnvelopeSize of the type
 	// byte and the payload.
@@ -75,7 +75,7 @@ const (
 // neither can fail; ErrRevealChainInfo wraps a missing ancestor under the
 // check that needed it.
 var (
-	ErrRevealLength    = errors.New("reveal is not a 0x50 envelope of 1,028,491 bytes")
+	ErrRevealLength    = errors.New("reveal is not a 0x50 envelope of 1,311,067 bytes")
 	ErrRevealVersion   = errors.New("reveal version is not 1")
 	ErrRevealAmount    = errors.New("reveal out or fee not below 2^96")
 	ErrRevealChainID   = errors.New("reveal chain id is not this chain's")
@@ -386,7 +386,7 @@ const DataBindingSize = 164
 // The errors of the data reveal checks, one per check, in the order they
 // run. Check 8 computes the binding digest and cannot fail.
 var (
-	ErrDataRevealLength  = errors.New("data reveal is not a 0x51 envelope of 1,028,491 bytes")
+	ErrDataRevealLength  = errors.New("data reveal is not a 0x51 envelope of 1,311,067 bytes")
 	ErrDataRevealVersion = errors.New("data reveal version is not 1")
 	ErrDataRevealAmount  = errors.New("data reveal out or fee not below 2^96")
 	ErrDataRevealChainID = errors.New("data reveal chain id is not this chain's")

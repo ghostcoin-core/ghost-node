@@ -307,7 +307,7 @@ func checkDataEnvelopeLayout(t *testing.T) {
 		{"out", 126, 158, make([]byte, 32)},
 		{"fee", 158, 190, make([]byte, 32)},
 		{"proof", 190, 290, r.Proof},
-		{"proof padding and note", 290, 1_028_490, make([]byte, 1_028_490-290)},
+		{"proof padding and note", 290, 1_311_066, make([]byte, 1_311_066-290)},
 	} {
 		if !bytes.Equal(p[f.from:f.to], f.want) {
 			t.Errorf("payload field %s at %d to %d", f.name, f.from, f.to)
@@ -344,7 +344,7 @@ func checkDataEnvelopeLayout(t *testing.T) {
 func TestDataRevealOnceThenSecondRejected(t *testing.T) {
 	useStub(t)
 	useZeroDataFee(t)
-	f := newFixture(t, 40_000_000, nil)
+	f := newFixture(t, 50_000_000, nil)
 	var (
 		file     = testDataFile("once")
 		marker   = testDataMarker("once")
@@ -725,7 +725,7 @@ func TestDataRevealNeverMintsOrTouchesCoinSets(t *testing.T) {
 	useStub(t)
 	useZeroDataFee(t)
 	trap := common.Address{0x7a, 0x0d}
-	f := newFixture(t, 40_000_000, genesisT.GenesisAlloc{
+	f := newFixture(t, 50_000_000, genesisT.GenesisAlloc{
 		trap: {Code: []byte{0xfe}, Balance: new(big.Int)}, // INVALID: any run of it fails
 	})
 	var (
@@ -961,7 +961,7 @@ func TestDataRevealNeverMintsOrTouchesCoinSets(t *testing.T) {
 func TestDataRevealReorgRestoresMarker(t *testing.T) {
 	useStub(t)
 	useZeroDataFee(t)
-	f := newFixture(t, 40_000_000, nil)
+	f := newFixture(t, 50_000_000, nil)
 	var (
 		file     = testDataFile("reorg")
 		extra    = testDataFile("reorg, branch A only")

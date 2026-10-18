@@ -419,7 +419,7 @@ func TestDataLifecycleCRD6(t *testing.T) {
 func raiseGasLimit(t *testing.T, s *scenario) {
 	t.Helper()
 	for i := 0; s.node(0).head().GasLimit < 2*types.GhostDataRevealGas; i++ {
-		if i == 200 {
+		if i == 500 {
 			t.Fatalf("gas limit %d after %d blocks", s.node(0).head().GasLimit, i)
 		}
 		s.net.mine(s.node(i), blockPlan{coinbase: address("gas filler"), gasTarget: 2*types.GhostDataRevealGas + 1_000_000})

@@ -58,7 +58,7 @@ const (
 	MaxReveals = 16
 
 	// MaxBytes is the most envelope bytes the pool holds, 16 envelopes.
-	MaxBytes = 16_455_856
+	MaxBytes = 20_977_072
 
 	// PeerRevealsPerBlock is the number of reveals a peer may have the node
 	// fetch or take from it per chain head: each announced reveal the node

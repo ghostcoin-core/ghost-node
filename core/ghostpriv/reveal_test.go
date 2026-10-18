@@ -410,9 +410,9 @@ func TestSecondRevealRejected(t *testing.T) {
 // rejected and nothing of it stays. The same block with two markers imports.
 func TestBlockWithTwoRevealsOfOneMarkerIsInvalid(t *testing.T) {
 	useStub(t)
-	f := newFixture(t, 40_000_000, nil)
+	f := newFixture(t, 50_000_000, nil)
 	var (
-		c1, c2         = testCoin("twice one", oneGhost), testCoin("twice two", oneGhost)
+		c1, c2        = testCoin("twice one", oneGhost), testCoin("twice two", oneGhost)
 		marker         = testMarker("twice")
 		out            = u256(ghostAmount(1, 4))
 		toOne, toOther = common.Address{0x9e, 1}, common.Address{0x9e, 2}
