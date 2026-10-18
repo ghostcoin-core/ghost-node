@@ -22,6 +22,7 @@ import (
 	"math/big"
 	"runtime"
 	"sync"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
@@ -50,6 +51,23 @@ func (r *RandomX) Seal(chain consensus.ChainHeaderReader, block *types.Block, re
 			case <-r.update:
 				if err := r.Seal(chain, block, results, stop); err != nil {
 					r.log.Error("Failed to restart sealing after update", "err", err)
+				}
+			}
+		}()
+		return nil
+	}
+	if wait := r.sealDelay(header.Time); wait > 0 {
+		// Every verifier would hold the block as a future block: wait
+		// until the clock lets it through, then seal it.
+		r.log.Debug("Sealing waits for the clock", "number", header.Number, "wait", wait)
+		go func() {
+			timer := time.NewTimer(wait)
+			defer timer.Stop()
+			select {
+			case <-stop:
+			case <-timer.C:
+				if err := r.Seal(chain, block, results, stop); err != nil {
+					r.log.Error("Failed to seal after waiting for the clock", "err", err)
 				}
 			}
 		}()
@@ -104,6 +122,17 @@ func (r *RandomX) Seal(chain consensus.ChainHeaderReader, block *types.Block, re
 		pend.Wait()
 	}()
 	return nil
+}
+
+// sealDelay returns how long a block with the given timestamp must wait
+// before the local clock is within the future drift of it, or zero. The
+// wait is capped at a minute, after which the caller checks again.
+func (r *RandomX) sealDelay(timestamp uint64) time.Duration {
+	now, drift := uint64(r.now().Unix()), r.params.FutureDrift
+	if timestamp <= drift || timestamp-drift <= now {
+		return 0
+	}
+	return time.Duration(min(timestamp-drift-now, 60)) * time.Second
 }
 
 // mine searches nonces upward from nonce until one seals the block or the

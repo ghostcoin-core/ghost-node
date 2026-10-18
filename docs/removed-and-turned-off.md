@@ -51,12 +51,23 @@ or to import, if any is switched on.
 - **Ghost's network as the default.** Running a node must take one pasted
   line, with no flags or config. When the genesis is frozen (phase 5), it and
   the bootstrap nodes are built in as the default network, so `geth` alone
-  runs a Ghost node.
+  runs a Ghost node. Until then no Ghost network is built in: the node mines
+  with RandomX only on the internal test network (chain ID 6777971, see
+  [internal-network.md](internal-network.md)) and in developer mode (chain
+  ID 1337), and refuses to start on a proof-of-work chain whose chain ID has
+  no consensus parameters. The launch genesis adds its own entry.
 
 - **Uncles, uncle rewards and the difficulty bomb** are rules of the ethash
-  engine. The RandomX engine (phase 2) replaces ethash and has none of them.
-- **Ethash and Clique** stay: ethash is the model for the RandomX engine and
-  the engine upstream tests use; Clique is kept for internal test networks.
+  engine. The RandomX engine replaces ethash for every proof-of-work chain
+  and has none of them.
+- **Ethash and Clique** stay: ethash is the model for the RandomX engine, the
+  engine upstream tests use, and the engine of the test modes outside release
+  builds; Clique is kept for internal test networks. The consensus type in a
+  chain configuration stays `ethash`, the proof-of-work marker; the node runs
+  RandomX for it.
+- **Remote mining and fast mode.** The RandomX engine mines on the node's
+  own CPU in light mode only; work for external miners and the 2 GiB
+  fast-mode dataset come later.
 - **Post-Cancun execution features** and the Ghost EVM profile matrix are
   phase 3 work.
 - **Upstream fixes since go-ethereum 1.13.15** and the dependency advisories

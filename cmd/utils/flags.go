@@ -2164,7 +2164,15 @@ func MakeChain(ctx *cli.Context, stack *node.Node, readonly bool) (*core.BlockCh
 		ethashConfig.ECIP1099Block = gspec.GetEthashECIP1099Transition() // This will panic if the genesis config field is not nil.
 	}
 
-	engine := ethconfig.CreateConsensusEngine(stack, &ethashConfig, cliqueConfig, nil, false, chainDb)
+	chainConfig, err := core.LoadChainConfig(chainDb, gspec)
+	if err != nil {
+		Fatalf("%v", err)
+	}
+	chainID := ethconfig.ConsensusChainID(chainConfig, ctx.Uint64(NetworkIdFlag.Name))
+	engine, err := ethconfig.CreateConsensusEngine(stack, &ethashConfig, cliqueConfig, chainID, nil, false, chainDb)
+	if err != nil {
+		Fatalf("%v", err)
+	}
 	if gcmode := ctx.String(GCModeFlag.Name); gcmode != gcModeFull && gcmode != gcModeArchive {
 		Fatalf("--%s must be either 'full' or 'archive'", GCModeFlag.Name)
 	}

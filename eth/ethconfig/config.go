@@ -18,6 +18,8 @@
 package ethconfig
 
 import (
+	"fmt"
+	"math/big"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -28,6 +30,8 @@ import (
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/consensus/clique"
 	"github.com/ethereum/go-ethereum/consensus/ethash"
+	"github.com/ethereum/go-ethereum/consensus/ghostrules"
+	"github.com/ethereum/go-ethereum/consensus/randomx"
 	"github.com/ethereum/go-ethereum/core/txpool/blobpool"
 	"github.com/ethereum/go-ethereum/core/txpool/legacypool"
 	"github.com/ethereum/go-ethereum/eth/downloader"
@@ -36,6 +40,7 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/miner"
 	"github.com/ethereum/go-ethereum/node"
+	"github.com/ethereum/go-ethereum/params/ghost"
 	"github.com/ethereum/go-ethereum/params/types/ctypes"
 	"github.com/ethereum/go-ethereum/params/types/genesisT"
 	"github.com/ethereum/go-ethereum/params/vars"
@@ -214,8 +219,40 @@ type Config struct {
 	CheckpointOracle *ctypes.CheckpointOracleConfig `toml:",omitempty"`
 }
 
-// CreateConsensusEngine creates a consensus engine for the given chain configuration.
-func CreateConsensusEngine(stack *node.Node, ethashConfig *ethash.Config, cliqueConfig *ctypes.CliqueConfig, notify []string, noverify bool, db ethdb.Database) consensus.Engine {
+// ConsensusChainID returns the chain ID that picks a chain's consensus
+// parameters: the configuration's chain ID or, for a configuration without
+// one, its network ID, as core-geth configurations take one for the other.
+// A non-zero networkID, the --networkid flag, overrides the configuration's.
+func ConsensusChainID(config ctypes.ChainConfigurator, networkID uint64) *big.Int {
+	if id := config.GetChainID(); id != nil {
+		return id
+	}
+	if networkID == 0 {
+		if id := config.GetNetworkID(); id != nil {
+			networkID = *id
+		}
+	}
+	return new(big.Int).SetUint64(networkID)
+}
+
+// consensusParams returns the RandomX consensus constants of a chain, by its
+// chain ID. Only the internal test network and developer mode have them; the
+// launch genesis adds its own entry with the built-in network.
+func consensusParams(chainID *big.Int) (ghostrules.Params, error) {
+	if chainID != nil && chainID.IsUint64() {
+		switch chainID.Uint64() {
+		case ghost.InternalNetChainID, ghost.DeveloperChainID:
+			return ghost.InternalNetParams(), nil
+		}
+	}
+	return ghostrules.Params{}, fmt.Errorf("no consensus parameters for chain ID %v: this node runs only the internal network (%d) and developer mode (%d)", chainID, ghost.InternalNetChainID, ghost.DeveloperChainID)
+}
+
+// CreateConsensusEngine creates a consensus engine for the given chain
+// configuration. A proof-of-work chain runs RandomX with the consensus
+// parameters of its chain ID, and a chain ID without parameters is an error.
+// The ethash test modes keep their ethash engines, outside release builds.
+func CreateConsensusEngine(stack *node.Node, ethashConfig *ethash.Config, cliqueConfig *ctypes.CliqueConfig, chainID *big.Int, notify []string, noverify bool, db ethdb.Database) (consensus.Engine, error) {
 	// If proof-of-authority is requested, set it up
 	var engine consensus.Engine
 	if cliqueConfig != nil {
@@ -243,23 +280,28 @@ func CreateConsensusEngine(stack *node.Node, ethashConfig *ethash.Config, clique
 		case ethash.ModePoissonFake:
 			log.Warn("Ethash used in fake Poisson mode")
 			engine = ethash.NewPoissonFaker()
+		case ethash.ModeFullFake:
+			log.Warn("Ethash used in full fake mode")
+			engine = ethash.New(ethash.Config{PowMode: ethash.ModeFullFake}, nil, false)
 		default:
-			engine = ethash.New(ethash.Config{
-				PowMode:          ethashConfig.PowMode,
-				CacheDir:         stack.ResolvePath(ethashConfig.CacheDir),
-				CachesInMem:      ethashConfig.CachesInMem,
-				CachesOnDisk:     ethashConfig.CachesOnDisk,
-				CachesLockMmap:   ethashConfig.CachesLockMmap,
-				DatasetDir:       ethashConfig.DatasetDir,
-				DatasetsInMem:    ethashConfig.DatasetsInMem,
-				DatasetsOnDisk:   ethashConfig.DatasetsOnDisk,
-				DatasetsLockMmap: ethashConfig.DatasetsLockMmap,
-				NotifyFull:       ethashConfig.NotifyFull,
-				ECIP1099Block:    ethashConfig.ECIP1099Block,
-			}, notify, noverify)
-			engine.(*ethash.Ethash).SetThreads(-1) // Disable CPU mining
+			params, err := consensusParams(chainID)
+			if err != nil {
+				return nil, err
+			}
+			if len(notify) > 0 {
+				log.Warn("RandomX has no remote sealer; ignoring the work notification URLs", "urls", notify)
+			}
+			if noverify {
+				log.Warn("RandomX always verifies mined work; ignoring --miner.noverify")
+			}
+			rx, err := randomx.New(randomx.Config{Params: params})
+			if err != nil {
+				return nil, err
+			}
+			rx.SetThreads(-1) // Disable CPU mining
+			engine = rx
 		}
 	}
 
-	return engine
+	return engine, nil
 }

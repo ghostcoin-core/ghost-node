@@ -331,7 +331,19 @@ func (r *RandomX) requiredDifficulty(chain consensus.ChainHeaderReader, time uin
 	return r.params.RequiredDifficulty(genesis.Time, parent.Number.Uint64()+1, time), nil
 }
 
-// APIs implements consensus.Engine. The engine has no RPC APIs.
+// APIs implements consensus.Engine, serving API under the "ethash"
+// namespace, the proof-of-work name the chain configuration uses.
 func (r *RandomX) APIs(chain consensus.ChainHeaderReader) []rpc.API {
-	return nil
+	return []rpc.API{{Namespace: "ethash", Service: &API{r}}}
+}
+
+// API is the engine's RPC service. It reports the local sealer only; the
+// engine hands out no work to remote miners.
+type API struct {
+	r *RandomX
+}
+
+// GetHashrate returns the local sealer's hashes per second.
+func (api *API) GetHashrate() uint64 {
+	return uint64(api.r.Hashrate())
 }
