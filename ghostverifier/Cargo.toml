@@ -1,0 +1,24 @@
+# The ghost reveal verifier's C interface, built as one static library for the
+# node to link through cgo (core/ghostpriv/verifier_cgo.go). Build it with
+# `go run build/ci.go ghostverifier`, which writes it to build/cache/ghostverifier.
+[package]
+name = "ghostverifier"
+version = "0.1.0"
+description = "Static library carrying the ghost-proofs coin reveal verifier for the node"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+
+# Its own workspace, apart from anything else in the repository.
+[workspace]
+
+# The only dependency, pinned to one revision of the ghost repository.
+[dependencies]
+ghost-proofs = { git = "https://github.com/ghostcoin-core/ghost", rev = "ce1dd891f53e636e7477236a8fb78a903c7ce8ca" }
+
+# The verifier catches its own panics, so the default panic = "unwind" stays.
+[profile.release]
+opt-level = 3
+codegen-units = 1

@@ -697,12 +697,14 @@ func TestDataRevealRejectedByDefaultFee(t *testing.T) {
 	}
 	noProofVerified(t, counter, "a non-zero fee")
 
-	// The default verifier rejects every data reveal, the stub's included.
-	if _, _, err := ghostpriv.CheckDataReveal(st.Copy(), env, ghostpriv.DefaultVerifier(), dataEnvelope(t, reveal)); !errors.Is(err, ghostpriv.ErrNoVerifier) {
-		t.Fatalf("default verifier: %v, want %v", err, ghostpriv.ErrNoVerifier)
+	// The default verifier rejects every data reveal, the stub's included:
+	// the reject-all one, or the linked proof verifier, which verifies only
+	// coin reveals.
+	if _, _, err := ghostpriv.CheckDataReveal(st.Copy(), env, ghostpriv.DefaultVerifier(), dataEnvelope(t, reveal)); !errors.Is(err, errDefaultDataVerifier) {
+		t.Fatalf("default verifier: %v, want %v", err, errDefaultDataVerifier)
 	}
-	if _, _, err := ghostpriv.CheckDataReveal(st.Copy(), env, nil, dataEnvelope(t, revoke)); !errors.Is(err, ghostpriv.ErrNoVerifier) {
-		t.Fatalf("nil verifier: %v, want %v", err, ghostpriv.ErrNoVerifier)
+	if _, _, err := ghostpriv.CheckDataReveal(st.Copy(), env, nil, dataEnvelope(t, revoke)); !errors.Is(err, errDefaultDataVerifier) {
+		t.Fatalf("nil verifier: %v, want %v", err, errDefaultDataVerifier)
 	}
 
 	// Turned off again, the default holds.
