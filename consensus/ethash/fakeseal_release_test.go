@@ -49,7 +49,7 @@ func TestReleaseHasNoFakeSeals(t *testing.T) {
 		"NewTester":         func() { NewTester(nil, false) },
 	}
 	sealer := startRemoteSealer(&Ethash{}, nil, true)
-	defer close(sealer.requestExit)
+	defer stopRemoteSealer(t, sealer)
 	if sealer.noverify {
 		t.Error("release remote sealer skips verification of submitted work")
 	}
@@ -62,5 +62,25 @@ func TestReleaseHasNoFakeSeals(t *testing.T) {
 			}()
 			construct()
 		}()
+	}
+}
+
+// TestRemoteSealerExitWithNilLog checks that a remote sealer started on an
+// engine without a configured logger shuts down cleanly instead of panicking
+// on its way out.
+func TestRemoteSealerExitWithNilLog(t *testing.T) {
+	sealer := startRemoteSealer(&Ethash{}, nil, true)
+	stopRemoteSealer(t, sealer)
+}
+
+// stopRemoteSealer asks the sealer's loop to exit and waits for it to finish,
+// so that nothing it does on the way out outlives the test.
+func stopRemoteSealer(t *testing.T, sealer *remoteSealer) {
+	t.Helper()
+	close(sealer.requestExit)
+	select {
+	case <-sealer.exitCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("remote sealer did not exit within 5s")
 	}
 }
