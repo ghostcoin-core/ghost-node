@@ -34,6 +34,7 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/log"
 	exprand "golang.org/x/exp/rand"
 	"gonum.org/v1/gonum/stat/distuv"
 )
@@ -310,9 +311,18 @@ func startRemoteSealer(ethash *Ethash, urls []string, noverify bool) *remoteSeal
 	return s
 }
 
+// logger returns the engine's configured logger, or the root logger when the
+// engine was built without one (for example a bare &Ethash{} in tests).
+func (s *remoteSealer) logger() log.Logger {
+	if l := s.ethash.config.Log; l != nil {
+		return l
+	}
+	return log.Root()
+}
+
 func (s *remoteSealer) loop() {
 	defer func() {
-		s.ethash.config.Log.Trace("Ethash remote sealer is exiting")
+		s.logger().Trace("Ethash remote sealer is exiting")
 		s.cancelNotify()
 		s.reqWG.Wait()
 		close(s.exitCh)
@@ -429,7 +439,7 @@ func (s *remoteSealer) sendNotification(ctx context.Context, url string, json []
 
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(json))
 	if err != nil {
-		s.ethash.config.Log.Warn("Can't create remote miner notification", "err", err)
+		s.logger().Warn("Can't create remote miner notification", "err", err)
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, remoteSealerTimeout)
@@ -439,9 +449,9 @@ func (s *remoteSealer) sendNotification(ctx context.Context, url string, json []
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		s.ethash.config.Log.Warn("Failed to notify remote miner", "err", err)
+		s.logger().Warn("Failed to notify remote miner", "err", err)
 	} else {
-		s.ethash.config.Log.Trace("Notified remote miner", "miner", url, "hash", work[0], "target", work[2])
+		s.logger().Trace("Notified remote miner", "miner", url, "hash", work[0], "target", work[2])
 		resp.Body.Close()
 	}
 }
@@ -451,13 +461,13 @@ func (s *remoteSealer) sendNotification(ctx context.Context, url string, json []
 // any other error, like no pending work or stale mining result).
 func (s *remoteSealer) submitWork(nonce types.BlockNonce, mixDigest common.Hash, sealhash common.Hash) bool {
 	if s.currentBlock == nil {
-		s.ethash.config.Log.Error("Pending work without block", "sealhash", sealhash)
+		s.logger().Error("Pending work without block", "sealhash", sealhash)
 		return false
 	}
 	// Make sure the work submitted is present
 	block := s.works[sealhash]
 	if block == nil {
-		s.ethash.config.Log.Warn("Work submitted but none pending", "sealhash", sealhash, "curnumber", s.currentBlock.NumberU64())
+		s.logger().Warn("Work submitted but none pending", "sealhash", sealhash, "curnumber", s.currentBlock.NumberU64())
 		return false
 	}
 	// Verify the correctness of submitted result.
@@ -468,16 +478,16 @@ func (s *remoteSealer) submitWork(nonce types.BlockNonce, mixDigest common.Hash,
 	start := time.Now()
 	if !s.noverify || !FakeSealsAllowed {
 		if err := s.ethash.verifySeal(nil, header, true); err != nil {
-			s.ethash.config.Log.Warn("Invalid proof-of-work submitted", "sealhash", sealhash, "elapsed", common.PrettyDuration(time.Since(start)), "err", err)
+			s.logger().Warn("Invalid proof-of-work submitted", "sealhash", sealhash, "elapsed", common.PrettyDuration(time.Since(start)), "err", err)
 			return false
 		}
 	}
 	// Make sure the result channel is assigned.
 	if s.results == nil {
-		s.ethash.config.Log.Warn("Ethash result channel is empty, submitted mining result is rejected")
+		s.logger().Warn("Ethash result channel is empty, submitted mining result is rejected")
 		return false
 	}
-	s.ethash.config.Log.Trace("Verified correct proof-of-work", "sealhash", sealhash, "elapsed", common.PrettyDuration(time.Since(start)))
+	s.logger().Trace("Verified correct proof-of-work", "sealhash", sealhash, "elapsed", common.PrettyDuration(time.Since(start)))
 
 	// Solutions seems to be valid, return to the miner and notify acceptance.
 	solution := block.WithSeal(header)
@@ -486,14 +496,14 @@ func (s *remoteSealer) submitWork(nonce types.BlockNonce, mixDigest common.Hash,
 	if solution.NumberU64()+staleThreshold > s.currentBlock.NumberU64() {
 		select {
 		case s.results <- solution:
-			s.ethash.config.Log.Debug("Work submitted is acceptable", "number", solution.NumberU64(), "sealhash", sealhash, "hash", solution.Hash())
+			s.logger().Debug("Work submitted is acceptable", "number", solution.NumberU64(), "sealhash", sealhash, "hash", solution.Hash())
 			return true
 		default:
-			s.ethash.config.Log.Warn("Sealing result is not read by miner", "mode", "remote", "sealhash", sealhash)
+			s.logger().Warn("Sealing result is not read by miner", "mode", "remote", "sealhash", sealhash)
 			return false
 		}
 	}
 	// The submitted block is too old to accept, drop it.
-	s.ethash.config.Log.Warn("Work submitted is too old", "number", solution.NumberU64(), "sealhash", sealhash, "hash", solution.Hash())
+	s.logger().Warn("Work submitted is too old", "number", solution.NumberU64(), "sealhash", sealhash, "hash", solution.Hash())
 	return false
 }

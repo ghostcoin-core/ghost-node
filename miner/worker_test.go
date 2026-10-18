@@ -292,29 +292,39 @@ func testEmptyWork(t *testing.T, chainConfig ctypes.ChainConfigurator, engine co
 	w, _ := newTestWorker(t, chainConfig, engine, rawdb.NewMemoryDatabase(), 0)
 	defer w.close()
 
+	// The worker may publish any number of block 1 tasks depending on timing:
+	// empty ones without the pool transaction, and full ones holding it. Every
+	// task must be one or the other, and no empty task may follow a full one.
 	var (
-		taskIndex int
-		taskCh    = make(chan struct{}, 2)
+		sawTx  bool                     // only touched by the worker's task loop
+		taskCh = make(chan struct{}, 1) // signalled when a task holds the pool tx
 	)
-	checkEqual := func(t *testing.T, task *task, index int) {
-		// The first empty work without any txs included
-		receiptLen, balance := 0, uint256.NewInt(0)
-		if index == 1 {
-			// The second full work with 1 tx included
-			receiptLen, balance = 1, uint256.NewInt(1000)
-		}
-		if len(task.receipts) != receiptLen {
-			t.Fatalf("receipt number mismatch: have %d, want %d", len(task.receipts), receiptLen)
-		}
-		if task.state.GetBalance(testUserAddress).Cmp(balance) != 0 {
-			t.Fatalf("account balance mismatch: have %d, want %d", task.state.GetBalance(testUserAddress), balance)
+	checkTask := func(task *task) {
+		balance := task.state.GetBalance(testUserAddress)
+		switch len(task.receipts) {
+		case 0:
+			if sawTx {
+				t.Errorf("empty task published after the task holding the pool transaction")
+			}
+			if balance.Cmp(uint256.NewInt(0)) != 0 {
+				t.Errorf("account balance mismatch: have %d, want %d", balance, 0)
+			}
+		case 1:
+			if balance.Cmp(uint256.NewInt(1000)) != 0 {
+				t.Errorf("account balance mismatch: have %d, want %d", balance, 1000)
+			}
+			sawTx = true
+			select {
+			case taskCh <- struct{}{}:
+			default:
+			}
+		default:
+			t.Errorf("receipt number mismatch: have %d, want 0 or 1", len(task.receipts))
 		}
 	}
 	w.newTaskHook = func(task *task) {
 		if task.block.NumberU64() == 1 {
-			checkEqual(t, task, taskIndex)
-			taskIndex += 1
-			taskCh <- struct{}{}
+			checkTask(task)
 		}
 	}
 	w.skipSealHook = func(task *task) bool { return true }
@@ -322,12 +332,17 @@ func testEmptyWork(t *testing.T, chainConfig ctypes.ChainConfigurator, engine co
 		time.Sleep(100 * time.Millisecond)
 	}
 	w.start() // Start mining!
-	for i := 0; i < 2; i += 1 {
-		select {
-		case <-taskCh:
-		case <-time.NewTimer(3 * time.Second).C:
-			t.Error("new task timeout")
-		}
+	waitForTaskWithTx(t, taskCh, 3*time.Second)
+}
+
+// waitForTaskWithTx waits until the worker publishes a block 1 task holding the
+// pool transaction, failing the test if none arrives within the timeout.
+func waitForTaskWithTx(t *testing.T, taskCh <-chan struct{}, timeout time.Duration) {
+	t.Helper()
+	select {
+	case <-taskCh:
+	case <-time.After(timeout):
+		t.Error("new task timeout: no task holding the pool transaction")
 	}
 }
 
