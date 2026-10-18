@@ -124,9 +124,10 @@ func (b *BlockGen) addTx(bc *BlockChain, vmConfig vm.Config, tx *types.Transacti
 		receipt *types.Receipt
 		err     error
 	)
-	if tx.Type() == types.GhostRevealTxType {
-		// A reveal is checked against the ancestry of the block being
-		// built, which the chain maker holds from the generation's parent.
+	if tx.IsGhostReveal() {
+		// A coin or data reveal is checked against the ancestry of the
+		// block being built, which the chain maker holds from the
+		// generation's parent.
 		var genesis common.Hash
 		if g := b.cm.GetHeaderByNumber(0); g != nil {
 			genesis = g.Hash()

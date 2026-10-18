@@ -23,17 +23,24 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
-// TestReservedAddressesAreDistinct checks that the commit entry address and
-// the totals account are distinct from each other and from the tree and
-// marker accounts, non-zero and outside the precompile range.
+// TestReservedAddressesAreDistinct checks that the coin and data commit entry
+// addresses and the totals account are distinct from each other and from the
+// tree and marker accounts, non-zero and outside the precompile range, and
+// that only the two entry addresses count as commit entries.
 func TestReservedAddressesAreDistinct(t *testing.T) {
 	accounts := map[string]common.Address{
-		"coin tree":    CoinTreeAccount,
-		"data tree":    DataTreeAccount,
-		"coin markers": CoinMarkerAccount,
-		"data markers": DataMarkerAccount,
-		"commit entry": CommitEntryAddress,
-		"totals":       PrivTotalsAccount,
+		"coin tree":         CoinTreeAccount,
+		"data tree":         DataTreeAccount,
+		"coin markers":      CoinMarkerAccount,
+		"data markers":      DataMarkerAccount,
+		"commit entry":      CommitEntryAddress,
+		"totals":            PrivTotalsAccount,
+		"data commit entry": DataCommitEntryAddress,
+	}
+	for name, addr := range accounts {
+		if want := addr == CommitEntryAddress || addr == DataCommitEntryAddress; IsCommitEntry(addr) != want {
+			t.Errorf("%s: IsCommitEntry %v", name, !want)
+		}
 	}
 	seen := make(map[common.Address]string)
 	for name, addr := range accounts {

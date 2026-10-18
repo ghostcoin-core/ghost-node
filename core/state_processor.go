@@ -85,7 +85,7 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 	}
 	// Iterate over and process the individual transactions
 	for i, tx := range block.Transactions() {
-		if tx.Type() == types.GhostRevealTxType {
+		if tx.IsGhostReveal() {
 			if p.bc == nil {
 				return nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: no chain for a reveal", i, tx.Hash().Hex())
 			}
@@ -173,12 +173,13 @@ func applyTransaction(msg *Message, config ctypes.ChainConfigurator, gp *GasPool
 	return receipt, err
 }
 
-// applyGhostReveal applies a reveal, the native transaction without an
-// account, in the block of header: it takes exactly G_PRIV gas from the
-// block gas pool, which must hold it, runs the reveal checks with the active
-// proof verifier and makes the reveal's change (core/ghostpriv). chain gives
-// the headers of the block's ancestry and genesis is the chain's genesis
-// hash. Any failure makes the block invalid.
+// applyGhostReveal applies a coin reveal (type 0x50) or a data reveal (type
+// 0x51), the native transactions without an account, in the block of header:
+// it takes exactly G_PRIV gas from the block gas pool, which must hold it,
+// runs the checks of the transaction's own type with the active proof
+// verifier and makes its change (core/ghostpriv). chain gives the headers of
+// the block's ancestry and genesis is the chain's genesis hash. Any failure
+// makes the block invalid.
 func applyGhostReveal(config ctypes.ChainConfigurator, gp *GasPool, statedb *state.StateDB, header *types.Header, chain ghostpriv.ChainReader, genesis common.Hash, blockHash common.Hash, tx *types.Transaction, usedGas *uint64) (*types.Receipt, error) {
 	if err := gp.SubGas(types.GhostRevealGas); err != nil {
 		return nil, err
@@ -189,7 +190,16 @@ func applyGhostReveal(config ctypes.ChainConfigurator, gp *GasPool, statedb *sta
 		ChainID: config.GetChainID(),
 		Genesis: genesis,
 	}
-	if err := ghostpriv.ApplyReveal(statedb, env, ghostpriv.ActiveVerifier(), tx.GhostRevealEnvelope()); err != nil {
+	var err error
+	switch tx.Type() {
+	case types.GhostRevealTxType:
+		err = ghostpriv.ApplyReveal(statedb, env, ghostpriv.ActiveVerifier(), tx.GhostRevealEnvelope())
+	case types.GhostDataRevealTxType:
+		err = ghostpriv.ApplyDataReveal(statedb, env, ghostpriv.ActiveVerifier(), tx.GhostDataRevealEnvelope())
+	default:
+		err = fmt.Errorf("%w: type %#x is not a reveal", types.ErrTxTypeNotSupported, tx.Type())
+	}
+	if err != nil {
 		return nil, err
 	}
 	var root []byte
@@ -202,7 +212,7 @@ func applyGhostReveal(config ctypes.ChainConfigurator, gp *GasPool, statedb *sta
 	*usedGas += types.GhostRevealGas
 
 	receipt := &types.Receipt{
-		Type:              types.GhostRevealTxType,
+		Type:              tx.Type(),
 		PostState:         root,
 		Status:            types.ReceiptStatusSuccessful,
 		CumulativeGasUsed: *usedGas,

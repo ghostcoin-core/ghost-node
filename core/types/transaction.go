@@ -71,8 +71,8 @@ func NewTx(inner TxData) *Transaction {
 
 // TxData is the underlying data of a transaction.
 //
-// This is implemented by DynamicFeeTx, LegacyTx, AccessListTx, BlobTx and
-// GhostRevealTx.
+// This is implemented by DynamicFeeTx, LegacyTx, AccessListTx, BlobTx,
+// GhostRevealTx and GhostDataRevealTx.
 type TxData interface {
 	txType() byte // returns the type ID
 	copy() TxData // creates a deep copy and initializes all fields
@@ -209,6 +209,8 @@ func (tx *Transaction) decodeTyped(b []byte) (TxData, error) {
 		inner = new(BlobTx)
 	case GhostRevealTxType:
 		inner = new(GhostRevealTx)
+	case GhostDataRevealTxType:
+		inner = new(GhostDataRevealTx)
 	default:
 		return nil, ErrTxTypeNotSupported
 	}
@@ -471,6 +473,8 @@ func (tx *Transaction) Hash() common.Hash {
 	var h common.Hash
 	if reveal, ok := tx.inner.(*GhostRevealTx); ok {
 		h = reveal.hash()
+	} else if reveal, ok := tx.inner.(*GhostDataRevealTx); ok {
+		h = reveal.hash()
 	} else if tx.Type() == LegacyTxType {
 		h = rlpHash(tx.inner)
 	} else {
@@ -488,6 +492,11 @@ func (tx *Transaction) Size() uint64 {
 	}
 	// A reveal's payload is not RLP: its envelope is its size.
 	if reveal, ok := tx.inner.(*GhostRevealTx); ok {
+		size := uint64(1 + len(reveal.Payload))
+		tx.size.Store(size)
+		return size
+	}
+	if reveal, ok := tx.inner.(*GhostDataRevealTx); ok {
 		size := uint64(1 + len(reveal.Payload))
 		tx.size.Store(size)
 		return size
