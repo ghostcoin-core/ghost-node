@@ -179,7 +179,8 @@ transaction. Marker pages are not built: marker status comes from the checked
 receipts alone.
 
 The RPC methods are thin wrappers in the `ghost` namespace
-(`internal/ethapi/ghosttree.go`), registered by the `eth` service:
+(`internal/ethapi/ghosttree.go`), registered by the `eth` service when the
+HTTP or WebSocket module list names it:
 
 | Method | Parameters | Result |
 |---|---|---|
@@ -187,8 +188,9 @@ The RPC methods are thin wrappers in the `ghost` namespace
 | `ghost_getPageRoots` | kind, tree index, anchor block hash | list of page roots |
 
 Every parameter is required, and a call with more is refused. The namespace
-is not among the default HTTP or WebSocket modules; enable it with
-`--http.api` or `--ws.api`. Pages are not served over the peer protocol.
+is opt-in, so the default module set of every endpoint is unchanged: it is
+registered only when `--http.api` or `--ws.api` lists `ghost`, and it is then
+also served over IPC. Pages are not served over the peer protocol.
 
 ## Decisions
 

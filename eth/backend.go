@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"math/big"
 	"runtime"
+	"slices"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/accounts"
@@ -105,6 +106,7 @@ type Ethereum struct {
 	shutdownTracker *shutdowncheck.ShutdownTracker // Tracks if and when the node has shutdown ungracefully
 
 	treeHistory *ghosttree.History // Leaves and notes of the commitment trees, served in pages
+	ghostAPI    bool               // Whether the HTTP or WebSocket module list names the ghost namespace
 }
 
 // New creates a new Ethereum object (including the
@@ -188,6 +190,7 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 		p2pServer:         stack.Server(),
 		shutdownTracker:   shutdowncheck.NewShutdownTracker(chainDb),
 		treeHistory:       ghosttree.NewHistory(chainDb),
+		ghostAPI:          slices.Contains(stack.Config().HTTPModules, "ghost") || slices.Contains(stack.Config().WSModules, "ghost"),
 	}
 	bcVersion := rawdb.ReadDatabaseVersion(chainDb)
 	var dbVer = "<nil>"
@@ -335,6 +338,11 @@ func (s *Ethereum) APIs() []rpc.API {
 	// Append any APIs exposed explicitly by the consensus engine
 	apis = append(apis, s.engine.APIs(s.BlockChain())...)
 
+	// The ghost namespace is opt-in, so the default module set is unchanged.
+	if s.ghostAPI {
+		apis = append(apis, rpc.API{Namespace: "ghost", Service: ethapi.NewGhostAPI(s.treeHistory)})
+	}
+
 	// Append all the local APIs and return
 	return append(apis, []rpc.API{
 		{
@@ -355,9 +363,6 @@ func (s *Ethereum) APIs() []rpc.API {
 		}, {
 			Namespace: "net",
 			Service:   s.netRPCService,
-		}, {
-			Namespace: "ghost",
-			Service:   ethapi.NewGhostAPI(s.treeHistory),
 		},
 	}...)
 }
