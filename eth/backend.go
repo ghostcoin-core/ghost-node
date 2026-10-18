@@ -157,9 +157,11 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 		return nil, err
 	}
 
-	engine := ethconfig.CreateConsensusEngine(stack, &ethashConfig, cliqueConfig, config.Miner.Notify, config.Miner.Noverify, chainDb)
-
 	chainConfig, err := core.LoadChainConfig(chainDb, config.Genesis)
+	if err != nil {
+		return nil, err
+	}
+	engine, err := ethconfig.CreateConsensusEngine(stack, &ethashConfig, cliqueConfig, ethconfig.ConsensusChainID(chainConfig, config.NetworkId), config.Miner.Notify, config.Miner.Noverify, chainDb)
 	if err != nil {
 		return nil, err
 	}
@@ -431,9 +433,10 @@ func (s *Ethereum) SetEtherbase(etherbase common.Address) {
 	s.miner.SetEtherbase(etherbase)
 }
 
-// StartMining starts the miner with the given number of CPU threads. If mining
-// is already running, this method adjust the number of threads allowed to use
-// and updates the minimum price required by the transaction pool.
+// StartMining starts the miner with the given number of CPU threads; zero
+// means one thread per CPU. If mining is already running, this method adjust
+// the number of threads allowed to use and updates the minimum price required
+// by the transaction pool.
 func (s *Ethereum) StartMining(threads int) error {
 	// Update the thread count within the consensus engine
 	type threaded interface {
@@ -441,9 +444,6 @@ func (s *Ethereum) StartMining(threads int) error {
 	}
 	if th, ok := s.engine.(threaded); ok {
 		log.Info("Updated mining threads", "threads", threads)
-		if threads == 0 {
-			threads = -1 // Disable the miner from within
-		}
 		th.SetThreads(threads)
 	}
 	// If the miner was not running, initialize it

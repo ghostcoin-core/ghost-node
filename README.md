@@ -13,13 +13,16 @@ value.
 
 ## Status
 
-The repository is at its first stage: the fork point is chosen and recorded,
-the parts of Core-Geth that Ghost does not use are removed or turned off, and
-every change is built reproducibly and tested in CI. It does not yet mine with
-RandomX, and the security catch-up on upstream fixes is still to come.
+The fork point is chosen and recorded, the parts of Core-Geth that Ghost does
+not use are removed or turned off, and every change is built reproducibly and
+tested in CI. The node mines with RandomX, but only on an internal test
+network and in developer mode: no Ghost network is built in yet, and a node
+refuses to start on any other chain. The security catch-up on upstream fixes
+is still to come.
 
 - Fork point: [docs/decisions/0001-fork-point.md](docs/decisions/0001-fork-point.md)
 - What is removed and turned off: [docs/removed-and-turned-off.md](docs/removed-and-turned-off.md)
+- The internal test network: [docs/internal-network.md](docs/internal-network.md)
 
 ## Running a node
 
@@ -34,8 +37,9 @@ terminal, without knowing anything about it. The node is built for that:
 
 No Ghost network exists yet, so today nothing is built in and the node will
 not start on an empty data directory rather than join some other chain. To
-try it, use developer mode (`geth --dev`), or initialise a private test
-network with a genesis file (`geth init genesis.json`).
+try it, use developer mode (`geth --dev`), or run the two-node internal test
+network with one command, `scripts/internal-net.sh` (see
+[docs/internal-network.md](docs/internal-network.md)).
 
 ## Building
 
