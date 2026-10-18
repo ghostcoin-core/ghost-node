@@ -70,8 +70,8 @@ as the Ghost layout, and anything else as before; in the base layout index 17
 is the blob gas used, an integer of at most 8 bytes. `DecodeGhostHeader` is
 the strict reference decoder of the specification, which rejects with the
 reasons `non-canonical-rlp`, `trailing-bytes`, `item-count`, `field-size`,
-`non-canonical-integer` and `integer-range`. The JSON form of the header is
-unchanged.
+`non-canonical-integer` and `integer-range`. The JSON encoding of
+`types.Header` is unchanged.
 
 The RandomX engine sets both roots from the final state in
 `FinalizeAndAssemble`, after the block reward and before the state root,
@@ -81,6 +81,114 @@ block whose roots differ. The genesis of the internal network and of
 developer mode carries the empty roots; the genesis state root stays that of
 the allocation. Developer mode's configuration has no EIP-1559, so its later
 blocks have no base fee and carry no roots.
+
+The JSON header of `eth_getBlockByNumber`, `eth_getBlockByHash` and the
+header methods carries `coinTreeRoot` and `dataTreeRoot` when the header has
+them, and leaves them out otherwise.
+
+## Pages
+
+Tree data is served in pages of `PageLeaves = 4096` consecutive positions
+(spec 05, section 8): page `p` of a tree holds positions `4096 p` to
+`4096 p + 4095`. The page size is a constant of the protocol. Each leaf is
+stored with its note of `NoteBytes = 156` bytes. The code is in
+`core/ghosttree/pages.go`:
+
+- `PageRoot(kind, leaves)` is the level-11 node over a page, with the empty
+  leaf at the positions past the given leaves. An empty page has the root
+  `Z_12`.
+- `RootFromPageRoots(kind, roots)` is the tree root from the page-root list
+  alone: the 20 levels above the pages, with `Z_12` for every page past the
+  list.
+- `Witness(kind, position, page, roots)` builds a leaf's path the way a wallet
+  does: 12 siblings from the leaves of its page and 20 from the page-root
+  list, after checking the page against its entry of the list. The path
+  verifies with `VerifyMembership` against the header root.
+
+Both are checked against the vector `coin-page-two-leaves` of spec 05,
+section 11: the page root
+`06d032e35a1f30a5773c38d9631f5e4ec069786f4d22131ef0bbba75acf2b717`, the empty
+page root `b50ae40977b91a1a10c7965cd40294eac6f63cbc40b5e57b9d4aa215956142d4`
+and the tree root
+`142c6bdf0882396330f9942ddd49df5d860b05a5218dad1ce6ef8e69238b6ec5`.
+
+## History store
+
+Leaves and notes are history, not state (spec 05, section 9).
+`ghosttree.History` (`core/ghosttree/history.go`) keeps every leaf and note of
+every tree index of both kinds on the canonical chain, in the chain database
+under three key prefixes of its own (`core/rawdb/accessors_ghosttree_history.go`):
+
+| Prefix | Key | Value |
+|---|---|---|
+| `ghost-tree-leaf-` | kind, tree index, position | block number, leaf, note |
+| `ghost-tree-block-` | block hash | block number, positions the block wrote |
+| `ghost-tree-page-` | kind, tree index, page | root of the full page |
+
+The caller drives it. `ApplyBlock(hash, number, records)` adds the records of
+a block that became canonical, in the order the block appended them;
+`RevertBlock(hash)` removes those of a block that left the canonical chain,
+newest block first. Each record must continue its tree: the next free
+position, at a block number not below the record before it, or position 0 of
+the next index after a tree that filled in an earlier block. Anything else is
+refused and nothing is written, so the stored positions of a tree are always
+contiguous from 0 and a reorganisation leaves the store equal to that of a
+node that never saw the removed blocks. The root of a page is stored when its
+last position is, and removed with it.
+
+The store prunes nothing. Its keys are never 32 bytes long, so the offline
+state pruner, which deletes 32-byte keys it takes for trie nodes, leaves them
+alone; garbage collection of the trie and the limits on transaction indexes
+and state history do not touch them either.
+
+Nothing applies blocks to the store yet. The records of a block come from the
+receipts of the commit and reveal transactions, whose layout belongs to that
+transaction format; until that wiring exists the node's history is empty and
+the methods below answer empty trees, which match the empty roots of every
+header so far. The store is not derived from block bodies, and snap sync does
+not download it.
+
+## Serving
+
+`History.Page(kind, treeIndex, page, anchor)` returns the filled positions of
+one whole page as of the anchor block, each as leaf and note, and their
+number. `History.PageRoots(kind, treeIndex, anchor)` returns the page roots of
+pages 0 to the last page with a leaf. Both:
+
+- require the anchor to be a known block on the canonical chain;
+- count the leaves of the tree at the anchor, so that positions appended after
+  it are not sent;
+- recompute the tree root from the page-root list and compare it with the
+  header root of that kind: the anchor's, or, for a full tree followed by the
+  next index before the anchor, the root of the block that filled it;
+- return an error for an unknown kind, a tree index other than 0 with no leaf
+  at the anchor, a page number of 2^20 or more, a header without the root,
+  a mismatch, missing or malformed history, or a database error. Uncertain
+  means reject: nothing is answered that was not checked.
+
+A page past the last filled page of an existing tree is an empty page, not an
+error.
+
+There is no lookup by commitment, single position, range other than a whole
+page, marker, note or transaction, and nothing returns a witness: a wallet
+fetches the page-root list and every page from its scan start, checks the list
+against the header root of the anchor in its own header chain and each page
+against its page root, and builds its own witness. The page root covers the
+leaves only; the wallet checks each note against the receipt of its
+transaction. Marker pages are not built: marker status comes from the checked
+receipts alone.
+
+The RPC methods are thin wrappers in the `ghost` namespace
+(`internal/ethapi/ghosttree.go`), registered by the `eth` service:
+
+| Method | Parameters | Result |
+|---|---|---|
+| `ghost_getTreePage` | kind (`"coin"` or `"data"`), tree index, page, anchor block hash | `{kind, treeIndex, page, filled, entries: [{leaf, note}]}` |
+| `ghost_getPageRoots` | kind, tree index, anchor block hash | list of page roots |
+
+Every parameter is required, and a call with more is refused. The namespace
+is not among the default HTTP or WebSocket modules; enable it with
+`--http.api` or `--ws.api`. Pages are not served over the peer protocol.
 
 ## Decisions
 
