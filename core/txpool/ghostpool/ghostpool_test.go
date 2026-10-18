@@ -540,48 +540,59 @@ func TestGhostPoolCapsAndRecheck(t *testing.T) {
 	}
 }
 
-// gatedChain is the chain with its first header read above the genesis
-// after arming held until the test releases it, standing in for an ancestry
-// walk that takes long. The tree-root index reads only the genesis header
-// for the genesis root, so the read held is the walk's.
-type gatedChain struct {
-	*core.BlockChain
+// gatedVerifier is the stub verifier with its first proof check after
+// arming held until the test releases it, standing in for a proof whose
+// verification takes long.
+type gatedVerifier struct {
+	ghostprivtest.Verifier
 	armed   atomic.Bool
 	entered chan struct{}
 	release chan struct{}
 }
 
-func (c *gatedChain) GetHeader(hash common.Hash, number uint64) *types.Header {
-	if number > 0 && c.armed.CompareAndSwap(true, false) {
-		close(c.entered)
-		<-c.release
+func (v *gatedVerifier) VerifyReveal(in *ghostpriv.VerifyInputs, proof []byte) error {
+	if v.armed.CompareAndSwap(true, false) {
+		close(v.entered)
+		<-v.release
 	}
-	return c.BlockChain.GetHeader(hash, number)
+	return v.Verifier.VerifyReveal(in, proof)
 }
 
-// stallChain is the chain with the first header reads above the genesis
-// after arming, up to stalls of them, held until the test releases them:
-// each stands for the long ancestry walk of a reveal down to an old root.
-type stallChain struct {
-	*core.BlockChain
+// stallVerifier is the stub verifier with its first proof checks, up to
+// stalls of them, held until the test releases them: each stands for the
+// long verification of a reveal's proof.
+type stallVerifier struct {
+	ghostprivtest.Verifier
 	stalls  atomic.Int32
 	entered chan struct{}
 	release chan struct{}
 }
 
-func (c *stallChain) GetHeader(hash common.Hash, number uint64) *types.Header {
-	if number > 0 && c.stalls.Add(-1) >= 0 {
-		c.entered <- struct{}{}
-		<-c.release
+func (v *stallVerifier) VerifyReveal(in *ghostpriv.VerifyInputs, proof []byte) error {
+	if v.stalls.Add(-1) >= 0 {
+		v.entered <- struct{}{}
+		<-v.release
 	}
-	return c.BlockChain.GetHeader(hash, number)
+	return v.Verifier.VerifyReveal(in, proof)
 }
 
-// countChain is the chain counting its header reads above the genesis, the
-// reads of an ancestry walk.
+// countVerifier is the stub verifier counting its proof checks.
+type countVerifier struct {
+	ghostprivtest.Verifier
+	checks atomic.Int64
+}
+
+func (v *countVerifier) VerifyReveal(in *ghostpriv.VerifyInputs, proof []byte) error {
+	v.checks.Add(1)
+	return v.Verifier.VerifyReveal(in, proof)
+}
+
+// countChain is the chain counting its header reads above the genesis, and
+// its lookups in the tree-root index.
 type countChain struct {
 	*core.BlockChain
-	reads atomic.Int64
+	reads   atomic.Int64
+	lookups atomic.Int64
 }
 
 func (c *countChain) GetHeader(hash common.Hash, number uint64) *types.Header {
@@ -591,13 +602,48 @@ func (c *countChain) GetHeader(hash common.Hash, number uint64) *types.Header {
 	return c.BlockChain.GetHeader(hash, number)
 }
 
-// TestGhostPoolAbsentRootsTakeNoCheckSlot floods the pool from several peers
-// with reveals that take nothing out, carry no proof and have roots that no
-// block carries, and checks that the tree-root index refuses each before it
-// takes a check slot or walks the ancestry, that each is charged to its
-// peer, and that reveals of other peers delivered during the flood are
-// checked and admitted, on this head and the next.
-func TestGhostPoolAbsentRootsTakeNoCheckSlot(t *testing.T) {
+func (c *countChain) RootFirstHeight(kind ghosttree.Kind, root common.Hash) (uint64, bool, error) {
+	c.lookups.Add(1)
+	return c.BlockChain.RootFirstHeight(kind, root)
+}
+
+func (c *countChain) reset() {
+	c.reads.Store(0)
+	c.lookups.Store(0)
+}
+
+// unreadyChain is the counting chain with a tree-root index that is not
+// ready.
+type unreadyChain struct {
+	*countChain
+}
+
+func (c *unreadyChain) RootIndexHead() (uint64, common.Hash, error) {
+	return 0, common.Hash{}, fmt.Errorf("%w: synthetic test index", ghosttree.ErrIndexNotReady)
+}
+
+// newCountedPool starts a reveal pool on the chain's head, the chain read
+// through chain, with verifier as the active verifier.
+func (f *fixture) newCountedPool(chain BlockChain, verifier ghostpriv.Verifier) *Pool {
+	f.t.Helper()
+	p := New(chain)
+	p.verifier = func() ghostpriv.Verifier { return verifier }
+	if err := p.Init(0, f.chain.CurrentBlock(), nil); err != nil {
+		f.t.Fatal(err)
+	}
+	f.t.Cleanup(func() { p.Close() })
+	return p
+}
+
+// TestGhostPoolAbsentRootsReadNoHeaders has several peers deliver their
+// whole budget of reveals with roots that no block carries, half with a
+// proof and half without, and checks that a reveal without a proof is
+// refused by its proof before its root is looked up, that one with a proof
+// is refused by one lookup in the tree-root index, that neither reads a
+// header, that each is charged to its peer and gives its check slot back,
+// and that reveals of other peers are then checked and admitted, on this
+// head and the next.
+func TestGhostPoolAbsentRootsReadNoHeaders(t *testing.T) {
 	f := newFixture(t, 4, nil)
 	f.insert(2)
 	f.insert(3)
@@ -605,65 +651,53 @@ func TestGhostPoolAbsentRootsTakeNoCheckSlot(t *testing.T) {
 		t.Fatal("block 4 does not start a fee window")
 	}
 	chain := &countChain{BlockChain: f.chain}
-	p := New(chain)
-	if err := p.Init(0, f.chain.CurrentBlock(), nil); err != nil {
-		t.Fatal(err)
-	}
-	defer p.Close()
+	verifier := new(countVerifier)
+	p := f.newCountedPool(chain, verifier)
 
 	remoteSlots := maxValidations - 1
-	// flood has remoteSlots peers deliver their whole budget of reveals at
-	// once, for the block at height next, with roots no block carries.
-	flood := func(round, next int) <-chan error {
-		fee := f.windowFee(next)
-		results := make(chan error, remoteSlots*PeerRevealsPerBlock)
-		for i := 0; i < remoteSlots; i++ {
-			go func(i int) {
-				for j := 0; j < PeerRevealsPerBlock; j++ {
-					n := 1000*(round+1) + PeerRevealsPerBlock*i + j
-					root := ghosttree.K("ghost/test-root", []byte(fmt.Sprintf("synthetic absent root %d", n)))
-					tx := f.unproven(testMarker(n), fee, root)
-					results <- p.AddFromPeer(fmt.Sprintf("flooder-%d", i), []*types.Transaction{tx})[0]
-				}
-			}(i)
-		}
-		return results
-	}
-	drain := func(results <-chan error) {
+	// flood has remoteSlots peers deliver their whole budget of reveals, for
+	// the block at height next, with roots no block carries.
+	flood := func(round, next int) {
 		t.Helper()
-		for i := 0; i < remoteSlots*PeerRevealsPerBlock; i++ {
-			select {
-			case err := <-results:
-				requireErr(t, err, ghostpriv.ErrRevealRoot, "flooded reveal with a root of no block")
-			case <-time.After(10 * time.Second):
-				t.Fatal("a flooded reveal was never answered")
+		chain.reset()
+		verifier.checks.Store(0)
+		fee := f.windowFee(next)
+		for i := 0; i < remoteSlots; i++ {
+			for j := 0; j < PeerRevealsPerBlock; j++ {
+				n := 1000*(round+1) + PeerRevealsPerBlock*i + j
+				root := ghosttree.K("ghost/test-root", []byte(fmt.Sprintf("synthetic absent root %d", n)))
+				peer := fmt.Sprintf("flooder-%d", i)
+				if j%2 == 0 {
+					tx := f.unproven(testMarker(n), fee, root)
+					requireErr(t, p.AddFromPeer(peer, []*types.Transaction{tx})[0], ghostpriv.ErrRevealProof, "flooded reveal without a proof")
+				} else {
+					tx := f.revealWithRoot(testMarker(n), recipient(i), fee, root)
+					requireErr(t, p.AddFromPeer(peer, []*types.Transaction{tx})[0], ghostpriv.ErrRevealRoot, "flooded reveal with a root of no block")
+				}
 			}
+		}
+		total := int64(remoteSlots * PeerRevealsPerBlock)
+		if reads := chain.reads.Load(); reads != 0 {
+			t.Fatalf("round %d: the flood read %d headers, want none", round, reads)
+		}
+		if checks := verifier.checks.Load(); checks != total {
+			t.Fatalf("round %d: %d proofs checked, want %d", round, checks, total)
+		}
+		if lookups := chain.lookups.Load(); lookups != total/2 {
+			t.Fatalf("round %d: %d root lookups, want %d, one per reveal with a proof", round, lookups, total/2)
 		}
 	}
 	// honest has remoteSlots other peers each deliver a valid reveal for the
-	// block at height next, during a flood, and requires every one admitted.
+	// block at height next, and requires every one admitted.
 	honest := func(round, next int) {
 		t.Helper()
 		fee := f.windowFee(next)
-		results := flood(round, next)
-		admitted := make(chan error, remoteSlots)
 		for i := 0; i < remoteSlots; i++ {
-			go func(i int) {
-				tx := f.revealWithFee(testMarker(100*(round+1)+i), recipient(i), fee)
-				admitted <- p.AddFromPeer(fmt.Sprintf("honest-%d-%d", round, i), []*types.Transaction{tx})[0]
-			}(i)
-		}
-		for i := 0; i < remoteSlots; i++ {
-			select {
-			case err := <-admitted:
-				if err != nil {
-					t.Fatalf("round %d: reveal of an honest peer refused during the flood: %v", round, err)
-				}
-			case <-time.After(10 * time.Second):
-				t.Fatal("a reveal of an honest peer was never answered")
+			tx := f.revealWithFee(testMarker(100*(round+1)+i), recipient(i), fee)
+			if err := p.AddFromPeer(fmt.Sprintf("honest-%d-%d", round, i), []*types.Transaction{tx})[0]; err != nil {
+				t.Fatalf("round %d: reveal of an honest peer refused after the flood: %v", round, err)
 			}
 		}
-		drain(results)
 	}
 	charged := func() {
 		t.Helper()
@@ -676,24 +710,21 @@ func TestGhostPoolAbsentRootsTakeNoCheckSlot(t *testing.T) {
 		}
 	}
 
-	// The flood alone reads no header: no reveal of it walks the ancestry,
-	// and none takes a check slot.
-	drain(flood(0, 4))
-	if reads := chain.reads.Load(); reads != 0 {
-		t.Fatalf("the flood read %d headers, want none", reads)
-	}
+	// The flood reads no header, and keeps no check slot.
+	flood(0, 4)
 	charged()
 	if len(p.remoteSlots) != 0 || len(p.validating) != 0 {
 		t.Fatal("the flood holds a check slot")
 	}
 
-	// A new head refills the flooders' budgets; they flood again while
-	// other peers deliver valid reveals, which all find a slot.
+	// A new head refills the flooders' budgets; they flood again, and other
+	// peers then deliver valid reveals, which all find a slot.
 	old := f.chain.CurrentBlock()
 	f.insert(4)
 	f.reset(p, old)
-	honest(1, 5)
+	flood(1, 5)
 	charged()
+	honest(1, 5)
 	if len(p.validating) != 0 || len(p.remoteSlots) != 0 {
 		t.Fatalf("%d reveals checked and %d slots taken after the flood, want none", len(p.validating), len(p.remoteSlots))
 	}
@@ -705,30 +736,24 @@ func TestGhostPoolAbsentRootsTakeNoCheckSlot(t *testing.T) {
 }
 
 // TestGhostPoolFloodOfSlowChecksLeavesLocalSlot floods the pool from several
-// peers with reveals of an old eligible root and no proof, each check stuck
-// in its ancestry walk, and checks that peers hold no more than the slots
+// peers with reveals of an eligible root and no proof, each check stuck in
+// its proof verification, and checks that peers hold no more than the slots
 // open to them, each at most one, that every refused reveal is charged to
 // its peer, and that a local reveal is still checked and admitted.
 func TestGhostPoolFloodOfSlowChecksLeavesLocalSlot(t *testing.T) {
 	f := newFixture(t, 3, nil)
 	f.insert(2)
 	f.insert(3)
-	// The next block, 4, starts a fee window, so the only header reads are
-	// those of the root rule.
 	if ghostpriv.WindowStart(4) != 4 {
 		t.Fatal("block 4 does not start a fee window")
 	}
 	remoteSlots := maxValidations - 1
-	chain := &stallChain{BlockChain: f.chain, entered: make(chan struct{}, maxValidations), release: make(chan struct{})}
-	p := New(chain)
-	if err := p.Init(0, f.chain.CurrentBlock(), nil); err != nil {
-		t.Fatal(err)
-	}
-	defer p.Close()
+	verifier := &stallVerifier{entered: make(chan struct{}, maxValidations), release: make(chan struct{})}
+	p := f.newCountedPool(f.chain, verifier)
 	released := false
 	defer func() {
 		if !released {
-			close(chain.release)
+			close(verifier.release)
 		}
 	}()
 
@@ -738,7 +763,7 @@ func TestGhostPoolFloodOfSlowChecksLeavesLocalSlot(t *testing.T) {
 		return f.unproven(testMarker(100+i), fee, genesisRoot)
 	}
 	const peers = 8
-	chain.stalls.Store(int32(remoteSlots))
+	verifier.stalls.Store(int32(remoteSlots))
 
 	// Every peer sends a reveal at once; those that take a slot are stuck.
 	results := make(chan error, peers)
@@ -749,7 +774,7 @@ func TestGhostPoolFloodOfSlowChecksLeavesLocalSlot(t *testing.T) {
 	}
 	for i := 0; i < remoteSlots; i++ {
 		select {
-		case <-chain.entered:
+		case <-verifier.entered:
 		case <-time.After(10 * time.Second):
 			t.Fatalf("only %d checks of the flood started, want %d", i, remoteSlots)
 		}
@@ -830,7 +855,7 @@ func TestGhostPoolFloodOfSlowChecksLeavesLocalSlot(t *testing.T) {
 	}
 
 	released = true
-	close(chain.release)
+	close(verifier.release)
 	for i := 0; i < remoteSlots; i++ {
 		select {
 		case err := <-results:
@@ -847,26 +872,20 @@ func TestGhostPoolFloodOfSlowChecksLeavesLocalSlot(t *testing.T) {
 	}
 }
 
-// TestGhostPoolSlowCheckDoesNotBlockPool checks that a peer's reveal of an
-// old root without a proof, whose check walks the ancestry, holds no lock
-// while it is checked: reads, announcements, a reset and other reveals go
-// on, while its marker stays taken for it until the check refuses it.
+// TestGhostPoolSlowCheckDoesNotBlockPool checks that a peer's reveal without
+// a proof, whose proof check takes long, holds no lock while it is checked:
+// reads, announcements, a reset and other reveals go on, while its marker
+// stays taken for it until the check refuses it.
 func TestGhostPoolSlowCheckDoesNotBlockPool(t *testing.T) {
 	f := newFixture(t, 3, nil)
 	f.insert(2)
 	f.insert(3)
-	// The next block, 4, starts a fee window, so the fee check reads no
-	// header and the first header read is the root rule's ancestry walk.
 	if ghostpriv.WindowStart(4) != 4 {
 		t.Fatal("block 4 does not start a fee window")
 	}
-	chain := &gatedChain{BlockChain: f.chain, entered: make(chan struct{}), release: make(chan struct{})}
-	p := New(chain)
+	verifier := &gatedVerifier{entered: make(chan struct{}), release: make(chan struct{})}
+	p := f.newCountedPool(f.chain, verifier)
 	head := f.chain.CurrentBlock()
-	if err := p.Init(0, head, nil); err != nil {
-		t.Fatal(err)
-	}
-	defer p.Close()
 
 	fee := f.windowFee(4)
 	valid := f.revealWithFee(testMarker(1), recipient(1), fee)
@@ -875,16 +894,16 @@ func TestGhostPoolSlowCheckDoesNotBlockPool(t *testing.T) {
 	}
 	bad := f.unproven(testMarker(2), fee, *f.genesis.Header().CoinTreeRoot)
 
-	chain.armed.Store(true)
+	verifier.armed.Store(true)
 	done := make(chan error, 1)
 	go func() { done <- p.AddFromPeer("peer-a", []*types.Transaction{bad})[0] }()
 	select {
-	case <-chain.entered:
+	case <-verifier.entered:
 	case <-time.After(10 * time.Second):
-		t.Fatal("the bad reveal's check never read a header")
+		t.Fatal("the bad reveal's proof was never checked")
 	}
 
-	// The bad reveal's check is stuck in its ancestry walk.
+	// The bad reveal's check is stuck in its proof verification.
 	var (
 		other    = f.revealWithFee(testMarker(3), recipient(3), fee)
 		rival    = f.revealWithFee(testMarker(2), recipient(4), fee)
@@ -907,7 +926,7 @@ func TestGhostPoolSlowCheckDoesNotBlockPool(t *testing.T) {
 	select {
 	case <-finished:
 	case <-time.After(10 * time.Second):
-		close(chain.release)
+		close(verifier.release)
 		t.Fatal("the pool was blocked while a reveal was checked")
 	}
 	if otherErr != nil {
@@ -918,7 +937,7 @@ func TestGhostPoolSlowCheckDoesNotBlockPool(t *testing.T) {
 		t.Fatal("the reset dropped the valid reveal")
 	}
 
-	close(chain.release)
+	close(verifier.release)
 	select {
 	case err := <-done:
 		requireErr(t, err, ghostpriv.ErrRevealProof, "reveal without a proof")
@@ -934,5 +953,100 @@ func TestGhostPoolSlowCheckDoesNotBlockPool(t *testing.T) {
 	}
 	if run, _ := p.Stats(); run != 3 || len(p.validating) != 0 {
 		t.Fatalf("pool holds %d reveals and checks %d, want 3 and none", run, len(p.validating))
+	}
+}
+
+// TestGhostPoolOldRootAdmissionReadsNoAncestry builds a long chain and has
+// peers deliver reveals of a root that only its first block carries, and
+// checks, counting the header reads and index lookups through a stub chain,
+// that admitting one reads a few headers whatever the length of the chain,
+// where the block checks of the same reveal walk the whole ancestry; that a
+// reveal without a proof is refused before its root is looked up; and that
+// with the index not ready a peer's reveal is refused without a walk.
+func TestGhostPoolOldRootAdmissionReadsNoAncestry(t *testing.T) {
+	const length = 200
+	f := newFixture(t, length, nil)
+	if _, err := f.chain.InsertChain(f.blocks[1:]); err != nil {
+		t.Fatal(err)
+	}
+	head := f.chain.CurrentBlock()
+	if head.Number.Uint64() != length {
+		t.Fatalf("head at %d, want %d", head.Number, length)
+	}
+	oldRoot := f.headerAt(1).CoinTreeRoot
+	if oldRoot == nil || *oldRoot == *f.genesis.Header().CoinTreeRoot {
+		t.Fatal("the first block does not carry a coin root of its own")
+	}
+	fee := f.windowFee(length + 1)
+	// The most headers one admission may read: the fee window, which the
+	// checks read twice, and the one header the index entry names.
+	const maxReads = 2*4 + 1
+
+	chain := &countChain{BlockChain: f.chain}
+	verifier := new(countVerifier)
+	p := f.newCountedPool(chain, verifier)
+
+	// The block checks of an old-root reveal walk the ancestry down to it.
+	walked := f.revealWithRoot(testMarker(0), recipient(0), fee, *oldRoot)
+	st, err := f.chain.StateAt(head.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chain.reset()
+	env := &ghostpriv.BlockEnv{Header: p.nextHeader(head), Chain: chain, ChainID: f.gspec.Config.GetChainID(), Genesis: f.genesis.Hash()}
+	if _, _, err := ghostpriv.CheckReveal(st, env, verifier, walked.GhostRevealEnvelope()); err != nil {
+		t.Fatalf("block checks refused the old-root reveal: %v", err)
+	}
+	if reads := chain.reads.Load(); reads < length-1 {
+		t.Fatalf("block checks read %d headers, want the walk of at least %d", reads, length-1)
+	}
+
+	// The pool admits old-root reveals from peers with a few reads each.
+	for i := 1; i <= 3; i++ {
+		tx := f.revealWithRoot(testMarker(i), recipient(i), fee, *oldRoot)
+		chain.reset()
+		if err := p.AddFromPeer(fmt.Sprintf("peer-%d", i), []*types.Transaction{tx})[0]; err != nil {
+			t.Fatalf("old-root reveal %d refused: %v", i, err)
+		}
+		if reads := chain.reads.Load(); reads > maxReads {
+			t.Fatalf("admitting old-root reveal %d read %d headers, want at most %d", i, reads, maxReads)
+		}
+		if lookups := chain.lookups.Load(); lookups != 1 {
+			t.Fatalf("admitting old-root reveal %d looked the root up %d times, want once", i, lookups)
+		}
+	}
+
+	// A reveal without a proof is refused before the root is looked up.
+	chain.reset()
+	verifier.checks.Store(0)
+	requireErr(t, p.AddFromPeer("peer-x", []*types.Transaction{f.unproven(testMarker(10), fee, *oldRoot)})[0], ghostpriv.ErrRevealProof, "old-root reveal without a proof")
+	if reads, lookups := chain.reads.Load(), chain.lookups.Load(); reads != 0 || lookups != 0 {
+		t.Fatalf("reveal without a proof read %d headers and looked up %d roots, want none", reads, lookups)
+	}
+	if checks := verifier.checks.Load(); checks != 1 {
+		t.Fatalf("%d proofs checked, want 1", checks)
+	}
+
+	// The recheck on a new head reads a few headers per held reveal too.
+	chain.reset()
+	p.Reset(head, head)
+	if run, _ := p.Stats(); run != 3 {
+		t.Fatalf("pool holds %d reveals after the recheck, want 3", run)
+	}
+	if reads := chain.reads.Load(); reads > 3*maxReads {
+		t.Fatalf("the recheck read %d headers, want at most %d", reads, 3*maxReads)
+	}
+
+	// With the index not ready, a peer's reveal is refused without a walk;
+	// the node's own reveal is checked by the block checks.
+	unready := &unreadyChain{countChain: &countChain{BlockChain: f.chain}}
+	q := f.newCountedPool(unready, verifier)
+	unready.reset()
+	requireErr(t, q.AddFromPeer("peer-a", []*types.Transaction{f.revealWithRoot(testMarker(20), recipient(20), fee, *oldRoot)})[0], ErrRootLookup, "peer reveal with the index not ready")
+	if reads := unready.reads.Load(); reads != 0 {
+		t.Fatalf("peer reveal with the index not ready read %d headers, want none", reads)
+	}
+	if err := q.Add([]*types.Transaction{f.revealWithRoot(testMarker(21), recipient(21), fee, *oldRoot)}, true, true)[0]; err != nil {
+		t.Fatalf("local reveal with the index not ready refused: %v", err)
 	}
 }
