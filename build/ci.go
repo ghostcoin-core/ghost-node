@@ -25,7 +25,8 @@ Usage: go run build/ci.go <command> <command flags/arguments>
 Available commands are:
 
 	install    [ -arch architecture ] [ -cc compiler ] [ packages... ]                          -- builds packages and executables
-	test       [ -coverage ] [ packages... ]                                                    -- runs the tests
+	ghostverifier                                                                               -- builds the reveal proof verifier's static library
+	test      [ -coverage ] [ packages... ]                                                    -- runs the tests
 	lint                                                                                        -- runs certain pre-selected linters
 	archive    [ -arch architecture ] [ -type zip|tar ] [ -signer key-envvar ] [ -signify key-envvar ] [ -upload dest ] -- archives build artifacts
 	importkeys                                                                                  -- imports signing keys from env
@@ -40,6 +41,7 @@ package main
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -161,6 +163,8 @@ func main() {
 	switch os.Args[1] {
 	case "install":
 		doInstall(os.Args[2:])
+	case "ghostverifier":
+		doGhostVerifier(os.Args[2:])
 	case "test":
 		doTest(os.Args[2:])
 	case "lint":
@@ -193,6 +197,18 @@ func doInstall(cmdline []string) {
 	)
 	flag.CommandLine.Parse(cmdline)
 	env := build.Env()
+
+	// A release build on Linux and macOS links the reveal proof verifier
+	// (core/ghostpriv/verifier_cgo.go), so build its static library first.
+	if ghostVerifierLinked() {
+		if *arch != "" && *arch != runtime.GOARCH {
+			log.Fatalf("the reveal proof verifier is built for the host, %s, not for %s", runtime.GOARCH, *arch)
+		}
+		if os.Getenv("CGO_ENABLED") == "0" {
+			log.Fatal("a release build links the reveal proof verifier through cgo: CGO_ENABLED must not be 0")
+		}
+		buildGhostVerifier()
+	}
 
 	// Configure the toolchain.
 	tc := build.GoToolchain{GOARCH: *arch, CC: *cc}
@@ -278,6 +294,127 @@ func buildFlags(env build.Environment, staticLinking bool, buildTags []string) (
 		flags = append(flags, "-tags", strings.Join(buildTags, ","))
 	}
 	return flags
+}
+
+// The reveal proof verifier
+//
+// ghostverifier/ is a small Rust crate that re-exports the C interface of
+// ghost-proofs, pinned to one revision of the ghost repository, as a static
+// library. core/ghostpriv/verifier_cgo.go links it from ghostVerifierLib.
+
+var (
+	ghostVerifierCrate = "ghostverifier"
+	ghostVerifierLib   = filepath.Join("build", "cache", "ghostverifier")
+)
+
+// ghostVerifierLinked reports whether a release build for this platform links
+// the verifier: the build constraint of core/ghostpriv/verifier_cgo.go.
+func ghostVerifierLinked() bool {
+	return runtime.GOOS == "linux" || runtime.GOOS == "darwin"
+}
+
+func doGhostVerifier(cmdline []string) {
+	flag.CommandLine.Parse(cmdline)
+	buildGhostVerifier()
+}
+
+// buildGhostVerifier builds libghostverifier.a into ghostVerifierLib with the
+// committed Cargo.lock, and checks that the committed header is the pinned
+// revision's. The build does not depend on the directory of the checkout:
+// the source directory and the cargo home are remapped out of every path the
+// compiler records, and nothing is built incrementally.
+func buildGhostVerifier() {
+	root, err := filepath.Abs(".")
+	if err != nil {
+		log.Fatal(err)
+	}
+	manifest := filepath.Join(root, ghostVerifierCrate, "Cargo.toml")
+	target := filepath.Join(root, ghostVerifierLib)
+
+	cargo := exec.Command("cargo", "build", "--release", "--locked", "--manifest-path", manifest, "--target-dir", target)
+	cargo.Env = ghostVerifierEnv(root)
+	build.MustRun(cargo)
+	if *build.DryRunFlag {
+		return
+	}
+	checkGhostVerifierHeader(root, manifest)
+}
+
+// ghostVerifierEnv is the environment of the cargo calls.
+func ghostVerifierEnv(root string) []string {
+	cargoHome := os.Getenv("CARGO_HOME")
+	if cargoHome == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			log.Fatal("no CARGO_HOME and no home directory: ", err)
+		}
+		cargoHome = filepath.Join(home, ".cargo")
+	}
+	cargoHome, err := filepath.Abs(cargoHome)
+	if err != nil {
+		log.Fatal(err)
+	}
+	// One flag per field of CARGO_ENCODED_RUSTFLAGS, so a path may hold
+	// spaces. These are the only flags: none are taken from the caller.
+	rustflags := strings.Join([]string{
+		"--remap-path-prefix=" + root + "=/ghost-node",
+		"--remap-path-prefix=" + cargoHome + "=/cargo",
+	}, "\x1f")
+	var env []string
+	for _, kv := range os.Environ() {
+		switch strings.SplitN(kv, "=", 2)[0] {
+		case "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_RUSTFLAGS", "CARGO_INCREMENTAL":
+		default:
+			env = append(env, kv)
+		}
+	}
+	return append(env, "CARGO_INCREMENTAL=0", "CARGO_ENCODED_RUSTFLAGS="+rustflags)
+}
+
+// checkGhostVerifierHeader fails unless ghostverifier/ghost_proofs.h is the
+// header of the ghost-proofs revision Cargo.lock pins.
+func checkGhostVerifierHeader(root, manifest string) {
+	pinned := ghostProofsHeader(root, manifest)
+	committed := filepath.Join(root, ghostVerifierCrate, "ghost_proofs.h")
+	want, err := os.ReadFile(pinned)
+	if err != nil {
+		log.Fatal(err)
+	}
+	have, err := os.ReadFile(committed)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if !bytes.Equal(have, want) {
+		log.Fatalf("%s differs from the pinned header %s", committed, pinned)
+	}
+}
+
+// ghostProofsHeader returns the path of include/ghost_proofs.h in the
+// ghost-proofs source cargo fetched.
+func ghostProofsHeader(root, manifest string) string {
+	cmd := exec.Command("cargo", "metadata", "--locked", "--format-version", "1", "--manifest-path", manifest)
+	cmd.Env = ghostVerifierEnv(root)
+	cmd.Stderr = os.Stderr
+	out, err := cmd.Output()
+	if err != nil {
+		log.Fatal("cargo metadata: ", err)
+	}
+	var meta struct {
+		Packages []struct {
+			Name         string `json:"name"`
+			ManifestPath string `json:"manifest_path"`
+		} `json:"packages"`
+	}
+	if err := json.Unmarshal(out, &meta); err != nil {
+		log.Fatal("cargo metadata: ", err)
+	}
+	for _, p := range meta.Packages {
+		if p.Name == "ghost-proofs" {
+			return filepath.Join(filepath.Dir(p.ManifestPath), "include", "ghost_proofs.h")
+		}
+	}
+	log.Fatal("cargo metadata: no ghost-proofs package")
+	return ""
 }
 
 // Running The Tests

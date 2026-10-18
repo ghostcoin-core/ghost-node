@@ -25,8 +25,8 @@ import (
 	"github.com/holiman/uint256"
 )
 
-// ErrNoVerifier is the answer of the default verifier to every reveal: the
-// node has no proof verifier linked in, so it cannot confirm any proof.
+// ErrNoVerifier is the answer of the reject-all verifier to every reveal: the
+// node was built without the proof verifier, so it cannot confirm any proof.
 var ErrNoVerifier = errors.New("no reveal proof verifier in this node")
 
 // VerifyInputs are the public inputs of a reveal's proof, as the node
@@ -60,14 +60,11 @@ type Verifier interface {
 	VerifyReveal(in *VerifyInputs, proof []byte) error
 }
 
-// rejectAll is the default verifier.
-type rejectAll struct{}
-
-func (rejectAll) VerifyReveal(*VerifyInputs, []byte) error { return ErrNoVerifier }
-
-// DefaultVerifier returns the verifier the node uses until another is set:
-// it rejects every reveal.
-func DefaultVerifier() Verifier { return rejectAll{} }
+// DefaultVerifier, the verifier the node uses until another is set, is in
+// verifier_cgo.go for builds that link the proof verifier of the ghost
+// repository (release builds on Linux and macOS, and builds with the
+// ghostproofs tag) and in verifier_nocgo.go, which rejects every reveal, for
+// all others.
 
 type verifierBox struct{ v Verifier }
 
