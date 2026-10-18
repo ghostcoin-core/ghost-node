@@ -228,6 +228,13 @@ func doInstall(cmdline []string) {
 	// Configure the build.
 	gobuild := tc.Go("build", buildFlags(env, *staticlink, buildTags)...)
 
+	// The C linker finds the verifier's library through LIBRARY_PATH, which
+	// leaves the executable as it is: a -L flag in the cgo directives would
+	// put the checkout's directory into it (see verifier_cgo.go).
+	if ghostVerifierLinked() {
+		gobuild.Env = append(gobuild.Env, ghostVerifierLibraryPath())
+	}
+
 	// arm64 CI builders are memory-constrained and can't handle concurrent builds,
 	// better disable it. This check isn't the best, it should probably
 	// check for something in env instead.
@@ -316,6 +323,19 @@ func ghostVerifierLinked() bool {
 func doGhostVerifier(cmdline []string) {
 	flag.CommandLine.Parse(cmdline)
 	buildGhostVerifier()
+}
+
+// ghostVerifierLibraryPath returns the LIBRARY_PATH setting that adds the
+// directory of libghostverifier.a to the caller's.
+func ghostVerifierLibraryPath() string {
+	dir, err := filepath.Abs(filepath.Join(ghostVerifierLib, "release"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	if prev := os.Getenv("LIBRARY_PATH"); prev != "" {
+		dir += string(os.PathListSeparator) + prev
+	}
+	return "LIBRARY_PATH=" + dir
 }
 
 // buildGhostVerifier builds libghostverifier.a into ghostVerifierLib with the
