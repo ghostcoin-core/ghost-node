@@ -292,9 +292,15 @@ func TestInternalNetTransfers(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := via.eth.SendTransaction(ctx, tx); err != nil {
-			t.Fatalf("sending through the %s: %v", via.name, err)
-		}
+		// The transaction pool moves to a new head shortly after the chain
+		// does, so funds the head already shows may not be in it yet.
+		waitFor(t, time.Minute, "the "+via.name+" to take the transaction", func() (bool, error) {
+			err := via.eth.SendTransaction(ctx, tx)
+			if err != nil && strings.Contains(err.Error(), "insufficient funds") {
+				return false, nil
+			}
+			return err == nil, err
+		})
 		return tx.Hash()
 	}
 	mined := func(hash common.Hash) {
