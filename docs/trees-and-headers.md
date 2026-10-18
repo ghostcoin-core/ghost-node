@@ -228,7 +228,10 @@ snap-synced head and the start of the node bring the index to the head the
 same way; a database without an index, or one whose index does not match
 the stored headers, gets it built again from genesis along the head's
 ancestry. If even that fails, the index head is removed and the index reads
-as not ready until the next move of the head rebuilds it.
+as not ready until the next move of the head rebuilds it. An index that
+already holds the head is not written again, so a read-only database opens
+as before; if a read-only database's index is behind, it stays as it was and
+answers only for blocks it covers.
 
 `EligibleRoot` first checks that the index head is canonical. It then walks
 the including block's own branch from the parent down to the first
