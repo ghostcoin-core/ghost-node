@@ -56,7 +56,9 @@ func (e *treeWriter) FinalizeAndAssemble(chain consensus.ChainHeaderReader, head
 	return e.RandomX.FinalizeAndAssemble(chain, header, st, txs, uncles, receipts, withdrawals)
 }
 
-func testTreeLeaf(i int) common.Hash { return ghosttree.K("ghost/test-leaf", []byte{byte(i >> 8), byte(i)}) }
+func testTreeLeaf(i int) common.Hash {
+	return ghosttree.K("ghost/test-leaf", []byte{byte(i >> 8), byte(i)})
+}
 
 func testTreeMarker(i int) common.Hash { return ghosttree.K("ghost/test-marker", []byte{byte(i)}) }
 
@@ -463,7 +465,7 @@ func TestGenesisCarriesEmptyTreeRoots(t *testing.T) {
 	}
 	for name, g := range map[string]*genesisT.Genesis{
 		"go-ethereum configuration with chain ID 1337": testGenesis(),
-		"another chain ID":                             otherID,
+		"another chain ID": otherID,
 	} {
 		if h := core.GenesisToBlock(g, nil).Header(); h.CoinTreeRoot != nil || h.DataTreeRoot != nil {
 			t.Errorf("%s: genesis has tree roots", name)
