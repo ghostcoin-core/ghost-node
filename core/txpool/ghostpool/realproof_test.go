@@ -222,6 +222,9 @@ func proveRealFixture(t *testing.T, request []byte) {
 	zw, _ := gzip.NewWriterLevel(&buf, gzip.BestCompression)
 	zw.Write(raw)
 	zw.Close()
+	if err := os.MkdirAll(filepath.Dir(realProofFixture), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(realProofFixture, buf.Bytes(), 0o644); err != nil {
 		t.Fatal(err)
 	}
