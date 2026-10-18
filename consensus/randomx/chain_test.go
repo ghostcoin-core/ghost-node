@@ -106,6 +106,12 @@ func buildSealedChain() (*sealedChainFixture, error) {
 // sealNext builds an empty block on parent the way a miner does and seals it
 // with the engine.
 func sealNext(engine *RandomX, chain *core.BlockChain, parent *types.Header, coinbase common.Address) (*types.Block, error) {
+	return sealNextWith(engine, engine, chain, parent, coinbase, nil)
+}
+
+// sealNextWith builds an empty block on parent with engine, lets change edit
+// the assembled header when it is not nil, and seals the block with sealer.
+func sealNextWith(engine consensus.Engine, sealer *RandomX, chain *core.BlockChain, parent *types.Header, coinbase common.Address, change func(*types.Header)) (*types.Block, error) {
 	config := chain.Config()
 	header := &types.Header{
 		ParentHash: parent.Hash(),
@@ -128,9 +134,14 @@ func sealNext(engine *RandomX, chain *core.BlockChain, parent *types.Header, coi
 	if err != nil {
 		return nil, err
 	}
+	if change != nil {
+		h := block.Header()
+		change(h)
+		block = block.WithSeal(h)
+	}
 	results, stop := make(chan *types.Block, 1), make(chan struct{})
 	defer close(stop)
-	if err := engine.Seal(chain, block, results, stop); err != nil {
+	if err := sealer.Seal(chain, block, results, stop); err != nil {
 		return nil, err
 	}
 	select {

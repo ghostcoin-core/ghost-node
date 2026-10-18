@@ -27,23 +27,46 @@ import (
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/trie"
 	"github.com/holiman/uint256"
 )
 
 // TestSealHashCoversEveryField changes each field of types.Header in turn,
 // found by reflection: every change except to MixDigest and Nonce must change
-// the seal hash, and those two must not.
+// the seal hash, and those two must not. A change that leaves the header in
+// neither encoding layout (one tree root on a base header, a forbidden field
+// on a Ghost header) must make it impossible to encode, so it can never be
+// sealed.
 func TestSealHashCoversEveryField(t *testing.T) {
 	engine := newTestEngine(t, testParams())
 	legacy := fullHeader()
 	legacy.BaseFee, legacy.WithdrawalsHash, legacy.BlobGasUsed, legacy.ExcessBlobGas, legacy.ParentBeaconRoot = nil, nil, nil, nil, nil
+	baseOnly := map[string]bool{"CoinTreeRoot": true, "DataTreeRoot": true}
+	ghostForbids := map[string]bool{"WithdrawalsHash": true, "BlobGasUsed": true, "ExcessBlobGas": true, "ParentBeaconRoot": true}
 
-	for name, base := range map[string]*types.Header{"all fields set": fullHeader(), "optional fields unset": legacy} {
+	for name, c := range map[string]struct {
+		base        *types.Header
+		unencodable map[string]bool
+	}{
+		"all fields set":        {fullHeader(), baseOnly},
+		"optional fields unset": {legacy, baseOnly},
+		"ghost layout":          {ghostHeader(), ghostForbids},
+	} {
+		base := c.base
+		if _, err := rlp.EncodeToBytes(base); err != nil {
+			t.Fatalf("%s: base header does not encode: %v", name, err)
+		}
 		want := engine.SealHash(base)
 		for _, field := range headerFields() {
 			h := types.CopyHeader(base)
 			mutateField(t, h, field, 0)
+			if _, err := rlp.EncodeToBytes(h); (err != nil) != c.unencodable[field] {
+				t.Errorf("%s: changing %s: encoding error %v", name, field, err)
+			}
+			if c.unencodable[field] {
+				continue
+			}
 			changed := engine.SealHash(h) != want
 			switch sealField := field == "MixDigest" || field == "Nonce"; {
 			case sealField && changed:

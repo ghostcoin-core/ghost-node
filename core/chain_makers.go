@@ -166,6 +166,13 @@ func (b *BlockGen) GetBalance(addr common.Address) *uint256.Int {
 	return b.statedb.GetBalance(addr)
 }
 
+// State returns the working state of the block being generated. Changes made
+// to it are part of the block; a chain that imports the block must make the
+// same changes, so tests use this with an engine that does.
+func (b *BlockGen) State() *state.StateDB {
+	return b.statedb
+}
+
 // AddUncheckedTx forcefully adds a transaction to the block without any validation.
 //
 // AddUncheckedTx will cause consensus failures when used during real
