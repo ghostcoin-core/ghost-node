@@ -16,3 +16,13 @@ as the files they change.
 Two changes were taken from ethereumclassic/core-geth
 (https://github.com/ethereumclassic/core-geth), as recorded in their commit
 messages.
+
+RandomX
+
+consensus/randomx/librandomx holds a copy of the RandomX library
+(https://github.com/tevador/RandomX), Copyright (c) 2018-2019 tevador and
+Copyright (c) 2014-2019 The Monero Project, licensed under the BSD 3-Clause
+License; the license
+text is in consensus/randomx/librandomx/LICENSE. Ghost changed one line of it,
+the Argon2 salt in src/configuration.h, as recorded in
+consensus/randomx/librandomx/ghost-salt.patch and VENDORED.md beside it.

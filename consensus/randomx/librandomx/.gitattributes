@@ -1,0 +1,3 @@
+# Keep the vendored files byte for byte as upstream has them: some upstream
+# files have CRLF line endings, which text=auto would rewrite.
+* -text
