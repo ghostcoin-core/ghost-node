@@ -21,11 +21,14 @@
 // beside the legacy pool, as a subpool of core/txpool.
 //
 // The pool checks a reveal with the chain rules of core/ghostpriv against
-// the block that would come next on the current head: the same checks, the
-// same root rule and the active verifier. It holds at most one reveal per
-// marker, the first seen: a later reveal of the same marker is refused, and
-// a held reveal whose marker another reveal spent in a block is dropped when
-// the pool rechecks on the new head.
+// the block that would come next on the current head, with the active
+// verifier, at a cost bounded per reveal: the proof is verified first, the
+// root rule is answered by the chain's tree-root index for the pool's head
+// instead of the walk of the ancestry the block checks make, and the other
+// checks read at most the headers of the fee window. It holds at most one
+// reveal per marker, the first seen: a later reveal of the same marker is
+// refused, and a held reveal whose marker another reveal spent in a block is
+// dropped when the pool rechecks on the new head.
 package ghostpool
 
 import (
@@ -107,8 +110,8 @@ var (
 	ErrChecksBusy = errors.New("every reveal check slot open to peers is taken")
 
 	// ErrRootLookup is returned for a remote reveal whose root the tree-root
-	// index cannot answer for: it is dropped, never checked by a walk of the
-	// ancestry.
+	// index cannot answer for, an index not ready among others: it is
+	// dropped, never checked by a walk of the ancestry.
 	ErrRootLookup = errors.New("reveal root cannot be looked up in the tree-root index")
 )
 
@@ -121,8 +124,8 @@ type BlockChain interface {
 	// CurrentBlock returns the current head of the chain.
 	CurrentBlock() *types.Header
 
-	// GetHeader returns a header by hash and number, for the reveal's
-	// ancestry walk.
+	// GetHeader returns a header by hash and number, for the fee window and
+	// the tree-root index.
 	GetHeader(hash common.Hash, number uint64) *types.Header
 
 	// StateAt returns the state with the given root.
@@ -136,12 +139,6 @@ type BlockChain interface {
 type markerKey struct {
 	kind   ghosttree.Kind
 	marker common.Hash
-}
-
-// rootKey identifies a root of a tree: the coin and data roots are apart.
-type rootKey struct {
-	kind ghosttree.Kind
-	root common.Hash
 }
 
 // entry is one held reveal.
@@ -162,19 +159,18 @@ type peerBudget struct {
 // Pool is the reveal pool.
 //
 // The reveal checks run outside the pool's lock, at most maxValidations at
-// a time, against a snapshot of the head: the root rule of the checks walks
-// the ancestry down to the root, so they cost reads that grow with the age
-// of the root, and the lock must not be held through them. A reveal being
-// checked holds its marker and a place under the caps, so that the first
-// seen of two competing reveals is still the one kept.
+// a time, against a snapshot of the head: they verify the proof, and the
+// lock must not be held through that. Their cost is bounded per reveal
+// whatever the age of its root: the proof first, then one lookup in the
+// tree-root index, then the other checks, which read at most the headers of
+// the fee window. A reveal being checked holds its marker and a place under
+// the caps, so that the first seen of two competing reveals is still the
+// one kept.
 //
-// So that peers cannot hold every check slot with reveals that fail, the
-// cheap refusals run first under the lock and charge the peer for every
-// reveal they refuse; among them the root rule, answered by the chain's
-// tree-root index for the pool's head, so a root that is no ancestor's never
-// reaches the ancestry walk; one peer holds at most one slot at a time; a remote
-// reveal that finds no slot free is dropped, never queued; and one slot is
-// kept for the node's own reveals.
+// The refusals that need neither the proof nor the root run first under the
+// lock and charge the peer for every reveal they refuse; one peer holds at
+// most one slot at a time; a remote reveal that finds no slot free is
+// dropped, never queued; and one slot is kept for the node's own reveals.
 type Pool struct {
 	chain       BlockChain
 	verifier    func() ghostpriv.Verifier
@@ -192,7 +188,6 @@ type Pool struct {
 	validating map[markerKey]common.Hash // reveals being checked, by marker
 	locals     int                       // local reveals among those being checked
 	peers      map[string]*peerBudget
-	roots      map[rootKey]bool // the root rule's answers on head, at most rootCacheSize
 
 	feed event.Feed
 	scope event.SubscriptionScope
@@ -206,9 +201,6 @@ const (
 	// maxRevalidations is how often a new reveal is checked again when the
 	// head moved while it was checked.
 	maxRevalidations = 3
-
-	// rootCacheSize is the most answers of the root rule kept for one head.
-	rootCacheSize = 1024
 )
 
 // errHeadMoving is returned for a reveal whose check could not finish on a
@@ -227,7 +219,6 @@ func New(chain BlockChain) *Pool {
 		markers:     make(map[markerKey]common.Hash),
 		validating:  make(map[markerKey]common.Hash),
 		peers:       make(map[string]*peerBudget),
-		roots:       make(map[rootKey]bool),
 	}
 }
 
@@ -245,7 +236,6 @@ func (p *Pool) Init(gasTip uint64, head *types.Header, reserve txpool.AddressRes
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.head, p.state, p.fee = head, st, fee
-	p.roots = make(map[rootKey]bool)
 	return nil
 }
 
@@ -275,7 +265,6 @@ func (p *Pool) Reset(oldHead, newHead *types.Header) {
 	fee := p.windowFee(newHead)
 	p.mu.Lock()
 	p.head, p.state, p.fee = newHead, st, fee
-	p.roots = make(map[rootKey]bool)
 	now := time.Now()
 	for _, b := range p.peers {
 		b.tokens = PeerRevealsPerBlock
@@ -287,17 +276,17 @@ func (p *Pool) Reset(oldHead, newHead *types.Header) {
 			}
 		}
 	}
-	held := make([]*types.Transaction, 0, len(p.order))
+	held := make([]entry, 0, len(p.order))
 	for _, hash := range p.order {
-		held = append(held, p.all[hash].tx)
+		held = append(held, *p.all[hash])
 	}
 	p.mu.Unlock()
 
 	var failed []common.Hash
-	for _, tx := range held {
-		if err := p.check(newHead, recheck.Copy(), tx); err != nil {
-			log.Debug("Dropped reveal on recheck", "hash", tx.Hash(), "err", err)
-			failed = append(failed, tx.Hash())
+	for _, e := range held {
+		if err := p.check(newHead, recheck.Copy(), e.tx, e.peer == ""); err != nil {
+			log.Debug("Dropped reveal on recheck", "hash", e.tx.Hash(), "err", err)
+			failed = append(failed, e.tx.Hash())
 		}
 	}
 	p.mu.Lock()
@@ -414,7 +403,7 @@ func (p *Pool) add(tx *types.Transaction, peer string) error {
 	// Each round leaves the loop holding the lock.
 	for attempt := 0; ; attempt++ {
 		if err == nil {
-			err = p.check(head, st, tx)
+			err = p.check(head, st, tx, peer == "")
 		}
 		p.mu.Lock()
 		if err != nil || p.head.Hash() == head.Hash() {
@@ -469,8 +458,8 @@ func (p *Pool) add(tx *types.Transaction, peer string) error {
 // refusal but that of a reveal held or being checked: so a reveal that
 // fails costs the peer as much as one that passes. Then come the decoding,
 // the peer's one check slot and held cap, a marker held or being checked
-// for another reveal, the chain id, the fee, a spent marker, the root and
-// the caps.
+// for another reveal, the chain id, the fee, a spent marker and the caps.
+// The proof and the root are left to the reveal checks, the proof first.
 // A remote reveal takes a check slot last, without waiting, and admit
 // returns it; a local reveal takes its slot after the lock is let go. The
 // caller holds the lock.
@@ -511,9 +500,6 @@ func (p *Pool) admit(hash common.Hash, fields revealFields, decodeErr error, siz
 		return nil, fmt.Errorf("%w: marker %x held by %x", ErrMarkerPending, key.marker, other)
 	}
 	if err := p.cheapRules(fields); err != nil {
-		return nil, err
-	}
-	if err := p.rootRule(fields, peer == ""); err != nil {
 		return nil, err
 	}
 	// A local reveal is not refused for the places of remote reveals being
@@ -563,55 +549,24 @@ func (p *Pool) cheapRules(r revealFields) error {
 	return nil
 }
 
-// rootRule refuses a reveal whose root is no ancestor's root of its kind on
-// the pool's head, by the chain's tree-root index, before the reveal takes a
-// check slot: a root that no block carries costs a few index reads, never
-// the ancestry walk of the reveal checks. The index answers the rule the
-// reveal checks walk for, and those checks still decide on a root it finds.
-// A remote reveal whose root the index cannot answer for is dropped; a
-// local one goes on to the reveal checks. The answers are kept until the
-// head moves. The caller holds the lock.
-func (p *Pool) rootRule(r revealFields, local bool) error {
-	key := rootKey{kind: r.key.kind, root: r.root}
-	eligible, ok := p.roots[key]
-	if !ok {
-		var err error
-		if eligible, err = p.eligibleRoot(key); err != nil {
-			if local {
-				return nil
-			}
-			return fmt.Errorf("%w: %x: %v", ErrRootLookup, r.root, err)
-		}
-		if len(p.roots) < rootCacheSize {
-			p.roots[key] = eligible
-		}
-	}
-	switch {
-	case eligible:
-		return nil
-	case key.kind == ghosttree.Coin:
-		return fmt.Errorf("%w: %x", ghostpriv.ErrRevealRoot, r.root)
-	default:
-		return fmt.Errorf("%w: %x", ghostpriv.ErrDataRevealRoot, r.root)
-	}
-}
-
-// eligibleRoot looks a root up in the chain's tree-root index for the block
-// that would come next on the pool's head. A lookup the index refuses
-// because the chain moved under it is tried once more. The caller holds the
-// lock.
-func (p *Pool) eligibleRoot(key rootKey) (bool, error) {
+// eligibleRoot answers the root rule for the block that would come next on
+// head from the chain's tree-root index: the first canonical height of the
+// root, against head. It reads no ancestry: head must be canonical, so that
+// the index answers at once, else the lookup is refused as for an index not
+// ready. A lookup the index refuses because the chain moved under it is
+// tried once more.
+func (p *Pool) eligibleRoot(head *types.Header, kind ghosttree.Kind, root common.Hash) (bool, error) {
 	chain, ok := p.chain.(ghosttree.HeaderLookup)
 	if !ok {
-		return false, errors.New("the chain keeps no root index")
-	}
-	if p.head == nil {
-		return false, errors.New("reveal pool not initialised")
+		return false, fmt.Errorf("%w: the chain keeps no root index", ghosttree.ErrIndexNotReady)
 	}
 	var err error
 	for attempt := 0; attempt < 2; attempt++ {
+		if chain.GetCanonicalHash(head.Number.Uint64()) != head.Hash() {
+			return false, fmt.Errorf("%w: head %d %x is not canonical", ghosttree.ErrIndexNotReady, head.Number, head.Hash())
+		}
 		var eligible bool
-		if eligible, err = ghosttree.EligibleRoot(chain, p.head, key.kind, key.root); err == nil {
+		if eligible, err = ghosttree.EligibleRoot(chain, head, kind, root); err == nil {
 			return eligible, nil
 		}
 	}
@@ -796,26 +751,185 @@ func (p *Pool) snapshot() (*types.Header, *state.StateDB, error) {
 }
 
 // check runs the reveal checks of the transaction's type against st, the
-// state after head, for the block that would come next on head. It reads
-// no pool field, so it runs without the lock: the root rule walks the
-// ancestry, which costs database reads that grow with the chain.
-func (p *Pool) check(head *types.Header, st *state.StateDB, tx *types.Transaction) error {
+// state after head, for the block that would come next on head, at a cost
+// bounded per reveal, cheap first:
+//
+//  1. the proof, for the inputs the node computes, before any root or
+//     header is read;
+//  2. the root rule, from the chain's tree-root index for head, with no
+//     walk of the ancestry;
+//  3. the other checks of core/ghostpriv, on a view of the chain that holds
+//     only the headers of the fee window, so that their own walk for the
+//     root stops there; a root the index found below the window is
+//     refused by that walk, and the checks that come after the root, the
+//     marker and the backstop, are then run here.
+//
+// When the index cannot answer, a remote reveal is refused with
+// ErrRootLookup; the node's own reveal is checked by core/ghostpriv on the
+// whole chain, as block validation checks it. check reads no pool field, so
+// it runs without the lock.
+func (p *Pool) check(head *types.Header, st *state.StateDB, tx *types.Transaction, local bool) error {
+	genesis := p.chain.Genesis().Hash()
+	rv, err := decodeForCheck(tx, genesis)
+	if err != nil {
+		return err
+	}
+	if err := p.verifier().VerifyReveal(rv.in, rv.proof); err != nil {
+		return fmt.Errorf("%w: %w", rv.errProof, err)
+	}
+	next := p.nextHeader(head)
 	env := &ghostpriv.BlockEnv{
-		Header:  p.nextHeader(head),
+		Header:  next,
 		Chain:   p.chain,
 		ChainID: p.chain.Config().GetChainID(),
-		Genesis: p.chain.Genesis().Hash(),
+		Genesis: genesis,
 	}
-	var err error
+	eligible, err := p.eligibleRoot(head, rv.in.Kind, rv.in.Root)
+	if err != nil {
+		if !local {
+			return fmt.Errorf("%w: %x: %v", ErrRootLookup, rv.in.Root, err)
+		}
+		return rv.rules(st, env, provenVerifier{rv.in})
+	}
+	if !eligible {
+		return fmt.Errorf("%w: %x", rv.errRoot, rv.in.Root)
+	}
+	env.Chain = windowChain{chain: p.chain, min: ghostpriv.WindowStart(next.Number.Uint64())}
+	if err = rv.rules(st, env, provenVerifier{rv.in}); !errors.Is(err, rv.errRoot) {
+		return err
+	}
+	// Every check before the root passed and the index found the root: what
+	// is left is the marker and, for a coin reveal, the backstop.
+	if ghosttree.IsSpent(st, rv.in.Kind, rv.in.Marker) {
+		return fmt.Errorf("%w: %x", rv.errMarker, rv.in.Marker)
+	}
+	if rv.in.Kind != ghosttree.Coin {
+		return nil
+	}
+	hidden, err := ghostpriv.Hidden(st)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ghostpriv.ErrRevealBackstop, err)
+	}
+	if need := new(uint256.Int).Add(rv.in.Out, rv.in.Fee); need.Gt(hidden) {
+		return fmt.Errorf("%w: out plus fee %v, hidden %v", ghostpriv.ErrRevealBackstop, need, hidden)
+	}
+	return nil
+}
+
+// checkedReveal is a reveal decoded for check: the inputs of its proof, the
+// proof, the errors of its type and its checks in core/ghostpriv.
+type checkedReveal struct {
+	in        *ghostpriv.VerifyInputs
+	proof     []byte
+	errProof  error
+	errRoot   error
+	errMarker error
+	rules     func(st *state.StateDB, env *ghostpriv.BlockEnv, verifier ghostpriv.Verifier) error
+}
+
+// decodeForCheck decodes a reveal and computes the public inputs of its
+// proof as core/ghostpriv does, the binding digest for its own chain id
+// over the genesis hash. A chain id other than the chain's makes other
+// inputs than the chain rules', and is refused by them in any case.
+func decodeForCheck(tx *types.Transaction, genesis common.Hash) (*checkedReveal, error) {
 	switch tx.Type() {
 	case types.GhostRevealTxType:
-		_, _, err = ghostpriv.CheckReveal(st, env, p.verifier(), tx.GhostRevealEnvelope())
+		envelope := tx.GhostRevealEnvelope()
+		r, err := ghostpriv.DecodeReveal(envelope)
+		if err != nil {
+			return nil, err
+		}
+		return &checkedReveal{
+			in: &ghostpriv.VerifyInputs{
+				Kind:      ghosttree.Coin,
+				Purpose:   ghostpriv.PurposeReveal,
+				Binding:   r.BindingDigest(r.ChainID, genesis),
+				ChainID:   r.ChainID,
+				Domain:    genesis,
+				Root:      r.Root,
+				Marker:    r.Marker,
+				Remainder: r.Remainder,
+				Recipient: r.Recipient,
+				Out:       new(uint256.Int).Set(r.Out),
+				Fee:       new(uint256.Int).Set(r.Fee),
+				Note:      r.Note,
+			},
+			proof:     common.CopyBytes(r.Proof),
+			errProof:  ghostpriv.ErrRevealProof,
+			errRoot:   ghostpriv.ErrRevealRoot,
+			errMarker: ghostpriv.ErrRevealMarker,
+			rules: func(st *state.StateDB, env *ghostpriv.BlockEnv, verifier ghostpriv.Verifier) error {
+				_, _, err := ghostpriv.CheckReveal(st, env, verifier, envelope)
+				return err
+			},
+		}, nil
 	case types.GhostDataRevealTxType:
-		_, _, err = ghostpriv.CheckDataReveal(st, env, p.verifier(), tx.GhostDataRevealEnvelope())
+		envelope := tx.GhostDataRevealEnvelope()
+		r, err := ghostpriv.DecodeDataReveal(envelope)
+		if err != nil {
+			return nil, err
+		}
+		// A purpose field other than reveal or revoke is refused by the
+		// chain rules whatever the proof.
+		return &checkedReveal{
+			in: &ghostpriv.VerifyInputs{
+				Kind:      ghosttree.Data,
+				Purpose:   r.Purpose[31],
+				Binding:   r.BindingDigest(r.ChainID, genesis),
+				ChainID:   r.ChainID,
+				Domain:    genesis,
+				Root:      r.Root,
+				Marker:    r.Marker,
+				Recipient: r.Verifier,
+				Out:       new(uint256.Int),
+				Fee:       new(uint256.Int).Set(r.Fee),
+			},
+			proof:     common.CopyBytes(r.Proof),
+			errProof:  ghostpriv.ErrDataRevealProof,
+			errRoot:   ghostpriv.ErrDataRevealRoot,
+			errMarker: ghostpriv.ErrDataRevealMarker,
+			rules: func(st *state.StateDB, env *ghostpriv.BlockEnv, verifier ghostpriv.Verifier) error {
+				_, _, err := ghostpriv.CheckDataReveal(st, env, verifier, envelope)
+				return err
+			},
+		}, nil
 	default:
-		err = fmt.Errorf("%w: type %#x", core.ErrTxTypeNotSupported, tx.Type())
+		return nil, fmt.Errorf("%w: type %#x", core.ErrTxTypeNotSupported, tx.Type())
 	}
-	return err
+}
+
+// provenVerifier accepts the inputs whose proof check already verified, and
+// refuses any others: the checks of core/ghostpriv then do not verify the
+// same proof again.
+type provenVerifier struct{ in *ghostpriv.VerifyInputs }
+
+func (v provenVerifier) VerifyReveal(in *ghostpriv.VerifyInputs, proof []byte) error {
+	errDiffer := errors.New("inputs differ from the verified ones")
+	if in == nil || in.Out == nil || in.Fee == nil || !in.Out.Eq(v.in.Out) || !in.Fee.Eq(v.in.Fee) {
+		return errDiffer
+	}
+	// The amounts are equal; the rest of the inputs are compared by value.
+	a, b := *in, *v.in
+	a.Out, a.Fee, b.Out, b.Fee = nil, nil, nil, nil
+	if a != b {
+		return errDiffer
+	}
+	return nil
+}
+
+// windowChain is the chain as the checks of core/ghostpriv read it in the
+// pool: the headers from height min up, those of the fee window, and none
+// below, so that their walk for the root reads at most the window.
+type windowChain struct {
+	chain ghostpriv.ChainReader
+	min   uint64
+}
+
+func (c windowChain) GetHeader(hash common.Hash, number uint64) *types.Header {
+	if number < c.min {
+		return nil
+	}
+	return c.chain.GetHeader(hash, number)
 }
 
 // nextHeader is the header of the block that would come next on head, as
@@ -837,7 +951,6 @@ func (p *Pool) nextHeader(head *types.Header) *types.Header {
 // revealFields are the fields of a reveal the cheap refusals read.
 type revealFields struct {
 	key     markerKey
-	root    common.Hash
 	chainID uint64
 	fee     *uint256.Int
 }
@@ -851,13 +964,13 @@ func decode(tx *types.Transaction) (revealFields, error) {
 		if err != nil {
 			return revealFields{}, err
 		}
-		return revealFields{key: markerKey{kind: ghosttree.Coin, marker: r.Marker}, root: r.Root, chainID: r.ChainID, fee: r.Fee}, nil
+		return revealFields{key: markerKey{kind: ghosttree.Coin, marker: r.Marker}, chainID: r.ChainID, fee: r.Fee}, nil
 	case types.GhostDataRevealTxType:
 		r, err := ghostpriv.DecodeDataReveal(tx.GhostDataRevealEnvelope())
 		if err != nil {
 			return revealFields{}, err
 		}
-		return revealFields{key: markerKey{kind: ghosttree.Data, marker: r.Marker}, root: r.Root, chainID: r.ChainID, fee: r.Fee}, nil
+		return revealFields{key: markerKey{kind: ghosttree.Data, marker: r.Marker}, chainID: r.ChainID, fee: r.Fee}, nil
 	default:
 		return revealFields{}, fmt.Errorf("%w: type %#x", core.ErrTxTypeNotSupported, tx.Type())
 	}
