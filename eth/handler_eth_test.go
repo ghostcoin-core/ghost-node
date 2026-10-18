@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"math/big"
 	"math/rand"
+	"sync"
 	"testing"
 	"time"
 
@@ -745,5 +746,136 @@ func testBroadcastMalformedBlock(t *testing.T, protocol uint) {
 			t.Fatalf("malformed block forwarded")
 		case <-time.After(100 * time.Millisecond):
 		}
+	}
+}
+
+// recordingGhostPool is a reveal pool that records what the handler hands it.
+type recordingGhostPool struct {
+	mu        sync.Mutex
+	added     map[string][]common.Hash // reveals added, by peer
+	announced map[string][]common.Hash // reveal announcements filtered, by peer
+	dropped   []string
+}
+
+func newRecordingGhostPool() *recordingGhostPool {
+	return &recordingGhostPool{added: make(map[string][]common.Hash), announced: make(map[string][]common.Hash)}
+}
+
+func (p *recordingGhostPool) AddFromPeer(peer string, txs []*types.Transaction) []error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, tx := range txs {
+		p.added[peer] = append(p.added[peer], tx.Hash())
+	}
+	return make([]error, len(txs))
+}
+
+// FilterAnnounced keeps every announced hash but the reveals.
+func (p *recordingGhostPool) FilterAnnounced(peer string, kinds []byte, sizes []uint32, hashes []common.Hash) []bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	keep := make([]bool, len(hashes))
+	for i, hash := range hashes {
+		if kinds[i] == types.GhostRevealTxType {
+			p.announced[peer] = append(p.announced[peer], hash)
+			continue
+		}
+		keep[i] = true
+	}
+	return keep
+}
+
+func (p *recordingGhostPool) DropPeer(peer string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.dropped = append(p.dropped, peer)
+}
+
+// TestHandlerPassesPeerToGhostPool checks that reveals delivered by a peer,
+// in a transaction broadcast or a pooled transaction reply, reach the reveal
+// pool with that peer, that reveal announcements go through the pool's
+// budgets before the fetcher, and that the pool learns when the peer leaves.
+func TestHandlerPassesPeerToGhostPool(t *testing.T) {
+	handler := newTestHandler()
+	defer handler.close()
+	ghostPool := newRecordingGhostPool()
+	handler.handler.ghostpool = ghostPool
+
+	newReveal := func(seed byte) *types.Transaction {
+		envelope := make([]byte, types.GhostRevealEnvelopeSize)
+		envelope[0] = types.GhostRevealTxType
+		envelope[1] = seed
+		tx, err := types.NewGhostRevealTx(envelope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tx
+	}
+	reveal1, reveal2, reveal3 := newReveal(1), newReveal(2), newReveal(3)
+	plain, err := types.SignTx(types.NewTransaction(0, common.Address{}, big.NewInt(0), 100000, big.NewInt(0), nil), types.HomesteadSigner{}, testKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pipe, remote := p2p.MsgPipe()
+	defer pipe.Close()
+	defer remote.Close()
+	peer := eth.NewPeer(eth.ETH68, p2p.NewPeerPipe(enode.ID{7}, "", nil, pipe), pipe, handler.txpool)
+	defer peer.Close()
+	if err := handler.handler.peers.registerPeer(peer, nil); err != nil {
+		t.Fatal(err)
+	}
+	backend := (*ethHandler)(handler.handler)
+
+	// A pooled transaction reply and a broadcast: only the reveals go to the
+	// reveal pool, with the peer.
+	reply, err := rlp.EncodeToRawList([]*types.Transaction{reveal1, plain})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.Handle(peer, &eth.PooledTransactionsPacket{RequestId: 1, List: reply}); err != nil {
+		t.Fatalf("pooled transactions: %v", err)
+	}
+	broadcast, err := rlp.EncodeToRawList([]*types.Transaction{reveal2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.Handle(peer, &eth.TransactionsPacket{RawList: broadcast}); err != nil {
+		t.Fatalf("transactions: %v", err)
+	}
+	ghostPool.mu.Lock()
+	got := ghostPool.added[peer.ID()]
+	others := len(ghostPool.added)
+	ghostPool.mu.Unlock()
+	if len(got) != 2 || got[0] != reveal1.Hash() || got[1] != reveal2.Hash() || others != 1 {
+		t.Fatalf("reveal pool got %v from %d peers, want the two reveals from peer %s only", got, others, peer.ID())
+	}
+
+	// An announcement passes the pool's budgets: what it refuses never
+	// reaches the fetcher.
+	kinds := []byte{types.GhostRevealTxType, types.LegacyTxType}
+	sizes := []uint32{types.GhostRevealEnvelopeSize, uint32(plain.Size())}
+	hashes := []common.Hash{reveal3.Hash(), plain.Hash()}
+	fkinds, fsizes, fhashes := backend.filterRevealAnnounces(peer.ID(), kinds, sizes, hashes)
+	if len(fhashes) != 1 || fhashes[0] != plain.Hash() || fkinds[0] != types.LegacyTxType || fsizes[0] != sizes[1] {
+		t.Fatalf("announcement after the budgets %v, want only the plain transaction", fhashes)
+	}
+	if err := backend.Handle(peer, &eth.NewPooledTransactionHashesPacket{Types: kinds, Sizes: sizes, Hashes: hashes}); err != nil {
+		t.Fatalf("announcement: %v", err)
+	}
+	ghostPool.mu.Lock()
+	announced := ghostPool.announced[peer.ID()]
+	ghostPool.mu.Unlock()
+	if len(announced) != 2 || announced[0] != reveal3.Hash() || announced[1] != reveal3.Hash() {
+		t.Fatalf("reveal pool saw announcements %v, want the reveal from peer %s twice", announced, peer.ID())
+	}
+
+	// The pool forgets the peer's budgets when it leaves.
+	handler.handler.unregisterPeer(peer.ID())
+	ghostPool.mu.Lock()
+	dropped := ghostPool.dropped
+	ghostPool.mu.Unlock()
+	if len(dropped) != 1 || dropped[0] != peer.ID() {
+		t.Fatalf("reveal pool dropped %v, want peer %s", dropped, peer.ID())
 	}
 }

@@ -1561,6 +1561,16 @@ func newRPCTransaction(tx *types.Transaction, blockHash common.Hash, blockNumber
 		}
 		result.MaxFeePerBlobGas = (*hexutil.Big)(tx.BlobGasFeeCap())
 		result.BlobVersionedHashes = tx.BlobHashes()
+
+	case types.GhostRevealTxType:
+		// The input of a reveal is its payload, the envelope after the
+		// type byte; it has no sender, so from stays the zero address.
+		result.Input = hexutil.Bytes(tx.GhostRevealEnvelope()[1:])
+		result.ChainID = (*hexutil.Big)(tx.ChainId())
+
+	case types.GhostDataRevealTxType:
+		result.Input = hexutil.Bytes(tx.GhostDataRevealEnvelope()[1:])
+		result.ChainID = (*hexutil.Big)(tx.ChainId())
 	}
 	return result
 }
@@ -1916,6 +1926,11 @@ func SubmitTransaction(ctx context.Context, b Backend, tx *types.Transaction) (c
 	}
 	if err := b.SendTx(ctx, tx); err != nil {
 		return common.Hash{}, err
+	}
+	// A reveal has no sender, nonce or recipient account to log.
+	if tx.IsGhostReveal() {
+		log.Info("Submitted reveal", "hash", tx.Hash().Hex(), "type", tx.Type())
+		return tx.Hash(), nil
 	}
 	// Print a log with full tx details for manual investigations and interventions
 	head := b.CurrentBlock()

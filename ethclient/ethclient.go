@@ -630,6 +630,42 @@ func (ec *Client) SendTransaction(ctx context.Context, tx *types.Transaction) er
 	return ec.c.CallContext(ctx, nil, "eth_sendRawTransaction", hexutil.Encode(data))
 }
 
+// SendRawTransaction injects an encoded transaction into the pending pool for
+// execution and returns the hash the node computed for it.
+func (ec *Client) SendRawTransaction(ctx context.Context, raw []byte) (common.Hash, error) {
+	var hash common.Hash
+	err := ec.c.CallContext(ctx, &hash, "eth_sendRawTransaction", hexutil.Encode(raw))
+	return hash, err
+}
+
+// SendReveal injects a reveal into the pending pool: the envelope of a coin
+// reveal (type 0x50) or of a data reveal (type 0x51), which is sent as it is.
+// A reveal has no sender and is not signed. The envelope's type and length
+// are checked before sending; the reveal checks run on the node. It returns
+// the reveal's hash, keccak256 of the envelope.
+func (ec *Client) SendReveal(ctx context.Context, envelope []byte) (common.Hash, error) {
+	var (
+		tx  *types.Transaction
+		err error
+	)
+	if len(envelope) > 0 && envelope[0] == types.GhostDataRevealTxType {
+		tx, err = types.NewGhostDataRevealTx(envelope)
+	} else {
+		tx, err = types.NewGhostRevealTx(envelope)
+	}
+	if err != nil {
+		return common.Hash{}, err
+	}
+	hash, err := ec.SendRawTransaction(ctx, envelope)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	if hash != tx.Hash() {
+		return hash, fmt.Errorf("node returned reveal hash %x, want %x", hash, tx.Hash())
+	}
+	return hash, nil
+}
+
 func toBlockNumArg(number *big.Int) string {
 	if number == nil {
 		return "latest"

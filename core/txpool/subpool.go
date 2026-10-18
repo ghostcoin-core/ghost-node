@@ -163,3 +163,11 @@ type SubPool interface {
 	// identified by their hashes.
 	Status(hash common.Hash) TxStatus
 }
+
+// RevealPool is a subpool of the native reveal transactions, which have no
+// sender account and so are not part of Pending, which is grouped by account.
+type RevealPool interface {
+	// PendingReveals retrieves the reveals ready for the next block, first
+	// seen first.
+	PendingReveals() []*types.Transaction
+}

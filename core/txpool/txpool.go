@@ -366,6 +366,18 @@ func (p *TxPool) Pending(filter PendingFilter) map[common.Address][]*LazyTransac
 	return txs
 }
 
+// PendingReveals retrieves the reveals ready for the next block from every
+// subpool that holds reveals, first seen first within a subpool.
+func (p *TxPool) PendingReveals() []*types.Transaction {
+	var txs []*types.Transaction
+	for _, subpool := range p.subpools {
+		if rp, ok := subpool.(RevealPool); ok {
+			txs = append(txs, rp.PendingReveals()...)
+		}
+	}
+	return txs
+}
+
 // SubscribeTransactions registers a subscription for new transaction events,
 // supporting feeding only newly seen or also resurrected transactions.
 func (p *TxPool) SubscribeTransactions(ch chan<- core.NewTxsEvent, reorgs bool) event.Subscription {

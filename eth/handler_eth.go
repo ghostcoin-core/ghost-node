@@ -26,6 +26,7 @@ import (
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/eth/protocols/eth"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/p2p/enode"
 )
 
@@ -68,7 +69,8 @@ func (h *ethHandler) Handle(peer *eth.Peer, packet eth.Packet) error {
 		return h.handleBlockBroadcast(peer, packet.Block, packet.TD)
 
 	case *eth.NewPooledTransactionHashesPacket:
-		return h.txFetcher.Notify(peer.ID(), packet.Types, packet.Sizes, packet.Hashes)
+		kinds, sizes, hashes := h.filterRevealAnnounces(peer.ID(), packet.Types, packet.Sizes, packet.Hashes)
+		return h.txFetcher.Notify(peer.ID(), kinds, sizes, hashes)
 
 	case *eth.TransactionsPacket:
 		txs, err := packet.Items()
@@ -78,6 +80,7 @@ func (h *ethHandler) Handle(peer *eth.Peer, packet eth.Packet) error {
 		if err := handleTransactions(peer, txs, true); err != nil {
 			return fmt.Errorf("Transactions: %v", err)
 		}
+		h.addRevealsFromPeer(peer.ID(), txs)
 		return h.txFetcher.Enqueue(peer.ID(), txs, false)
 
 	case *eth.PooledTransactionsPacket:
@@ -88,6 +91,7 @@ func (h *ethHandler) Handle(peer *eth.Peer, packet eth.Packet) error {
 		if err := handleTransactions(peer, txs, false); err != nil {
 			return fmt.Errorf("PooledTransactions: %v", err)
 		}
+		h.addRevealsFromPeer(peer.ID(), txs)
 		return h.txFetcher.Enqueue(peer.ID(), txs, true)
 
 	default:
@@ -115,6 +119,53 @@ func handleTransactions(peer *eth.Peer, list []*types.Transaction, directBroadca
 		peer.MarkTransaction(hash)
 	}
 	return nil
+}
+
+// filterRevealAnnounces drops from an announcement the reveals the peer's
+// budgets do not cover, so that the fetcher never requests them. Other
+// transactions pass unchanged.
+func (h *ethHandler) filterRevealAnnounces(peer string, kinds []byte, sizes []uint32, hashes []common.Hash) ([]byte, []uint32, []common.Hash) {
+	if h.ghostpool == nil || kinds == nil || len(kinds) != len(hashes) || len(sizes) != len(hashes) {
+		return kinds, sizes, hashes
+	}
+	keep := h.ghostpool.FilterAnnounced(peer, kinds, sizes, hashes)
+	var (
+		fkinds  = make([]byte, 0, len(hashes))
+		fsizes  = make([]uint32, 0, len(hashes))
+		fhashes = make([]common.Hash, 0, len(hashes))
+	)
+	for i, hash := range hashes {
+		if i < len(keep) && keep[i] {
+			fkinds = append(fkinds, kinds[i])
+			fsizes = append(fsizes, sizes[i])
+			fhashes = append(fhashes, hash)
+		}
+	}
+	return fkinds, fsizes, fhashes
+}
+
+// addRevealsFromPeer hands the reveals of a delivery to the reveal pool with
+// the peer they came from, so that its budgets apply. The whole delivery
+// still goes to the fetcher afterwards, which sees each of these reveals as
+// already known or refused.
+func (h *ethHandler) addRevealsFromPeer(peer string, txs []*types.Transaction) {
+	if h.ghostpool == nil {
+		return
+	}
+	var reveals []*types.Transaction
+	for _, tx := range txs {
+		if tx.IsGhostReveal() {
+			reveals = append(reveals, tx)
+		}
+	}
+	if len(reveals) == 0 {
+		return
+	}
+	for i, err := range h.ghostpool.AddFromPeer(peer, reveals) {
+		if err != nil {
+			log.Debug("Reveal from peer refused", "peer", peer, "hash", reveals[i].Hash(), "err", err)
+		}
+	}
 }
 
 // handleBlockAnnounces is invoked from a peer's message handler when it transmits a

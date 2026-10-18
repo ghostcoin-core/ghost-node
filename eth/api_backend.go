@@ -293,6 +293,8 @@ func (b *EthAPIBackend) GetPoolTransactions() (types.Transactions, error) {
 			}
 		}
 	}
+	// Reveals have no account, so they are not in the pending set above.
+	txs = append(txs, b.eth.txPool.PendingReveals()...)
 	return txs, nil
 }
 

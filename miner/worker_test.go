@@ -29,8 +29,12 @@ import (
 	"github.com/ethereum/go-ethereum/consensus/clique"
 	"github.com/ethereum/go-ethereum/consensus/ethash"
 	"github.com/ethereum/go-ethereum/core"
+	"github.com/ethereum/go-ethereum/core/ghostpriv"
+	"github.com/ethereum/go-ethereum/core/ghostpriv/ghostprivtest"
+	"github.com/ethereum/go-ethereum/core/ghosttree"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/txpool"
+	"github.com/ethereum/go-ethereum/core/txpool/ghostpool"
 	"github.com/ethereum/go-ethereum/core/txpool/legacypool"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
@@ -38,6 +42,7 @@ import (
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/params/ghost"
 	"github.com/ethereum/go-ethereum/params/types/ctypes"
 	"github.com/ethereum/go-ethereum/params/types/genesisT"
 	"github.com/ethereum/go-ethereum/params/types/goethereum"
@@ -720,5 +725,145 @@ func testGetSealingWork(t *testing.T, chainConfig ctypes.ChainConfigurator, engi
 			}
 			assertBlock(r.block, c.expectNumber, c.coinbase, c.random)
 		}
+	}
+}
+
+// TestWorkerIncludesPendingReveal checks that the worker takes a reveal, which
+// has no account, from the reveal pool into the block it builds, ahead of the
+// ordinary transactions, and that the block imports.
+func TestWorkerIncludesPendingReveal(t *testing.T) {
+	t.Cleanup(ghostpriv.SetVerifier(ghostprivtest.Verifier{}))
+
+	var (
+		gspec    = ghost.InternalNetGenesis()
+		engine   = ethash.NewFaker()
+		oneGhost = new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+		chainID  = gspec.Config.GetChainID()
+	)
+	gspec.Alloc = genesisT.GenesisAlloc{testBankAddress: {Balance: new(big.Int).Mul(oneGhost, big.NewInt(100))}}
+	signer := types.LatestSigner(gspec.Config)
+	signed := func(nonce uint64, to common.Address, value *big.Int, data []byte, gas uint64) *types.Transaction {
+		return types.MustSignNewTx(testBankKey, signer, &types.DynamicFeeTx{
+			ChainID:   chainID,
+			Nonce:     nonce,
+			GasTipCap: big.NewInt(vars.InitialBaseFee),
+			GasFeeCap: big.NewInt(100 * vars.InitialBaseFee),
+			Gas:       gas,
+			To:        &to,
+			Value:     value,
+			Data:      data,
+		})
+	}
+	commitData, err := ghostpriv.CommitData(ghosttree.K("ghost/test-coin-f", []byte("worker")), make([]byte, ghostpriv.NoteSize))
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit := signed(0, ghost.CommitEntryAddress, oneGhost, commitData, 60_000)
+
+	// Block 1 commits one GHOST, so that the hidden set holds what the
+	// reveal takes.
+	_, blocks, _ := core.GenerateChainWithGenesis(gspec, engine, 1, func(i int, b *core.BlockGen) {
+		b.SetCoinbase(testUserAddress)
+		b.AddTx(commit)
+	})
+	db := rawdb.NewMemoryDatabase()
+	chain, err := core.NewBlockChain(db, nil, gspec, nil, engine, vm.Config{}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer chain.Stop()
+	if _, err := chain.InsertChain(blocks); err != nil {
+		t.Fatal(err)
+	}
+	ghostPool := ghostpool.New(chain)
+	pool, err := txpool.New(testTxPoolConfig.PriceLimit, chain, []txpool.SubPool{legacypool.New(testTxPoolConfig, chain), ghostPool})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	backend := &testWorkerBackend{db: db, chain: chain, txPool: pool, genesis: gspec}
+
+	// A reveal for block 2, which is in the genesis's fee window.
+	genesis := chain.Genesis()
+	fee, err := ghostpriv.WindowFee(genesis.BaseFee())
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := uint256.NewInt(1_000_000)
+	recipient := common.Address{0x52, 0x45, 0x56}
+	r := &ghostpriv.Reveal{
+		Version:   ghostpriv.Version,
+		ChainID:   chainID.Uint64(),
+		Marker:    ghosttree.K("ghost/test-marker", []byte("synthetic worker marker")),
+		Root:      *genesis.Header().CoinTreeRoot,
+		Remainder: ghosttree.K("ghost/test-remainder", []byte("synthetic worker remainder")),
+		Recipient: recipient,
+		Out:       out,
+		Fee:       fee.Total,
+	}
+	r.Proof = ghostprivtest.Proof(r.BindingDigest(chainID.Uint64(), genesis.Hash()))
+	envelope, err := r.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reveal, err := types.NewGhostRevealTx(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transfer := signed(1, testUserAddress, big.NewInt(1000), nil, vars.TxGas)
+	for i, err := range pool.Add([]*types.Transaction{transfer, reveal}, true, true) {
+		if err != nil {
+			t.Fatalf("transaction %d refused by the pool: %v", i, err)
+		}
+	}
+
+	config := *testConfig
+	config.GasCeil = ghost.InternalNetGasLimit
+	w := newWorker(&config, gspec.Config, engine, backend, new(event.TypeMux), nil, false)
+	defer w.close()
+
+	parent := chain.CurrentBlock()
+	coinbase := common.Address{0xc0, 0x1b}
+	res := w.getSealingBlock(&generateParams{
+		parentHash: parent.Hash(),
+		timestamp:  parent.Time + 1,
+		coinbase:   coinbase,
+		noUncle:    true,
+	})
+	if res.err != nil {
+		t.Fatalf("building the block: %v", res.err)
+	}
+	block := res.block
+	txs := block.Transactions()
+	if len(txs) != 2 || txs[0].Hash() != reveal.Hash() || txs[1].Hash() != transfer.Hash() {
+		t.Fatalf("block carries %d transactions, want the reveal then the transfer", len(txs))
+	}
+	if want := uint64(types.GhostRevealGas + vars.TxGas); block.GasUsed() != want {
+		t.Fatalf("block gas used %d, want %d", block.GasUsed(), want)
+	}
+
+	// The block passes block processing on import.
+	if _, err := chain.InsertChain(types.Blocks{block}); err != nil {
+		t.Fatalf("built block not imported: %v", err)
+	}
+	st, err := chain.State()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.GetBalance(recipient); !got.Eq(out) {
+		t.Fatalf("recipient balance %v, want %v", got, out)
+	}
+	if !ghosttree.IsSpent(st, ghosttree.Coin, r.Marker) {
+		t.Fatal("the reveal's marker is not spent")
+	}
+	receipts := chain.GetReceiptsByHash(block.Hash())
+	if len(receipts) != 2 || receipts[0].Type != types.GhostRevealTxType || receipts[0].Status != types.ReceiptStatusSuccessful || len(receipts[0].Logs) != 1 {
+		t.Fatal("the reveal has no successful typed receipt with its log")
+	}
+
+	// On the new head the pool drops the mined reveal.
+	ghostPool.Reset(parent, chain.CurrentBlock())
+	if ghostPool.Has(reveal.Hash()) {
+		t.Fatal("the reveal pool still holds the mined reveal")
 	}
 }
