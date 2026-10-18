@@ -192,6 +192,57 @@ is opt-in, so the default module set of every endpoint is unchanged: it is
 registered only when `--http.api` or `--ws.api` lists `ghost`, and it is then
 also served over IPC. Pages are not served over the peer protocol.
 
+## Eligible roots
+
+A root is eligible for a block when it is the root field of its kind in the
+header of an ancestor of that block (spec 05, section 5 and section 7, steps
+1 and 2). `ghosttree.EligibleRoot(chain, parent, kind, root)`
+(`core/ghosttree/roots.go`) answers it, given the parent of the including
+block:
+
+- There is no age limit: a root of any ancestor, down to genesis, counts.
+- The including block's own root counts only when an ancestor carries it
+  too, and a root of the other kind never counts.
+- Only ancestry counts, not what the node has seen: a root that appears only
+  in a block outside the ancestry is rejected, even when the node imported
+  that block or followed its branch before a reorganisation.
+- Uncertain means reject: a missing header, an unreadable or mismatching
+  index entry, or an index that is not ready is an error, never `true`.
+
+The answer comes from an index kept in the chain database
+(`core/rawdb/accessors_ghosttree.go`):
+
+| Key | Value |
+|---|---|
+| `ghost-root-` + kind + root | height of the first canonical header carrying the root |
+| `GhostRootIndexHead` | number and hash of the block whose ancestry the index holds |
+
+`ghosttree.MoveRootIndex` works out the change of the index when the
+canonical head moves: it walks the indexed chain and the new head's branch
+down to their common ancestor, removes the entries that start at a block
+leaving the chain and adds those of the blocks joining it. `writeHeadBlock`
+in `core/blockchain.go` writes that change in the same batch as the
+canonical-chain pointers, so a reorganisation removes the disconnected
+blocks' entries and adds the new branch's together. A rewind, the commit of a
+snap-synced head and the start of the node bring the index to the head the
+same way; a database without an index, or one whose index does not match
+the stored headers, gets it built again from genesis along the head's
+ancestry. If even that fails, the index head is removed and the index reads
+as not ready until the next move of the head rebuilds it.
+
+`EligibleRoot` first checks that the index head is canonical. It then walks
+the including block's own branch from the parent down to the first
+canonical block, the fork point, and accepts a root carried on the way. Below
+the fork point the index answers: the root is eligible when its entry's
+height is at most the fork point's, after checking that the canonical header
+at that height carries it. A fork point above the index head, as while
+headers are synced ahead of the blocks, is "not ready". The chain passed in
+must also implement `ghosttree.RootIndex`, as `*core.BlockChain` does;
+otherwise the answer is "not ready".
+
+The answers after a reorganisation equal those of a node that never saw the
+removed branch, and so does the index.
+
 ## Decisions
 
 - Existing headers keep their exact bytes; only a header with both roots takes

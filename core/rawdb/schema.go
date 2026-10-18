@@ -142,6 +142,13 @@ var (
 	ghostTreeBlockPrefix    = []byte("ghost-tree-block-") // ghostTreeBlockPrefix + block hash -> block number, positions written by the block
 	ghostTreePageRootPrefix = []byte("ghost-tree-page-")  // ghostTreePageRootPrefix + kind (1 byte) + tree index (uint64 big endian) + page (uint32 big endian) -> root of the full page
 
+	// Index of the tree roots carried by the headers of the canonical chain:
+	// for each root, the height of the first canonical header carrying it,
+	// and the block whose ancestry the index holds. Neither key is 32 bytes
+	// long.
+	ghostRootIndexPrefix  = []byte("ghost-root-")        // ghostRootIndexPrefix + kind (1 byte) + root -> height of the first canonical header carrying it (uint64 big endian)
+	ghostRootIndexHeadKey = []byte("GhostRootIndexHead") // block number (uint64 big endian) + block hash of the head of the indexed chain
+
 	BestUpdateKey         = []byte("update-")    // bigEndian64(syncPeriod) -> RLP(types.LightClientUpdate)  (nextCommittee only referenced by root hash)
 	FixedCommitteeRootKey = []byte("fixedRoot-") // bigEndian64(syncPeriod) -> committee root hash
 	SyncCommitteeKey      = []byte("committee-") // bigEndian64(syncPeriod) -> serialized committee
@@ -262,6 +269,15 @@ func ghostTreePageRootKey(kind uint8, treeIndex uint64, page uint32) []byte {
 // ghostTreeBlockKey = ghostTreeBlockPrefix + block hash
 func ghostTreeBlockKey(hash common.Hash) []byte {
 	return append(append([]byte{}, ghostTreeBlockPrefix...), hash.Bytes()...)
+}
+
+// ghostRootIndexKey = ghostRootIndexPrefix + kind + root
+func ghostRootIndexKey(kind uint8, root common.Hash) []byte {
+	key := make([]byte, len(ghostRootIndexPrefix)+1+common.HashLength)
+	copy(key, ghostRootIndexPrefix)
+	key[len(ghostRootIndexPrefix)] = kind
+	copy(key[len(ghostRootIndexPrefix)+1:], root[:])
+	return key
 }
 
 // preimageKey = PreimagePrefix + hash

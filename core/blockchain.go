@@ -34,6 +34,7 @@ import (
 	"github.com/ethereum/go-ethereum/common/prque"
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
+	"github.com/ethereum/go-ethereum/core/ghosttree"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/state/snapshot"
@@ -433,6 +434,9 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, genesis *genesis
 			}
 		}
 	}
+	// Bring the tree-root index to the head, or build it from the stored
+	// headers if the database was written without one.
+	bc.syncRootIndex()
 
 	// Load any existing snapshot, regenerating it if loading failed
 	if bc.cacheConfig.SnapshotLimit > 0 {
@@ -814,7 +818,11 @@ func (bc *BlockChain) setHeadBeyondRoot(head uint64, time uint64, root common.Ha
 		log.Error("SetHead invalidated finalized block")
 		bc.SetFinalized(nil)
 	}
-	return rootNumber, bc.loadLastState()
+	if err := bc.loadLastState(); err != nil {
+		return rootNumber, err
+	}
+	bc.syncRootIndex()
+	return rootNumber, nil
 }
 
 // SnapSyncCommitHead sets the current head block to the one defined by the hash
@@ -841,6 +849,7 @@ func (bc *BlockChain) SnapSyncCommitHead(hash common.Hash) error {
 	}
 	bc.currentBlock.Store(block.Header())
 	headBlockGauge.Update(int64(block.NumberU64()))
+	bc.syncRootIndex()
 	bc.chainmu.Unlock()
 
 	// Destroy any existing state snapshot and regenerate it in the background,
@@ -940,6 +949,7 @@ func (bc *BlockChain) writeHeadBlock(block *types.Block) {
 	rawdb.WriteCanonicalHash(batch, block.Hash(), block.NumberU64())
 	rawdb.WriteTxLookupEntriesByBlock(batch, block)
 	rawdb.WriteHeadBlockHash(batch, block.Hash())
+	bc.moveRootIndex(batch, block.Header())
 
 	// Flush the whole batch into the disk, exit the node if failed
 	if err := batch.Write(); err != nil {
@@ -953,6 +963,43 @@ func (bc *BlockChain) writeHeadBlock(block *types.Block) {
 
 	bc.currentBlock.Store(block.Header())
 	headBlockGauge.Update(int64(block.NumberU64()))
+}
+
+// moveRootIndex adds to batch the change that makes the tree-root index hold
+// the ancestry of head: the entries of the blocks that leave the canonical
+// chain go and those of the blocks that join it come, together with the
+// canonical-chain pointers written in the same batch. If the change cannot be
+// worked out, the index is marked not ready instead, so that no root is
+// accepted from it until it is built again.
+func (bc *BlockChain) moveRootIndex(batch ethdb.KeyValueWriter, head *types.Header) {
+	if err := ghosttree.MoveRootIndex(bc.db, bc, batch, head); err != nil {
+		log.Error("Tree-root index not updated", "number", head.Number, "hash", head.Hash(), "err", err)
+		if err := rawdb.DeleteGhostRootIndexHead(batch); err != nil {
+			log.Crit("Failed to mark the tree-root index not ready", "err", err)
+		}
+	}
+}
+
+// syncRootIndex brings the tree-root index to the current head block, building
+// it from the stored headers when the database has none yet.
+func (bc *BlockChain) syncRootIndex() {
+	batch := bc.db.NewBatch()
+	bc.moveRootIndex(batch, bc.CurrentBlock())
+	if err := batch.Write(); err != nil {
+		log.Crit("Failed to update the tree-root index", "err", err)
+	}
+}
+
+// RootIndexHead returns the block whose ancestry the tree-root index holds; it
+// implements ghosttree.RootIndex.
+func (bc *BlockChain) RootIndexHead() (uint64, common.Hash, error) {
+	return ghosttree.DBRootIndex{DB: bc.db}.RootIndexHead()
+}
+
+// RootFirstHeight returns the height of the first canonical header carrying
+// root as its root of the kind; it implements ghosttree.RootIndex.
+func (bc *BlockChain) RootFirstHeight(kind ghosttree.Kind, root common.Hash) (uint64, bool, error) {
+	return ghosttree.DBRootIndex{DB: bc.db}.RootFirstHeight(kind, root)
 }
 
 // stopWithoutSaving stops the blockchain service. If any imports are currently in progress
