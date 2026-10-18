@@ -120,7 +120,21 @@ func (b *BlockGen) addTx(bc *BlockChain, vmConfig vm.Config, tx *types.Transacti
 		b.SetCoinbase(common.Address{})
 	}
 	b.statedb.SetTxContext(tx.Hash(), len(b.txs))
-	receipt, err := ApplyTransaction(b.cm.config, bc, &b.header.Coinbase, b.gasPool, b.statedb, b.header, tx, &b.header.GasUsed, vmConfig)
+	var (
+		receipt *types.Receipt
+		err     error
+	)
+	if tx.Type() == types.GhostRevealTxType {
+		// A reveal is checked against the ancestry of the block being
+		// built, which the chain maker holds from the generation's parent.
+		var genesis common.Hash
+		if g := b.cm.GetHeaderByNumber(0); g != nil {
+			genesis = g.Hash()
+		}
+		receipt, err = applyGhostReveal(b.cm.config, b.gasPool, b.statedb, b.header, b.cm, genesis, b.header.Hash(), tx, &b.header.GasUsed)
+	} else {
+		receipt, err = ApplyTransaction(b.cm.config, bc, &b.header.Coinbase, b.gasPool, b.statedb, b.header, tx, &b.header.GasUsed, vmConfig)
+	}
 	if err != nil {
 		panic(err)
 	}
