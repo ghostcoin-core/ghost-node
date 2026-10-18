@@ -31,6 +31,7 @@ import (
 	"github.com/ethereum/go-ethereum/consensus/clique"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/bloombits"
+	"github.com/ethereum/go-ethereum/core/ghosttree"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state/pruner"
 	"github.com/ethereum/go-ethereum/core/txpool"
@@ -102,6 +103,8 @@ type Ethereum struct {
 	lock sync.RWMutex // Protects the variadic fields (e.g. gas price and etherbase)
 
 	shutdownTracker *shutdowncheck.ShutdownTracker // Tracks if and when the node has shutdown ungracefully
+
+	treeHistory *ghosttree.History // Leaves and notes of the commitment trees, served in pages
 }
 
 // New creates a new Ethereum object (including the
@@ -184,6 +187,7 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 		bloomIndexer:      core.NewBloomIndexer(chainDb, vars.BloomBitsBlocks, vars.BloomConfirms),
 		p2pServer:         stack.Server(),
 		shutdownTracker:   shutdowncheck.NewShutdownTracker(chainDb),
+		treeHistory:       ghosttree.NewHistory(chainDb),
 	}
 	bcVersion := rawdb.ReadDatabaseVersion(chainDb)
 	var dbVer = "<nil>"
@@ -351,9 +355,17 @@ func (s *Ethereum) APIs() []rpc.API {
 		}, {
 			Namespace: "net",
 			Service:   s.netRPCService,
+		}, {
+			Namespace: "ghost",
+			Service:   ethapi.NewGhostAPI(s.treeHistory),
 		},
 	}...)
 }
+
+// TreeHistory returns the store of the commitment trees' leaves and notes.
+// Nothing writes it until records are taken from the receipts of the commit
+// and reveal transactions, so it serves empty trees.
+func (s *Ethereum) TreeHistory() *ghosttree.History { return s.treeHistory }
 
 func (s *Ethereum) ResetWithGenesisBlock(gb *types.Block) {
 	s.blockchain.ResetWithGenesisBlock(gb)

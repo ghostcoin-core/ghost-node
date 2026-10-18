@@ -1246,6 +1246,12 @@ func RPCMarshalHeader(head *types.Header) map[string]interface{} {
 	if head.ParentBeaconRoot != nil {
 		result["parentBeaconBlockRoot"] = head.ParentBeaconRoot
 	}
+	if head.CoinTreeRoot != nil {
+		result["coinTreeRoot"] = head.CoinTreeRoot
+	}
+	if head.DataTreeRoot != nil {
+		result["dataTreeRoot"] = head.DataTreeRoot
+	}
 	return result
 }
 
@@ -1270,6 +1276,8 @@ type RPCMarshalHeaderT struct {
 	ReceiptsRoot     common.Hash       `json:"receiptsRoot"`
 	BaseFee          *hexutil.Big      `json:"baseFeePerGas,omitempty"`
 	WithdrawalsHash  *common.Hash      `json:"withdrawalsRoot,omitempty"`
+	CoinTreeRoot     *common.Hash      `json:"coinTreeRoot,omitempty"`
+	DataTreeRoot     *common.Hash      `json:"dataTreeRoot,omitempty"`
 }
 
 // NewRPCMarshalHeaderTFromHeader constructs a new RPCMarshalHeaderT struct from a given header.
@@ -1306,6 +1314,9 @@ func NewRPCMarshalHeaderTFromHeader(header *types.Header) *RPCMarshalHeaderT {
 	if header.WithdrawalsHash != nil {
 		head.WithdrawalsHash = header.WithdrawalsHash
 	}
+
+	head.CoinTreeRoot = header.CoinTreeRoot
+	head.DataTreeRoot = header.DataTreeRoot
 
 	return head
 }

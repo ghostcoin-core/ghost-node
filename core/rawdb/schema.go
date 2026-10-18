@@ -134,6 +134,14 @@ var (
 
 	CliqueSnapshotPrefix = []byte("clique-")
 
+	// Commitment tree history: every leaf and note of the canonical chain,
+	// the records each block added, and the roots of full pages. None of the
+	// keys is 32 bytes long, so that state pruning never takes them for trie
+	// nodes.
+	ghostTreeLeafPrefix     = []byte("ghost-tree-leaf-")  // ghostTreeLeafPrefix + kind (1 byte) + tree index (uint64 big endian) + position (uint32 big endian) -> block number, leaf, note
+	ghostTreeBlockPrefix    = []byte("ghost-tree-block-") // ghostTreeBlockPrefix + block hash -> block number, positions written by the block
+	ghostTreePageRootPrefix = []byte("ghost-tree-page-")  // ghostTreePageRootPrefix + kind (1 byte) + tree index (uint64 big endian) + page (uint32 big endian) -> root of the full page
+
 	BestUpdateKey         = []byte("update-")    // bigEndian64(syncPeriod) -> RLP(types.LightClientUpdate)  (nextCommittee only referenced by root hash)
 	FixedCommitteeRootKey = []byte("fixedRoot-") // bigEndian64(syncPeriod) -> committee root hash
 	SyncCommitteeKey      = []byte("committee-") // bigEndian64(syncPeriod) -> serialized committee
@@ -229,6 +237,31 @@ func bloomBitsKey(bit uint, section uint64, hash common.Hash) []byte {
 // skeletonHeaderKey = skeletonHeaderPrefix + num (uint64 big endian)
 func skeletonHeaderKey(number uint64) []byte {
 	return append(skeletonHeaderPrefix, encodeBlockNumber(number)...)
+}
+
+// ghostTreeKey = prefix + kind + tree index (uint64 big endian) + n (uint32 big endian)
+func ghostTreeKey(prefix []byte, kind uint8, treeIndex uint64, n uint32) []byte {
+	key := make([]byte, len(prefix)+1+8+4)
+	copy(key, prefix)
+	key[len(prefix)] = kind
+	binary.BigEndian.PutUint64(key[len(prefix)+1:], treeIndex)
+	binary.BigEndian.PutUint32(key[len(prefix)+9:], n)
+	return key
+}
+
+// ghostTreeLeafKey = ghostTreeLeafPrefix + kind + tree index + position
+func ghostTreeLeafKey(kind uint8, treeIndex uint64, position uint32) []byte {
+	return ghostTreeKey(ghostTreeLeafPrefix, kind, treeIndex, position)
+}
+
+// ghostTreePageRootKey = ghostTreePageRootPrefix + kind + tree index + page
+func ghostTreePageRootKey(kind uint8, treeIndex uint64, page uint32) []byte {
+	return ghostTreeKey(ghostTreePageRootPrefix, kind, treeIndex, page)
+}
+
+// ghostTreeBlockKey = ghostTreeBlockPrefix + block hash
+func ghostTreeBlockKey(hash common.Hash) []byte {
+	return append(append([]byte{}, ghostTreeBlockPrefix...), hash.Bytes()...)
 }
 
 // preimageKey = PreimagePrefix + hash
