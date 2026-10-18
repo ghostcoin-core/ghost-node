@@ -189,7 +189,7 @@ type Pool struct {
 	locals     int                       // local reveals among those being checked
 	peers      map[string]*peerBudget
 
-	feed event.Feed
+	feed  event.Feed
 	scope event.SubscriptionScope
 }
 
