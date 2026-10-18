@@ -144,8 +144,8 @@ For an including block at height `H`, the window is `w = floor(H / 4)` and
 (the including block itself when `H = 4w`). With `U0 = b_ref` and
 `U(j+1) = U(j) + floor(U(j)/8) + floor(U(j)/20000) + 1`, the price is `U3`,
 the base part `G_PRIV * price`, the tip `ceil(base part / 10)` and the fee
-`base part + tip`. For `b_ref = 10^9` the fee is 25954253644941297; for
-`b_ref = 1.1 * 10^9` it is 28549678993031962.
+`base part + tip`. For `b_ref = 10^9` the fee is 33036375802978007; for
+`b_ref = 1.1 * 10^9` it is 36340013362396340.
 
 ## Proof verifier
 

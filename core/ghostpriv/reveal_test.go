@@ -412,7 +412,7 @@ func TestBlockWithTwoRevealsOfOneMarkerIsInvalid(t *testing.T) {
 	useStub(t)
 	f := newFixture(t, 50_000_000, nil)
 	var (
-		c1, c2        = testCoin("twice one", oneGhost), testCoin("twice two", oneGhost)
+		c1, c2         = testCoin("twice one", oneGhost), testCoin("twice two", oneGhost)
 		marker         = testMarker("twice")
 		out            = u256(ghostAmount(1, 4))
 		toOne, toOther = common.Address{0x9e, 1}, common.Address{0x9e, 2}
@@ -487,8 +487,8 @@ func TestRevealFeeMustEqualWindowFee(t *testing.T) {
 		price, base, tip, totalFee string
 	}
 	for _, tt := range []answer{
-		{1_000_000_000, "1424017979", "23594776040855724", "2359477604085573", "25954253644941297"},
-		{1_100_000_000, "1566419776", "25954253630029056", "2595425363002906", "28549678993031962"},
+		{1_000_000_000, "1424017979", "30033068911798188", "3003306891179819", "33036375802978007"},
+		{1_100_000_000, "1566419776", "33036375783996672", "3303637578399668", "36340013362396340"},
 	} {
 		fee, err := ghostpriv.WindowFee(big.NewInt(tt.bRef))
 		if err != nil {
