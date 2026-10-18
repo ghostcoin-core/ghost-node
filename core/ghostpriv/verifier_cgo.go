@@ -20,10 +20,18 @@ package ghostpriv
 
 // The static library is built from ghostverifier/ by
 // `go run build/ci.go ghostverifier`, which `build/ci.go install` runs first.
+//
+// A release build (ghostrelease) names only the library: cgo records its
+// linker flags in the compiled package, so a search path holding the
+// checkout's directory would make the executable depend on where it was
+// built. `build/ci.go install` gives the C linker the directory through
+// LIBRARY_PATH instead. Other builds, such as tests with the ghostproofs tag,
+// find it in the checkout.
 
 /*
 #cgo CFLAGS: -I${SRCDIR}/../../ghostverifier
-#cgo LDFLAGS: -L${SRCDIR}/../../build/cache/ghostverifier/release -lghostverifier
+#cgo !ghostrelease LDFLAGS: -L${SRCDIR}/../../build/cache/ghostverifier/release
+#cgo LDFLAGS: -lghostverifier
 #cgo linux LDFLAGS: -lm -ldl -lpthread
 #cgo darwin LDFLAGS: -lm
 #include "ghost_proofs.h"
