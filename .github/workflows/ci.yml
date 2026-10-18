@@ -59,7 +59,7 @@ jobs:
   build:
     name: build
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -69,6 +69,12 @@ jobs:
           go-version-file: go.mod
       - name: Build every command
         run: go run build/ci.go install
+      - name: Real-proof verifier tests
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          go test -tags ghostproofs -count=1 -v -run '^(TestGhostVerifierKnownAnswer|TestRealProofRevealRoundTrip)$' ./core/ghostpriv/
+          go test -tags ghostproofs -count=1 -v -run '^(TestRealProofRevealPoolAndBlock|TestRealProofTamperedRevealRejected)$' ./core/txpool/ghostpool/
       - name: The Linux release is one self-contained file
         run: file build/bin/geth | grep -q 'statically linked'
       - name: Record the geth hash
