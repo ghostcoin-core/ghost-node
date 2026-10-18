@@ -973,9 +973,13 @@ func TestGhostPoolOldRootAdmissionReadsNoAncestry(t *testing.T) {
 	if head.Number.Uint64() != length {
 		t.Fatalf("head at %d, want %d", head.Number, length)
 	}
-	oldRoot := f.headerAt(1).CoinTreeRoot
-	if oldRoot == nil || *oldRoot == *f.genesis.Header().CoinTreeRoot {
-		t.Fatal("the first block does not carry a coin root of its own")
+	// The generated blocks carry no tree roots, so the old root is the
+	// genesis's, at the bottom of the ancestry.
+	oldRoot := f.genesis.Header().CoinTreeRoot
+	for n := 1; n <= length; n++ {
+		if r := f.headerAt(n).CoinTreeRoot; r != nil && *r == *oldRoot {
+			t.Fatalf("block %d carries the genesis coin root too", n)
+		}
 	}
 	fee := f.windowFee(length + 1)
 	// The most headers one admission may read: the fee window, which the
