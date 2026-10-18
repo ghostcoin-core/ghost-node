@@ -144,3 +144,119 @@ func (tx *GhostRevealTx) decode(input []byte) error {
 func (tx *GhostRevealTx) hash() common.Hash {
 	return crypto.Keccak256Hash([]byte{GhostRevealTxType}, tx.Payload)
 }
+
+// The native data reveal transaction (docs/data-commitments.md). It is a
+// type of its own, 0x51, with the payload size and field offsets of the coin
+// reveal, so that a coin reveal and a data reveal can never be taken for each
+// other. Like the coin reveal it has no sender, nonce or signature, and its
+// consensus checks are in core/ghostpriv.
+const (
+	// GhostDataRevealTxType is the type byte of a data reveal.
+	GhostDataRevealTxType = 0x51
+
+	// GhostDataRevealPayloadSize is the length of a data reveal's payload,
+	// that of the coin reveal.
+	GhostDataRevealPayloadSize = GhostRevealPayloadSize
+
+	// GhostDataRevealEnvelopeSize is the length of a data reveal's envelope,
+	// the type byte and the payload.
+	GhostDataRevealEnvelopeSize = 1 + GhostDataRevealPayloadSize
+
+	// GhostDataRevealGas is the gas every data reveal takes from the block
+	// gas pool, G_PRIV as for the coin reveal.
+	GhostDataRevealGas = GhostRevealGas
+)
+
+// IsGhostReveal reports whether tx is a native transaction without an
+// account: a coin reveal (0x50) or a data reveal (0x51).
+func (tx *Transaction) IsGhostReveal() bool {
+	t := tx.Type()
+	return t == GhostRevealTxType || t == GhostDataRevealTxType
+}
+
+// GhostDataRevealTx is the payload of a data reveal, kept as its exact bytes.
+type GhostDataRevealTx struct {
+	Payload []byte
+}
+
+// NewGhostDataRevealTx wraps a data reveal envelope, the type byte 0x51 and
+// the payload, into a transaction. The envelope is copied. Only its type and
+// length are checked here; the fields are checked when a block includes it.
+func NewGhostDataRevealTx(envelope []byte) (*Transaction, error) {
+	if len(envelope) == 0 || envelope[0] != GhostDataRevealTxType {
+		return nil, fmt.Errorf("%w: not a data reveal envelope", ErrInvalidTxType)
+	}
+	inner := new(GhostDataRevealTx)
+	if err := inner.decode(envelope[1:]); err != nil {
+		return nil, err
+	}
+	tx := new(Transaction)
+	tx.setDecoded(inner, uint64(len(envelope)))
+	return tx, nil
+}
+
+// GhostDataRevealEnvelope returns a copy of a data reveal's envelope, nil for
+// any other transaction, a coin reveal included.
+func (tx *Transaction) GhostDataRevealEnvelope() []byte {
+	inner, ok := tx.inner.(*GhostDataRevealTx)
+	if !ok {
+		return nil
+	}
+	return append([]byte{GhostDataRevealTxType}, inner.Payload...)
+}
+
+func (tx *GhostDataRevealTx) copy() TxData {
+	return &GhostDataRevealTx{Payload: common.CopyBytes(tx.Payload)}
+}
+
+func (tx *GhostDataRevealTx) txType() byte { return GhostDataRevealTxType }
+
+// chainID returns the payload's chain ID field, zero if the payload is too
+// short to hold it.
+func (tx *GhostDataRevealTx) chainID() *big.Int {
+	if len(tx.Payload) < 10 {
+		return new(big.Int)
+	}
+	return new(big.Int).SetUint64(binary.BigEndian.Uint64(tx.Payload[2:10]))
+}
+
+func (tx *GhostDataRevealTx) accessList() AccessList { return nil }
+func (tx *GhostDataRevealTx) data() []byte           { return nil }
+func (tx *GhostDataRevealTx) gas() uint64            { return GhostDataRevealGas }
+
+// A data reveal's fee is a field of its payload; it has no gas price.
+func (tx *GhostDataRevealTx) gasPrice() *big.Int  { return new(big.Int) }
+func (tx *GhostDataRevealTx) gasTipCap() *big.Int { return new(big.Int) }
+func (tx *GhostDataRevealTx) gasFeeCap() *big.Int { return new(big.Int) }
+func (tx *GhostDataRevealTx) value() *big.Int     { return new(big.Int) }
+func (tx *GhostDataRevealTx) nonce() uint64       { return 0 }
+func (tx *GhostDataRevealTx) to() *common.Address { return nil }
+
+func (tx *GhostDataRevealTx) effectiveGasPrice(dst *big.Int, baseFee *big.Int) *big.Int {
+	return dst.SetUint64(0)
+}
+
+func (tx *GhostDataRevealTx) rawSignatureValues() (v, r, s *big.Int) {
+	return new(big.Int), new(big.Int), new(big.Int)
+}
+
+// setSignatureValues does nothing: a data reveal carries no signature.
+func (tx *GhostDataRevealTx) setSignatureValues(chainID, v, r, s *big.Int) {}
+
+func (tx *GhostDataRevealTx) encode(b *bytes.Buffer) error {
+	_, err := b.Write(tx.Payload)
+	return err
+}
+
+func (tx *GhostDataRevealTx) decode(input []byte) error {
+	if len(input) != GhostDataRevealPayloadSize {
+		return fmt.Errorf("%w: %d bytes, want %d", ErrGhostRevealLength, len(input)+1, GhostDataRevealEnvelopeSize)
+	}
+	tx.Payload = common.CopyBytes(input)
+	return nil
+}
+
+// hash is keccak256(0x51 || payload).
+func (tx *GhostDataRevealTx) hash() common.Hash {
+	return crypto.Keccak256Hash([]byte{GhostDataRevealTxType}, tx.Payload)
+}

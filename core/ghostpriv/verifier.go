@@ -21,6 +21,7 @@ import (
 	"sync/atomic"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/ghosttree"
 	"github.com/holiman/uint256"
 )
 
@@ -30,7 +31,15 @@ var ErrNoVerifier = errors.New("no reveal proof verifier in this node")
 
 // VerifyInputs are the public inputs of a reveal's proof, as the node
 // computes them: never taken from the proof.
+//
+// Kind and Purpose name the statement: a coin reveal is Kind ghosttree.Coin
+// with PurposeReveal; a data reveal is Kind ghosttree.Data with
+// PurposeReveal or PurposeRevoke. For a data reveal Recipient is the
+// verifier-or-recipient field, which credits nothing, and Remainder, Out,
+// Rule and Note are zero.
 type VerifyInputs struct {
+	Kind      ghosttree.Kind
+	Purpose   byte
 	Binding   common.Hash // the binding digest
 	ChainID   uint64
 	Domain    common.Hash // the genesis block hash

@@ -218,6 +218,10 @@ type StateTransition struct {
 	// commit is the parsed commit of a top-level call to the commit entry
 	// address, set by preCheck; nil for any other message.
 	commit *ghostpriv.Commit
+
+	// dataCommit is the parsed data commit of a top-level call to the data
+	// commit entry address, set by preCheck; nil for any other message.
+	dataCommit *ghostpriv.DataCommit
 }
 
 // NewStateTransition initialises and returns a new state transition object.
@@ -357,7 +361,7 @@ func (st *StateTransition) preCheck() error {
 			}
 		}
 	}
-	if msg.To != nil && *msg.To == ghost.CommitEntryAddress {
+	if msg.To != nil && ghost.IsCommitEntry(*msg.To) {
 		if err := st.checkCommit(); err != nil {
 			return err
 		}
@@ -365,9 +369,9 @@ func (st *StateTransition) preCheck() error {
 	return st.buyGas()
 }
 
-// checkCommit runs the checks of a commit that come after the ordinary
-// checks above and before the funds check of buyGas, which covers the value
-// and the gas: the intrinsic gas, then the data, F and the value.
+// checkCommit runs the checks of a coin or data commit that come after the
+// ordinary checks above and before the funds check of buyGas, which covers
+// the value and the gas: the intrinsic gas, then the data, F and the value.
 func (st *StateTransition) checkCommit() error {
 	var (
 		msg      = st.msg
@@ -384,6 +388,14 @@ func (st *StateTransition) checkCommit() error {
 	}
 	if msg.GasLimit < gas {
 		return fmt.Errorf("%w: have %d, want %d", ErrIntrinsicGas, msg.GasLimit, gas)
+	}
+	if *msg.To == ghost.DataCommitEntryAddress {
+		dataCommit, err := ghostpriv.ParseDataCommit(msg.Data, msg.Value)
+		if err != nil {
+			return fmt.Errorf("%w: address %v", err, msg.From.Hex())
+		}
+		st.dataCommit = dataCommit
+		return nil
 	}
 	commit, err := ghostpriv.ParseCommit(msg.Data, msg.Value)
 	if err != nil {
@@ -504,6 +516,13 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 		// nobody, and the commitment the node computes is appended.
 		st.state.SetNonce(msg.From, st.state.GetNonce(msg.From)+1)
 		if err := ghostpriv.ApplyCommit(st.state, st.evm.Context.BlockNumber.Uint64(), msg.From, st.commit); err != nil {
+			return nil, err
+		}
+	case st.dataCommit != nil:
+		// A data commit runs no code and moves no value: the data
+		// commitment the node computes is appended to the data tree.
+		st.state.SetNonce(msg.From, st.state.GetNonce(msg.From)+1)
+		if err := ghostpriv.ApplyDataCommit(st.state, st.evm.Context.BlockNumber.Uint64(), st.dataCommit); err != nil {
 			return nil, err
 		}
 	case contractCreation:

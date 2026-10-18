@@ -18,6 +18,10 @@
 // ordinary transaction that burns public value into a coin commitment, and
 // the reveal, the native transaction without an account that mints public
 // value out of the hidden set against a proof (docs/private-transactions.md).
+// It also holds the data rules: the data commit, which appends a data
+// commitment without moving value, and the data reveal, which spends a data
+// marker once against a proof and moves no value
+// (docs/data-commitments.md).
 package ghostpriv
 
 import (
@@ -42,6 +46,16 @@ const (
 	TagRevealReceipt = "ghost/reveal-receipt/v1"
 )
 
+// The hash tags of the data rules, none shared with a coin rule, so that no
+// coin value can be used as a data value.
+const (
+	TagDataCommitment    = "ghost/data-commitment/v1"
+	TagDataMarker        = "ghost/data-marker/v1"
+	TagDataRevealBinding = "ghost/data-reveal-binding/v1"
+	TagDataCommitReceipt = "ghost/data-commit-receipt/v1"
+	TagDataRevealReceipt = "ghost/data-reveal-receipt/v1"
+)
+
 // Sizes and constants of the coin rules.
 const (
 	// NoteSize is the length of a note, the encrypted data stored with a
@@ -59,6 +73,10 @@ const (
 // Coin is the type of a coin commitment, COIN. The node supplies it; a
 // sender cannot choose a type.
 var Coin = [2]byte{0x01, 0x01}
+
+// Data is the type of a data commitment, DATA. The node supplies it; there
+// are no application-defined data types.
+var Data = [2]byte{0x02, 0x01}
 
 // VMax is the largest amount, 2^96 - 1.
 var VMax = new(uint256.Int).Sub(new(uint256.Int).Lsh(uint256.NewInt(1), 96), uint256.NewInt(1))
@@ -112,6 +130,12 @@ func readAmount(w []byte) (*uint256.Int, error) {
 // K("ghost/coin-commitment/v1", COIN, F, v as a 32-byte word).
 func Commitment(f common.Hash, v *uint256.Int) common.Hash {
 	return ghosttree.K(TagCommitment, Coin[:], f[:], amountWord(v))
+}
+
+// DataCommitment returns the data commitment of F_d,
+// K("ghost/data-commitment/v1", DATA, F_d). It carries no amount.
+func DataCommitment(f common.Hash) common.Hash {
+	return ghosttree.K(TagDataCommitment, Data[:], f[:])
 }
 
 // Slots of the totals account.

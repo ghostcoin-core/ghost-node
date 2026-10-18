@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"sync/atomic"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/ghosttree"
@@ -58,8 +59,15 @@ const (
 // Fixed fields of the binding digest.
 const (
 	statementCoinReveal = 0x01
+	statementDataReveal = 0x02
 	statementVersion    = 0x01
-	purposeReveal       = 0x01
+	purposeReveal       = PurposeReveal
+)
+
+// The purposes of a data reveal. The coin reveal has only PurposeReveal.
+const (
+	PurposeReveal byte = 0x01 // a one-time reveal of the data
+	PurposeRevoke byte = 0x02 // a revoke, which spends the marker for good
 )
 
 // The errors of the reveal checks, one per check, in the order they run.
@@ -303,6 +311,8 @@ func CheckReveal(st StateDB, env *BlockEnv, verifier Verifier, envelope []byte) 
 		verifier = DefaultVerifier()
 	}
 	in := &VerifyInputs{
+		Kind:      ghosttree.Coin,
+		Purpose:   purposeReveal,
 		Binding:   binding,
 		ChainID:   chainID,
 		Domain:    env.Genesis,
@@ -366,6 +376,278 @@ func ApplyReveal(st StateDB, env *BlockEnv, verifier Verifier, envelope []byte) 
 		Topics:      []common.Hash{ghosttree.K(TagRevealReceipt), r.Marker},
 		Data:        data,
 		BlockNumber: height,
+	})
+	return nil
+}
+
+// DataBindingSize is the length of a data reveal's binding digest input.
+const DataBindingSize = 164
+
+// The errors of the data reveal checks, one per check, in the order they
+// run. Check 8 computes the binding digest and cannot fail.
+var (
+	ErrDataRevealLength  = errors.New("data reveal is not a 0x51 envelope of 1,028,491 bytes")
+	ErrDataRevealVersion = errors.New("data reveal version is not 1")
+	ErrDataRevealAmount  = errors.New("data reveal out or fee not below 2^96")
+	ErrDataRevealChainID = errors.New("data reveal chain id is not this chain's")
+	ErrDataRevealFee     = errors.New("data reveal fee rejected")
+	ErrDataRevealPurpose = errors.New("data reveal purpose is neither reveal nor revoke")
+	ErrDataRevealShape   = errors.New("data reveal carries a value or a remainder")
+	ErrDataRevealRoot    = errors.New("data reveal root is not an ancestor's data tree root")
+	ErrDataRevealMarker  = errors.New("data reveal marker already used")
+	ErrDataRevealProof   = errors.New("data reveal proof rejected")
+
+	// ErrDataRevealFeeUnsettled is wrapped by ErrDataRevealFee for every
+	// data reveal while the fee source is not settled.
+	ErrDataRevealFeeUnsettled = errors.New("data reveal fee source not settled")
+)
+
+// dataRevealZeroFee is the test-only switch that settles the data reveal fee
+// as zero. It is off by default, and then every data reveal is rejected at
+// the fee check.
+var dataRevealZeroFee atomic.Bool
+
+// SetDataRevealZeroFee turns the test-only zero data reveal fee on or off and
+// returns a function that restores the setting before. With it on, a data
+// reveal's fee must be zero; with it off, the default, every data reveal is
+// rejected. It is for tests, like SetVerifier; nothing else calls it, and it
+// does not settle the fee for a network.
+func SetDataRevealZeroFee(on bool) (restore func()) {
+	prev := dataRevealZeroFee.Swap(on)
+	return func() { dataRevealZeroFee.Store(prev) }
+}
+
+// PurposeField returns the 32-byte purpose field of a data reveal, 31 zero
+// bytes then the purpose.
+func PurposeField(purpose byte) common.Hash { return common.Hash{31: purpose} }
+
+// DataReveal is a decoded data reveal payload. It has the coin reveal's
+// layout: the remainder field holds the purpose, the recipient field is the
+// verifier-or-recipient field, and out, fee and the note must be zero.
+type DataReveal struct {
+	Version  uint16
+	ChainID  uint64
+	Marker   common.Hash
+	Root     common.Hash
+	Purpose  common.Hash    // the purpose field, see PurposeField
+	Verifier common.Address // the verifier-or-recipient field; credits nothing
+	Out      *uint256.Int
+	Fee      *uint256.Int
+	Proof    []byte // ProofSize bytes, or fewer to be padded with zeros
+	Note     [NoteSize]byte
+}
+
+// MarshalBinary returns the data reveal's envelope: the type byte 0x51 and
+// the payload of EnvelopeSize - 1 bytes. A shorter proof is padded with
+// zeros; a longer one is an error.
+func (r *DataReveal) MarshalBinary() ([]byte, error) {
+	if len(r.Proof) > ProofSize {
+		return nil, fmt.Errorf("proof of %d bytes, the field holds %d", len(r.Proof), ProofSize)
+	}
+	env := make([]byte, types.GhostDataRevealEnvelopeSize)
+	env[0] = types.GhostDataRevealTxType
+	p := env[1:]
+	binary.BigEndian.PutUint16(p[offVersion:], r.Version)
+	binary.BigEndian.PutUint64(p[offChainID:], r.ChainID)
+	copy(p[offMarker:], r.Marker[:])
+	copy(p[offRoot:], r.Root[:])
+	copy(p[offRemainder:], r.Purpose[:])
+	copy(p[offRecipient:], r.Verifier[:])
+	if r.Out != nil {
+		copy(p[offOut:offFee], amountWord(r.Out))
+	}
+	if r.Fee != nil {
+		copy(p[offFee:offProof], amountWord(r.Fee))
+	}
+	copy(p[offProof:offNote], r.Proof)
+	copy(p[offNote:], r.Note[:])
+	return env, nil
+}
+
+// DecodeDataReveal decodes a data reveal envelope and runs the first three
+// checks: the type byte 0x51 and exact length (ErrDataRevealLength), version
+// 1 (ErrDataRevealVersion), and out and fee below 2^96
+// (ErrDataRevealAmount). A coin reveal envelope, type 0x50, fails the first.
+func DecodeDataReveal(envelope []byte) (*DataReveal, error) {
+	if len(envelope) != types.GhostDataRevealEnvelopeSize || envelope[0] != types.GhostDataRevealTxType {
+		return nil, fmt.Errorf("%w: %d bytes", ErrDataRevealLength, len(envelope))
+	}
+	p := envelope[1:]
+	r := &DataReveal{
+		Version:  binary.BigEndian.Uint16(p[offVersion:]),
+		ChainID:  binary.BigEndian.Uint64(p[offChainID:]),
+		Marker:   common.BytesToHash(p[offMarker:offRoot]),
+		Root:     common.BytesToHash(p[offRoot:offRemainder]),
+		Purpose:  common.BytesToHash(p[offRemainder:offRecipient]),
+		Verifier: common.BytesToAddress(p[offRecipient:offOut]),
+		Proof:    common.CopyBytes(p[offProof:offNote]),
+	}
+	copy(r.Note[:], p[offNote:])
+	if r.Version != Version {
+		return nil, fmt.Errorf("%w: %d", ErrDataRevealVersion, r.Version)
+	}
+	var err error
+	if r.Out, err = readAmount(p[offOut:offFee]); err != nil {
+		return nil, fmt.Errorf("%w: out", ErrDataRevealAmount)
+	}
+	if r.Fee, err = readAmount(p[offFee:offProof]); err != nil {
+		return nil, fmt.Errorf("%w: fee", ErrDataRevealAmount)
+	}
+	return r, nil
+}
+
+// purpose returns the purpose of the purpose field: PurposeReveal or
+// PurposeRevoke after 31 zero bytes. Anything else is ErrDataRevealPurpose.
+func (r *DataReveal) purpose() (byte, error) {
+	for _, b := range r.Purpose[:31] {
+		if b != 0 {
+			return 0, fmt.Errorf("%w: %x", ErrDataRevealPurpose, r.Purpose)
+		}
+	}
+	switch p := r.Purpose[31]; p {
+	case PurposeReveal, PurposeRevoke:
+		return p, nil
+	default:
+		return 0, fmt.Errorf("%w: %#x", ErrDataRevealPurpose, p)
+	}
+}
+
+// BindingDigest returns the binding digest a data reveal's proof must commit
+// to, K("ghost/data-reveal-binding/v1", fields) over the 164 bytes of
+// BindingInput. Its tag, statement and type differ from the coin reveal's,
+// so it never equals a coin reveal's digest.
+func (r *DataReveal) BindingDigest(chainID uint64, genesis common.Hash) common.Hash {
+	return ghosttree.K(TagDataRevealBinding, r.BindingInput(chainID, genesis))
+}
+
+// BindingInput returns the 164 bytes the data binding digest hashes: the
+// chain id (8), the version (2), the domain, which is the genesis hash (32),
+// the transaction type 0x51 (1), the statement 0x02 and its version (1
+// each), the type DATA (2), the purpose (1, the last byte of the purpose
+// field), the verifier-or-recipient field (20), the root and marker (32
+// each) and the fee (32). The node supplies the chain id, version, domain,
+// transaction type, statement and type; the proof is not covered.
+func (r *DataReveal) BindingInput(chainID uint64, genesis common.Hash) []byte {
+	fee := r.Fee
+	if fee == nil {
+		fee = new(uint256.Int)
+	}
+	b := make([]byte, 0, DataBindingSize)
+	b = binary.BigEndian.AppendUint64(b, chainID)
+	b = binary.BigEndian.AppendUint16(b, Version)
+	b = append(b, genesis[:]...)
+	b = append(b, types.GhostDataRevealTxType, statementDataReveal, statementVersion)
+	b = append(b, Data[:]...)
+	b = append(b, r.Purpose[31])
+	b = append(b, r.Verifier[:]...)
+	b = append(b, r.Root[:]...)
+	b = append(b, r.Marker[:]...)
+	b = append(b, amountWord(fee)...)
+	return b
+}
+
+// dataRootEligible reports whether root is the data tree root in the header
+// of a block of the including block's ancestry, strictly below it, found by
+// walking parent links. A missing ancestor ends the walk with false.
+func (env *BlockEnv) dataRootEligible(root common.Hash) bool {
+	for h := env.parent(env.Header); h != nil; h = env.parent(h) {
+		if r := ghosttree.HeaderRoot(h, ghosttree.Data); r != nil && *r == root {
+			return true
+		}
+	}
+	return false
+}
+
+// CheckDataReveal runs checks 1 to 11 of a data reveal against the state
+// before it and returns the decoded data reveal and its purpose. It changes
+// nothing.
+func CheckDataReveal(st StateDB, env *BlockEnv, verifier Verifier, envelope []byte) (*DataReveal, byte, error) {
+	// Checks 1 to 3: type, length, version and amount words.
+	r, err := DecodeDataReveal(envelope)
+	if err != nil {
+		return nil, 0, err
+	}
+	if env == nil || env.Header == nil || env.Header.Number == nil {
+		return nil, 0, fmt.Errorf("%w: no including block", ErrRevealChainInfo)
+	}
+	// Check 4: the chain id.
+	if env.ChainID == nil || !env.ChainID.IsUint64() || env.ChainID.Uint64() != r.ChainID {
+		return nil, 0, fmt.Errorf("%w: have %d, chain %v", ErrDataRevealChainID, r.ChainID, env.ChainID)
+	}
+	chainID := env.ChainID.Uint64()
+	// Check 5: the fee. Its source is not settled, so every data reveal is
+	// rejected unless a test has settled it as zero.
+	if !dataRevealZeroFee.Load() {
+		return nil, 0, fmt.Errorf("%w: %w", ErrDataRevealFee, ErrDataRevealFeeUnsettled)
+	}
+	if !r.Fee.IsZero() {
+		return nil, 0, fmt.Errorf("%w: have %v, want 0", ErrDataRevealFee, r.Fee)
+	}
+	// Check 6: the purpose.
+	purpose, err := r.purpose()
+	if err != nil {
+		return nil, 0, err
+	}
+	// Check 7: no value and no remainder: out and the note are zero.
+	if !r.Out.IsZero() {
+		return nil, 0, fmt.Errorf("%w: out %v", ErrDataRevealShape, r.Out)
+	}
+	if r.Note != ([NoteSize]byte{}) {
+		return nil, 0, fmt.Errorf("%w: a note", ErrDataRevealShape)
+	}
+	// Check 8: the node's own binding digest.
+	binding := r.BindingDigest(chainID, env.Genesis)
+	// Check 9: the root, a data tree root of the ancestry.
+	if !env.dataRootEligible(r.Root) {
+		return nil, 0, fmt.Errorf("%w: %x", ErrDataRevealRoot, r.Root)
+	}
+	// Check 10: the marker, against the data marker set, which holds the
+	// markers of earlier data reveals and revokes of this block too.
+	if ghosttree.IsSpent(st, ghosttree.Data, r.Marker) {
+		return nil, 0, fmt.Errorf("%w: %x", ErrDataRevealMarker, r.Marker)
+	}
+	// Check 11: the proof, for the inputs the node computed.
+	if verifier == nil {
+		verifier = DefaultVerifier()
+	}
+	in := &VerifyInputs{
+		Kind:      ghosttree.Data,
+		Purpose:   purpose,
+		Binding:   binding,
+		ChainID:   chainID,
+		Domain:    env.Genesis,
+		Root:      r.Root,
+		Marker:    r.Marker,
+		Recipient: r.Verifier,
+		Out:       new(uint256.Int),
+		Fee:       new(uint256.Int).Set(r.Fee),
+	}
+	if err := verifier.VerifyReveal(in, common.CopyBytes(r.Proof)); err != nil {
+		return nil, 0, fmt.Errorf("%w: %w", ErrDataRevealProof, err)
+	}
+	return r, purpose, nil
+}
+
+// ApplyDataReveal checks a data reveal and makes its one change: it adds the
+// marker to the data marker set and writes the receipt log. It appends to
+// neither tree, mints nothing, moves no balance and leaves the totals as
+// they are. The gas is the caller's. On an error nothing is changed.
+func ApplyDataReveal(st StateDB, env *BlockEnv, verifier Verifier, envelope []byte) error {
+	r, purpose, err := CheckDataReveal(st, env, verifier, envelope)
+	if err != nil {
+		return err
+	}
+	if err := ghosttree.MarkSpent(st, ghosttree.Data, r.Marker); err != nil {
+		return fmt.Errorf("%w: %w", ErrDataRevealMarker, err)
+	}
+	data := make([]byte, 0, 1+20)
+	data = append(data, purpose)
+	data = append(data, r.Verifier[:]...)
+	st.AddLog(&types.Log{
+		Address:     ghosttree.TreeAccount(ghosttree.Data),
+		Topics:      []common.Hash{ghosttree.K(TagDataRevealReceipt), r.Marker},
+		Data:        data,
+		BlockNumber: env.Header.Number.Uint64(),
 	})
 	return nil
 }

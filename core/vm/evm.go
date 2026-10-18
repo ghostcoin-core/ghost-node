@@ -31,10 +31,10 @@ import (
 	"github.com/holiman/uint256"
 )
 
-// ErrCommitEntryCall is returned for any call to the commit entry address
-// from inside the EVM. A commit is only ever a top-level transaction, which
-// the state transition handles before the EVM runs, so no contract can burn
-// into a commitment.
+// ErrCommitEntryCall is returned for any call to the coin or the data commit
+// entry address from inside the EVM. A commit is only ever a top-level
+// transaction, which the state transition handles before the EVM runs, so no
+// contract can burn into a commitment or append a data commitment.
 var ErrCommitEntryCall = errors.New("call to the commit entry address")
 
 type (
@@ -224,7 +224,7 @@ func (evm *EVM) Call(caller ContractRef, addr common.Address, input []byte, gas 
 	if evm.depth > int(vars.CallCreateDepth) {
 		return nil, gas, ErrDepth
 	}
-	if addr == ghost.CommitEntryAddress {
+	if ghost.IsCommitEntry(addr) {
 		return nil, 0, ErrCommitEntryCall
 	}
 	// Fail if we're trying to transfer more than the available balance
@@ -314,7 +314,7 @@ func (evm *EVM) CallCode(caller ContractRef, addr common.Address, input []byte, 
 	if evm.depth > int(vars.CallCreateDepth) {
 		return nil, gas, ErrDepth
 	}
-	if addr == ghost.CommitEntryAddress {
+	if ghost.IsCommitEntry(addr) {
 		return nil, 0, ErrCommitEntryCall
 	}
 	// Fail if we're trying to transfer more than the available balance
@@ -365,7 +365,7 @@ func (evm *EVM) DelegateCall(caller ContractRef, addr common.Address, input []by
 	if evm.depth > int(vars.CallCreateDepth) {
 		return nil, gas, ErrDepth
 	}
-	if addr == ghost.CommitEntryAddress {
+	if ghost.IsCommitEntry(addr) {
 		return nil, 0, ErrCommitEntryCall
 	}
 	var snapshot = evm.StateDB.Snapshot()
@@ -411,7 +411,7 @@ func (evm *EVM) StaticCall(caller ContractRef, addr common.Address, input []byte
 	if evm.depth > int(vars.CallCreateDepth) {
 		return nil, gas, ErrDepth
 	}
-	if addr == ghost.CommitEntryAddress {
+	if ghost.IsCommitEntry(addr) {
 		return nil, 0, ErrCommitEntryCall
 	}
 	// We take a snapshot here. This is a bit counter-intuitive, and could probably be skipped.

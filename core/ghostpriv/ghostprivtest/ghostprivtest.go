@@ -21,7 +21,9 @@
 // A stub proof is the proof field of a reveal whose first 32 bytes are
 // K("ghost/test-proof/v1", binding digest) and whose other bytes are zero.
 // The stub checks nothing else: membership, the marker's derivation and
-// conservation are the real proof's job.
+// conservation are the real proof's job. Coin and data reveals have binding
+// digests of their own, with their own tags, so the stub proof of a coin
+// reveal never verifies a data reveal, nor a reveal's a revoke.
 package ghostprivtest
 
 import (
@@ -49,12 +51,15 @@ func Proof(binding common.Hash) []byte {
 }
 
 // Verifier is the stub verifier: it accepts exactly the stub proof of the
-// binding digest the node computed.
+// binding digest the node computed, for a coin or a data reveal.
 type Verifier struct{}
 
 // VerifyReveal implements ghostpriv.Verifier.
 func (Verifier) VerifyReveal(in *ghostpriv.VerifyInputs, proof []byte) error {
 	if in == nil || len(proof) != ghostpriv.ProofSize {
+		return ErrStubProof
+	}
+	if in.Kind != ghosttree.Coin && in.Kind != ghosttree.Data {
 		return ErrStubProof
 	}
 	want := ghosttree.K(TagTestProof, in.Binding[:])

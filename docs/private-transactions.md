@@ -208,5 +208,6 @@ Reveals reach a block only through the chain maker of the tests
 (`core/chain_makers.go`): the pool, the miner, the RPC submission methods and
 the peer protocol do not handle type `0x50` yet. The history store of
 [trees and headers](trees-and-headers.md) is not fed from these receipts yet.
-Only the coin kind is wired: nothing commits to or reveals from the data tree,
-and the only rule is the empty one.
+The only rule is the empty one. The data tree has its own commit and its own
+reveal, type `0x51`, in [data commit and data reveal](data-commitments.md);
+a coin reveal is never checked as a data reveal, or the other way round.

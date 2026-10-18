@@ -34,4 +34,16 @@ var (
 	// 32-byte big-endian integer. It gets nonce 1 when it is first written,
 	// as the tree accounts do.
 	PrivTotalsAccount = common.HexToAddress("0x67686f7374000000000000000000000000000006")
+
+	// DataCommitEntryAddress is where a data commit is sent: a top-level
+	// transaction to it with value 0 appends a data commitment to the data
+	// tree (docs/data-commitments.md). Like the commit entry address it
+	// holds nothing, and every EVM call to it fails.
+	DataCommitEntryAddress = common.HexToAddress("0x67686f7374000000000000000000000000000007")
 )
+
+// IsCommitEntry reports whether addr is the coin or the data commit entry
+// address, which no call from inside the EVM may reach.
+func IsCommitEntry(addr common.Address) bool {
+	return addr == CommitEntryAddress || addr == DataCommitEntryAddress
+}
