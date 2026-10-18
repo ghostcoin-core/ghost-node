@@ -204,7 +204,7 @@ func (r *Receipt) decodeTyped(b []byte) error {
 		return errShortTypedReceipt
 	}
 	switch b[0] {
-	case DynamicFeeTxType, AccessListTxType, BlobTxType:
+	case DynamicFeeTxType, AccessListTxType, BlobTxType, GhostRevealTxType:
 		var data receiptRLP
 		err := rlp.DecodeBytes(b[1:], &data)
 		if err != nil {
@@ -312,7 +312,7 @@ func (rs Receipts) EncodeIndex(i int, w *bytes.Buffer) {
 	}
 	w.WriteByte(r.Type)
 	switch r.Type {
-	case AccessListTxType, DynamicFeeTxType, BlobTxType:
+	case AccessListTxType, DynamicFeeTxType, BlobTxType, GhostRevealTxType:
 		rlp.Encode(w, data)
 	default:
 		// For unsupported types, write nothing. Since this is for
@@ -348,7 +348,8 @@ func (rs Receipts) DeriveFields(config ctypes.ChainConfigurator, hash common.Has
 		rs[i].TransactionIndex = uint(i)
 
 		// The contract address can be derived from the transaction itself
-		if txs[i].To() == nil {
+		// A reveal has no sender and creates nothing.
+		if txs[i].To() == nil && txs[i].Type() != GhostRevealTxType {
 			// Deriving the signer is expensive, only do if it's actually needed
 			from, _ := Sender(signer, txs[i])
 			rs[i].ContractAddress = crypto.CreateAddress(from, txs[i].Nonce())

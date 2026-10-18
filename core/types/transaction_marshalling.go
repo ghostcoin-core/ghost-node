@@ -153,6 +153,13 @@ func (tx *Transaction) MarshalJSON() ([]byte, error) {
 			enc.Commitments = itx.Sidecar.Commitments
 			enc.Proofs = itx.Sidecar.Proofs
 		}
+
+	case *GhostRevealTx:
+		// A reveal has no sender, nonce, gas price or signature: only its
+		// payload, as the input, and the chain ID field of the payload.
+		enc.ChainID = (*hexutil.Big)(itx.chainID())
+		payload := hexutil.Bytes(common.CopyBytes(itx.Payload))
+		enc.Input = &payload
 	}
 	return json.Marshal(&enc)
 }
@@ -408,6 +415,16 @@ func (tx *Transaction) UnmarshalJSON(input []byte) error {
 				return err
 			}
 		}
+
+	case GhostRevealTxType:
+		if dec.Input == nil {
+			return errors.New("missing required field 'input' in transaction")
+		}
+		var itx GhostRevealTx
+		if err := itx.decode(*dec.Input); err != nil {
+			return err
+		}
+		inner = &itx
 
 	default:
 		return ErrTxTypeNotSupported

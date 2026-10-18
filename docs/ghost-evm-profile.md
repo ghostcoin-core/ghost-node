@@ -163,10 +163,16 @@ WebSocket serve only the namespaces named with `--http.api` and `--ws.api`.
 * **The precompile set** is exactly the one listed above: 0x01 to 0x09.
 * **No withdrawals and no beacon block root.** Blocks carry no withdrawals and
   there is no EIP-4788 contract.
-* **The Reveal transaction is planned, not implemented.** A sender-less Reveal
-  transaction type is planned for Ghost. It does not exist on any chain the
-  node runs today, it is not in these tables as supported, and no contract or
-  tool may assume it.
+* **The commit entry address cannot be called.** Every `CALL`, `CALLCODE`,
+  `DELEGATECALL` and `STATICCALL` to the commit entry address fails and uses
+  up the gas it was given. Only a top-level transaction to it commits, and it
+  runs no code ([commit and reveal](private-transactions.md)).
+* **The reveal transaction has no sender.** Type `0x50` is a native
+  transaction without an account, nonce or signature; it runs no EVM code and
+  credits its recipient without running the recipient's code. Blocks accept
+  it only with a proof the node's verifier accepts, and the node has no
+  verifier linked in yet, so no chain the node runs today includes one. No
+  contract or tool may assume a sender, `tx.origin` or a call for it.
 * **`evmVersion: cancun` is compiler guidance only.** Compiling with
   `evmVersion: cancun` gives bytecode that uses only opcodes this profile has
   on (PUSH0, MCOPY, TLOAD and TSTORE included), as long as it does not use
@@ -208,6 +214,7 @@ configuration. That a Ghost chain has those features off, and what it runs
 instead, is checked by the tests named at the top of this page.
 
 Not done yet: checks with MetaMask, Foundry, Hardhat and a block explorer,
-the check of a block that contains a Reveal transaction, and a run of the fee
-behaviour through a live chain. They need outside tools and a Reveal type that
-does not exist yet, and they are still required before launch.
+the check of a block that contains a reveal transaction through those tools,
+and a run of the fee behaviour through a live chain. They need outside tools
+and a node that can submit reveals, and they are still required before
+launch.

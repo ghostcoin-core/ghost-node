@@ -23,9 +23,11 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	cmath "github.com/ethereum/go-ethereum/common/math"
+	"github.com/ethereum/go-ethereum/core/ghostpriv"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto/kzg4844"
+	"github.com/ethereum/go-ethereum/params/ghost"
 	"github.com/ethereum/go-ethereum/params/vars"
 	"github.com/holiman/uint256"
 )
@@ -212,6 +214,10 @@ type StateTransition struct {
 	initialGas   uint64
 	state        vm.StateDB
 	evm          *vm.EVM
+
+	// commit is the parsed commit of a top-level call to the commit entry
+	// address, set by preCheck; nil for any other message.
+	commit *ghostpriv.Commit
 }
 
 // NewStateTransition initialises and returns a new state transition object.
@@ -351,7 +357,40 @@ func (st *StateTransition) preCheck() error {
 			}
 		}
 	}
+	if msg.To != nil && *msg.To == ghost.CommitEntryAddress {
+		if err := st.checkCommit(); err != nil {
+			return err
+		}
+	}
 	return st.buyGas()
+}
+
+// checkCommit runs the checks of a commit that come after the ordinary
+// checks above and before the funds check of buyGas, which covers the value
+// and the gas: the intrinsic gas, then the data, F and the value.
+func (st *StateTransition) checkCommit() error {
+	var (
+		msg      = st.msg
+		rules    = st.evm.ChainConfig()
+		number   = st.evm.Context.BlockNumber
+		eip2f    = rules.IsEnabled(rules.GetEIP2Transition, number)
+		eip2028f = rules.IsEnabled(rules.GetEIP2028Transition, number)
+		eip3860f = rules.IsEnabledByTime(rules.GetEIP3860TransitionTime, &st.evm.Context.Time) ||
+			rules.IsEnabled(rules.GetEIP3860Transition, number)
+	)
+	gas, err := IntrinsicGas(msg.Data, msg.AccessList, false, eip2f, eip2028f, eip3860f)
+	if err != nil {
+		return err
+	}
+	if msg.GasLimit < gas {
+		return fmt.Errorf("%w: have %d, want %d", ErrIntrinsicGas, msg.GasLimit, gas)
+	}
+	commit, err := ghostpriv.ParseCommit(msg.Data, msg.Value)
+	if err != nil {
+		return fmt.Errorf("%w: address %v", err, msg.From.Hex())
+	}
+	st.commit = commit
+	return nil
 }
 
 // TransitionDb will transition the state by applying the current message and
@@ -459,9 +498,17 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 		ret   []byte
 		vmerr error // vm errors do not effect consensus and are therefore not assigned to err
 	)
-	if contractCreation {
+	switch {
+	case st.commit != nil:
+		// A commit runs no code: its value is debited and credited to
+		// nobody, and the commitment the node computes is appended.
+		st.state.SetNonce(msg.From, st.state.GetNonce(msg.From)+1)
+		if err := ghostpriv.ApplyCommit(st.state, st.evm.Context.BlockNumber.Uint64(), msg.From, st.commit); err != nil {
+			return nil, err
+		}
+	case contractCreation:
 		ret, _, st.gasRemaining, vmerr = st.evm.Create(sender, msg.Data, st.gasRemaining, value)
-	} else {
+	default:
 		// Increment the nonce for the next transaction
 		st.state.SetNonce(msg.From, st.state.GetNonce(sender.Address())+1)
 		ret, st.gasRemaining, vmerr = st.evm.Call(sender, st.to(), msg.Data, st.gasRemaining, value)

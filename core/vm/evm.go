@@ -25,10 +25,17 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/params/ghost"
 	"github.com/ethereum/go-ethereum/params/types/ctypes"
 	"github.com/ethereum/go-ethereum/params/vars"
 	"github.com/holiman/uint256"
 )
+
+// ErrCommitEntryCall is returned for any call to the commit entry address
+// from inside the EVM. A commit is only ever a top-level transaction, which
+// the state transition handles before the EVM runs, so no contract can burn
+// into a commitment.
+var ErrCommitEntryCall = errors.New("call to the commit entry address")
 
 type (
 	// CanTransferFunc is the signature of a transfer guard function
@@ -217,6 +224,9 @@ func (evm *EVM) Call(caller ContractRef, addr common.Address, input []byte, gas 
 	if evm.depth > int(vars.CallCreateDepth) {
 		return nil, gas, ErrDepth
 	}
+	if addr == ghost.CommitEntryAddress {
+		return nil, 0, ErrCommitEntryCall
+	}
 	// Fail if we're trying to transfer more than the available balance
 	if !value.IsZero() && !evm.Context.CanTransfer(evm.StateDB, caller.Address(), value) {
 		return nil, gas, ErrInsufficientBalance
@@ -304,6 +314,9 @@ func (evm *EVM) CallCode(caller ContractRef, addr common.Address, input []byte, 
 	if evm.depth > int(vars.CallCreateDepth) {
 		return nil, gas, ErrDepth
 	}
+	if addr == ghost.CommitEntryAddress {
+		return nil, 0, ErrCommitEntryCall
+	}
 	// Fail if we're trying to transfer more than the available balance
 	// Note although it's noop to transfer X ether to caller itself. But
 	// if caller doesn't have enough balance, it would be an error to allow
@@ -352,6 +365,9 @@ func (evm *EVM) DelegateCall(caller ContractRef, addr common.Address, input []by
 	if evm.depth > int(vars.CallCreateDepth) {
 		return nil, gas, ErrDepth
 	}
+	if addr == ghost.CommitEntryAddress {
+		return nil, 0, ErrCommitEntryCall
+	}
 	var snapshot = evm.StateDB.Snapshot()
 
 	// Invoke tracer hooks that signal entering/exiting a call frame
@@ -394,6 +410,9 @@ func (evm *EVM) StaticCall(caller ContractRef, addr common.Address, input []byte
 	// Fail if we're trying to execute above the call depth limit
 	if evm.depth > int(vars.CallCreateDepth) {
 		return nil, gas, ErrDepth
+	}
+	if addr == ghost.CommitEntryAddress {
+		return nil, 0, ErrCommitEntryCall
 	}
 	// We take a snapshot here. This is a bit counter-intuitive, and could probably be skipped.
 	// However, even a staticcall is considered a 'touch'. On mainnet, static calls were introduced

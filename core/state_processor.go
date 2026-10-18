@@ -22,6 +22,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
+	"github.com/ethereum/go-ethereum/core/ghostpriv"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
@@ -84,6 +85,19 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 	}
 	// Iterate over and process the individual transactions
 	for i, tx := range block.Transactions() {
+		if tx.Type() == types.GhostRevealTxType {
+			if p.bc == nil {
+				return nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: no chain for a reveal", i, tx.Hash().Hex())
+			}
+			statedb.SetTxContext(tx.Hash(), i)
+			receipt, err := applyGhostReveal(p.config, gp, statedb, header, p.bc, p.bc.Genesis().Hash(), blockHash, tx, usedGas)
+			if err != nil {
+				return nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: %w", i, tx.Hash().Hex(), err)
+			}
+			receipts = append(receipts, receipt)
+			allLogs = append(allLogs, receipt.Logs...)
+			continue
+		}
 		msg, err := TransactionToMessage(tx, signer, header.BaseFee)
 		if err != nil {
 			return nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: %w", i, tx.Hash().Hex(), err)
@@ -157,6 +171,51 @@ func applyTransaction(msg *Message, config ctypes.ChainConfigurator, gp *GasPool
 	receipt.BlockNumber = blockNumber
 	receipt.TransactionIndex = uint(statedb.TxIndex())
 	return receipt, err
+}
+
+// applyGhostReveal applies a reveal, the native transaction without an
+// account, in the block of header: it takes exactly G_PRIV gas from the
+// block gas pool, which must hold it, runs the reveal checks with the active
+// proof verifier and makes the reveal's change (core/ghostpriv). chain gives
+// the headers of the block's ancestry and genesis is the chain's genesis
+// hash. Any failure makes the block invalid.
+func applyGhostReveal(config ctypes.ChainConfigurator, gp *GasPool, statedb *state.StateDB, header *types.Header, chain ghostpriv.ChainReader, genesis common.Hash, blockHash common.Hash, tx *types.Transaction, usedGas *uint64) (*types.Receipt, error) {
+	if err := gp.SubGas(types.GhostRevealGas); err != nil {
+		return nil, err
+	}
+	env := &ghostpriv.BlockEnv{
+		Header:  header,
+		Chain:   chain,
+		ChainID: config.GetChainID(),
+		Genesis: genesis,
+	}
+	if err := ghostpriv.ApplyReveal(statedb, env, ghostpriv.ActiveVerifier(), tx.GhostRevealEnvelope()); err != nil {
+		return nil, err
+	}
+	var root []byte
+	eip161d := config.IsEnabled(config.GetEIP161dTransition, header.Number)
+	if config.IsEnabled(config.GetEIP658Transition, header.Number) {
+		statedb.Finalise(eip161d)
+	} else {
+		root = statedb.IntermediateRoot(eip161d).Bytes()
+	}
+	*usedGas += types.GhostRevealGas
+
+	receipt := &types.Receipt{
+		Type:              types.GhostRevealTxType,
+		PostState:         root,
+		Status:            types.ReceiptStatusSuccessful,
+		CumulativeGasUsed: *usedGas,
+		TxHash:            tx.Hash(),
+		GasUsed:           types.GhostRevealGas,
+		EffectiveGasPrice: new(big.Int),
+	}
+	receipt.Logs = statedb.GetLogs(tx.Hash(), header.Number.Uint64(), blockHash)
+	receipt.Bloom = types.CreateBloom(types.Receipts{receipt})
+	receipt.BlockHash = blockHash
+	receipt.BlockNumber = new(big.Int).Set(header.Number)
+	receipt.TransactionIndex = uint(statedb.TxIndex())
+	return receipt, nil
 }
 
 // ApplyTransaction attempts to apply a transaction to the given state database
