@@ -68,7 +68,7 @@ any other way, such as a `SELFDESTRUCT` beneficiary, is not intercepted.
 
 ## Reveal
 
-A reveal is the typed transaction `0x50 || payload`, 1,028,491 bytes, with
+A reveal is the typed transaction `0x50 || payload`, 1,311,067 bytes, with
 hash `keccak256(0x50 || payload)`. The payload is a fixed layout, not RLP:
 
 | Offset | Length | Field |
@@ -81,14 +81,18 @@ hash `keccak256(0x50 || payload)`. The payload is a fixed layout, not RLP:
 | 106 | 20 | recipient |
 | 126 | 32 | out (amount word) |
 | 158 | 32 | fee (amount word) |
-| 190 | 1,028,144 | proof, then zeros |
-| 1,028,334 | 156 | note of the remainder |
+| 190 | 1,310,720 | proof, then zeros |
+| 1,310,910 | 156 | note of the remainder |
+
+The proof field is 1,310,720 bytes (1.25 MiB) for version 1, chosen to hold
+every proof of the pinned prover (about 1.19 MB) without ever growing.
 
 A reveal has no sender, nonce or signature: `types.Sender` returns
 `types.ErrNoSender` for it under every signer, and no signer signs it. No
 ordinary account can authorise one. Every reveal takes exactly
-`G_PRIV = 16,569,156` gas from the block gas pool; a block whose pool holds
-less is invalid. Its receipt is a typed receipt of type `0x50` with status 1,
+`G_PRIV = 21,090,372` gas (16 x 1,311,067 + 21,000 + 92,300) from the block
+gas pool; a block whose pool holds less is invalid. At the internal network's
+genesis gas limit of 30,000,000 a block holds one reveal. Its receipt is a typed receipt of type `0x50` with status 1,
 the cumulative gas and one log.
 
 The checks run in this order and stop at the first failure; any failure makes

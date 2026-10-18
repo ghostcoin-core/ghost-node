@@ -187,7 +187,7 @@ func TestBoundaryCompetingReveals(t *testing.T) {
 	// The miners raise the gas limit until two reveals fit: then the marker
 	// alone makes the block invalid.
 	for i := 0; third.head().GasLimit < 2*ghostpriv.GasPriv; i++ {
-		if i == 200 {
+		if i == 500 {
 			t.Fatalf("gas limit %d after %d blocks", third.head().GasLimit, i)
 		}
 		s.net.mine(s.node(i), blockPlan{coinbase: filler, gasTarget: 2*ghostpriv.GasPriv + 1_000_000})

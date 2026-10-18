@@ -156,10 +156,15 @@ func TestBindingDigestLayout(t *testing.T) {
 // words must have their 20 leading bytes zero, and that the proof field's
 // padding must be zero.
 func TestEnvelopeSizeAndPadding(t *testing.T) {
-	if ghostpriv.EnvelopeSize != 1_028_491 || ghostpriv.PayloadSize != 1_028_490 || ghostpriv.ProofSize != 1_028_144 {
+	if ghostpriv.EnvelopeSize != 1_311_067 || ghostpriv.PayloadSize != 1_311_066 || ghostpriv.ProofSize != 1_310_720 {
 		t.Fatalf("sizes %d %d %d", ghostpriv.EnvelopeSize, ghostpriv.PayloadSize, ghostpriv.ProofSize)
 	}
-	if ghostpriv.GasPriv != 16_569_156 || types.GhostRevealGas != ghostpriv.GasPriv {
+	// The data reveal keeps an envelope of the coin reveal's size.
+	if types.GhostDataRevealEnvelopeSize != 1_311_067 || types.GhostDataRevealPayloadSize != 1_311_066 {
+		t.Fatalf("data reveal sizes %d %d", types.GhostDataRevealEnvelopeSize, types.GhostDataRevealPayloadSize)
+	}
+	// G_PRIV = 16 x 1,311,067 + 21,000 + 92,300 = 21,090,372.
+	if ghostpriv.GasPriv != 16*1_311_067+21_000+92_300 || types.GhostRevealGas != ghostpriv.GasPriv {
 		t.Fatalf("G_PRIV %d", ghostpriv.GasPriv)
 	}
 	r := layoutReveal()
@@ -167,7 +172,7 @@ func TestEnvelopeSizeAndPadding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(env) != 1_028_491 || env[0] != 0x50 {
+	if len(env) != 1_311_067 || env[0] != 0x50 {
 		t.Fatalf("envelope of %d bytes, type %#x", len(env), env[0])
 	}
 	p := env[1:]
@@ -185,8 +190,8 @@ func TestEnvelopeSizeAndPadding(t *testing.T) {
 		{"out", 126, 158, word(0x5555)},
 		{"fee", 158, 190, word(0x6666)},
 		{"proof", 190, 290, r.Proof},
-		{"proof padding", 290, 1_028_334, make([]byte, 1_028_334-290)},
-		{"note", 1_028_334, 1_028_490, r.Note[:]},
+		{"proof padding", 290, 1_310_910, make([]byte, 1_310_910-290)},
+		{"note", 1_310_910, 1_311_066, r.Note[:]},
 	} {
 		if !bytes.Equal(p[f.from:f.to], f.want) {
 			t.Errorf("payload field %s at %d to %d", f.name, f.from, f.to)

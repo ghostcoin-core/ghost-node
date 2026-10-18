@@ -81,7 +81,7 @@ and uses up the gas it was given, as for the commit entry address.
 
 ## Data reveal
 
-A data reveal is the typed transaction `0x51 || payload`, 1,028,491 bytes, the
+A data reveal is the typed transaction `0x51 || payload`, 1,311,067 bytes, the
 size of the coin reveal, with hash `keccak256(0x51 || payload)`. It is a type
 of its own so that a coin reveal and a data reveal can never be taken for each
 other. The payload has the coin reveal's offsets:
@@ -96,8 +96,8 @@ other. The payload has the coin reveal's offsets:
 | 106 | 20 | verifier-or-recipient field |
 | 126 | 32 | out, must be zero |
 | 158 | 32 | fee, must be zero (see [fee](#fee)) |
-| 190 | 1,028,144 | proof, then zeros |
-| 1,028,334 | 156 | note, must be all zero |
+| 190 | 1,310,720 | proof, then zeros |
+| 1,310,910 | 156 | note, must be all zero |
 
 The verifier-or-recipient field names who the reveal is for; it credits
 nothing and no code runs for it. There is no remainder: a data reveal with a
@@ -105,7 +105,7 @@ note, or with out, is rejected.
 
 Like the coin reveal a data reveal has no sender, nonce or signature
 (`types.Sender` returns `types.ErrNoSender`), takes exactly
-`G_PRIV = 16,569,156` gas from the block gas pool, and has a typed receipt of
+`G_PRIV = 21,090,372` gas from the block gas pool, and has a typed receipt of
 type `0x51` with status 1, the cumulative gas and one log.
 
 ### Purposes

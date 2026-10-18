@@ -36,7 +36,7 @@ const (
 	GhostRevealTxType = 0x50
 
 	// GhostRevealPayloadSize is the length of a reveal's payload.
-	GhostRevealPayloadSize = 1_028_490
+	GhostRevealPayloadSize = 1_311_066
 
 	// GhostRevealEnvelopeSize is the length of a reveal's envelope, the type
 	// byte and the payload.
@@ -44,7 +44,7 @@ const (
 
 	// GhostRevealGas is G_PRIV, the gas every reveal takes from the block gas
 	// pool.
-	GhostRevealGas = 16_569_156
+	GhostRevealGas = 21_090_372
 )
 
 var (
