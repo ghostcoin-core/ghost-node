@@ -24,6 +24,7 @@ import (
 	"log"
 	"math/big"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,8 +33,13 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/common/math"
 	"github.com/ethereum/go-ethereum/consensus/ethash"
+	"github.com/ethereum/go-ethereum/consensus/misc/eip1559"
 	"github.com/ethereum/go-ethereum/core"
+	"github.com/ethereum/go-ethereum/core/ghostpriv"
+	"github.com/ethereum/go-ethereum/core/ghostpriv/ghostprivtest"
+	"github.com/ethereum/go-ethereum/core/ghosttree"
 	"github.com/ethereum/go-ethereum/core/rawdb"
+	"github.com/ethereum/go-ethereum/core/txpool/ghostpool"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/eth"
@@ -42,10 +48,12 @@ import (
 	"github.com/ethereum/go-ethereum/eth/tracers"
 	"github.com/ethereum/go-ethereum/node"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/params/ghost"
 	"github.com/ethereum/go-ethereum/params/types/genesisT"
 	"github.com/ethereum/go-ethereum/params/vars"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/ethereum/go-ethereum/triedb"
+	"github.com/holiman/uint256"
 )
 
 // Verify that Client implements the ethereum interfaces.
@@ -1226,4 +1234,202 @@ var allRPCMethods = []string{
 	"txpool_status",
 	"web3_clientVersion",
 	"web3_sha3",
+}
+
+// waitReceipt polls for the receipt of a transaction until the deadline.
+func waitReceipt(ctx context.Context, client *Client, hash common.Hash, timeout time.Duration) *types.Receipt {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if receipt, err := client.TransactionReceipt(ctx, hash); err == nil && receipt != nil {
+			return receipt
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return nil
+}
+
+// stopMining stops the node's miner and waits until the head stays put.
+func stopMining(t *testing.T, ethservice *eth.Ethereum) {
+	t.Helper()
+	ethservice.StopMining()
+	head := ethservice.BlockChain().CurrentBlock().Hash()
+	for stable := 0; stable < 10; {
+		time.Sleep(20 * time.Millisecond)
+		if now := ethservice.BlockChain().CurrentBlock().Hash(); now != head {
+			head, stable = now, 0
+			continue
+		}
+		stable++
+	}
+}
+
+// TestCommitAndRevealOverRPCAreMined runs a node on the internal network's
+// configuration with fake sealing, sends a commit and then a reveal of it
+// over RPC, and checks that the node's miner mines both, that a competing
+// reveal of the same marker is refused while the first is pending and after
+// it is mined, and that the reveal pays out.
+func TestCommitAndRevealOverRPCAreMined(t *testing.T) {
+	t.Cleanup(ghostpriv.SetVerifier(ghostprivtest.Verifier{}))
+
+	var (
+		key, _    = crypto.ToECDSA(crypto.Keccak256([]byte("ghost synthetic test account client")))
+		addr      = crypto.PubkeyToAddress(key.PublicKey)
+		oneGhost  = new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+		gspec     = ghost.InternalNetGenesis()
+		chainID   = gspec.Config.GetChainID()
+		coinbase  = common.Address{0xc0, 0x1b}
+		recipient = common.Address{0x52, 0x45, 0x56}
+		other     = common.Address{0x52, 0x45, 0x57}
+		out       = uint256.NewInt(1_000_000)
+		ctx       = context.Background()
+	)
+	gspec.Alloc = genesisT.GenesisAlloc{addr: {Balance: new(big.Int).Mul(oneGhost, big.NewInt(100))}}
+
+	n, err := node.New(&node.Config{})
+	if err != nil {
+		t.Fatalf("can't create new node: %v", err)
+	}
+	defer n.Close()
+	config := &ethconfig.Config{Genesis: gspec}
+	config.Ethash.PowMode = ethash.ModeFake
+	config.Miner.Etherbase = coinbase
+	config.Miner.GasCeil = ghost.InternalNetGasLimit
+	ethservice, err := eth.New(n, config)
+	if err != nil {
+		t.Fatalf("can't create new ethereum service: %v", err)
+	}
+	if err := n.Start(); err != nil {
+		t.Fatalf("can't start test node: %v", err)
+	}
+	ethservice.Miner().DisablePreseal()
+	client := NewClient(n.Attach())
+	defer client.Close()
+
+	// The commit is an ordinary signed transaction.
+	data, err := ghostpriv.CommitData(ghosttree.K("ghost/test-coin-f", []byte("client")), make([]byte, ghostpriv.NoteSize))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := ghost.CommitEntryAddress
+	commit := types.MustSignNewTx(key, types.LatestSigner(gspec.Config), &types.DynamicFeeTx{
+		ChainID:   chainID,
+		Nonce:     0,
+		GasTipCap: big.NewInt(2 * vars.GWei),
+		GasFeeCap: big.NewInt(100 * vars.GWei),
+		Gas:       60_000,
+		To:        &entry,
+		Value:     oneGhost,
+		Data:      data,
+	})
+	if err := client.SendTransaction(ctx, commit); err != nil {
+		t.Fatalf("commit refused: %v", err)
+	}
+	if err := ethservice.StartMining(1); err != nil {
+		t.Fatal(err)
+	}
+	receipt := waitReceipt(ctx, client, commit.Hash(), 30*time.Second)
+	stopMining(t, ethservice)
+	if receipt == nil || receipt.Status != types.ReceiptStatusSuccessful {
+		t.Fatal("the commit was not mined")
+	}
+
+	// A reveal of the commit for the next block on the head, with the stub
+	// proof. It is priced for the head's next fee window, so a head that
+	// moves into another window before the reveal is mined drops it from the
+	// pool, and the test sends a new one.
+	genesis := ethservice.BlockChain().Genesis()
+	marker := ghosttree.K("ghost/test-marker", []byte("synthetic client marker"))
+	newReveal := func(to common.Address) []byte {
+		t.Helper()
+		head, err := client.HeaderByNumber(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		number := head.Number.Uint64() + 1
+		bRef := eip1559.CalcBaseFee(ethservice.BlockChain().Config(), head)
+		if start := ghostpriv.WindowStart(number); start != number {
+			first, err := client.HeaderByNumber(ctx, new(big.Int).SetUint64(start))
+			if err != nil {
+				t.Fatal(err)
+			}
+			bRef = first.BaseFee
+		}
+		fee, err := ghostpriv.WindowFee(bRef)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := &ghostpriv.Reveal{
+			Version:   ghostpriv.Version,
+			ChainID:   chainID.Uint64(),
+			Marker:    marker,
+			Root:      *genesis.Header().CoinTreeRoot,
+			Remainder: ghosttree.K("ghost/test-remainder", to[:]),
+			Recipient: to,
+			Out:       out,
+			Fee:       fee.Total,
+		}
+		r.Proof = ghostprivtest.Proof(r.BindingDigest(chainID.Uint64(), genesis.Hash()))
+		envelope, err := r.MarshalBinary()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return envelope
+	}
+	var (
+		reveal common.Hash
+		mined  *types.Receipt
+	)
+	for attempt := 0; attempt < 5 && mined == nil; attempt++ {
+		envelope := newReveal(recipient)
+		reveal, err = client.SendReveal(ctx, envelope)
+		if err != nil {
+			t.Logf("attempt %d: reveal refused: %v", attempt, err)
+			continue
+		}
+		if reveal != crypto.Keccak256Hash(envelope) {
+			t.Fatalf("reveal hash %x, want keccak256 of the envelope", reveal)
+		}
+		// A competing reveal of the same marker is refused: the first seen
+		// is kept.
+		if _, err := client.SendReveal(ctx, newReveal(other)); err == nil || !strings.Contains(err.Error(), ghostpool.ErrMarkerPending.Error()) {
+			t.Fatalf("competing reveal: error %v, want %q", err, ghostpool.ErrMarkerPending)
+		}
+		tx, pending, err := client.TransactionByHash(ctx, reveal)
+		if err != nil || !pending || tx.Type() != types.GhostRevealTxType || !bytes.Equal(tx.GhostRevealEnvelope(), envelope) {
+			t.Fatalf("the pending reveal is not served back as sent: pending %v, err %v", pending, err)
+		}
+		if err := ethservice.StartMining(1); err != nil {
+			t.Fatal(err)
+		}
+		mined = waitReceipt(ctx, client, reveal, 5*time.Second)
+		stopMining(t, ethservice)
+	}
+	if mined == nil {
+		t.Fatal("the reveal was not mined")
+	}
+	if mined.Type != types.GhostRevealTxType || mined.Status != types.ReceiptStatusSuccessful || mined.GasUsed != types.GhostRevealGas || len(mined.Logs) != 1 {
+		t.Fatal("the reveal's receipt is not a successful reveal receipt with its log")
+	}
+	block, err := client.BlockByHash(ctx, mined.BlockHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if block.Transaction(reveal) == nil {
+		t.Fatal("the reveal is not in the block of its receipt")
+	}
+	balance, err := client.BalanceAt(ctx, recipient, mined.BlockNumber)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if balance.Cmp(out.ToBig()) != 0 {
+		t.Fatalf("recipient balance %v, want %v", balance, out)
+	}
+	// The marker is spent: a competing reveal is refused by the chain rules
+	// now, and the pool holds no reveal.
+	if _, err := client.SendReveal(ctx, newReveal(other)); err == nil || !strings.Contains(err.Error(), ghostpriv.ErrRevealMarker.Error()) {
+		t.Fatalf("reveal of the spent marker: error %v, want %q", err, ghostpriv.ErrRevealMarker)
+	}
+	if reveals := ethservice.TxPool().PendingReveals(); len(reveals) != 0 {
+		t.Fatalf("the pool still holds %d reveals", len(reveals))
+	}
 }

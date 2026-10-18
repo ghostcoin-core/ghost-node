@@ -41,8 +41,13 @@ import (
 	"github.com/ethereum/go-ethereum/consensus/ethash"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/bloombits"
+	"github.com/ethereum/go-ethereum/core/ghostpriv"
+	"github.com/ethereum/go-ethereum/core/ghostpriv/ghostprivtest"
+	"github.com/ethereum/go-ethereum/core/ghosttree"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state"
+	"github.com/ethereum/go-ethereum/core/txpool"
+	"github.com/ethereum/go-ethereum/core/txpool/ghostpool"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -51,6 +56,7 @@ import (
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/internal/blocktest"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/params/ghost"
 	"github.com/ethereum/go-ethereum/params/types/ctypes"
 	"github.com/ethereum/go-ethereum/params/types/genesisT"
 	"github.com/ethereum/go-ethereum/params/types/goethereum"
@@ -2066,4 +2072,134 @@ func testRPCResponseWithFile(t *testing.T, testid int, result interface{}, rpc s
 		t.Fatalf("error reading expected test file: %s output: %v", outputFile, err)
 	}
 	require.JSONEqf(t, string(want), string(data), "test %d: json not match, want: %s, have: %s", testid, string(want), string(data))
+}
+
+// revealBackend is the test backend with its transactions sent to a reveal
+// pool on its chain.
+type revealBackend struct {
+	*testBackend
+	pool *ghostpool.Pool
+	sent []*types.Transaction
+}
+
+func (b *revealBackend) SendTx(ctx context.Context, tx *types.Transaction) error {
+	b.sent = append(b.sent, tx)
+	return b.pool.Add([]*types.Transaction{tx}, true, false)[0]
+}
+
+func TestSendRawRevealTransaction(t *testing.T) {
+	t.Cleanup(ghostpriv.SetVerifier(ghostprivtest.Verifier{}))
+
+	var (
+		key, _   = crypto.ToECDSA(crypto.Keccak256([]byte("ghost synthetic test account rpc")))
+		addr     = crypto.PubkeyToAddress(key.PublicKey)
+		oneGhost = new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+		gspec    = ghost.InternalNetGenesis()
+		chainID  = gspec.Config.GetChainID()
+		signer   = types.LatestSigner(gspec.Config)
+	)
+	gspec.Alloc = genesisT.GenesisAlloc{addr: {Balance: new(big.Int).Mul(oneGhost, big.NewInt(100))}}
+	data, err := ghostpriv.CommitData(ghosttree.K("ghost/test-coin-f", []byte("rpc")), make([]byte, ghostpriv.NoteSize))
+	if err != nil {
+		t.Fatal(err)
+	}
+	to := ghost.CommitEntryAddress
+	commit := types.MustSignNewTx(key, signer, &types.DynamicFeeTx{
+		ChainID:   chainID,
+		Nonce:     0,
+		GasTipCap: big.NewInt(vars.InitialBaseFee),
+		GasFeeCap: big.NewInt(100 * vars.InitialBaseFee),
+		Gas:       60_000,
+		To:        &to,
+		Value:     oneGhost,
+		Data:      data,
+	})
+	tb := newTestBackend(t, 1, gspec, ethash.NewFaker(), func(i int, b *core.BlockGen) {
+		b.AddTx(commit)
+	})
+	defer tb.chain.Stop()
+	pool := ghostpool.New(tb.chain)
+	if err := pool.Init(0, tb.chain.CurrentBlock(), nil); err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	backend := &revealBackend{testBackend: tb, pool: pool}
+	api := NewTransactionAPI(backend, new(AddrLocker))
+
+	// A reveal for block 2, in the genesis's fee window.
+	genesis := tb.chain.Genesis()
+	fee, err := ghostpriv.WindowFee(genesis.BaseFee())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &ghostpriv.Reveal{
+		Version:   ghostpriv.Version,
+		ChainID:   chainID.Uint64(),
+		Marker:    ghosttree.K("ghost/test-marker", []byte("synthetic rpc marker")),
+		Root:      *genesis.Header().CoinTreeRoot,
+		Remainder: ghosttree.K("ghost/test-remainder", []byte("synthetic rpc remainder")),
+		Recipient: common.Address{0x52},
+		Out:       uint256.NewInt(1000),
+		Fee:       fee.Total,
+	}
+	r.Proof = ghostprivtest.Proof(r.BindingDigest(chainID.Uint64(), genesis.Hash()))
+	envelope, err := r.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hash, err := api.SendRawTransaction(context.Background(), envelope)
+	if err != nil {
+		t.Fatalf("raw reveal refused: %v", err)
+	}
+	if want := crypto.Keccak256Hash(envelope); hash != want {
+		t.Fatalf("hash %x, want keccak256 of the envelope %x", hash, want)
+	}
+	if len(backend.sent) != 1 || !bytes.Equal(backend.sent[0].GhostRevealEnvelope(), envelope) {
+		t.Fatal("the backend did not get the reveal with its exact envelope")
+	}
+	if !pool.Has(hash) {
+		t.Fatal("the reveal pool does not hold the reveal")
+	}
+	// The same reveal again is already known.
+	if _, err := api.SendRawTransaction(context.Background(), envelope); !errors.Is(err, txpool.ErrAlreadyKnown) {
+		t.Fatalf("second send: error %v, want %v", err, txpool.ErrAlreadyKnown)
+	}
+	// A competing reveal of the same marker is refused.
+	r2 := *r
+	r2.Recipient = common.Address{0x53}
+	r2.Proof = ghostprivtest.Proof(r2.BindingDigest(chainID.Uint64(), genesis.Hash()))
+	competing, err := r2.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.SendRawTransaction(context.Background(), competing); !errors.Is(err, ghostpool.ErrMarkerPending) {
+		t.Fatalf("competing reveal: error %v, want %v", err, ghostpool.ErrMarkerPending)
+	}
+	// An envelope of the wrong length never reaches the backend.
+	sent := len(backend.sent)
+	if _, err := api.SendRawTransaction(context.Background(), envelope[:len(envelope)-1]); !errors.Is(err, types.ErrGhostRevealLength) {
+		t.Fatalf("short envelope: error %v, want %v", err, types.ErrGhostRevealLength)
+	}
+	if len(backend.sent) != sent {
+		t.Fatal("a short envelope reached the backend")
+	}
+
+	// The RPC form carries the payload as its input and decodes back to the
+	// same reveal.
+	rpcTx := NewRPCPendingTransaction(backend.sent[0], tb.chain.CurrentBlock(), tb.chain.Config())
+	if rpcTx.Type != types.GhostRevealTxType || rpcTx.Hash != hash || !bytes.Equal(rpcTx.Input, envelope[1:]) || rpcTx.From != (common.Address{}) {
+		t.Fatal("the RPC form of the reveal is not its payload under its hash")
+	}
+	enc, err := json.Marshal(rpcTx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dec types.Transaction
+	if err := json.Unmarshal(enc, &dec); err != nil {
+		t.Fatalf("decoding the RPC form: %v", err)
+	}
+	if dec.Hash() != hash {
+		t.Fatalf("decoded reveal hash %x, want %x", dec.Hash(), hash)
+	}
 }

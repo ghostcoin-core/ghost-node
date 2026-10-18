@@ -82,12 +82,28 @@ type txPool interface {
 	SubscribeTransactions(ch chan<- core.NewTxsEvent, reorgs bool) event.Subscription
 }
 
+// ghostPool defines the methods needed from the reveal pool to apply the
+// per-peer budgets to reveals on the existing transaction announce and fetch
+// messages. The reveals reach it with the peer they came from.
+type ghostPool interface {
+	// AddFromPeer adds reveals delivered by a peer, under its budgets.
+	AddFromPeer(peer string, txs []*types.Transaction) []error
+
+	// FilterAnnounced reports for each announced hash whether to fetch it
+	// from the peer, within its budgets.
+	FilterAnnounced(peer string, kinds []byte, sizes []uint32, hashes []common.Hash) []bool
+
+	// DropPeer forgets the budgets of a disconnected peer.
+	DropPeer(peer string)
+}
+
 // handlerConfig is the collection of initialization parameters to create a full
 // node network handler.
 type handlerConfig struct {
 	Database       ethdb.Database            // Database for direct sync insertions
 	Chain          *core.BlockChain          // Blockchain to serve data from
 	TxPool         txPool                    // Transaction pool to propagate from
+	GhostPool      ghostPool                 // Reveal pool taking reveals with their peer, nil leaves them to TxPool
 	Merger         *consensus.Merger         // The manager for eth1/2 transition
 	Network        uint64                    // Network identifier to advertise
 	Sync           downloader.SyncMode       // Whether to snap or full sync
@@ -107,10 +123,11 @@ type handler struct {
 	checkpointNumber uint64      // Block number for the sync progress validator to cross reference
 	checkpointHash   common.Hash // Block hash for the sync progress validator to cross reference
 
-	database ethdb.Database
-	txpool   txPool
-	chain    *core.BlockChain
-	maxPeers int
+	database  ethdb.Database
+	txpool    txPool
+	ghostpool ghostPool
+	chain     *core.BlockChain
+	maxPeers  int
 
 	downloader   *downloader.Downloader
 	blockFetcher *fetcher.BlockFetcher
@@ -147,6 +164,7 @@ func newHandler(config *handlerConfig) (*handler, error) {
 		eventMux:       config.EventMux,
 		database:       config.Database,
 		txpool:         config.TxPool,
+		ghostpool:      config.GhostPool,
 		chain:          config.Chain,
 		peers:          newPeerSet(),
 		merger:         config.Merger,
@@ -573,6 +591,9 @@ func (h *handler) unregisterPeer(id string) {
 	}
 	h.downloader.UnregisterPeer(id)
 	h.txFetcher.Drop(id)
+	if h.ghostpool != nil {
+		h.ghostpool.DropPeer(id)
+	}
 
 	if err := h.peers.unregisterPeer(id); err != nil {
 		logger.Error("Ethereum peer removal failed", "err", err)

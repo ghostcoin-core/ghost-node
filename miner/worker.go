@@ -31,6 +31,7 @@ import (
 	"github.com/ethereum/go-ethereum/consensus/misc/eip1559"
 	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
 	"github.com/ethereum/go-ethereum/core"
+	"github.com/ethereum/go-ethereum/core/ghostpriv"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/txpool"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -648,8 +649,16 @@ func (w *worker) mainLoop() {
 				if gp := w.current.gasPool; gp != nil && gp.Gas() < vars.TxGas {
 					continue
 				}
-				txs := make(map[common.Address][]*txpool.LazyTransaction, len(ev.Txs))
+				var (
+					txs     = make(map[common.Address][]*txpool.LazyTransaction, len(ev.Txs))
+					reveals []*types.Transaction
+				)
 				for _, tx := range ev.Txs {
+					// A reveal has no account to group it by.
+					if tx.IsGhostReveal() {
+						reveals = append(reveals, tx)
+						continue
+					}
 					acc, _ := types.Sender(w.current.signer, tx)
 					txs[acc] = append(txs[acc], &txpool.LazyTransaction{
 						Pool:      w.eth.TxPool(), // We don't know where this came from, yolo resolve from everywhere
@@ -666,6 +675,7 @@ func (w *worker) mainLoop() {
 				blobTxs := newTransactionsByPriceAndNonce(w.current.signer, nil, w.current.header.BaseFee)  // Empty bag, don't bother optimising
 
 				tcount := w.current.tcount
+				w.commitReveals(w.current, reveals, nil)
 				w.commitTransactions(w.current, plainTxs, blobTxs, nil)
 
 				// Only update the snapshot if any new transactions were added
@@ -895,7 +905,15 @@ func (w *worker) commitTransaction(env *environment, tx *types.Transaction) ([]*
 	if tx.Type() == types.BlobTxType {
 		return w.commitBlobTransaction(env, tx)
 	}
-	receipt, err := w.applyTransaction(env, tx)
+	var (
+		receipt *types.Receipt
+		err     error
+	)
+	if tx.IsGhostReveal() {
+		receipt, err = w.applyReveal(env, tx)
+	} else {
+		receipt, err = w.applyTransaction(env, tx)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -940,6 +958,98 @@ func (w *worker) applyTransaction(env *environment, tx *types.Transaction) (*typ
 		env.gasPool.SetGas(gp)
 	}
 	return receipt, err
+}
+
+// applyReveal runs a reveal, the native transaction without an account, as
+// block processing does: it takes G_PRIV gas from the block gas pool, runs
+// the checks of the reveal's type with the active verifier against the
+// sealing block's own ancestry and makes the reveal's change. If anything
+// fails, state and gas pool are reverted.
+func (w *worker) applyReveal(env *environment, tx *types.Transaction) (*types.Receipt, error) {
+	var (
+		snap   = env.state.Snapshot()
+		gp     = env.gasPool.Gas()
+		header = env.header
+	)
+	fail := func(err error) (*types.Receipt, error) {
+		env.state.RevertToSnapshot(snap)
+		env.gasPool.SetGas(gp)
+		return nil, err
+	}
+	if err := env.gasPool.SubGas(types.GhostRevealGas); err != nil {
+		return fail(err)
+	}
+	renv := &ghostpriv.BlockEnv{
+		Header:  header,
+		Chain:   w.chain,
+		ChainID: w.chainConfig.GetChainID(),
+		Genesis: w.chain.Genesis().Hash(),
+	}
+	var err error
+	switch tx.Type() {
+	case types.GhostRevealTxType:
+		err = ghostpriv.ApplyReveal(env.state, renv, ghostpriv.ActiveVerifier(), tx.GhostRevealEnvelope())
+	case types.GhostDataRevealTxType:
+		err = ghostpriv.ApplyDataReveal(env.state, renv, ghostpriv.ActiveVerifier(), tx.GhostDataRevealEnvelope())
+	default:
+		err = fmt.Errorf("%w: type %#x is not a reveal", types.ErrTxTypeNotSupported, tx.Type())
+	}
+	if err != nil {
+		return fail(err)
+	}
+	var root []byte
+	eip161d := w.chainConfig.IsEnabled(w.chainConfig.GetEIP161dTransition, header.Number)
+	if w.chainConfig.IsEnabled(w.chainConfig.GetEIP658Transition, header.Number) {
+		env.state.Finalise(eip161d)
+	} else {
+		root = env.state.IntermediateRoot(eip161d).Bytes()
+	}
+	header.GasUsed += types.GhostRevealGas
+
+	receipt := &types.Receipt{
+		Type:              tx.Type(),
+		PostState:         root,
+		Status:            types.ReceiptStatusSuccessful,
+		CumulativeGasUsed: header.GasUsed,
+		TxHash:            tx.Hash(),
+		GasUsed:           types.GhostRevealGas,
+		EffectiveGasPrice: new(big.Int),
+		Logs:              env.state.GetLogs(tx.Hash(), header.Number.Uint64(), common.Hash{}),
+		BlockNumber:       new(big.Int).Set(header.Number),
+		TransactionIndex:  uint(env.state.TxIndex()),
+	}
+	receipt.Bloom = types.CreateBloom(types.Receipts{receipt})
+	return receipt, nil
+}
+
+// commitReveals fills the sealing block with reveals, in the order given,
+// while the gas pool holds G_PRIV. A reveal that fails its checks is left
+// out; the pool drops it when it rechecks on the next head.
+func (w *worker) commitReveals(env *environment, reveals []*types.Transaction, interrupt *atomic.Int32) error {
+	if env.gasPool == nil {
+		env.gasPool = new(core.GasPool).AddGas(env.header.GasLimit)
+	}
+	for _, tx := range reveals {
+		if interrupt != nil {
+			if signal := interrupt.Load(); signal != commitInterruptNone {
+				return signalToErr(signal)
+			}
+		}
+		if env.gasPool.Gas() < types.GhostRevealGas {
+			log.Trace("Not enough gas left for a reveal", "left", env.gasPool.Gas(), "needed", types.GhostRevealGas)
+			break
+		}
+		if !tx.IsGhostReveal() {
+			continue
+		}
+		env.state.SetTxContext(tx.Hash(), env.tcount)
+		if _, err := w.commitTransaction(env, tx); err != nil {
+			log.Debug("Reveal left out of the block", "hash", tx.Hash(), "err", err)
+			continue
+		}
+		env.tcount++
+	}
+	return nil
 }
 
 func (w *worker) commitTransactions(env *environment, plainTxs, blobTxs *transactionsByPriceAndNonce, interrupt *atomic.Int32) error {
@@ -1223,6 +1333,12 @@ func (w *worker) fillTransactions(interrupt *atomic.Int32, env *environment) err
 	filter.OnlyPlainTxs, filter.OnlyBlobTxs = false, true
 	pendingBlobTxs := w.eth.TxPool().Pending(filter)
 
+	// Reveals have no account and are not part of the pending set above:
+	// they come first, first seen first.
+	if err := w.commitReveals(env, w.eth.TxPool().PendingReveals(), interrupt); err != nil {
+		return err
+	}
+
 	// Split the pending transactions into locals and remotes.
 	localPlainTxs, remotePlainTxs := make(map[common.Address][]*txpool.LazyTransaction), pendingPlainTxs
 	localBlobTxs, remoteBlobTxs := make(map[common.Address][]*txpool.LazyTransaction), pendingBlobTxs
@@ -1453,6 +1569,10 @@ func (w *worker) postSideBlock(event core.ChainSideEvent) {
 func totalFees(block *types.Block, receipts []*types.Receipt) *big.Int {
 	feesWei := new(big.Int)
 	for i, tx := range block.Transactions() {
+		// A reveal pays its tip from hidden value, not per gas.
+		if tx.IsGhostReveal() {
+			continue
+		}
 		minerFee, _ := tx.EffectiveGasTip(block.BaseFee())
 		feesWei.Add(feesWei, new(big.Int).Mul(new(big.Int).SetUint64(receipts[i].GasUsed), minerFee))
 	}

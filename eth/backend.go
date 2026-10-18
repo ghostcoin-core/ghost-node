@@ -36,6 +36,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state/pruner"
 	"github.com/ethereum/go-ethereum/core/txpool"
+	"github.com/ethereum/go-ethereum/core/txpool/ghostpool"
 	"github.com/ethereum/go-ethereum/core/txpool/legacypool"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
@@ -244,9 +245,14 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	}
 	legacyPool := legacypool.New(config.TxPool, eth.blockchain)
 
+	// Reveals have no sender account, so they have a pool of their own
+	// beside the per-account legacy pool. A commit is an ordinary signed
+	// transaction and goes to the legacy pool.
+	ghostPool := ghostpool.New(eth.blockchain)
+
 	// Ghost has no blob transactions, so there is no blob pool: blob
 	// transactions from peers or RPC are refused as an unsupported type.
-	eth.txPool, err = txpool.New(config.TxPool.PriceLimit, eth.blockchain, []txpool.SubPool{legacyPool})
+	eth.txPool, err = txpool.New(config.TxPool.PriceLimit, eth.blockchain, []txpool.SubPool{legacyPool, ghostPool})
 	if err != nil {
 		return nil, err
 	}
@@ -264,6 +270,7 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 		Database:       chainDb,
 		Chain:          eth.blockchain,
 		TxPool:         eth.txPool,
+		GhostPool:      ghostPool,
 		Merger:         eth.merger,
 		Network:        networkID,
 		Sync:           config.SyncMode,
