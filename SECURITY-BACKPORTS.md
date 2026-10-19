@@ -40,7 +40,10 @@ crash nodes, split the chain or break consensus) goes out under the
   does not affect it. A `not applicable` row must give its reason in the
   evidence.
 - `open`: the fix applies, or may apply, and is not in this repository yet.
-  The evidence says what is pending.
+  The evidence says what is pending. Since the catch-up backports finished,
+  the only `open` row allowed is an advisory with no upstream fix: its
+  evidence starts with `no upstream fix:` and names the advisory. The test
+  `TestNoOpenItemsRemain` in `internal/securitydocs` enforces this.
 
 Every row names where each of its facts came from: the Source column gives the
 upstream release, advisory or document, and the Evidence column gives the
@@ -51,10 +54,14 @@ commit, file or reason that supports the status.
 The catch-up inventory of upstream fixes since go-ethereum 1.13.15 is added by
 the security catch-up work, with its sub-tables added under this heading.
 
-Taken on 2026-10-17. An `open` row is pending in the follow-up backport work
-(phase 1b), which must also finish before any Ghost node is exposed to a
-public network. Upstream pull requests are go-ethereum's unless named
-otherwise; a release tag names the go-ethereum release notes of that tag.
+Taken on 2026-10-17. The rows left `open` then were settled by the follow-up
+backport work (phase 1b), which had to finish before any Ghost node is exposed
+to a public network. Its fixes went in as one commit per subsystem; on
+2026-10-18 each of those rows was set to `applied`, naming the commit that
+ported the fix and its test, or to `not applicable` with the reason. Where the
+code here never had the upstream bug, the commit adds the upstream regression
+test only, and the row says so. Upstream pull requests are go-ethereum's unless
+named otherwise; a release tag names the go-ethereum release notes of that tag.
 
 ### go-ethereum releases after v1.13.15
 
@@ -68,45 +75,45 @@ to CI problems upstream and v1.14.2 took its place in the series).
 | 2026-10-17 | go-ethereum tag `v1.14.3` | v1.14.3: no security items in the notes | not applicable | no security items in the notes |
 | 2026-10-17 | go-ethereum tag `v1.14.4` | v1.14.4: discovery revalidation crash #29864; Verkle gas | applied | #29864 is in `p2p/discover/table_reval.go`; Verkle is not used by any Ghost chain |
 | 2026-10-17 | go-ethereum tag `v1.14.5` | v1.14.5: no security items in the notes (hotfix for a v1.14.4 discovery regression) | not applicable | no security items in the notes |
-| 2026-10-17 | go-ethereum tag `v1.14.6` | v1.14.6: 2 KB RLPx handshake limit #30029, discovery seed-node lock #29960, JSON out-of-bounds #30014 | open | #30029 applied in `d7b9e6c28`; #29960 and #30014 are open (see other fixes below) |
+| 2026-10-17 | go-ethereum tag `v1.14.6` | v1.14.6: 2 KB RLPx handshake limit #30029, discovery seed-node lock #29960, JSON out-of-bounds #30014 | applied | #30029 in `d7b9e6c28`; #29960 in `b42b8c437`; #30014 in `1e864dc16` (see other fixes below) |
 | 2026-10-17 | go-ethereum tag `v1.14.7` | v1.14.7: no security items in the notes | not applicable | no security items in the notes |
-| 2026-10-17 | go-ethereum tag `v1.14.8` | v1.14.8: discovery revalidation CPU spin #30239; blob pool flags | open | #30239 open (see other fixes below); blob pool removed (`docs/removed-and-turned-off.md` line 26) |
-| 2026-10-17 | go-ethereum tag `v1.14.9` | v1.14.9: blob pool out-of-bounds #30430, zero-amount header request #30305; Prague EIPs | open | #30305 open; #30430 not applicable (no blob pool, line 26); Prague is post-Cancun work (line 60) |
+| 2026-10-17 | go-ethereum tag `v1.14.8` | v1.14.8: discovery revalidation CPU spin #30239; blob pool flags | applied | #30239 in `b42b8c437` (see other fixes below); blob pool removed (`docs/removed-and-turned-off.md` line 26) |
+| 2026-10-17 | go-ethereum tag `v1.14.9` | v1.14.9: blob pool out-of-bounds #30430, zero-amount header request #30305; Prague EIPs | applied | #30305 in `c19cf21c6`; #30430 not applicable (no blob pool, `docs/removed-and-turned-off.md` line 26); Prague is post-Cancun work (line 71) |
 | 2026-10-17 | go-ethereum tag `v1.14.10` | v1.14.10: no security items in the notes | not applicable | no security items in the notes |
 | 2026-10-17 | go-ethereum tag `v1.14.11` | v1.14.11: no security items in the notes | not applicable | no security items in the notes |
 | 2026-10-17 | go-ethereum tag `v1.14.12` | v1.14.12: no security items in the notes | not applicable | no security items in the notes |
 | 2026-10-17 | go-ethereum tag `v1.14.13` | v1.14.13: security release for CVE-2025-24883 (#31100) | applied | `ae6bad2d3` |
-| 2026-10-17 | go-ethereum tag `v1.15.0` | v1.15.0: carries the CVE-2025-24883 fix; otherwise the Prague execution features | applied | `ae6bad2d3`; Prague is post-Cancun work (`docs/removed-and-turned-off.md` line 60) |
-| 2026-10-17 | go-ethereum tag `v1.15.1` | v1.15.1: crash fixes in raw-data debug RPC #31157 and genesis handling #31171 | open | not yet checked against this code |
+| 2026-10-17 | go-ethereum tag `v1.15.0` | v1.15.0: carries the CVE-2025-24883 fix; otherwise the Prague execution features | applied | `ae6bad2d3`; Prague is post-Cancun work (`docs/removed-and-turned-off.md` line 71) |
+| 2026-10-17 | go-ethereum tag `v1.15.1` | v1.15.1: crash fixes in raw-data debug RPC #31157 and genesis handling #31171 | applied | #31157 in `354c6165b` (test `TestGetRawNotFoundNoPanic`); #31171: `0461b3b07` adds the regression test `TestSetupGenesisNoPanic`, and `core/genesis.go` needed no change |
 | 2026-10-17 | go-ethereum tag `v1.15.2` | v1.15.2: no security items in the notes | not applicable | no security items in the notes |
 | 2026-10-17 | go-ethereum tag `v1.15.3` | v1.15.3: no security items in the notes | not applicable | no security items in the notes |
-| 2026-10-17 | go-ethereum tag `v1.15.4` | v1.15.4: blob p2p disconnects #31219 and a Pectra txpool regression | not applicable | blob transactions are off (line 43) and the blob pool is removed (line 26); the regression is in Prague code (line 60) |
+| 2026-10-17 | go-ethereum tag `v1.15.4` | v1.15.4: blob p2p disconnects #31219 and a Pectra txpool regression | not applicable | blob transactions are off (line 43) and the blob pool is removed (line 26); the regression is in Prague code (line 71) |
 | 2026-10-17 | go-ethereum tag `v1.15.5` | v1.15.5: no security items in the notes | not applicable | no security items in the notes |
 | 2026-10-17 | go-ethereum tag `v1.15.6` | v1.15.6: no security items in the notes (a low-nonce regression in newer pool code) | not applicable | no security items in the notes |
 | 2026-10-17 | go-ethereum tag `v1.15.7` | v1.15.7: log indexer trie deletion #31525 | not applicable | the log indexer (filter maps) is not in this code |
-| 2026-10-17 | go-ethereum tag `v1.15.8` | v1.15.8: header traversal overflow #31522, discv5 challenge resend #31543 | open | both open (see other fixes below) |
-| 2026-10-17 | go-ethereum tag `v1.15.9` | v1.15.9: Prague mainnet activation, failed system call rule #31639, blob fee history crash #31663 | not applicable | Prague is post-Cancun work (line 60); blob transactions are off (line 43) |
+| 2026-10-17 | go-ethereum tag `v1.15.8` | v1.15.8: header traversal overflow #31522, discv5 challenge resend #31543 | applied | #31522 in `c19cf21c6`; #31543 in `e9c60f300` (see other fixes below) |
+| 2026-10-17 | go-ethereum tag `v1.15.9` | v1.15.9: Prague mainnet activation, failed system call rule #31639, blob fee history crash #31663 | not applicable | Prague is post-Cancun work (line 71); blob transactions are off (line 43) |
 | 2026-10-17 | go-ethereum tag `v1.15.10` | v1.15.10: log indexer deadlock #31708 | not applicable | the log indexer (filter maps) is not in this code |
-| 2026-10-17 | go-ethereum tag `v1.15.11` | v1.15.11: RPC method name length limit #31711 | open | #31711 open (see other fixes below) |
+| 2026-10-17 | go-ethereum tag `v1.15.11` | v1.15.11: RPC method name length limit #31711 | applied | #31711 in `1e864dc16` (see other fixes below) |
 | 2026-10-17 | go-ethereum tag `v1.16.0` | v1.16.0: no security items in the notes (eth/69, early Fusaka work, Engine API) | not applicable | no security items in the notes |
-| 2026-10-17 | go-ethereum tag `v1.16.1` | v1.16.1: `eth_getLogs` address limit of 1000 | open | no address limit in `eth/filters` yet |
-| 2026-10-17 | go-ethereum tag `v1.16.2` | v1.16.2: oversized transaction announcements #32210, log filter validation #31877 | open | #32210 applied in `0481e6ce8`; #31877 not yet checked |
-| 2026-10-17 | go-ethereum tag `v1.16.3` | v1.16.3: modexp input bounds #32363, GraphQL depth limit #32344, websocket read limit #32279 | open | #32363 not applicable (Osaka modexp rules, line 60); GraphQL removed (line 21); #32279 not yet checked against `rpc/websocket.go` |
-| 2026-10-17 | go-ethereum tag `v1.16.4` | v1.16.4: KZG library fix (#32640, #32639) usable only after Osaka; txpool cost overflow #32544 | open | KZG not applicable (blob transactions off, line 43); #32544 open |
+| 2026-10-17 | go-ethereum tag `v1.16.1` | v1.16.1: `eth_getLogs` address limit of 1000 | applied | `efefa17d8`: `maxAddresses` of 1000 in `eth/filters/api.go` and `filter_system.go` (test `TestGetLogsAddressLimit`) |
+| 2026-10-17 | go-ethereum tag `v1.16.2` | v1.16.2: oversized transaction announcements #32210, log filter validation #31877 | applied | #32210 in `0481e6ce8`; #31877 in `efefa17d8` (test `TestLogFilterValidation`) |
+| 2026-10-17 | go-ethereum tag `v1.16.3` | v1.16.3: modexp input bounds #32363, GraphQL depth limit #32344, websocket read limit #32279 | applied | #32279 in `1e864dc16` (test `TestWebsocketServerReadLimit`); #32363 not applicable (Osaka modexp rules, post-Cancun work, `docs/removed-and-turned-off.md` line 71); GraphQL removed (line 21) |
+| 2026-10-17 | go-ethereum tag `v1.16.4` | v1.16.4: KZG library fix (#32640, #32639) usable only after Osaka; txpool cost overflow #32544 | applied | #32544 in `0a5e92121`; KZG not applicable (blob transactions off, `docs/removed-and-turned-off.md` line 43) |
 | 2026-10-17 | go-ethereum tag `v1.16.5` | v1.16.5: drop peers sending duplicate transactions #32728; discovery regressions #32912 and #32572 | applied | #32728 is in `eth/handler_eth.go`; the discovery regressions are in code this fork does not have |
-| 2026-10-17 | go-ethereum tag `v1.16.6` | v1.16.6: `debug_traceCall` crash #33015, tx fetcher alternates leak #32947 | open | both open |
-| 2026-10-17 | go-ethereum tag `v1.16.7` | v1.16.7: c-kzg-4844 fix #33093 (post-Fusaka only), nocgo signature hash length #33104 | open | KZG not applicable (line 43); #33104 open |
+| 2026-10-17 | go-ethereum tag `v1.16.6` | v1.16.6: `debug_traceCall` crash #33015, tx fetcher alternates leak #32947 | applied | #32947 in `0a5e92121`; #33015: `354c6165b` adds the regression test `TestTraceCallNoCrash`, and `BlockOverrides.Apply` in `internal/ethapi/api.go` leaves an unset block number alone, so no code change was needed |
+| 2026-10-17 | go-ethereum tag `v1.16.7` | v1.16.7: c-kzg-4844 fix #33093 (post-Fusaka only), nocgo signature hash length #33104 | applied | #33104 in `d3f47b80b`; KZG not applicable (blob transactions off, `docs/removed-and-turned-off.md` line 43) |
 | 2026-10-17 | go-ethereum tag `v1.16.8` | v1.16.8: security release for CVE-2026-22862 and CVE-2026-22868 | applied | CVE-2026-22862 in `348942271` and `6d4968db5`; CVE-2026-22868 not applicable (see the advisories table) |
 | 2026-10-17 | go-ethereum tag `v1.16.9` | v1.16.9: security hotfix for CVE-2026-26314 and CVE-2026-26315 | applied | `0ebf49228`, `46bba8dfc`, `348942271` |
-| 2026-10-17 | go-ethereum tag `v1.17.0` | v1.17.0: CVE-2026-26313, CVE-2026-26314, CVE-2026-26315, ECIES #33669, delayed decoding #33835; tx-unindex loop #33573, unsupported announcements #33378, heartbeat leak #33704 | open | the CVEs, #33669 and #33835 are applied (see the Core-Geth table); #33573, #33378 and #33704 are open |
-| 2026-10-17 | go-ethereum tag `v1.17.1` | v1.17.1: request tracker crash #33940; snap sync fixes #33790 and #33898 | open | #33940 is in `p2p/tracker/tracker.go`; #33790 and #33898 not yet checked |
-| 2026-10-17 | go-ethereum tag `v1.17.2` | v1.17.2: `eth_getProof` slot limits #34617, tx lookup deadlock #34039; witness and simulate RPC limits | open | #34617 and #34039 open; the witness and simulate RPCs are not in this code |
-| 2026-10-17 | go-ethereum tag `v1.17.3` | v1.17.3: drop peers sending invalid bodies or receipts #34745 #34870, nocgo hash length #33839, discovery races #34888 #34743 #34878 | open | #34745 and #34870 are in `eth/downloader/fetchers_concurrent.go`; the others are open |
-| 2026-10-17 | go-ethereum tag `v1.17.4` | v1.17.4: snapshot shutdown race #33540, GraphQL body limit #35034, log range validation #35032 | open | GraphQL removed (line 21); #33540 and #35032 open |
+| 2026-10-17 | go-ethereum tag `v1.17.0` | v1.17.0: CVE-2026-26313, CVE-2026-26314, CVE-2026-26315, ECIES #33669, delayed decoding #33835; tx-unindex loop #33573, unsupported announcements #33378, heartbeat leak #33704 | applied | the CVEs, #33669 and #33835 are applied (see the Core-Geth table); #33573, #33378 and #33704 in `0a5e92121` |
+| 2026-10-17 | go-ethereum tag `v1.17.1` | v1.17.1: request tracker crash #33940; snap sync fixes #33790 and #33898 | applied | #33940 is in `p2p/tracker/tracker.go` (test `TestRequestTrackerNoCrash` in `7ff2c26cb`); #33790 and #33898 in `7ff2c26cb` (tests `TestSnapSyncFix33790` and `TestSnapSyncFix33898`) |
+| 2026-10-17 | go-ethereum tag `v1.17.2` | v1.17.2: `eth_getProof` slot limits #34617, tx lookup deadlock #34039; witness and simulate RPC limits | applied | #34617 in `354c6165b` (test `TestGetProofSlotLimit`); #34039: `0a5e92121` adds the regression test `TestTxLookupNoDeadlock`, and lookups here take no lock that a reorg holds, so no code change was needed; the witness and simulate RPCs are not in this code |
+| 2026-10-17 | go-ethereum tag `v1.17.3` | v1.17.3: drop peers sending invalid bodies or receipts #34745 #34870, nocgo hash length #33839, discovery races #34888 #34743 #34878 | applied | #34745 and #34870 are in `eth/downloader/fetchers_concurrent.go` (tests `TestDownloaderDropsPeerInvalidBodies` and `TestDownloaderDropsPeerInvalidReceipts` in `0461b3b07`); #33839 in `d3f47b80b`; #34743, #34878 and #34888 in `b42b8c437` |
+| 2026-10-17 | go-ethereum tag `v1.17.4` | v1.17.4: snapshot shutdown race #33540, GraphQL body limit #35034, log range validation #35032 | applied | #33540 in `0461b3b07` (test `TestSnapshotShutdownRace`); #35032 in `efefa17d8` (test `TestLogFilterRangeValidation`); GraphQL removed (`docs/removed-and-turned-off.md` line 21) |
 | 2026-10-17 | go-ethereum tag `v1.17.5` | v1.17.5: no security items in the notes | not applicable | no security items in the notes |
-| 2026-10-17 | go-ethereum tag `v1.17.6` | v1.17.6: RPC null-argument check #35576, JSON key unescaping #35587, tx type fork validation #35588, log range check #35070 | open | not yet checked against this code |
-| 2026-10-17 | go-ethereum tag `v1.17.7` | v1.17.7: block prefetcher memory leak on stop #35821 | open | not yet checked against this code |
-| 2026-10-17 | go-ethereum tag `v1.17.8` | v1.17.8: eth/snap handler DoS fixes #35862 #35904 #35857 #35856, IP predictor #35861, receipts #35859, cells #35883, STUN crash #35863 | open | #35862, #35904, #35857, #35856 and #35861 open; #35859 (eth/69), #35883 (eth/72 blobs) and #35863 (no STUN client) not applicable |
+| 2026-10-17 | go-ethereum tag `v1.17.6` | v1.17.6: RPC null-argument check #35576, JSON key unescaping #35587, tx type fork validation #35588, log range check #35070 | applied | #35576 in `1e864dc16` (test `TestRPCNullArguments`); #35587: `1e864dc16` adds the regression test `TestRPCKeyUnescape`, and `rpc` decodes messages with `encoding/json`, which unescapes keys, so no code change was needed; #35588 in `354c6165b` (test `TestTxArgsTypeForkValidation`); #35070 in `efefa17d8` (test `TestLogFilterRangeCheck`) |
+| 2026-10-17 | go-ethereum tag `v1.17.7` | v1.17.7: block prefetcher memory leak on stop #35821 | applied | `0461b3b07`: `core/blockchain.go` waits for the block prefetchers on stop (test `TestPrefetcherStopNoLeak`) |
+| 2026-10-17 | go-ethereum tag `v1.17.8` | v1.17.8: eth/snap handler DoS fixes #35862 #35904 #35857 #35856, IP predictor #35861, receipts #35859, cells #35883, STUN crash #35863 | applied | #35862, #35904 and #35857 in `c19cf21c6`, #35856 in `7ff2c26cb`, #35861 in `b42b8c437`; #35859 (eth/69), #35883 (eth/72 blobs) and #35863 (no STUN client) not applicable |
 
 ### go-ethereum security advisories after v1.13.15
 
@@ -128,36 +135,36 @@ exhaustion, consensus split or invalid-input bug.
 
 | Logged | Source | Item | Status | Evidence |
 | --- | --- | --- | --- | --- |
-| 2026-10-17 | go-ethereum #35862 (v1.17.8) | eth: reject block bodies listing more items than their size allows | open | `eth/protocols/eth/handlers.go` hashes every body item unchecked |
-| 2026-10-17 | go-ethereum #35904 (v1.17.8) | eth: the same check for receipts | open | `handleReceipts` in `eth/protocols/eth/handlers.go` |
-| 2026-10-17 | go-ethereum #35857 (v1.17.8) | eth: cap lookups per pooled-transactions request at 4096 | open | `answerGetPooledTransactions` stops only at the byte limit |
-| 2026-10-17 | go-ethereum #35856 (v1.17.8) | snap: charge at least one load per requested trie node | open | `eth/protocols/snap/handler.go` still counts `loads += resolved` |
-| 2026-10-17 | go-ethereum #35861 (v1.17.8) | p2p/discover: only bonded peers feed the IP predictor | open | `p2p/discover/v4_udp.go` has no bond check there |
+| 2026-10-17 | go-ethereum #35862 (v1.17.8) | eth: reject block bodies listing more items than their size allows | applied | `c19cf21c6`: `checkBodyItemCounts` in `eth/protocols/eth/handlers.go` (test `TestServeBodiesRejectOversizedCount`) |
+| 2026-10-17 | go-ethereum #35904 (v1.17.8) | eth: the same check for receipts | applied | `c19cf21c6`: `checkReceiptItemCounts` in `handleReceipts`, with the minimum receipt size of the eth/68 consensus encoding (test `TestServeReceiptsRejectOversizedCount`) |
+| 2026-10-17 | go-ethereum #35857 (v1.17.8) | eth: cap lookups per pooled-transactions request at 4096 | applied | `c19cf21c6`: `maxPooledTxServe` in `eth/protocols/eth/handler.go` (test `TestPooledTxLookupCap`) |
+| 2026-10-17 | go-ethereum #35856 (v1.17.8) | snap: charge at least one load per requested trie node | applied | `7ff2c26cb`: `loads += max(resolved, 1)` in `eth/protocols/snap/handler.go` (test `TestSnapServeTrieNodeLoadCharge`) |
+| 2026-10-17 | go-ethereum #35861 (v1.17.8) | p2p/discover: only bonded peers feed the IP predictor | applied | `b42b8c437`: `handlePing` in `p2p/discover/v4_udp.go` checks the bond first (test `TestV4IPPredictorBondedOnly`) |
 | 2026-10-17 | go-ethereum #35859, #35883, #35881, #35865, #35890, #35863 (v1.17.8) | eth/69 receipts, eth/72 cells, JUMPDEST cache, block access lists, STUN client | not applicable | this code speaks eth/68 only, has no blob cells, no global JUMPDEST cache, no Amsterdam code and no STUN client |
 | 2026-10-17 | go-ethereum #35289 | eth, snap: discard the message before the size check | applied | `eth/protocols/eth/handler.go` and `eth/protocols/snap/handler.go` defer `msg.Discard()` |
 | 2026-10-17 | go-ethereum #33940 (v1.17.1) | p2p/tracker: crash in `clean()` after stop | applied | `p2p/tracker/tracker.go` |
 | 2026-10-17 | go-ethereum #33245 (v1.17.0) | rlp: list iterator stops after a parse error | applied | `rlp/iterator.go` |
 | 2026-10-17 | go-ethereum #30918 | eth: response dispatch hangs when the peer disconnects | applied | `eth/protocols/eth/dispatcher.go` |
-| 2026-10-17 | go-ethereum #32947 (v1.16.6) | eth/fetcher: a dropped peer's alternates are never removed (memory leak) | open | `eth/fetcher/tx_fetcher.go` cleans `announced` only |
-| 2026-10-17 | go-ethereum #33378 (v1.17.0) | core/txpool: ignore announcements of unsupported transaction types | open | `eth/handler.go` passes `h.txpool.Has` |
-| 2026-10-17 | go-ethereum #33704 (v1.17.0) | core/txpool/legacypool: heartbeat entries leak | open | `pool.beats` is set unconditionally in `core/txpool/legacypool/legacypool.go` |
-| 2026-10-17 | go-ethereum #32544 (v1.16.4) | core/txpool/legacypool: overflow check on the list's total cost | open | `core/txpool/legacypool/list.go` adds without a check |
+| 2026-10-17 | go-ethereum #32947 (v1.16.6) | eth/fetcher: a dropped peer's alternates are never removed (memory leak) | applied | `0a5e92121`: a dropped peer is removed from `alternates` in `eth/fetcher/tx_fetcher.go` (test `TestTxFetcherDropClearsAlternates`) |
+| 2026-10-17 | go-ethereum #33378 (v1.17.0) | core/txpool: ignore announcements of unsupported transaction types | applied | `0a5e92121`: `TxPool.FilterType`, passed to the tx fetcher by `eth/handler.go` (test `TestHandlerIgnoresUnsupportedTxAnnouncements`) |
+| 2026-10-17 | go-ethereum #33704 (v1.17.0) | core/txpool/legacypool: heartbeat entries leak | applied | `0a5e92121`: `bumpBeat` in `core/txpool/legacypool/legacypool.go` (test `TestLegacyPoolHeartbeatNoLeak`) |
+| 2026-10-17 | go-ethereum #32544 (v1.16.4) | core/txpool/legacypool: overflow check on the list's total cost | applied | `0a5e92121`: `AddOverflow` in `core/txpool/legacypool/list.go` (test `TestListTotalCostOverflow`) |
 | 2026-10-17 | go-ethereum #30430 (v1.14.9) and the blob pool size caps #33474 #34831 #35367 #35766 | core/txpool/blobpool fixes | not applicable | the blob pool is removed from the node (`docs/removed-and-turned-off.md` line 26) |
-| 2026-10-17 | go-ethereum #31522 (v1.15.8) | eth: overflow in header request traversal | open | `eth/protocols/eth/handlers.go` uses `Skip+1` unchecked; replies stay bounded by `maxHeadersServe` |
-| 2026-10-17 | go-ethereum #30305 (v1.14.9) | eth: return early on a zero-amount header request | open | `eth/protocols/eth/handlers.go` |
+| 2026-10-17 | go-ethereum #31522 (v1.15.8) | eth: overflow in header request traversal | applied | `c19cf21c6`: overflow and underflow checks in `serviceNonContiguousBlockHeaderQuery` (test `TestHeaderTraversalOverflow`) |
+| 2026-10-17 | go-ethereum #30305 (v1.14.9) | eth: return early on a zero-amount header request | applied | `c19cf21c6`: `ServiceGetBlockHeadersQuery` in `eth/protocols/eth/handlers.go` (test `TestZeroAmountHeaderRequest`) |
 | 2026-10-17 | go-ethereum #29864 (v1.14.4) | p2p/discover: crash when a node is removed during revalidation | applied | `p2p/discover/table_reval.go` |
-| 2026-10-17 | go-ethereum #30239 (v1.14.8) | p2p/discover: revalidation CPU spin | open | `p2p/discover/table_reval.go` has the old `run()` |
-| 2026-10-17 | go-ethereum #29960 (v1.14.6) | p2p/discover: missing lock when loading seed nodes (data race) | open | `p2p/discover/table.go` calls `handleAddNode` without the table mutex |
-| 2026-10-17 | go-ethereum #34743, #34878, #34888 (v1.17.3) | p2p/discover: v4 timeout loop, clock-warp error routing, read buffer race | open | `p2p/discover/v4_udp.go` |
-| 2026-10-17 | go-ethereum #35043 | p2p/discover: v5 node wait hangs on a zero response count | open | `p2p/discover/v5_udp.go` |
-| 2026-10-17 | go-ethereum #31356, #31543 | p2p/discover/v5: resend the current challenge during a handshake | open | `p2p/discover/v5_udp.go` always makes a new challenge |
-| 2026-10-17 | go-ethereum #33104, #33839 (v1.16.7, v1.17.3) | crypto: hash length checks in the nocgo signature code | open | `crypto/signature_nocgo.go`; matters for builds without cgo |
-| 2026-10-17 | go-ethereum #35686 | crypto/bn256/cloudflare: `twistPoint.Neg` zeroes its input | open | `crypto/bn256/cloudflare/twist.go`; the precompiles do not call `G2.Neg` |
-| 2026-10-17 | go-ethereum #29644 | eth/gasprice: at most 100 reward percentiles in fee history | open | `eth/gasprice/feehistory.go` has no limit |
-| 2026-10-17 | go-ethereum #31711, #35038 | rpc: method name length limit | open | no such limit in `rpc` |
+| 2026-10-17 | go-ethereum #30239 (v1.14.8) | p2p/discover: revalidation CPU spin | applied | `b42b8c437`: the new `run()` in `p2p/discover/table_reval.go` (test `TestRevalidationNoCPUSpin`) |
+| 2026-10-17 | go-ethereum #29960 (v1.14.6) | p2p/discover: missing lock when loading seed nodes (data race) | applied | `b42b8c437`: `loadSeedNodes` in `p2p/discover/table.go` holds the table mutex (test `TestTableLoadSeedNodesLocked`) |
+| 2026-10-17 | go-ethereum #34743, #34878, #34888 (v1.17.3) | p2p/discover: v4 timeout loop, clock-warp error routing, read buffer race | applied | `b42b8c437`: `p2p/discover/v4_udp.go` (tests `TestV4TimeoutLoop`, `TestV4ClockWarpErrorRouting` and `TestV4ReadBufferNoRace`) |
+| 2026-10-17 | go-ethereum #35043 | p2p/discover: v5 node wait hangs on a zero response count | applied | `e9c60f300`: `p2p/discover/v5_udp.go` (test `TestV5WaitZeroResponses`) |
+| 2026-10-17 | go-ethereum #31356, #31543 | p2p/discover/v5: resend the current challenge during a handshake | applied | `e9c60f300`: `p2p/discover/v5_udp.go` and `p2p/discover/v5wire` (tests `TestV5ResendChallenge` and `TestV5ResendChallengeDuringHandshake`) |
+| 2026-10-17 | go-ethereum #33104, #33839 (v1.16.7, v1.17.3) | crypto: hash length checks in the nocgo signature code | applied | `d3f47b80b`: `crypto/signature_nocgo.go` (tests `TestNoCgoSignHashLength`, `TestNoCgoRecoverHashLength` and `TestNoCgoVerifyHashLength`) |
+| 2026-10-17 | go-ethereum #35686 | crypto/bn256/cloudflare: `twistPoint.Neg` zeroes its input | applied | `d3f47b80b`: `crypto/bn256/cloudflare/twist.go` (test `TestTwistPointNegKeepsInput`) |
+| 2026-10-17 | go-ethereum #29644 | eth/gasprice: at most 100 reward percentiles in fee history | applied | `efefa17d8`: `maxQueryLimit` in `eth/gasprice/feehistory.go` (test `TestFeeHistoryPercentileLimit`) |
+| 2026-10-17 | go-ethereum #31711, #35038 | rpc: method name length limit | applied | `1e864dc16`: `maxMethodNameLength` of 2048 in `rpc/json.go`, checked in `rpc/handler.go` (test `TestRPCMethodNameLengthLimit`) |
 | 2026-10-17 | go-ethereum #33545 (v1.16.8) | rpc: limited buffer write fix | not applicable | `rpc` has no `limitedBuffer` |
-| 2026-10-17 | go-ethereum #30014 (v1.14.6) | common/math: out of bounds on a lone quote in hex-or-decimal JSON | open | `common/math/big.go`, `integer.go` and `uint256.go` |
-| 2026-10-17 | go-ethereum #32363, #31818 | core/vm: modexp input bounds (EIP-7823) | not applicable | Osaka is post-Cancun work (`docs/removed-and-turned-off.md` line 60) |
+| 2026-10-17 | go-ethereum #30014 (v1.14.6) | common/math: out of bounds on a lone quote in hex-or-decimal JSON | applied | `1e864dc16`: `common/math/big.go`, `integer.go` and `uint256.go` (test `TestHexOrDecimalLoneQuote`) |
+| 2026-10-17 | go-ethereum #32363, #31818 | core/vm: modexp input bounds (EIP-7823) | not applicable | Osaka is post-Cancun work (`docs/removed-and-turned-off.md` line 71) |
 
 ### Core-Geth fixes
 
@@ -214,4 +221,4 @@ modules).
 
 | Logged | Source | Item | Status | Evidence |
 | --- | --- | --- | --- | --- |
-| 2026-10-17 | ghostcoin-core/ghost `docs/surveys/randomx.md` and `docs/decisions/0001-base-client.md` | RandomX reference (`tevador/RandomX`): the latest v1 tag is `v1.2.3` (2026-07-17). Fixes not in any release: `c981f99` and `397fd7a` (use-after-free in `randomx_vm_set_cache`), `c1811ac` and `9b012ab` (JIT page-protection errors), `418f549` (signed-overflow in the portable `smulh`). The reference `master` commit `418f5497e60215fcd8a7cff2a16be835135833e5` has all of them. | open | pinned by the RandomX engine work, not merged yet |
+| 2026-10-17 | ghostcoin-core/ghost `docs/surveys/randomx.md` and `docs/decisions/0001-base-client.md` | RandomX reference (`tevador/RandomX`): the latest v1 tag is `v1.2.3` (2026-07-17). Fixes not in any release: `c981f99` and `397fd7a` (use-after-free in `randomx_vm_set_cache`), `c1811ac` and `9b012ab` (JIT page-protection errors), `418f549` (signed-overflow in the portable `smulh`). The reference `master` commit `418f5497e60215fcd8a7cff2a16be835135833e5` has all of them. | applied | the vendored library is pinned to `418f5497e602` (`5c3fe1999`; `consensus/randomx/librandomx/VENDORED.md`, `docs/decisions/0002-randomx-binding.md`) |
