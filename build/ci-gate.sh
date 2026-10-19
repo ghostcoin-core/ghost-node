@@ -117,7 +117,7 @@ stage_build() {
 }
 
 stage_unit() {
-	local shard=$1 all pkgs
+	local shard=$1 all pkgs home
 	all="$(unit_packages)"
 	pkgs="$(shard_packages "$shard" $all)"
 	if [ -z "$pkgs" ]; then
@@ -133,6 +133,19 @@ stage_unit() {
 	# GOCOMPILEDEBUG is part of the build cache key.
 	if [ "$(go env GOARCH)" != amd64 ] && [ -z "${GOCOMPILEDEBUG:-}" ]; then
 		export GOCOMPILEDEBUG=fmahash=qn
+	fi
+	# Some tests (internal/flags) expect ~ to expand to the account's home
+	# from the user database, as it does on CI. Sandboxes may set HOME to
+	# another directory; use the account's home then, keeping the Go caches
+	# where they are.
+	if command -v getent >/dev/null; then
+		home="$(getent passwd "$(id -u)" | cut -d: -f6)"
+		if [ -n "$home" ] && [ "$home" != "${HOME:-}" ] && [ -d "$home" ] && [ -w "$home" ]; then
+			GOCACHE="$(go env GOCACHE)"
+			GOMODCACHE="$(go env GOMODCACHE)"
+			GOPATH="$(go env GOPATH)"
+			export GOCACHE GOMODCACHE GOPATH HOME="$home"
+		fi
 	fi
 	go test -p 1 -tags integrationtests -timeout 20m $pkgs
 }
