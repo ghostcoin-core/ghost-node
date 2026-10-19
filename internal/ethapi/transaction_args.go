@@ -32,6 +32,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto/kzg4844"
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/params/types/ctypes"
 	"github.com/ethereum/go-ethereum/params/vars"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/holiman/uint256"
@@ -98,6 +99,9 @@ func (args *TransactionArgs) data() []byte {
 // setDefaults fills in default values for unspecified tx fields.
 func (args *TransactionArgs) setDefaults(ctx context.Context, b Backend, skipGasEstimation bool) error {
 	if err := args.setBlobTxSidecar(ctx, b); err != nil {
+		return err
+	}
+	if err := args.ValidateTxTypeFork(b.ChainConfig(), b.CurrentHeader().Number); err != nil {
 		return err
 	}
 	if err := args.setFeeDefaults(ctx, b); err != nil {
@@ -525,6 +529,20 @@ func (args *TransactionArgs) toTransaction() *types.Transaction {
 		}
 	}
 	return types.NewTx(data)
+}
+
+// ValidateTxTypeFork rejects arguments that select a transaction type whose
+// fork is not active at the given block number. The type is picked the same
+// way as in toTransaction: an access list needs EIP-2930 and 1559 fee fields
+// need EIP-1559.
+func (args *TransactionArgs) ValidateTxTypeFork(config ctypes.ChainConfigurator, number *big.Int) error {
+	if (args.MaxFeePerGas != nil || args.MaxPriorityFeePerGas != nil) && !config.IsEnabled(config.GetEIP1559Transition, number) {
+		return fmt.Errorf("%w: dynamic fee tx (sender %v)", core.ErrTxTypeNotSupported, args.from())
+	}
+	if args.AccessList != nil && !config.IsEnabled(config.GetEIP2930Transition, number) {
+		return fmt.Errorf("%w: access list tx (sender %v)", core.ErrTxTypeNotSupported, args.from())
+	}
+	return nil
 }
 
 // IsEIP4844 returns an indicator if the args contains EIP4844 fields.

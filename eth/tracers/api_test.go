@@ -406,6 +406,46 @@ func TestTraceCall(t *testing.T) {
 	}
 }
 
+// TestTraceCallNoCrash checks that debug_traceCall does not panic when the
+// block overrides are present but leave the block number unset (go-ethereum
+// issue #33014).
+func TestTraceCallNoCrash(t *testing.T) {
+	t.Parallel()
+
+	accounts := newAccounts(2)
+	genesis := &genesisT.Genesis{
+		Config: params.TestChainConfig,
+		Alloc: genesisT.GenesisAlloc{
+			accounts[0].addr: {Balance: big.NewInt(vars.Ether)},
+			accounts[1].addr: {Balance: big.NewInt(vars.Ether)},
+		},
+	}
+	backend := newTestBackend(t, 1, genesis, func(i int, b *core.BlockGen) {})
+	defer backend.teardown()
+	api := NewAPI(backend)
+
+	for _, number := range []rpc.BlockNumber{0, 1, rpc.LatestBlockNumber} {
+		number := number
+		config := &TraceCallConfig{BlockOverrides: &ethapi.BlockOverrides{}}
+		call := ethapi.TransactionArgs{
+			From:  &accounts[0].addr,
+			To:    &accounts[1].addr,
+			Value: (*hexutil.Big)(big.NewInt(1000)),
+		}
+		result, err := api.TraceCall(context.Background(), call, rpc.BlockNumberOrHash{BlockNumber: &number}, config)
+		if err != nil {
+			t.Fatalf("block %d: expect no error, got %v", number, err)
+		}
+		var have *logger.ExecutionResult
+		if err := json.Unmarshal(result.(json.RawMessage), &have); err != nil {
+			t.Fatalf("block %d: failed to unmarshal result %v", number, err)
+		}
+		if have.Failed || have.Gas != vars.TxGas {
+			t.Fatalf("block %d: unexpected result %s", number, string(result.(json.RawMessage)))
+		}
+	}
+}
+
 func TestTraceTransaction(t *testing.T) {
 	t.Parallel()
 

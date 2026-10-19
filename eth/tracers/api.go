@@ -938,6 +938,9 @@ func (api *API) TraceCall(ctx context.Context, args ethapi.TransactionArgs, bloc
 		config.BlockOverrides.Apply(&vmctx)
 	}
 	// Execute the trace
+	if err := args.ValidateTxTypeFork(api.backend.ChainConfig(), vmctx.BlockNumber); err != nil {
+		return nil, err
+	}
 	msg, err := args.ToMessage(api.backend.RPCGasCap(), vmctx.BaseFee)
 	if err != nil {
 		return nil, err
@@ -989,6 +992,10 @@ func (api *API) TraceCallMany(ctx context.Context, txs []ethapi.TransactionArgs,
 	var results = make([]interface{}, len(txs))
 	for idx, args := range txs {
 		// Execute the trace
+		if err := args.ValidateTxTypeFork(api.backend.ChainConfig(), block.Number()); err != nil {
+			results[idx] = &txTraceResult{Error: err.Error()}
+			continue
+		}
 		msg, err := args.ToMessage(api.backend.RPCGasCap(), block.BaseFee())
 		if err != nil {
 			results[idx] = &txTraceResult{Error: err.Error()}

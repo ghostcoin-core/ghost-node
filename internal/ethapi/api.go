@@ -688,8 +688,15 @@ func (n *proofList) Delete(key []byte) error {
 	panic("not supported")
 }
 
+// maxGetProofKeys is the maximum number of storage keys that can be requested
+// in a single eth_getProof call.
+const maxGetProofKeys = 1024
+
 // GetProof returns the Merkle-proof for a given account and optionally some storage keys.
 func (s *BlockChainAPI) GetProof(ctx context.Context, address common.Address, storageKeys []string, blockNrOrHash rpc.BlockNumberOrHash) (*AccountResult, error) {
+	if len(storageKeys) > maxGetProofKeys {
+		return nil, &invalidParamsError{fmt.Sprintf("too many storage keys requested (max %d, got %d)", maxGetProofKeys, len(storageKeys))}
+	}
 	var (
 		keys         = make([]common.Hash, len(storageKeys))
 		keyLengths   = make([]int, len(storageKeys))
@@ -722,6 +729,9 @@ func (s *BlockChainAPI) GetProof(ctx context.Context, address common.Address, st
 		}
 		// Create the proofs for the storageKeys.
 		for i, key := range keys {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			// Output key encoding is a bit special: if the input was a 32-byte hash, it is
 			// returned as such. Otherwise, we apply the QUANTITY encoding mandated by the
 			// JSON-RPC spec for getProof. This behavior exists to preserve backwards
@@ -1098,6 +1108,9 @@ func doCall(ctx context.Context, b Backend, args TransactionArgs, state *state.S
 	if blockOverrides != nil {
 		blockOverrides.Apply(&blockCtx)
 	}
+	if err := args.ValidateTxTypeFork(b.ChainConfig(), blockCtx.BlockNumber); err != nil {
+		return nil, err
+	}
 	msg, err := args.ToMessage(globalGasCap, blockCtx.BaseFee)
 	if err != nil {
 		return nil, err
@@ -1183,6 +1196,9 @@ func DoEstimateGas(ctx context.Context, b Backend, args TransactionArgs, blockNr
 		ErrorRatio: estimateGasErrorRatio,
 	}
 	// Run the gas estimation andwrap any revertals into a custom return
+	if err := args.ValidateTxTypeFork(b.ChainConfig(), header.Number); err != nil {
+		return 0, err
+	}
 	call, err := args.ToMessage(gasCap, header.BaseFee)
 	if err != nil {
 		return 0, err
@@ -2173,7 +2189,7 @@ func (api *DebugAPI) GetRawHeader(ctx context.Context, blockNrOrHash rpc.BlockNu
 		hash = h
 	} else {
 		block, err := api.b.BlockByNumberOrHash(ctx, blockNrOrHash)
-		if err != nil {
+		if block == nil || err != nil {
 			return nil, err
 		}
 		hash = block.Hash()
@@ -2192,7 +2208,7 @@ func (api *DebugAPI) GetRawBlock(ctx context.Context, blockNrOrHash rpc.BlockNum
 		hash = h
 	} else {
 		block, err := api.b.BlockByNumberOrHash(ctx, blockNrOrHash)
-		if err != nil {
+		if block == nil || err != nil {
 			return nil, err
 		}
 		hash = block.Hash()
@@ -2211,7 +2227,7 @@ func (api *DebugAPI) GetRawReceipts(ctx context.Context, blockNrOrHash rpc.Block
 		hash = h
 	} else {
 		block, err := api.b.BlockByNumberOrHash(ctx, blockNrOrHash)
-		if err != nil {
+		if block == nil || err != nil {
 			return nil, err
 		}
 		hash = block.Hash()
