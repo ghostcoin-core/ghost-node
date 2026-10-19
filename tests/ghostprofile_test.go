@@ -105,14 +105,24 @@ func TestProfileForksHaveFixtureConfigs(t *testing.T) {
 		}
 	}
 
-	// The fixtures CI job runs the state and blockchain fixtures of ./tests.
-	ci, err := os.ReadFile("../.github/workflows/ci.yml")
-	if err != nil {
-		t.Fatal(err)
+	// The fixtures CI job runs the state and blockchain fixtures of ./tests
+	// through build/ci-gate.sh.
+	checks := []struct {
+		file  string
+		wants []string
+	}{
+		{"../.github/workflows/ci.yml", []string{"\n  fixtures:\n", "build/ci-gate.sh fixtures"}},
+		{"../build/ci-gate.sh", []string{"-run '^TestState$' ./tests", "-run '^TestBlockchain$' ./tests"}},
 	}
-	for _, want := range []string{"\n  fixtures:\n", "-run '^TestState$' ./tests", "-run '^TestBlockchain$' ./tests"} {
-		if !strings.Contains(string(ci), want) {
-			t.Errorf("the CI workflow does not contain %q", want)
+	for _, check := range checks {
+		data, err := os.ReadFile(check.file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range check.wants {
+			if !strings.Contains(string(data), want) {
+				t.Errorf("%s does not contain %q", check.file, want)
+			}
 		}
 	}
 }
