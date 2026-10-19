@@ -34,6 +34,7 @@ const (
 	subscribeMethodSuffix    = "_subscribe"
 	unsubscribeMethodSuffix  = "_unsubscribe"
 	notificationMethodSuffix = "_subscription"
+	maxMethodNameLength      = 2048
 
 	defaultWriteTimeout = 10 * time.Second // used if context has no deadline
 )
@@ -360,18 +361,38 @@ func parseArgumentArray(dec *json.Decoder, types []reflect.Type) ([]reflect.Valu
 		if i >= len(types) {
 			return args, fmt.Errorf("too many arguments, want at most %d", len(types))
 		}
-		argval := reflect.New(types[i])
-		if err := dec.Decode(argval.Interface()); err != nil {
+		var elem json.RawMessage
+		if err := dec.Decode(&elem); err != nil {
 			return args, fmt.Errorf("invalid argument %d: %v", i, err)
 		}
-		if argval.IsNil() && types[i].Kind() != reflect.Ptr {
+		argval := reflect.New(types[i])
+		if !isNilable(types[i]) && isJSONNull(elem) {
 			return args, fmt.Errorf("missing value for required argument %d", i)
+		}
+		if err := json.Unmarshal(elem, argval.Interface()); err != nil {
+			return args, fmt.Errorf("invalid argument %d: %v", i, err)
 		}
 		args = append(args, argval.Elem())
 	}
 	// Read end of args array.
 	_, err := dec.Token()
 	return args, err
+}
+
+// isJSONNull reports whether the raw JSON value is the literal null.
+func isJSONNull(raw json.RawMessage) bool {
+	return bytes.Equal(bytes.TrimSpace(raw), null)
+}
+
+// isNilable reports whether JSON null is a valid value for an argument of type t,
+// i.e. whether its zero value is nil. Clients send null for optional lists, for
+// example ethclient's FeeHistory with no reward percentiles.
+func isNilable(t reflect.Type) bool {
+	switch t.Kind() {
+	case reflect.Ptr, reflect.Slice, reflect.Map, reflect.Interface:
+		return true
+	}
+	return false
 }
 
 // parseSubscriptionName extracts the subscription name from an encoded argument array.

@@ -114,3 +114,32 @@ func TestMustParseUint64Panic(t *testing.T) {
 	}()
 	MustParseUint64("ggg")
 }
+
+// TestHexOrDecimalLoneQuote checks that a JSON value made of a single quote
+// character is rejected instead of slicing out of bounds.
+func TestHexOrDecimalLoneQuote(t *testing.T) {
+	input := []byte(`"`)
+	if err := new(HexOrDecimal64).UnmarshalJSON(input); err == nil {
+		t.Error("HexOrDecimal64: expected error for lone quote")
+	}
+	if err := new(HexOrDecimal256).UnmarshalJSON(input); err == nil {
+		t.Error("HexOrDecimal256: expected error for lone quote")
+	}
+	if err := new(HexOrDecimalUint256).UnmarshalJSON(input); err == nil {
+		t.Error("HexOrDecimalUint256: expected error for lone quote")
+	}
+
+	// Quoted values must still decode.
+	var i64 HexOrDecimal64
+	if err := i64.UnmarshalJSON([]byte(`"0x10"`)); err != nil || i64 != 16 {
+		t.Errorf("HexOrDecimal64: got %d, %v; want 16", i64, err)
+	}
+	var i256 HexOrDecimal256
+	if err := i256.UnmarshalJSON([]byte(`"0x10"`)); err != nil || i256.ToInt().Uint64() != 16 {
+		t.Errorf("HexOrDecimal256: got %v, %v; want 16", i256.ToInt(), err)
+	}
+	var u256 HexOrDecimalUint256
+	if err := u256.UnmarshalJSON([]byte(`"0x10"`)); err != nil || u256.ToInt().Uint64() != 16 {
+		t.Errorf("HexOrDecimalUint256: got %v, %v; want 16", u256.ToInt(), err)
+	}
+}

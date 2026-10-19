@@ -385,3 +385,78 @@ func wsPingTestHandler(t *testing.T, conn *websocket.Conn, shutdown, sendPing <-
 		}
 	}
 }
+
+func TestRPCMethodNameLengthLimit(t *testing.T) {
+	t.Parallel()
+
+	var (
+		srv     = newTestServer()
+		httpsrv = httptest.NewServer(srv.WebsocketHandler([]string{"*"}))
+		wsURL   = "ws:" + strings.TrimPrefix(httpsrv.URL, "http:")
+	)
+	defer srv.Stop()
+	defer httpsrv.Close()
+
+	client, err := DialWebsocket(context.Background(), wsURL, "")
+	if err != nil {
+		t.Fatalf("can't dial: %v", err)
+	}
+	defer client.Close()
+
+	// Test cases
+	tests := []struct {
+		name          string
+		method        string
+		params        []interface{}
+		expectedError string
+	}{
+		{
+			name:          "valid method name",
+			method:        "test_echo",
+			params:        []interface{}{"test", 1},
+			expectedError: "",
+		},
+		{
+			name:          "method name too long",
+			method:        "test_" + string(make([]byte, maxMethodNameLength+1)),
+			params:        []interface{}{"test", 1},
+			expectedError: "method name too long",
+		},
+		{
+			name:          "valid subscription",
+			method:        "nftest_subscribe",
+			params:        []interface{}{"someSubscription", 1, 2},
+			expectedError: "",
+		},
+		{
+			name:          "method name too long subscribe",
+			method:        string(make([]byte, maxMethodNameLength+1)) + "_subscribe",
+			params:        []interface{}{"newHeads"},
+			expectedError: "method name too long",
+		},
+		{
+			name:          "method name too long unsubscribe",
+			method:        string(make([]byte, maxMethodNameLength+1)) + "_unsubscribe",
+			params:        []interface{}{"0x1"},
+			expectedError: "method name too long",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var result interface{}
+			err := client.Call(&result, tt.method, tt.params...)
+			if tt.expectedError == "" {
+				if err != nil {
+					t.Errorf("unexpected error: %v", err)
+				}
+			} else {
+				if err == nil {
+					t.Error("expected error, got nil")
+				} else if !strings.Contains(err.Error(), tt.expectedError) {
+					t.Errorf("expected error containing %q, got %q", tt.expectedError, err.Error())
+				}
+			}
+		})
+	}
+}
