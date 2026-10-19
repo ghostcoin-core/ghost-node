@@ -156,6 +156,7 @@ type downloadTesterPeer struct {
 
 	withholdHeaders map[common.Hash]struct{}
 	corruptBodies   bool // if set, the peer serves incorrect blocks
+	corruptReceipts bool // if set, the peer serves incorrect receipts
 	fakeTD          *big.Int
 
 	dropped chan error // signaled when res.Done receives an error
@@ -349,6 +350,11 @@ func (dlp *downloadTesterPeer) RequestReceipts(hashes []common.Hash, sink chan *
 	for i, receipt := range receipts {
 		hashes[i] = types.DeriveSha(types.Receipts(receipt), hasher)
 	}
+	if dlp.corruptReceipts {
+		for i := range hashes {
+			hashes[i] = common.Hash{0xff}
+		}
+	}
 	req := &eth.Request{
 		Peer: dlp.id,
 	}
@@ -357,10 +363,16 @@ func (dlp *downloadTesterPeer) RequestReceipts(hashes []common.Hash, sink chan *
 		Res:  &raws,
 		Meta: hashes,
 		Time: 1,
-		Done: make(chan error, 1), // Ignore the returned status
+		Done: make(chan error),
 	}
 	go func() {
 		sink <- res
+		if err := <-res.Done; err != nil {
+			select {
+			case dlp.dropped <- err:
+			default:
+			}
+		}
 	}()
 	return req, nil
 }
@@ -1486,5 +1498,81 @@ func TestInvalidBodyPeerDrop(t *testing.T) {
 	case <-peer.dropped:
 	case <-time.After(1 * time.Minute):
 		t.Fatal("peer was not dropped")
+	}
+}
+
+// Tests that a peer delivering block bodies which do not match the requested
+// headers is reported back to the protocol handler with errInvalidBody, which
+// is what makes the eth handler disconnect it, while an honest peer is not.
+func TestDownloaderDropsPeerInvalidBodies(t *testing.T) {
+	chain := testChainBase.shorten(blockCacheMaxItems - 15)
+
+	// An honest peer must sync without any delivery being flagged
+	honest := newTester(t)
+	defer honest.terminate()
+
+	good := honest.newPeer("honest", eth.ETH68, chain.blocks[1:])
+	if err := honest.sync("honest", nil, FullSync); err != nil {
+		t.Fatalf("failed to sync from honest peer: %v", err)
+	}
+	select {
+	case err := <-good.dropped:
+		t.Fatalf("honest peer flagged for dropping: %v", err)
+	default:
+	}
+	// A peer serving corrupt bodies must be flagged as invalid
+	tester := newTester(t)
+	defer tester.terminate()
+
+	peer := tester.newPeer("corrupt", eth.ETH68, chain.blocks[1:])
+	peer.corruptBodies = true
+
+	go tester.sync("corrupt", nil, FullSync)
+
+	select {
+	case err := <-peer.dropped:
+		if !errors.Is(err, errInvalidBody) {
+			t.Fatalf("peer dropped with wrong error: have %v, want %v", err, errInvalidBody)
+		}
+	case <-time.After(1 * time.Minute):
+		t.Fatal("peer serving invalid bodies was not dropped")
+	}
+}
+
+// Tests that a peer delivering receipts which do not match the requested
+// headers is reported back to the protocol handler with errInvalidReceipt,
+// which is what makes the eth handler disconnect it, while an honest peer is not.
+func TestDownloaderDropsPeerInvalidReceipts(t *testing.T) {
+	chain := testChainBase.shorten(blockCacheMaxItems - 15)
+
+	// An honest peer must snap sync without any delivery being flagged
+	honest := newTester(t)
+	defer honest.terminate()
+
+	good := honest.newPeer("honest", eth.ETH68, chain.blocks[1:])
+	if err := honest.sync("honest", nil, SnapSync); err != nil {
+		t.Fatalf("failed to sync from honest peer: %v", err)
+	}
+	select {
+	case err := <-good.dropped:
+		t.Fatalf("honest peer flagged for dropping: %v", err)
+	default:
+	}
+	// A peer serving corrupt receipts must be flagged as invalid
+	tester := newTester(t)
+	defer tester.terminate()
+
+	peer := tester.newPeer("corrupt", eth.ETH68, chain.blocks[1:])
+	peer.corruptReceipts = true
+
+	go tester.sync("corrupt", nil, SnapSync)
+
+	select {
+	case err := <-peer.dropped:
+		if !errors.Is(err, errInvalidReceipt) {
+			t.Fatalf("peer dropped with wrong error: have %v, want %v", err, errInvalidReceipt)
+		}
+	case <-time.After(1 * time.Minute):
+		t.Fatal("peer serving invalid receipts was not dropped")
 	}
 }

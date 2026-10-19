@@ -23,6 +23,7 @@ import (
 	"math/rand"
 	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -4391,5 +4392,86 @@ func TestEIP3651(t *testing.T) {
 	expected = new(big.Int).SetUint64(block.GasUsed() * (block.Transactions()[0].GasTipCap().Uint64() + block.BaseFee().Uint64()))
 	if actual.Cmp(expected) != 0 {
 		t.Fatalf("sender balance incorrect: expected %d, got %d", expected, actual)
+	}
+}
+
+// blockingPrefetcher is a Prefetcher that holds every prefetch run until it is
+// released, standing in for a prefetcher still busy with a heavy block.
+type blockingPrefetcher struct {
+	started     chan struct{}
+	startOnce   sync.Once
+	release     chan struct{}
+	releaseOnce sync.Once
+	running     atomic.Int32
+}
+
+func (p *blockingPrefetcher) Prefetch(block *types.Block, statedb *state.StateDB, cfg vm.Config, interrupt *atomic.Bool) {
+	p.running.Add(1)
+	defer p.running.Add(-1)
+
+	p.startOnce.Do(func() { close(p.started) })
+	<-p.release
+}
+
+func (p *blockingPrefetcher) unblock() {
+	p.releaseOnce.Do(func() { close(p.release) })
+}
+
+// TestPrefetcherStopNoLeak checks that stopping the chain waits for every block
+// prefetcher it launched, so none outlives the chain and keeps its state alive,
+// and that no prefetcher is launched once the chain is stopping.
+func TestPrefetcherStopNoLeak(t *testing.T) {
+	var (
+		engine  = ethash.NewFaker()
+		genesis = &genesisT.Genesis{
+			BaseFee: big.NewInt(vars.InitialBaseFee),
+			Config:  params.AllEthashProtocolChanges,
+		}
+	)
+	_, blocks := makeBlockChainWithGenesis(genesis, 4, engine, canonicalSeed)
+
+	chain, err := NewBlockChain(rawdb.NewMemoryDatabase(), DefaultCacheConfigWithScheme(rawdb.HashScheme), genesis, nil, engine, vm.Config{}, nil, nil)
+	if err != nil {
+		t.Fatalf("failed to create blockchain: %v", err)
+	}
+	prefetcher := &blockingPrefetcher{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	defer prefetcher.unblock()
+	chain.prefetcher = prefetcher
+
+	if _, err := chain.InsertChain(blocks); err != nil {
+		t.Fatalf("failed to insert chain: %v", err)
+	}
+	select {
+	case <-prefetcher.started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("no block prefetcher was launched")
+	}
+	// Stop the chain while the prefetchers are still busy. It must not return
+	// before they have exited.
+	stopped := make(chan int32, 1)
+	go func() {
+		chain.Stop()
+		stopped <- prefetcher.running.Load()
+	}()
+	select {
+	case n := <-stopped:
+		t.Fatalf("chain stopped while %d block prefetchers were still running", n)
+	case <-time.After(100 * time.Millisecond):
+	}
+	prefetcher.unblock()
+
+	select {
+	case n := <-stopped:
+		if n != 0 {
+			t.Fatalf("chain stopped while %d block prefetchers were still running", n)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stopping the chain did not return")
+	}
+	if chain.trackPrefetch() {
+		t.Fatal("block prefetcher registered after the chain stopped")
 	}
 }

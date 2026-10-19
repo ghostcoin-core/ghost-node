@@ -384,3 +384,122 @@ func TestSetupGenesisKeepsStoredConfig(t *testing.T) {
 		t.Errorf("stored configuration was overwritten: EIP-150 now at block %d", *b)
 	}
 }
+
+// TestSetupGenesisNoPanic checks that reopening a chain created from a custom
+// genesis, the way an older node wrote it, returns a result or an error and
+// never crashes, including for time-based fork configurations and forks given
+// out of order.
+func TestSetupGenesisNoPanic(t *testing.T) {
+	var (
+		zero   = uint64(0)
+		future = uint64(1 << 40)
+	)
+	london := func() *goethereum.ChainConfig {
+		return &goethereum.ChainConfig{
+			ChainID:             big.NewInt(4321),
+			HomesteadBlock:      big.NewInt(0),
+			EIP150Block:         big.NewInt(0),
+			EIP155Block:         big.NewInt(0),
+			EIP158Block:         big.NewInt(0),
+			ByzantiumBlock:      big.NewInt(0),
+			ConstantinopleBlock: big.NewInt(0),
+			PetersburgBlock:     big.NewInt(0),
+			IstanbulBlock:       big.NewInt(0),
+			BerlinBlock:         big.NewInt(0),
+			LondonBlock:         big.NewInt(0),
+			Ethash:              new(ctypes.EthashConfig),
+		}
+	}
+	genesisWith := func(config *goethereum.ChainConfig) *genesisT.Genesis {
+		return &genesisT.Genesis{
+			Config:     config,
+			BaseFee:    big.NewInt(vars.InitialBaseFee),
+			Difficulty: big.NewInt(0x20000),
+			GasLimit:   0x2fefd8,
+			Alloc:      genesisT.GenesisAlloc{{1}: {Balance: big.NewInt(1)}},
+		}
+	}
+	noPanic := func(t *testing.T, what string, fn func()) {
+		t.Helper()
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("%s panicked: %v", what, r)
+			}
+		}()
+		fn()
+	}
+	// A chain whose genesis enables the time-based forks at genesis, written
+	// without any per-fork blob parameters, is reopened with and without its
+	// genesis and started.
+	t.Run("time forks at genesis", func(t *testing.T) {
+		config := london()
+		config.ShanghaiTime, config.CancunTime = &zero, &zero
+		g := genesisWith(config)
+
+		db := rawdb.NewMemoryDatabase()
+		tdb := triedb.NewDatabase(db, nil)
+		noPanic(t, "initial setup", func() {
+			if _, _, err := SetupGenesisBlock(db, tdb, g); err != nil {
+				t.Fatalf("initial setup failed: %v", err)
+			}
+		})
+		noPanic(t, "reopen with genesis", func() {
+			if _, _, err := SetupGenesisBlock(db, tdb, genesisWith(config)); err != nil {
+				t.Fatalf("reopen with genesis failed: %v", err)
+			}
+		})
+		noPanic(t, "reopen without genesis", func() {
+			if _, _, err := SetupGenesisBlock(db, tdb, nil); err != nil {
+				t.Fatalf("reopen without genesis failed: %v", err)
+			}
+		})
+		noPanic(t, "chain start", func() {
+			bc, err := NewBlockChain(db, nil, genesisWith(config), nil, ethash.NewFaker(), vm.Config{}, nil, nil)
+			if err != nil {
+				t.Fatalf("chain start failed: %v", err)
+			}
+			bc.Stop()
+		})
+	})
+	// A stored pre-Shanghai chain is upgraded by a new genesis configuration
+	// that schedules the time-based forks.
+	t.Run("upgrade to time forks", func(t *testing.T) {
+		db := rawdb.NewMemoryDatabase()
+		tdb := triedb.NewDatabase(db, nil)
+		noPanic(t, "initial setup", func() {
+			if _, _, err := SetupGenesisBlock(db, tdb, genesisWith(london())); err != nil {
+				t.Fatalf("initial setup failed: %v", err)
+			}
+		})
+		upgraded := london()
+		upgraded.ShanghaiTime, upgraded.CancunTime, upgraded.PragueTime = &future, &future, &future
+		noPanic(t, "upgrade", func() {
+			if _, _, err := SetupGenesisBlock(db, tdb, genesisWith(upgraded)); err != nil {
+				t.Fatalf("upgrade failed: %v", err)
+			}
+		})
+		stored := rawdb.ReadChainConfig(db, rawdb.ReadCanonicalHash(db, 0))
+		if stored == nil || stored.GetEIP4844TransitionTime() == nil || *stored.GetEIP4844TransitionTime() != future {
+			t.Fatalf("upgraded configuration not stored: %v", stored)
+		}
+	})
+	// A new genesis configuration lists its forks out of order. Setup may
+	// accept or refuse it, but must not crash.
+	t.Run("forks out of order", func(t *testing.T) {
+		db := rawdb.NewMemoryDatabase()
+		tdb := triedb.NewDatabase(db, nil)
+		noPanic(t, "initial setup", func() {
+			if _, _, err := SetupGenesisBlock(db, tdb, genesisWith(london())); err != nil {
+				t.Fatalf("initial setup failed: %v", err)
+			}
+		})
+		disordered := london()
+		disordered.CancunTime, disordered.PragueTime = &future, &zero
+		noPanic(t, "reopen", func() {
+			SetupGenesisBlock(db, tdb, genesisWith(disordered))
+		})
+		noPanic(t, "reopen without genesis", func() {
+			SetupGenesisBlock(db, tdb, nil)
+		})
+	})
+}
