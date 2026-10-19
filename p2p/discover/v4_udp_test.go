@@ -232,6 +232,105 @@ func TestUDPv4_responseTimeouts(t *testing.T) {
 	}
 }
 
+// This test checks that the reply and timeout loops visit every pending reply matcher,
+// including those that follow a matcher removed in the same pass.
+func TestV4TimeoutLoop(t *testing.T) {
+	test := newUDPTest(t)
+	defer test.close()
+
+	const n = 3
+	addMatchers := func(ptype byte) []chan error {
+		errcs := make([]chan error, n)
+		for i := range errcs {
+			errcs[i] = make(chan error, 1)
+			p := &replyMatcher{
+				ptype:    ptype,
+				callback: func(v4wire.Packet) (bool, bool) { return true, true },
+				errc:     errcs[i],
+			}
+			p.from[0] = ptype
+			test.udp.addReplyMatcher <- p
+		}
+		return errcs
+	}
+	wait := func(errcs []chan error, want error) {
+		t.Helper()
+		for i, errc := range errcs {
+			select {
+			case err := <-errc:
+				if err != want {
+					t.Errorf("matcher %d: got error %v, want %v", i, err, want)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatalf("matcher %d: no result delivered", i)
+			}
+		}
+	}
+
+	// A single reply completes all matchers waiting for it.
+	replied := addMatchers(200)
+	var from enode.ID
+	from[0] = 200
+	if !test.udp.handleReply(from, netip.Addr{}, testPacket(200)) {
+		t.Fatal("reply not matched")
+	}
+	wait(replied, nil)
+
+	// Matchers that expire together all time out.
+	wait(addMatchers(201), errTimeout)
+}
+
+// This test checks that when the clock jumps backwards, errClockWarp is delivered to the
+// matchers whose deadline is too far in the future, and only to them.
+func TestV4ClockWarpErrorRouting(t *testing.T) {
+	test := newUDPTest(t)
+	defer test.close()
+
+	newMatcher := func(id byte, callback replyMatchFunc) *replyMatcher {
+		p := &replyMatcher{ptype: id, callback: callback, errc: make(chan error, 1)}
+		p.from[0] = id
+		return p
+	}
+	var (
+		warped1 = newMatcher(1, nil)
+		warped2 = newMatcher(2, nil)
+		normal  = newMatcher(3, nil)
+		// The reply callback runs on the loop goroutine. It moves the deadlines of the
+		// warped matchers far ahead, as if the clock had jumped back after they were set.
+		trigger = newMatcher(4, func(v4wire.Packet) (bool, bool) {
+			warped1.deadline = time.Now().Add(time.Hour)
+			warped2.deadline = time.Now().Add(time.Hour)
+			return true, true
+		})
+	)
+	for _, p := range []*replyMatcher{trigger, warped1, warped2, normal} {
+		test.udp.addReplyMatcher <- p
+	}
+	if !test.udp.handleReply(trigger.from, trigger.ip, testPacket(trigger.ptype)) {
+		t.Fatal("reply not matched")
+	}
+
+	for _, c := range []struct {
+		name string
+		p    *replyMatcher
+		want error
+	}{
+		{"trigger", trigger, nil},
+		{"warped1", warped1, errClockWarp},
+		{"warped2", warped2, errClockWarp},
+		{"normal", normal, errTimeout},
+	} {
+		select {
+		case err := <-c.p.errc:
+			if err != c.want {
+				t.Errorf("%s: got error %v, want %v", c.name, err, c.want)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s: no result delivered", c.name)
+		}
+	}
+}
+
 func TestUDPv4_findnodeTimeout(t *testing.T) {
 	t.Parallel()
 	test := newUDPTest(t)
@@ -451,6 +550,41 @@ func TestUDPv4_successfulPing(t *testing.T) {
 	}
 }
 
+// This test checks that pings from unbonded nodes do not feed the endpoint predictor.
+func TestV4IPPredictorBondedOnly(t *testing.T) {
+	test := newUDPTest(t)
+	defer test.close()
+
+	var (
+		claimed = v4wire.Endpoint{IP: net.ParseIP("6.6.6.6").To4(), UDP: 6666}
+		keys    []*ecdsa.PrivateKey
+		addrs   []netip.AddrPort
+	)
+	for i := range 2 * 10 { // 2x iptrackMinStatements
+		keys = append(keys, newkey())
+		addrs = append(addrs, netip.AddrPortFrom(netip.AddrFrom4([4]byte{10, 20, 0, byte(i)}), 30303))
+	}
+	ping := &v4wire.Ping{From: testRemote, To: claimed, Version: 4, Expiration: futureExp}
+
+	// Pings from unbonded nodes must not change the local endpoint.
+	for i := range keys {
+		test.packetInFrom(nil, keys[i], addrs[i], ping)
+	}
+	if ip := test.udp.localNode.Node().IPAddr(); ip == netip.AddrFrom4([4]byte{6, 6, 6, 6}) {
+		t.Fatalf("local endpoint changed by unbonded pings: %v", ip)
+	}
+
+	// Once bonded, the statements are accepted.
+	for i := range keys {
+		id := enode.PubkeyToIDV4(&keys[i].PublicKey)
+		test.db.UpdateLastPongReceived(id, addrs[i].Addr(), time.Now())
+		test.packetInFrom(nil, keys[i], addrs[i], ping)
+	}
+	if ip := test.udp.localNode.Node().IPAddr(); ip != netip.AddrFrom4([4]byte{6, 6, 6, 6}) {
+		t.Fatalf("local endpoint not updated by bonded pings: %v", ip)
+	}
+}
+
 // This test checks that EIP-868 requests work.
 func TestUDPv4_EIP868(t *testing.T) {
 	test := newUDPTest(t)
@@ -567,6 +701,67 @@ func startLocalhostV4(t *testing.T, cfg Config) *UDPv4 {
 		t.Fatal(err)
 	}
 	return udp
+}
+
+// This test checks that packets passed to the unhandled channel do not share the read
+// buffer, which readLoop reuses for the next packet.
+func TestV4ReadBufferNoRace(t *testing.T) {
+	var (
+		key       = newkey()
+		db, _     = enode.OpenDB("")
+		ln        = enode.NewLocalNode(db, key)
+		conn      = &inboundPipe{dgramPipe: newpipe(), in: make(chan dgram, 2)}
+		unhandled = make(chan ReadPacket, 2)
+	)
+	defer db.Close()
+	udp, err := ListenV4(conn, ln, Config{
+		PrivateKey: key,
+		Unhandled:  unhandled,
+		Log:        testlog.Logger(t, log.LvlTrace),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer udp.Close()
+
+	// Two packets of equal size that are not valid discv4 packets.
+	from := netip.MustParseAddrPort("10.0.1.99:30303")
+	first := bytes.Repeat([]byte{0x01}, 200)
+	second := bytes.Repeat([]byte{0x02}, 200)
+	conn.in <- dgram{from, first}
+	conn.in <- dgram{from, second}
+
+	var got []ReadPacket
+	for len(got) < 2 {
+		select {
+		case p := <-unhandled:
+			got = append(got, p)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("got %d unhandled packets, want 2", len(got))
+		}
+	}
+	// By now the second packet has been read into the buffer.
+	if !bytes.Equal(got[0].Data, first) {
+		t.Errorf("first unhandled packet was overwritten: got %x..., want %x...", got[0].Data[:4], first[:4])
+	}
+	if !bytes.Equal(got[1].Data, second) {
+		t.Errorf("wrong second unhandled packet: got %x..., want %x...", got[1].Data[:4], second[:4])
+	}
+}
+
+// inboundPipe is a dgramPipe that also delivers the datagrams sent on in.
+type inboundPipe struct {
+	*dgramPipe
+	in chan dgram
+}
+
+func (c *inboundPipe) ReadFromUDPAddrPort(b []byte) (n int, addr netip.AddrPort, err error) {
+	select {
+	case d := <-c.in:
+		return copy(b, d.data), d.to, nil
+	case <-c.closing:
+		return 0, netip.AddrPort{}, io.EOF
+	}
 }
 
 // dgramPipe is a fake UDP socket. It queues all sent datagrams.

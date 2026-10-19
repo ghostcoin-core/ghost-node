@@ -432,6 +432,41 @@ func TestTable_revalidateSyncRecord(t *testing.T) {
 	}
 }
 
+// This test checks that loadSeedNodes adds seeds while holding the table mutex.
+// It runs during refresh, concurrently with lookups and table queries.
+func TestTableLoadSeedNodesLocked(t *testing.T) {
+	transport := newPingRecorder()
+	tab, db := newInactiveTestTable(transport, Config{})
+	defer db.Close()
+
+	seed := nodeAtDistance(tab.self().ID(), 255, net.IP{77, 88, 99, 1})
+	tab.nursery = []*enode.Node{seed}
+
+	// While the mutex is held elsewhere, loading seeds must wait for it.
+	tab.mutex.Lock()
+	done := make(chan struct{})
+	go func() {
+		tab.loadSeedNodes()
+		close(done)
+	}()
+	select {
+	case <-done:
+		tab.mutex.Unlock()
+		t.Fatal("loadSeedNodes added a seed without taking the table mutex")
+	case <-time.After(200 * time.Millisecond):
+	}
+	tab.mutex.Unlock()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("loadSeedNodes did not finish after the mutex was released")
+	}
+	if tab.getNode(seed.ID()) == nil {
+		t.Fatal("seed node was not added to the table")
+	}
+}
+
 func TestNodesPush(t *testing.T) {
 	var target enode.ID
 	n1 := nodeAtDistance(target, 255, intIP(1))

@@ -439,16 +439,20 @@ func (t *UDPv4) loop() {
 		}
 		// Start the timer so it fires when the next pending reply has expired.
 		now := time.Now()
-		for el := plist.Front(); el != nil; el = el.Next() {
-			nextTimeout = el.Value.(*replyMatcher)
-			if dist := nextTimeout.deadline.Sub(now); dist < 2*respTimeout {
+		var next *list.Element
+		for el := plist.Front(); el != nil; el = next {
+			// Take the successor first: Remove clears the links of el.
+			next = el.Next()
+			p := el.Value.(*replyMatcher)
+			nextTimeout = p
+			if dist := p.deadline.Sub(now); dist < 2*respTimeout {
 				timeout.Reset(dist)
 				return
 			}
 			// Remove pending replies whose deadline is too far in the
 			// future. These can occur if the system clock jumped
 			// backwards after the deadline was assigned.
-			nextTimeout.errc <- errClockWarp
+			p.errc <- errClockWarp
 			plist.Remove(el)
 		}
 		nextTimeout = nil
@@ -471,7 +475,9 @@ func (t *UDPv4) loop() {
 
 		case r := <-t.gotreply:
 			var matched bool // whether any replyMatcher considered the reply acceptable.
-			for el := plist.Front(); el != nil; el = el.Next() {
+			var next *list.Element
+			for el := plist.Front(); el != nil; el = next {
+				next = el.Next()
 				p := el.Value.(*replyMatcher)
 				if p.from == r.from && p.ptype == r.data.Kind() && p.ip == r.ip {
 					ok, requestDone := p.callback(r.data)
@@ -492,7 +498,9 @@ func (t *UDPv4) loop() {
 			nextTimeout = nil
 
 			// Notify and remove callbacks whose deadline is in the past.
-			for el := plist.Front(); el != nil; el = el.Next() {
+			var next *list.Element
+			for el := plist.Front(); el != nil; el = next {
+				next = el.Next()
 				p := el.Value.(*replyMatcher)
 				if now.After(p.deadline) || now.Equal(p.deadline) {
 					p.errc <- errTimeout
@@ -548,8 +556,9 @@ func (t *UDPv4) readLoop(unhandled chan<- ReadPacket) {
 			return
 		}
 		if t.handlePacket(from, buf[:nbytes]) != nil && unhandled != nil {
+			p := ReadPacket{bytes.Clone(buf[:nbytes]), from}
 			select {
-			case unhandled <- ReadPacket{buf[:nbytes], from}:
+			case unhandled <- p:
 			default:
 			}
 		}
@@ -699,8 +708,12 @@ func (t *UDPv4) handlePing(h *packetHandlerV4, from netip.AddrPort, fromID enode
 
 	// Update node database and endpoint predictor.
 	t.db.UpdateLastPingReceived(n.ID(), from.Addr(), time.Now())
-	toaddr := netip.AddrPortFrom(netutil.IPToAddr(req.To.IP), req.To.UDP)
-	t.localNode.UDPEndpointStatement(from, toaddr)
+
+	// Only bonded nodes are allowed to make statements about our endpoint.
+	if t.checkBond(fromID, from) {
+		toaddr := netip.AddrPortFrom(netutil.IPToAddr(req.To.IP), req.To.UDP)
+		t.localNode.UDPEndpointStatement(from, toaddr)
+	}
 }
 
 // PONG/v4

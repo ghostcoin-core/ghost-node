@@ -71,6 +71,53 @@ func TestRevalidation_nodeRemoved(t *testing.T) {
 	}
 }
 
+// This test checks that run moves the next revalidation time into the future even when
+// no request can be started because the only node is already being revalidated.
+// Returning a time in the past makes the Table loop call run again right away.
+func TestRevalidationNoCPUSpin(t *testing.T) {
+	var (
+		clock     mclock.Simulated
+		transport = newPingRecorder()
+		tab, db   = newInactiveTestTable(transport, Config{Clock: &clock})
+		tr        = &tab.revalidation
+	)
+	defer db.Close()
+
+	// Add a single node to the table.
+	node := nodeAtDistance(tab.self().ID(), 255, net.IP{77, 88, 99, 1})
+	tab.handleAddNode(addNodeOp{node: node})
+
+	// Start a revalidation request for it.
+	next := tr.run(tab, clock.Now())
+	clock.Run(time.Duration(next + 1))
+	next = tr.run(tab, clock.Now())
+	if len(tr.activeReq) != 1 {
+		t.Fatal("revalidation request did not start:", tr.activeReq)
+	}
+
+	// Pass the next scheduled time while the request is still active. No new
+	// request can start, but the returned time must still lie in the future.
+	clock.Run(time.Duration(next-clock.Now()) + 1)
+	for i := 0; i < 3; i++ {
+		now := clock.Now()
+		if next = tr.run(tab, now); next <= now {
+			t.Fatalf("run returned next time %v, not after now %v", next, now)
+		}
+		if len(tr.activeReq) != 1 {
+			t.Fatal("unexpected revalidation requests:", tr.activeReq)
+		}
+		clock.Run(time.Duration(next-now) + 1)
+	}
+
+	// Finish the request.
+	select {
+	case resp := <-tab.revalResponseCh:
+		tr.handleResponse(tab, resp)
+	case <-time.After(1 * time.Second):
+		t.Fatal("timed out waiting for revalidation")
+	}
+}
+
 // This test checks that nodes with an updated endpoint remain in the fast revalidation list.
 func TestRevalidation_endpointUpdate(t *testing.T) {
 	var (
