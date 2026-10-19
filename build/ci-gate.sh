@@ -127,6 +127,13 @@ stage_unit() {
 	# One package at a time, as upstream's CI does: several upstream tests
 	# are timing-sensitive and fail when packages run in parallel on a small
 	# runner.
+	# The expected outputs of the float tests (metrics/influxdb among them)
+	# were made on amd64, where Go does not fuse multiply and add. Other
+	# architectures fuse them and round differently, so turn fusing off there;
+	# GOCOMPILEDEBUG is part of the build cache key.
+	if [ "$(go env GOARCH)" != amd64 ] && [ -z "${GOCOMPILEDEBUG:-}" ]; then
+		export GOCOMPILEDEBUG=fmahash=qn
+	fi
 	go test -p 1 -tags integrationtests -timeout 20m $pkgs
 }
 
@@ -134,29 +141,44 @@ is_empty() {
 	[ ! -d "$1" ] || [ -z "$(ls -A "$1")" ]
 }
 
-# Fills every submodule the fixture tests read, when it is empty: a shallow
-# fetch first, then a read-only copy on the host (GATE_FIXTURES_DIR, laid out
-# as <dir>/testdata and <dir>/evm-benchmarks) for hosts that cannot fetch.
+# Fills the submodule $2 of the repository $1 when it is empty, then every
+# submodule nested in it (tests/testdata holds LegacyTests): a shallow fetch
+# first, then the read-only copy $3 for hosts that cannot fetch.
+fill_submodule() {
+	local repo=$1 sub=$2 copy=$3 path nested
+	path="$sub"
+	if [ "$repo" != . ]; then
+		path="$repo/$sub"
+	fi
+	if is_empty "$path"; then
+		if git -C "$repo" submodule update --init --depth 1 "$sub" && ! is_empty "$path"; then
+			:
+		elif ! is_empty "$copy"; then
+			echo "Could not fetch $path; copying it from $copy"
+			mkdir -p "$path"
+			cp -R "$copy/." "$path/"
+		else
+			echo "$path is empty: it could not be fetched, and there is no copy in $copy."
+			echo "Run 'git submodule update --init --recursive --depth 1 ${fixture_submodules[*]}', or set GATE_FIXTURES_DIR to a directory holding a copy of it."
+			exit 1
+		fi
+	fi
+	if [ -f "$path/.gitmodules" ]; then
+		while read -r _ nested; do
+			fill_submodule "$path" "$nested" "$copy/$nested"
+		done < <(git config -f "$path/.gitmodules" --get-regexp '^submodule\..*\.path$' || true)
+	fi
+}
+
+# Fills every submodule the fixture tests read (tests/testdata and
+# tests/evm-benchmarks, with the submodules nested in them) when it is empty.
+# Hosts that cannot fetch read a read-only copy (GATE_FIXTURES_DIR, laid out as
+# <dir>/testdata and <dir>/evm-benchmarks) instead.
 prepare_fixtures() {
 	local host=${GATE_FIXTURES_DIR:-/usr/local/share/fixtures-ghost-node}
-	local path name
+	local path
 	for path in "${fixture_submodules[@]}"; do
-		if ! is_empty "$path"; then
-			continue
-		fi
-		if git submodule update --init --depth 1 "$path" && ! is_empty "$path"; then
-			continue
-		fi
-		name="$(basename "$path")"
-		if ! is_empty "$host/$name"; then
-			echo "Could not fetch $path; copying it from $host/$name"
-			mkdir -p "$path"
-			cp -R "$host/$name/." "$path/"
-			continue
-		fi
-		echo "$path is empty: it could not be fetched, and there is no copy in $host/$name."
-		echo "Run 'git submodule update --init --depth 1 $path', or set GATE_FIXTURES_DIR to a directory holding $name."
-		exit 1
+		fill_submodule . "$path" "$host/$(basename "$path")"
 	done
 }
 
