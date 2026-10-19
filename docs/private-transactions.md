@@ -152,10 +152,34 @@ the base part `G_PRIV * price`, the tip `ceil(base part / 10)` and the fee
 `ghostpriv.Verifier` checks a proof against `VerifyInputs`, the binding digest
 and public fields the node computed. Block processing uses
 `ghostpriv.ActiveVerifier()`, which is `DefaultVerifier()` unless
-`ghostpriv.SetVerifier` installed another. The default rejects every reveal
-with `ErrNoVerifier`: the node has no proof verifier linked in yet, so a node
-built from this tree can process commits but rejects every block that carries
-a reveal. Linking the proof system's verifier is separate work.
+`ghostpriv.SetVerifier` installed another. In a build without the proof
+verifier the default rejects every reveal with `ErrNoVerifier`, so such a node
+can process commits but rejects every block that carries a reveal. Release
+builds (`ghostrelease`) and builds with the `ghostproofs` tag link the
+`ghostverifier` static library instead (`core/ghostpriv/verifier_cgo.go`,
+built by `go run build/ci.go ghostverifier`).
+
+The linked verifier checks coin reveals through `ghost_proofs.h`, the pinned
+ghost-proofs header, and data reveals and revokes through
+`ghostverifier/ghost_data.h`, which the `ghostverifier` crate adds around the
+one data verifier of ghost-proofs, `verify_data_reveal`. A data reveal and a
+data revoke differ only in the purpose byte that starts the statement: `0x02`
+or `0x03`, then the root, marker, party (the verifier-or-recipient address
+left-padded to 32 bytes), fee and rule, 32 bytes each. A kind or purpose it
+does not verify is `ErrProofStatement`, without calling it; every answer but
+acceptance is `ErrProofRejected`.
+
+The data reveal fee is not settled, and the pinned ghost-proofs rejects every
+data reveal and revoke with `DataFeeUnsettled`, whatever the proof. The
+release node therefore rejects all of them, with `ErrProofDataFeeUnsettled`
+wrapped by `ErrProofRejected` for a well-formed proof (and its own data fee
+check rejects them before that by default). The accept path with real proofs
+is proved only in the crate's own tests, `ghostverifier/tests/data_reveal.rs`,
+with the test-only cargo feature `unsettled-points-test`, which adds
+`ghost_verify_data_reveal_unsettled`. That feature is off by default, never
+enabled by `build/ci.go` or the release build, and its function is not in the
+release node. The data lifecycle with real proofs on a release node needs the
+fee settled first.
 
 `core/ghostpriv/ghostprivtest` holds the stub verifier for tests: it accepts
 exactly a proof field whose first 32 bytes are

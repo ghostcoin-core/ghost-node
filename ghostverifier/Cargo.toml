@@ -4,12 +4,13 @@
 [package]
 name = "ghostverifier"
 version = "0.1.0"
-description = "Static library carrying the ghost-proofs coin reveal verifier for the node"
+description = "Static library carrying the ghost-proofs reveal verifiers for the node"
 edition = "2024"
 publish = false
 
+# The rlib is for the crate's own tests (tests/); the node links the staticlib.
 [lib]
-crate-type = ["staticlib"]
+crate-type = ["staticlib", "rlib"]
 
 # Its own workspace, apart from anything else in the repository.
 [workspace]
@@ -17,6 +18,13 @@ crate-type = ["staticlib"]
 # The only dependency, pinned to one revision of the ghost repository.
 [dependencies]
 ghost-proofs = { git = "https://github.com/ghostcoin-core/ghost", rev = "ce1dd891f53e636e7477236a8fb78a903c7ce8ca" }
+
+# No feature is on by default. unsettled-points-test is for tests only: it
+# adds ghost_verify_data_reveal_unsettled, which accepts a data reveal the
+# shipped verifier rejects for the unsettled fee. build/ci.go and the release
+# build never enable it.
+[features]
+unsettled-points-test = ["ghost-proofs/unsettled-points-test"]
 
 # The verifier catches its own panics, so the default panic = "unwind" stays.
 [profile.release]

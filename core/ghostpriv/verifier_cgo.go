@@ -18,7 +18,7 @@
 
 package ghostpriv
 
-// The static library is built from ghostverifier/ by
+// The static library is built from ghostverifier/, with no cargo feature, by
 // `go run build/ci.go ghostverifier`, which `build/ci.go install` runs first.
 //
 // A release build (ghostrelease) names only the library: cgo records its
@@ -35,6 +35,7 @@ package ghostpriv
 #cgo linux LDFLAGS: -lm -ldl -lpthread
 #cgo darwin LDFLAGS: -lm
 #include "ghost_proofs.h"
+#include "ghost_data.h"
 */
 import "C"
 
@@ -44,6 +45,7 @@ import (
 	"fmt"
 	"unsafe"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/ghosttree"
 	"github.com/holiman/uint256"
 )
@@ -52,56 +54,82 @@ import (
 const (
 	ghostChainParamsBytes = C.GHOST_PROOFS_CHAIN_PARAMS_BYTES
 	ghostCoinRevealBytes  = C.GHOST_PROOFS_COIN_REVEAL_BYTES
+	ghostDataRevealBytes  = C.GHOST_DATA_REVEAL_BYTES
 	ghostProofMaxBytes    = C.GHOST_PROOFS_PROOF_MAX_BYTES
 )
 
 var (
 	// ErrProofStatement is returned, without calling the proof verifier, for
-	// a statement it does not verify: anything but a coin reveal, which
-	// includes every data reveal.
-	ErrProofStatement = errors.New("reveal proof verifier checks only coin reveals")
+	// a statement it does not verify: anything but a coin reveal, or a data
+	// reveal or revoke.
+	ErrProofStatement = errors.New("reveal proof verifier checks only coin reveals and data reveals and revokes")
 
 	// ErrProofRejected is returned for every answer of the proof verifier
 	// but acceptance; the error names the status.
 	ErrProofRejected = errors.New("reveal proof not accepted")
+
+	// ErrProofDataFeeUnsettled is wrapped by ErrProofRejected for the
+	// verifier's answer to every well-formed data reveal and revoke: the
+	// linked ghost-proofs rejects them all until the data reveal fee is
+	// settled, whatever the proof.
+	ErrProofDataFeeUnsettled = errors.New("data reveal fee not settled in the proof verifier")
 )
 
-// ghostVerifier is the coin reveal verifier of the ghost repository's
-// ghost-proofs, linked in through its C interface.
+// ghostVerifier is the reveal verifier of the ghost repository's
+// ghost-proofs, linked in through C interfaces: ghost_proofs.h for coin
+// reveals and ghostverifier's ghost_data.h for data reveals and revokes.
 type ghostVerifier struct{}
 
 // DefaultVerifier returns the verifier the node uses until another is set:
 // the proof verifier of the ghost repository. It accepts a coin reveal whose
-// proof verifies against the inputs and rejects everything else, every data
-// reveal included.
+// proof verifies against the inputs and rejects everything else. A data
+// reveal or revoke goes to the proof verifier too, which rejects every one
+// with ErrProofDataFeeUnsettled until the data reveal fee is settled.
 func DefaultVerifier() Verifier { return ghostVerifier{} }
 
-// VerifyReveal verifies the proof of a coin reveal against the chain
-// parameters and statement it builds from in, in the layout of
-// ghost_proofs.h. The proof may be followed by zero bytes, as in the
-// reveal's proof field. The binding digest is not passed: the verifier
-// computes its own from the same fields.
+// VerifyReveal verifies the proof of a coin reveal, data reveal or data
+// revoke against the chain parameters and statement it builds from in, in
+// the layout of ghost_proofs.h or ghost_data.h. The proof may be followed by
+// zero bytes, as in the reveal's proof field. The binding digest is not
+// passed: the verifier computes its own from the same fields.
 func (ghostVerifier) VerifyReveal(in *VerifyInputs, proof []byte) error {
 	if in == nil {
 		return fmt.Errorf("%w: no inputs", ErrProofStatement)
 	}
-	if in.Kind != ghosttree.Coin || in.Purpose != PurposeReveal {
+	var verify func(params, statement, proof *C.uint8_t, paramsLen, statementLen, proofLen C.size_t) C.int32_t
+	var statement []byte
+	switch {
+	case in.Kind == ghosttree.Coin && in.Purpose == PurposeReveal:
+		statement = ghostCoinStatement(in)
+		verify = func(p, s, q *C.uint8_t, pl, sl, ql C.size_t) C.int32_t {
+			return C.ghost_verify_coin_reveal(p, pl, s, sl, q, ql)
+		}
+	case in.Kind == ghosttree.Data && (in.Purpose == PurposeReveal || in.Purpose == PurposeRevoke):
+		statement = ghostDataStatement(in)
+		verify = func(p, s, q *C.uint8_t, pl, sl, ql C.size_t) C.int32_t {
+			return C.ghost_verify_data_reveal(p, pl, s, sl, q, ql)
+		}
+	default:
 		return fmt.Errorf("%w: kind %d, purpose %#x", ErrProofStatement, in.Kind, in.Purpose)
 	}
 	if len(proof) == 0 || len(proof) > ghostProofMaxBytes {
 		return fmt.Errorf("%w: proof of %d bytes", ErrProofRejected, len(proof))
 	}
 	params := ghostChainParams(in)
-	statement := ghostCoinStatement(in)
-	status := C.ghost_verify_coin_reveal(
-		(*C.uint8_t)(unsafe.Pointer(&params[0])), C.size_t(len(params)),
-		(*C.uint8_t)(unsafe.Pointer(&statement[0])), C.size_t(len(statement)),
-		(*C.uint8_t)(unsafe.Pointer(&proof[0])), C.size_t(len(proof)),
+	status := verify(
+		(*C.uint8_t)(unsafe.Pointer(&params[0])),
+		(*C.uint8_t)(unsafe.Pointer(&statement[0])),
+		(*C.uint8_t)(unsafe.Pointer(&proof[0])),
+		C.size_t(len(params)), C.size_t(len(statement)), C.size_t(len(proof)),
 	)
-	if status != C.GHOST_PROOFS_ACCEPTED {
+	switch status {
+	case C.GHOST_PROOFS_ACCEPTED:
+		return nil
+	case C.GHOST_DATA_FEE_UNSETTLED:
+		return fmt.Errorf("%w: %w", ErrProofRejected, ErrProofDataFeeUnsettled)
+	default:
 		return fmt.Errorf("%w: %s", ErrProofRejected, ghostStatusName(status))
 	}
-	return nil
 }
 
 // ghostChainParams returns the chain parameters: the chain id (8 bytes, big
@@ -135,8 +163,29 @@ func ghostCoinStatement(in *VerifyInputs) []byte {
 	return append(b, in.Rule[:]...)
 }
 
+// ghostDataStatement returns the data reveal statement: the purpose (1), the
+// root and marker (32 each), the party, which is the verifier-or-recipient
+// address left-padded with zeros to 32 bytes, the fee as a 32-byte amount
+// word and the rule (32). A nil fee is zero.
+func ghostDataStatement(in *VerifyInputs) []byte {
+	fee := in.Fee
+	if fee == nil {
+		fee = new(uint256.Int)
+	}
+	party := common.BytesToHash(in.Recipient[:])
+	b := make([]byte, 0, ghostDataRevealBytes)
+	b = append(b, in.Purpose)
+	b = append(b, in.Root[:]...)
+	b = append(b, in.Marker[:]...)
+	b = append(b, party[:]...)
+	b = append(b, amountWord(fee)...)
+	return append(b, in.Rule[:]...)
+}
+
 func ghostStatusName(status C.int32_t) string {
 	switch status {
+	case C.GHOST_DATA_FEE_UNSETTLED:
+		return "data fee unsettled"
 	case C.GHOST_PROOFS_REJECTED:
 		return "rejected"
 	case C.GHOST_PROOFS_MALFORMED_INPUT:

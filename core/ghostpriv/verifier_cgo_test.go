@@ -35,8 +35,9 @@ import (
 )
 
 // errDefaultDataVerifier is the default verifier's answer to a data reveal:
-// the linked proof verifier verifies only coin reveals.
-var errDefaultDataVerifier = ghostpriv.ErrProofStatement
+// the linked proof verifier rejects every one until the data reveal fee is
+// settled, or as malformed.
+var errDefaultDataVerifier = ghostpriv.ErrProofRejected
 
 // Lengths of the chain parameters and of the coin reveal statement in the
 // layout of ghost_proofs.h.
@@ -100,6 +101,79 @@ func (ka knownAnswer) inputs(t *testing.T) *ghostpriv.VerifyInputs {
 	}
 	copy(in.Note[:], s[96:252])
 	return in
+}
+
+// TestGhostDataVerifier checks that data reveals and revokes reach the linked
+// proof verifier through ghost_data.h and that it rejects every one, naming
+// the unsettled fee, whatever the proof: the accept path is in the
+// ghostverifier crate's tests (ghostverifier/tests/data_reveal.rs) only. A
+// well-formed proof here is the coin fixture's; a malformed one is rejected
+// as malformed, not for the fee.
+func TestGhostDataVerifier(t *testing.T) {
+	ka := loadKnownAnswer(t)
+	coin := ka.inputs(t)
+	v := ghostpriv.DefaultVerifier()
+	data := func(purpose byte) *ghostpriv.VerifyInputs {
+		return &ghostpriv.VerifyInputs{
+			Kind:      ghosttree.Data,
+			Purpose:   purpose,
+			ChainID:   coin.ChainID,
+			Domain:    coin.Domain,
+			Root:      coin.Root,
+			Marker:    coin.Marker,
+			Recipient: coin.Recipient,
+			Out:       new(uint256.Int),
+			Fee:       new(uint256.Int),
+		}
+	}
+	proof := func() []byte { return common.CopyBytes(ka.proof) }
+
+	for _, purpose := range []byte{ghostpriv.PurposeReveal, ghostpriv.PurposeRevoke} {
+		for name, p := range map[string][]byte{
+			"proof":              proof(),
+			"proof and zeros":    append(proof(), make([]byte, 4096)...),
+			"proof field":        append(proof(), make([]byte, ghostpriv.ProofSize-len(ka.proof))...),
+			"fee-carrying input": proof(),
+		} {
+			in := data(purpose)
+			if name == "fee-carrying input" {
+				in.Fee = uint256.NewInt(21)
+			}
+			for vname, verifier := range map[string]ghostpriv.Verifier{"default": v, "active": ghostpriv.ActiveVerifier()} {
+				err := verifier.VerifyReveal(in, p)
+				if !errors.Is(err, ghostpriv.ErrProofRejected) || !errors.Is(err, ghostpriv.ErrProofDataFeeUnsettled) {
+					t.Errorf("purpose %#x, %s, %s verifier: %v, want %v", purpose, name, vname, err, ghostpriv.ErrProofDataFeeUnsettled)
+				}
+			}
+		}
+
+		n := len(ka.proof)
+		padded := append(proof(), make([]byte, 64)...)
+		padded[n+10] = 1
+		for name, p := range map[string][]byte{
+			"non-zero padding": padded,
+			"truncated":        proof()[:n-1],
+			"empty":            nil,
+			"oversized":        make([]byte, 2<<20+1),
+		} {
+			err := v.VerifyReveal(data(purpose), p)
+			if !errors.Is(err, ghostpriv.ErrProofRejected) || errors.Is(err, ghostpriv.ErrProofDataFeeUnsettled) {
+				t.Errorf("purpose %#x, %s: %v, want %v and not the fee", purpose, name, err, ghostpriv.ErrProofRejected)
+			}
+		}
+	}
+
+	// What the verifier does not verify is not passed to it.
+	for _, purpose := range []byte{0x00, 0x01, 0x04, 0xff} {
+		if err := v.VerifyReveal(data(purpose), proof()); !errors.Is(err, ghostpriv.ErrProofStatement) {
+			t.Errorf("data purpose %#x: %v, want %v", purpose, err, ghostpriv.ErrProofStatement)
+		}
+	}
+	in := data(ghostpriv.PurposeReveal)
+	in.Kind = ghosttree.Kind(7)
+	if err := v.VerifyReveal(in, proof()); !errors.Is(err, ghostpriv.ErrProofStatement) {
+		t.Errorf("unknown kind: %v, want %v", err, ghostpriv.ErrProofStatement)
+	}
 }
 
 // TestGhostVerifierKnownAnswer checks the linked proof verifier against a
