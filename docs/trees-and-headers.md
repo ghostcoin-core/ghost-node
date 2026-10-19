@@ -116,37 +116,78 @@ and the tree root
 
 Leaves and notes are history, not state (spec 05, section 9).
 `ghosttree.History` (`core/ghosttree/history.go`) keeps every leaf and note of
-every tree index of both kinds on the canonical chain, in the chain database
-under three key prefixes of its own (`core/rawdb/accessors_ghosttree_history.go`):
+every tree index of both kinds on the canonical chain, and every spent marker
+of both kinds in the order the chain spent it, in the chain database under
+three key prefixes of its own (`core/rawdb/accessors_ghosttree_history.go`):
 
 | Prefix | Key | Value |
 |---|---|---|
 | `ghost-tree-leaf-` | kind, tree index, position | block number, leaf, note |
 | `ghost-tree-block-` | block hash | block number, positions the block wrote |
+| `ghost-tree-block-` | the zero hash | number and hash of the history's head |
 | `ghost-tree-page-` | kind, tree index, page | root of the full page |
 
-The caller drives it. `ApplyBlock(hash, number, records)` adds the records of
-a block that became canonical, in the order the block appended them;
-`RevertBlock(hash)` removes those of a block that left the canonical chain,
-newest block first. Each record must continue its tree: the next free
-position, at a block number not below the record before it, or position 0 of
-the next index after a tree that filled in an earlier block. Anything else is
-refused and nothing is written, so the stored positions of a tree are always
-contiguous from 0 and a reorganisation leaves the store equal to that of a
-node that never saw the removed blocks. The root of a page is stored when its
-last position is, and removed with it.
+The kind byte is 0 for the coin tree, 1 for the data tree, 2 for the coin
+marker list and 3 for the data marker list. A marker list is stored like a
+tree: a marker is kept as the leaf of its record, with a zero note, and a list
+index holds as many markers as a tree index holds leaves before the next
+index starts. A marker list has no page roots and no header root. The head
+is the block whose ancestry the store holds; no block has the zero hash.
+
+`ApplyBlock(hash, number, records)` adds the records of a block that became
+canonical, in the order the block appended them; `RevertBlock(hash)` removes
+those of a block that left the canonical chain, newest block first. Each
+record of a tree must continue it: the next free position, at a block number
+not below the record before it, or position 0 of the next index after a tree
+that filled in an earlier block. A marker record takes the next position of
+its list, and the next list index starts at once when a list fills. Anything
+else is refused and nothing is written, so the stored positions of a tree or
+list are always contiguous from 0 and a reorganisation leaves the store equal
+to that of a node that never saw the removed blocks. The root of a page of a
+tree is stored when its last position is, and removed with it.
 
 The store prunes nothing. Its keys are never 32 bytes long, so the offline
 state pruner, which deletes 32-byte keys it takes for trie nodes, leaves them
 alone; garbage collection of the trie and the limits on transaction indexes
 and state history do not touch them either.
 
-Nothing applies blocks to the store yet. The records of a block come from the
-receipts of the commit and reveal transactions, whose layout belongs to that
-transaction format; until that wiring exists the node's history is empty and
-the methods below answer empty trees, which match the empty roots of every
-header so far. The store is not derived from block bodies, and snap sync does
-not download it.
+### Feeding the store
+
+The node keeps the store at its head block. `eth/backend.go` hands the store
+to the blockchain (`BlockChain.SetTreeHistory`), and from then on
+`core/blockchain.go` calls `History.Sync(head, records)` whenever the head
+block moves (`writeHeadBlock`, which inserts, reorganisations and
+`SetCanonical` go through, the end of a rewind and the commit of a snap-synced
+head). `Sync` walks the stored head's branch and the new head's branch down to
+their common ancestor through the stored headers, reverts the blocks of the
+old branch newest first and applies those of the new branch oldest first,
+each block in one write together with the new head. While a rewind deletes
+blocks from the top of the chain, `History.Unwind(hash)` reverts each deleted
+block that is the history's head, before its header is gone.
+
+The records of a block come from the logs of its receipts
+(`ghostpriv.HistoryRecords`, `core/ghostpriv/commit.go`), which only the coin
+and data rules write from the tree accounts:
+
+| Receipt log | Records |
+|---|---|
+| commit | coin leaf at the logged tree index and position, with its note |
+| reveal | coin leaf of the remainder with its note, and the marker in the coin marker list |
+| data commit | data leaf at the logged tree index and position, with its note |
+| data reveal (and revoke) | the marker in the data marker list |
+
+A log of a tree account that is none of these, a block without its body, or a
+body without all its receipts is an error: the history stays at the block's
+parent, the error is logged, and the next move of the head tries again.
+
+At start-up, a store without a head (a database from before the store was
+fed, or a new one) is built from genesis along the head block's ancestry, so a
+node with an existing chain answers too. A store whose head header is gone, or
+that refuses a block, is cleared (records, page roots and head) and built again
+the same way; block entries of blocks no longer applied may remain and are
+replaced when such a block is applied again. Nothing of this changes what a
+block means: the store is a read-side index, never consulted by block
+validation, and snap sync does not download it.
 
 ## Serving
 
@@ -175,22 +216,98 @@ fetches the page-root list and every page from its scan start, checks the list
 against the header root of the anchor in its own header chain and each page
 against its page root, and builds its own witness. The page root covers the
 leaves only; the wallet checks each note against the receipt of its
-transaction. Marker pages are not built: marker status comes from the checked
-receipts alone.
+transaction.
+
+`History.MarkerPage(kind, index, page, anchor)` returns one whole page of a
+marker list as of the anchor block: the markers spent at positions `4096 p` to
+`4096 p + 4095` of list `index`, in the order the canonical chain up to the
+anchor spent them. No header carries a root of a marker list, so a marker page
+is checked against the chain instead: the anchor must be a known canonical
+block, the history's head must be canonical and at or above the anchor, and
+the anchor must be applied to the history. Anything else, as while the history
+is behind the head or in the middle of a reorganisation, is an error; so is a
+missing record below the count. A page past the last marker of an existing
+list is empty.
+
+## Tree page methods
 
 The RPC methods are thin wrappers in the `ghost` namespace
 (`internal/ethapi/ghosttree.go`), registered by the `eth` service when the
-HTTP or WebSocket module list names it:
+HTTP or WebSocket module list names it. The namespace is opt-in, so the
+default module set of every endpoint is unchanged: it is registered only when
+`--http.api` or `--ws.api` lists `ghost`, and it is then also served over IPC.
+Pages are not served over the peer protocol. Every parameter is required, and
+a call with fewer or more parameters is refused.
 
-| Method | Parameters | Result |
+### Parameters
+
+| Parameter | JSON | Meaning |
 |---|---|---|
-| `ghost_getTreePage` | kind (`"coin"` or `"data"`), tree index, page, anchor block hash | `{kind, treeIndex, page, filled, entries: [{leaf, note}]}` |
-| `ghost_getPageRoots` | kind, tree index, anchor block hash | list of page roots |
+| `kind` | string: `"coin"`, `"data"`, `"coin-markers"` or `"data-markers"` | the coin tree, the data tree, or the list of spent coin or data markers |
+| `treeIndex` | hex quantity, for example `"0x0"` | the tree index `k`, or for a marker kind the list index; each list holds 2^32 markers |
+| `page` | hex quantity below `0x100000` (2^20) | the page: positions `4096 page` to `4096 page + 4095` |
+| `anchorHash` | 32-byte hex block hash | the block the answer is as of; a block number is refused |
 
-Every parameter is required, and a call with more is refused. The namespace
-is opt-in, so the default module set of every endpoint is unchanged: it is
-registered only when `--http.api` or `--ws.api` lists `ghost`, and it is then
-also served over IPC. Pages are not served over the peer protocol.
+### `ghost_getPageRoots(kind, treeIndex, anchorHash)`
+
+For `"coin"` and `"data"`: a JSON array of 32-byte hex page roots, of pages 0
+to the last page with a leaf as of the anchor; an empty tree gives `[]`. The
+wallet checks `RootFromPageRoots(kind, roots)` against the `coinTreeRoot` or
+`dataTreeRoot` of the anchor header. For `"coin-markers"` and
+`"data-markers"` the call is refused: a marker list has no page roots.
+
+```json
+["0x06d032e35a1f30a5773c38d9631f5e4ec069786f4d22131ef0bbba75acf2b717"]
+```
+
+### `ghost_getTreePage(kind, treeIndex, page, anchorHash)`
+
+For `"coin"` and `"data"` the result is one page of the tree, the same shape
+for both kinds:
+
+| Field | JSON | Meaning |
+|---|---|---|
+| `kind` | string | `"coin"` or `"data"`, as asked |
+| `treeIndex` | hex quantity | as asked |
+| `page` | hex quantity | as asked |
+| `filled` | hex quantity | number of entries, 0 to 4096 |
+| `entries` | array of `{leaf, note}` | the filled positions from the first of the page, in order: `leaf` a 32-byte hex hash, `note` the 156-byte note as hex |
+
+```json
+{"kind": "coin", "treeIndex": "0x0", "page": "0x0", "filled": "0x1",
+ "entries": [{"leaf": "0x…", "note": "0x…"}]}
+```
+
+For `"coin-markers"` and `"data-markers"` the result is one page of up to
+4,096 spent markers, the same shape for both kinds:
+
+| Field | JSON | Meaning |
+|---|---|---|
+| `count` | hex quantity | number of markers in this page, 0 to 4096 |
+| `markers` | array of 32-byte hex hashes | the markers at the page's positions, in the order they were spent (inclusion order: block, then transaction) |
+
+```json
+{"count": "0x2", "markers": ["0x…", "0x…"]}
+```
+
+A page with fewer than 4,096 markers is the last one with markers; the pages
+after it are empty (`{"count": "0x0", "markers": []}`). A wallet reads pages
+0, 1, … until it gets one that is not full.
+
+### Errors
+
+Every failure is a JSON-RPC error, never a guess or an answer for another
+block. A parameter that does not parse, an unknown kind among them (`invalid
+argument 0: unknown tree kind`), is refused with code `-32602`; everything
+else has code `-32000`: a page of 2^20 or more (`page number beyond the tree`), a tree or list index other than
+0 with nothing at the anchor (`tree index does not exist at the anchor`), an
+unknown anchor (`unknown anchor block`), an anchor off the canonical chain,
+as after a reorganisation removed it (`anchor block not canonical`), a header
+without the root of the kind (`header has no tree root`), a history that does
+not reproduce the header root (`tree history does not match the header
+root`), a history that does not hold the anchor yet (`tree history does not
+cover the anchor`), corrupt history, page roots of a marker list, and
+database errors.
 
 ## Eligible roots
 

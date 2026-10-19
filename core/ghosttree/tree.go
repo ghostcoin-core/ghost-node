@@ -65,6 +65,12 @@ type Kind uint8
 const (
 	Coin Kind = iota // the coin tree and the coin spent-marker set
 	Data             // the data tree and the data spent-marker set
+
+	// CoinMarkers and DataMarkers are the lists of spent markers of each
+	// kind in the order they were spent, which only the tree history keeps.
+	// They are no tree: no state, root or header field belongs to them.
+	CoinMarkers
+	DataMarkers
 )
 
 func (k Kind) String() string {
@@ -73,11 +79,21 @@ func (k Kind) String() string {
 		return "coin"
 	case Data:
 		return "data"
+	case CoinMarkers:
+		return "coin-markers"
+	case DataMarkers:
+		return "data-markers"
 	}
 	return fmt.Sprintf("kind(%d)", uint8(k))
 }
 
 func (k Kind) valid() bool { return k == Coin || k == Data }
+
+// IsMarkers reports whether k is a marker list of the tree history.
+func (k Kind) IsMarkers() bool { return k == CoinMarkers || k == DataMarkers }
+
+// stored reports whether the tree history keeps records of kind k.
+func (k Kind) stored() bool { return k.valid() || k.IsMarkers() }
 
 // The hash tags of spec 01, section 4.
 const (

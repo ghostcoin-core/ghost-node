@@ -28,7 +28,8 @@ import (
 )
 
 // GhostAPI serves the commitment tree history in whole pages and whole
-// page-root lists as of an anchor block, and nothing else.
+// page-root lists as of an anchor block, and the spent markers in whole
+// pages, and nothing else.
 type GhostAPI struct {
 	history *ghosttree.History
 }
@@ -38,12 +39,13 @@ func NewGhostAPI(history *ghosttree.History) *GhostAPI {
 	return &GhostAPI{history: history}
 }
 
-// TreeKind is a tree kind in JSON: "coin" or "data".
+// TreeKind is a kind in JSON: "coin" or "data" for a tree, "coin-markers" or
+// "data-markers" for a list of spent markers.
 type TreeKind ghosttree.Kind
 
 func (k TreeKind) MarshalJSON() ([]byte, error) {
 	switch ghosttree.Kind(k) {
-	case ghosttree.Coin, ghosttree.Data:
+	case ghosttree.Coin, ghosttree.Data, ghosttree.CoinMarkers, ghosttree.DataMarkers:
 		return json.Marshal(ghosttree.Kind(k).String())
 	}
 	return nil, ghosttree.ErrUnknownKind
@@ -52,17 +54,15 @@ func (k TreeKind) MarshalJSON() ([]byte, error) {
 func (k *TreeKind) UnmarshalJSON(input []byte) error {
 	var s string
 	if err := json.Unmarshal(input, &s); err != nil {
-		return fmt.Errorf("tree kind must be \"coin\" or \"data\": %w", err)
+		return fmt.Errorf("kind must be \"coin\", \"data\", \"coin-markers\" or \"data-markers\": %w", err)
 	}
-	switch s {
-	case "coin":
-		*k = TreeKind(ghosttree.Coin)
-	case "data":
-		*k = TreeKind(ghosttree.Data)
-	default:
-		return fmt.Errorf("%w: %q", ghosttree.ErrUnknownKind, s)
+	for _, kind := range []ghosttree.Kind{ghosttree.Coin, ghosttree.Data, ghosttree.CoinMarkers, ghosttree.DataMarkers} {
+		if s == kind.String() {
+			*k = TreeKind(kind)
+			return nil
+		}
 	}
-	return nil
+	return fmt.Errorf("%w: %q", ghosttree.ErrUnknownKind, s)
 }
 
 // RPCPageEntry is one filled position of a page.
@@ -80,17 +80,36 @@ type RPCTreePage struct {
 	Entries   []RPCPageEntry `json:"entries"`
 }
 
-var errNoTreeHistory = errors.New("tree history unavailable")
+// RPCMarkerPage is one page of a list of spent markers as of an anchor: the
+// markers in the order they were spent, and their number.
+type RPCMarkerPage struct {
+	Count   hexutil.Uint64 `json:"count"`
+	Markers []common.Hash  `json:"markers"`
+}
 
-// GetTreePage returns the filled positions of one whole page of a tree as of
-// the anchor block, each as leaf and note, and their number. A page past the
-// last filled one is empty.
-func (api *GhostAPI) GetTreePage(kind TreeKind, treeIndex hexutil.Uint64, page hexutil.Uint64, anchorHash common.Hash) (*RPCTreePage, error) {
+var (
+	errNoTreeHistory = errors.New("tree history unavailable")
+	errNoMarkerRoots = errors.New("a list of spent markers has no page roots")
+)
+
+// GetTreePage returns one whole page as of the anchor block. For a tree kind
+// it is the filled positions of the page, each as leaf and note, and their
+// number (RPCTreePage); for a marker kind it is the markers spent at the
+// page's positions and their number (RPCMarkerPage). A page past the last
+// filled one is empty.
+func (api *GhostAPI) GetTreePage(kind TreeKind, treeIndex hexutil.Uint64, page hexutil.Uint64, anchorHash common.Hash) (interface{}, error) {
 	if api.history == nil {
 		return nil, errNoTreeHistory
 	}
 	if page > math.MaxUint32 {
 		return nil, fmt.Errorf("%w: page %d", ghosttree.ErrPageRange, uint64(page))
+	}
+	if ghosttree.Kind(kind).IsMarkers() {
+		p, err := api.history.MarkerPage(ghosttree.Kind(kind), uint64(treeIndex), uint32(page), anchorHash)
+		if err != nil {
+			return nil, err
+		}
+		return &RPCMarkerPage{Count: hexutil.Uint64(len(p.Markers)), Markers: p.Markers}, nil
 	}
 	p, err := api.history.Page(ghosttree.Kind(kind), uint64(treeIndex), uint32(page), anchorHash)
 	if err != nil {
@@ -110,10 +129,13 @@ func (api *GhostAPI) GetTreePage(kind TreeKind, treeIndex hexutil.Uint64, page h
 }
 
 // GetPageRoots returns the page roots of a tree as of the anchor block, of
-// pages 0 to the last page with a leaf.
+// pages 0 to the last page with a leaf. A marker list has none.
 func (api *GhostAPI) GetPageRoots(kind TreeKind, treeIndex hexutil.Uint64, anchorHash common.Hash) ([]common.Hash, error) {
 	if api.history == nil {
 		return nil, errNoTreeHistory
+	}
+	if ghosttree.Kind(kind).IsMarkers() {
+		return nil, fmt.Errorf("%w: %v", errNoMarkerRoots, ghosttree.Kind(kind))
 	}
 	return api.history.PageRoots(ghosttree.Kind(kind), uint64(treeIndex), anchorHash)
 }

@@ -238,6 +238,11 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 		eth.blockchain.Stop()
 		return nil, err
 	}
+	// The tree history follows the canonical chain from here on; a database
+	// whose history is missing or behind gets it built at once.
+	if err := eth.blockchain.SetTreeHistory(eth.treeHistory); err != nil {
+		log.Warn("Tree history not ready", "err", err)
+	}
 	eth.bloomIndexer.Start(eth.blockchain)
 
 	if config.TxPool.Journal != "" {
@@ -374,9 +379,9 @@ func (s *Ethereum) APIs() []rpc.API {
 	}...)
 }
 
-// TreeHistory returns the store of the commitment trees' leaves and notes.
-// Nothing writes it until records are taken from the receipts of the commit
-// and reveal transactions, so it serves empty trees.
+// TreeHistory returns the store of the commitment trees' leaves and notes and
+// of the spent markers, which the blockchain keeps at its head block from the
+// receipts of the commit and reveal transactions.
 func (s *Ethereum) TreeHistory() *ghosttree.History { return s.treeHistory }
 
 func (s *Ethereum) ResetWithGenesisBlock(gb *types.Block) {

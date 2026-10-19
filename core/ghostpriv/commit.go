@@ -215,3 +215,65 @@ func ApplyDataCommit(st StateDB, height uint64, c *DataCommit) error {
 	})
 	return nil
 }
+
+// ErrReceiptLog is returned for a log of a tree account that is not a
+// well-formed receipt log of a commit, reveal, data commit or data reveal.
+var ErrReceiptLog = errors.New("tree account log is not a receipt of the coin or data rules")
+
+var (
+	topicCommit     = ghosttree.K(TagCommitReceipt)
+	topicReveal     = ghosttree.K(TagRevealReceipt)
+	topicDataCommit = ghosttree.K(TagDataCommitReceipt)
+	topicDataReveal = ghosttree.K(TagDataRevealReceipt)
+)
+
+// HistoryRecords returns the tree history records of a block from its
+// receipts, in the order the block wrote them: the leaf, tree index,
+// position and note of every commit, reveal remainder and data commit, and
+// the marker of every reveal and data reveal as a record of
+// ghosttree.CoinMarkers or ghosttree.DataMarkers. Only the coin and data rules
+// write logs from the tree accounts, which hold no code; a log of a tree
+// account that is not one of their receipt logs is ErrReceiptLog.
+func HistoryRecords(receipts types.Receipts) ([]ghosttree.Record, error) {
+	var (
+		coinAccount = ghosttree.TreeAccount(ghosttree.Coin)
+		dataAccount = ghosttree.TreeAccount(ghosttree.Data)
+		out         []ghosttree.Record
+	)
+	leaf := func(kind ghosttree.Kind, data []byte, note []byte) ghosttree.Record {
+		r := ghosttree.Record{
+			Kind:      kind,
+			TreeIndex: uint64(binary.BigEndian.Uint32(data[:4])),
+			Position:  binary.BigEndian.Uint32(data[4:8]),
+			Leaf:      common.BytesToHash(data[8:40]),
+		}
+		copy(r.Note[:], note)
+		return r
+	}
+	for i, receipt := range receipts {
+		for j, l := range receipt.Logs {
+			if l.Address != coinAccount && l.Address != dataAccount {
+				continue
+			}
+			var topic common.Hash
+			if len(l.Topics) > 0 {
+				topic = l.Topics[0]
+			}
+			d := l.Data
+			switch {
+			case l.Address == coinAccount && topic == topicCommit && len(l.Topics) == 1 && len(d) == 8+32+32+NoteSize:
+				out = append(out, leaf(ghosttree.Coin, d, d[72:]))
+			case l.Address == coinAccount && topic == topicReveal && len(l.Topics) == 2 && len(d) == 8+32+NoteSize+20+32:
+				out = append(out, leaf(ghosttree.Coin, d, d[40:40+NoteSize]))
+				out = append(out, ghosttree.Record{Kind: ghosttree.CoinMarkers, Leaf: l.Topics[1]})
+			case l.Address == dataAccount && topic == topicDataCommit && len(l.Topics) == 1 && len(d) == 8+32+NoteSize:
+				out = append(out, leaf(ghosttree.Data, d, d[40:]))
+			case l.Address == dataAccount && topic == topicDataReveal && len(l.Topics) == 2 && len(d) == 1+20:
+				out = append(out, ghosttree.Record{Kind: ghosttree.DataMarkers, Leaf: l.Topics[1]})
+			default:
+				return nil, fmt.Errorf("%w: receipt %d, log %d", ErrReceiptLog, i, j)
+			}
+		}
+	}
+	return out, nil
+}

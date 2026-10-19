@@ -70,6 +70,69 @@ type TreePage struct {
 	Entries   []PageEntry
 }
 
+// MarkerPage is one page of a marker list as of an anchor: the markers spent
+// at its positions, in the order the chain spent them.
+type MarkerPage struct {
+	Kind    Kind
+	Index   uint64
+	Page    uint32
+	Markers []common.Hash
+}
+
+// MarkerPage returns one page of the spent markers of a kind (CoinMarkers or
+// DataMarkers) as of the anchor block: positions 4096 page to 4096 page +
+// 4095 of list index, each list holding as many markers as a tree holds
+// leaves, in the order the canonical chain up to the anchor spent them. A
+// page past the last marker is empty. No header carries a root of a marker
+// list, so the page is checked against the chain instead: the anchor must be
+// canonical and applied to a history whose head is canonical, and anything
+// else is an error.
+func (h *History) MarkerPage(kind Kind, index uint64, page uint32, anchor common.Hash) (*MarkerPage, error) {
+	if !kind.IsMarkers() {
+		return nil, ErrUnknownKind
+	}
+	if err := h.p.pageable(); err != nil {
+		return nil, err
+	}
+	if uint64(page) >= h.p.pagesPerTree() {
+		return nil, fmt.Errorf("%w: page %d of %d", ErrPageRange, page, h.p.pagesPerTree())
+	}
+	h.lock.RLock()
+	defer h.lock.RUnlock()
+
+	number, _, err := h.canonicalHeader(anchor)
+	if err != nil {
+		return nil, err
+	}
+	if err := h.covers(anchor, number); err != nil {
+		return nil, err
+	}
+	count, err := h.countAt(kind, index, number)
+	if err != nil {
+		return nil, err
+	}
+	if index > 0 {
+		if count == 0 {
+			return nil, fmt.Errorf("%w: %v list %d at block %d", ErrNoTree, kind, index, number)
+		}
+		if before, err := h.countAt(kind, index-1, number); err != nil {
+			return nil, err
+		} else if before != h.p.capacity() {
+			return nil, fmt.Errorf("%w: %v list %d below a list that is not full", ErrCorruptHistory, kind, index)
+		}
+	}
+	out := &MarkerPage{Kind: kind, Index: index, Page: page, Markers: []common.Hash{}}
+	first := uint64(page) * PageLeaves
+	for pos := first; pos < min(count, first+PageLeaves); pos++ {
+		rec, err := h.mustRead(slot{kind, index, uint32(pos)})
+		if err != nil {
+			return nil, err
+		}
+		out.Markers = append(out.Markers, rec.leaf)
+	}
+	return out, nil
+}
+
 // treeView is one tree as of an anchor, checked against its header root.
 type treeView struct {
 	count uint64        // leaves of the tree at the anchor
