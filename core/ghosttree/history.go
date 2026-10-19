@@ -59,9 +59,11 @@ type Record struct {
 }
 
 // History is the store of every leaf and note of every tree index of both
-// kinds on the canonical chain. The caller applies each block that becomes
-// canonical and reverts each block that leaves the canonical chain, newest
-// first; the store derives nothing itself and prunes nothing.
+// kinds on the canonical chain, and of every spent marker of both kinds in
+// the order the chain spent them. A node keeps it at its chain head with Sync
+// (and Unwind while it deletes blocks); ApplyBlock and RevertBlock move it
+// one block at a time. The store derives nothing from state and prunes
+// nothing.
 type History struct {
 	p    Params
 	db   ethdb.Database
@@ -148,9 +150,11 @@ func (h *History) read(s slot) (*stored, error) {
 func (h *History) lastPosition() uint32 { return uint32(h.p.capacity() - 1) }
 
 // ApplyBlock adds the records of a canonical block, in the order the block
-// appended them. Every record must continue its tree: the next free
+// appended them. Every record of a tree must continue it: the next free
 // position, or position 0 of the next index after a tree that filled in an
-// earlier block. On an error nothing is written.
+// earlier block. A record of a marker list (CoinMarkers, DataMarkers) takes
+// the next position of its list, whatever its TreeIndex and Position say,
+// and carries the marker as its leaf. On an error nothing is written.
 func (h *History) ApplyBlock(blockHash common.Hash, number uint64, records []Record) error {
 	if err := h.p.pageable(); err != nil {
 		return err
@@ -163,6 +167,17 @@ func (h *History) ApplyBlock(blockHash common.Hash, number uint64, records []Rec
 	} else if enc != nil {
 		return fmt.Errorf("%w: %x", ErrBlockApplied, blockHash)
 	}
+	batch := h.db.NewBatch()
+	if err := h.applyBlock(batch, blockHash, number, records); err != nil {
+		return err
+	}
+	return batch.Write()
+}
+
+// applyBlock writes the records of a block and its block entry to batch,
+// replacing any block entry already stored under the hash. The caller holds
+// the lock.
+func (h *History) applyBlock(batch ethdb.KeyValueWriter, blockHash common.Hash, number uint64, records []Record) error {
 	pending := make(map[slot]*stored)
 	lookup := func(s slot) (*stored, error) {
 		if r, ok := pending[s]; ok {
@@ -170,10 +185,28 @@ func (h *History) ApplyBlock(blockHash common.Hash, number uint64, records []Rec
 		}
 		return h.read(s)
 	}
-	batch := h.db.NewBatch()
+	// The next free slot of each marker list.
+	nextMarker := make(map[Kind]slot)
 	slots := make([]slot, 0, len(records))
 	for i, r := range records {
-		if !r.Kind.valid() || r.Leaf == (common.Hash{}) || uint64(r.Position) >= h.p.capacity() {
+		if r.Kind.IsMarkers() {
+			s, ok := nextMarker[r.Kind]
+			if !ok {
+				var err error
+				if s, err = h.nextFree(r.Kind); err != nil {
+					return err
+				}
+			}
+			r.TreeIndex, r.Position, r.Note = s.treeIndex, s.position, [NoteBytes]byte{}
+			if s.position < h.lastPosition() {
+				nextMarker[r.Kind] = slot{r.Kind, s.treeIndex, s.position + 1}
+			} else if s.treeIndex < math.MaxUint64 {
+				nextMarker[r.Kind] = slot{r.Kind, s.treeIndex + 1, 0}
+			} else {
+				nextMarker[r.Kind] = slot{r.Kind, s.treeIndex, 0}
+			}
+		}
+		if !r.Kind.stored() || (r.Kind.valid() && r.Leaf == (common.Hash{})) || uint64(r.Position) >= h.p.capacity() {
 			return fmt.Errorf("%w: record %d: kind %v, leaf %x, position %d", ErrBadRecord, i, r.Kind, r.Leaf, r.Position)
 		}
 		s := slot{r.Kind, r.TreeIndex, r.Position}
@@ -184,9 +217,10 @@ func (h *History) ApplyBlock(blockHash common.Hash, number uint64, records []Rec
 		}
 		// The record before it: the previous position, or the last position
 		// of the previous tree, which must have filled in an earlier block.
+		// A marker list has no such rule: the next list starts at once.
 		prev, strict := slot{r.Kind, r.TreeIndex, r.Position - 1}, false
 		if r.Position == 0 {
-			prev, strict = slot{r.Kind, r.TreeIndex - 1, h.lastPosition()}, true
+			prev, strict = slot{r.Kind, r.TreeIndex - 1, h.lastPosition()}, r.Kind.valid()
 		}
 		if r.Position > 0 || r.TreeIndex > 0 {
 			before, err := lookup(prev)
@@ -203,8 +237,9 @@ func (h *History) ApplyBlock(blockHash common.Hash, number uint64, records []Rec
 		if err := rawdb.WriteGhostTreeLeaf(batch, uint8(r.Kind), r.TreeIndex, r.Position, rec.encode()); err != nil {
 			return err
 		}
-		// The record that completes a page also stores the page's root.
-		if (uint64(r.Position)+1)%PageLeaves == 0 {
+		// The record that completes a page of a tree also stores the page's
+		// root.
+		if r.Kind.valid() && (uint64(r.Position)+1)%PageLeaves == 0 {
 			first := r.Position + 1 - PageLeaves
 			leaves := make([]common.Hash, PageLeaves)
 			for j := range leaves {
@@ -223,10 +258,24 @@ func (h *History) ApplyBlock(blockHash common.Hash, number uint64, records []Rec
 			}
 		}
 	}
-	if err := rawdb.WriteGhostTreeBlock(batch, blockHash, encodeBlock(number, slots)); err != nil {
-		return err
+	return rawdb.WriteGhostTreeBlock(batch, blockHash, encodeBlock(number, slots))
+}
+
+// nextFree returns the first stored-to-be slot of a kind: the first position
+// without a record of the first index that is not full.
+func (h *History) nextFree(kind Kind) (slot, error) {
+	for index := uint64(0); ; index++ {
+		count, err := h.countAt(kind, index, math.MaxUint64)
+		if err != nil {
+			return slot{}, err
+		}
+		if count < h.p.capacity() {
+			return slot{kind, index, uint32(count)}, nil
+		}
+		if index == math.MaxUint64 {
+			return slot{}, fmt.Errorf("%w: %v exhausted", ErrBadRecord, kind)
+		}
 	}
-	return batch.Write()
 }
 
 // RevertBlock removes the records of a block that left the canonical chain.
@@ -236,6 +285,16 @@ func (h *History) RevertBlock(blockHash common.Hash) error {
 	h.lock.Lock()
 	defer h.lock.Unlock()
 
+	batch := h.db.NewBatch()
+	if err := h.revertBlock(batch, blockHash); err != nil {
+		return err
+	}
+	return batch.Write()
+}
+
+// revertBlock writes the removal of a block's records and block entry to
+// batch. The caller holds the lock.
+func (h *History) revertBlock(batch ethdb.KeyValueWriter, blockHash common.Hash) error {
 	enc, err := rawdb.ReadGhostTreeBlock(h.db, blockHash)
 	if err != nil {
 		return err
@@ -251,7 +310,6 @@ func (h *History) RevertBlock(blockHash common.Hash) error {
 	for _, s := range slots {
 		mine[s] = true
 	}
-	batch := h.db.NewBatch()
 	for _, s := range slots {
 		rec, err := h.read(s)
 		if err != nil {
@@ -279,14 +337,11 @@ func (h *History) RevertBlock(blockHash common.Hash) error {
 		if err := rawdb.DeleteGhostTreeLeaf(batch, uint8(s.kind), s.treeIndex, s.position); err != nil {
 			return err
 		}
-		if (uint64(s.position)+1)%PageLeaves == 0 {
+		if s.kind.valid() && (uint64(s.position)+1)%PageLeaves == 0 {
 			if err := rawdb.DeleteGhostTreePageRoot(batch, uint8(s.kind), s.treeIndex, s.position/PageLeaves); err != nil {
 				return err
 			}
 		}
 	}
-	if err := rawdb.DeleteGhostTreeBlock(batch, blockHash); err != nil {
-		return err
-	}
-	return batch.Write()
+	return rawdb.DeleteGhostTreeBlock(batch, blockHash)
 }

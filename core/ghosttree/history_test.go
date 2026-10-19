@@ -476,7 +476,7 @@ func TestApplyBlockRefusesBrokenRecords(t *testing.T) {
 		{"position stored", 3, []Record{{Kind: Coin, Position: 2, Leaf: leaf}}},
 		{"duplicate in the block", 3, []Record{ok, ok}},
 		{"zero leaf", 3, []Record{{Kind: Coin, Position: 3}}},
-		{"unknown kind", 3, []Record{{Kind: Kind(2), Position: 0, Leaf: leaf}}},
+		{"unknown kind", 3, []Record{{Kind: Kind(9), Position: 0, Leaf: leaf}}},
 		{"below the block before", 0, []Record{ok}},
 		{"next index before the tree is full", 3, []Record{{Kind: Data, TreeIndex: 1, Position: 0, Leaf: leaf}}},
 		{"good then bad", 3, []Record{ok, {Kind: Coin, Position: 5, Leaf: leaf}}},

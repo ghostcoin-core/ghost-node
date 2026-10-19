@@ -18,6 +18,7 @@ package ghosttree_test
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"math/big"
 	"reflect"
 	"slices"
@@ -94,7 +95,7 @@ func rpcFixture(t *testing.T) (*rpc.Client, *types.Header) {
 func TestWholePagesOnly(t *testing.T) {
 	// The whole surface: pages and page-root lists, and the two calls that
 	// keep the store equal to the canonical chain.
-	if got, want := exportedMethods(&ghosttree.History{}), []string{"ApplyBlock", "Page", "PageRoots", "RevertBlock"}; !reflect.DeepEqual(got, want) {
+	if got, want := exportedMethods(&ghosttree.History{}), []string{"ApplyBlock", "MarkerPage", "Page", "PageRoots", "RevertBlock", "Sync", "Unwind"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("history methods %v, want %v", got, want)
 	}
 	if got, want := exportedMethods(&ethapi.GhostAPI{}), []string{"GetPageRoots", "GetTreePage"}; !reflect.DeepEqual(got, want) {
@@ -176,6 +177,100 @@ func TestWholePagesOnly(t *testing.T) {
 	} {
 		if err := client.Call(&out, c.method, c.args...); err == nil {
 			t.Errorf("%s: answered %v", c.name, out)
+		}
+	}
+}
+
+// TestMarkerPagesOverRPC serves the spent markers of a chain the history was
+// synced to as {count, markers}, the same for both marker kinds.
+func TestMarkerPagesOverRPC(t *testing.T) {
+	db := rawdb.NewMemoryDatabase()
+	history := ghosttree.NewHistory(db)
+	records := make(map[common.Hash][]ghosttree.Record)
+	coin, data := ghosttree.EmptyRoot(ghosttree.Coin), ghosttree.EmptyRoot(ghosttree.Data)
+	var (
+		parent  common.Hash
+		headers []*types.Header
+	)
+	for number := uint64(0); number < 3; number++ {
+		header := &types.Header{ParentHash: parent, Number: new(big.Int).SetUint64(number), Difficulty: big.NewInt(1), BaseFee: big.NewInt(1), CoinTreeRoot: &coin, DataTreeRoot: &data}
+		rawdb.WriteHeader(db, header)
+		rawdb.WriteCanonicalHash(db, header.Hash(), number)
+		if number == 1 {
+			for i := 0; i < 5000; i++ {
+				records[header.Hash()] = append(records[header.Hash()], ghosttree.Record{Kind: ghosttree.CoinMarkers, Leaf: rpcLeaf(i)})
+			}
+			for i := 0; i < 2; i++ {
+				records[header.Hash()] = append(records[header.Hash()], ghosttree.Record{Kind: ghosttree.DataMarkers, Leaf: rpcLeaf(-1 - i)})
+			}
+		}
+		headers = append(headers, header)
+		parent = header.Hash()
+	}
+	err := history.Sync(headers[2], func(h *types.Header) ([]ghosttree.Record, error) { return records[h.Hash()], nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := rpc.NewServer()
+	if err := server.RegisterName("ghost", ethapi.NewGhostAPI(history)); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(server.Stop)
+	client := rpc.DialInProc(server)
+	t.Cleanup(client.Close)
+
+	for _, c := range []struct {
+		kind   string
+		anchor *types.Header
+		page   uint64
+		first  int
+		count  int
+	}{
+		{"coin-markers", headers[2], 0, 0, 4096},
+		{"coin-markers", headers[2], 1, 4096, 904},
+		{"coin-markers", headers[2], 2, 0, 0},
+		{"coin-markers", headers[0], 0, 0, 0},
+		{"data-markers", headers[2], 0, -1, 2},
+		{"data-markers", headers[1], 1, 0, 0},
+	} {
+		var raw map[string]json.RawMessage
+		if err := client.Call(&raw, "ghost_getTreePage", c.kind, "0x0", hexutil.Uint64(c.page), c.anchor.Hash()); err != nil {
+			t.Fatalf("%s page %d at %d: %v", c.kind, c.page, c.anchor.Number, err)
+		}
+		if len(raw) != 2 || raw["count"] == nil || raw["markers"] == nil {
+			t.Fatalf("%s page %d: result fields %v, want count and markers", c.kind, c.page, raw)
+		}
+		var page ethapi.RPCMarkerPage
+		blob, _ := json.Marshal(raw)
+		if err := json.Unmarshal(blob, &page); err != nil {
+			t.Fatal(err)
+		}
+		if int(page.Count) != c.count || len(page.Markers) != c.count || page.Markers == nil {
+			t.Errorf("%s page %d at %d: count %d, %d markers, want %d", c.kind, c.page, c.anchor.Number, page.Count, len(page.Markers), c.count)
+			continue
+		}
+		for i, m := range page.Markers {
+			want := rpcLeaf(c.first + i)
+			if c.first < 0 {
+				want = rpcLeaf(c.first - i)
+			}
+			if m != want {
+				t.Fatalf("%s page %d marker %d: %x", c.kind, c.page, i, m)
+			}
+		}
+	}
+	// The data tree is served as a tree beside its marker list.
+	var tree ethapi.RPCTreePage
+	if err := client.Call(&tree, "ghost_getTreePage", "data", "0x0", "0x0", headers[2].Hash()); err != nil || tree.Filled != 0 {
+		t.Errorf("data tree page: %v, %v", tree, err)
+	}
+	var out interface{}
+	for _, kind := range []string{"coin-markers", "data-markers"} {
+		if err := client.Call(&out, "ghost_getPageRoots", kind, "0x0", headers[2].Hash()); err == nil {
+			t.Errorf("page roots of %s: answered %v", kind, out)
+		}
+		if err := client.Call(&out, "ghost_getTreePage", kind, "0x1", "0x0", headers[2].Hash()); err == nil {
+			t.Errorf("%s list 1: answered %v", kind, out)
 		}
 	}
 }

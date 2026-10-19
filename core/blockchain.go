@@ -34,6 +34,7 @@ import (
 	"github.com/ethereum/go-ethereum/common/prque"
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
+	"github.com/ethereum/go-ethereum/core/ghostpriv"
 	"github.com/ethereum/go-ethereum/core/ghosttree"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state"
@@ -222,6 +223,7 @@ type BlockChain struct {
 	triedb        *triedb.Database                 // The database handler for maintaining trie nodes.
 	stateCache    state.Database                   // State database to reuse between imports (contains state cache)
 	txIndexer     *txIndexer                       // Transaction indexer, might be nil if not enabled
+	treeHistory   *ghosttree.History               // Commitment tree history kept at the head, nil if none (guarded by chainmu)
 
 	hc            *HeaderChain
 	rmLogsFeed    event.Feed
@@ -778,6 +780,9 @@ func (bc *BlockChain) setHeadBeyondRoot(head uint64, time uint64, root common.Ha
 	}
 	// Rewind the header chain, deleting all block bodies until then
 	delFn := func(db ethdb.KeyValueWriter, hash common.Hash, num uint64) {
+		// The tree history leaves the block while its header is still there.
+		bc.unwindTreeHistory(hash, num)
+
 		// Ignore the error here since light client won't hit this path
 		frozen, _ := bc.db.Ancients()
 		if num+1 <= frozen {
@@ -835,6 +840,7 @@ func (bc *BlockChain) setHeadBeyondRoot(head uint64, time uint64, root common.Ha
 		return rootNumber, err
 	}
 	bc.syncRootIndex()
+	bc.syncTreeHistory(bc.CurrentBlock())
 	return rootNumber, nil
 }
 
@@ -863,6 +869,7 @@ func (bc *BlockChain) SnapSyncCommitHead(hash common.Hash) error {
 	bc.currentBlock.Store(block.Header())
 	headBlockGauge.Update(int64(block.NumberU64()))
 	bc.syncRootIndex()
+	bc.syncTreeHistory(block.Header())
 	bc.chainmu.Unlock()
 
 	// Destroy any existing state snapshot and regenerate it in the background,
@@ -968,6 +975,7 @@ func (bc *BlockChain) writeHeadBlock(block *types.Block) {
 	if err := batch.Write(); err != nil {
 		log.Crit("Failed to update chain indexes and markers", "err", err)
 	}
+	bc.syncTreeHistory(block.Header())
 	// Update all in-memory chain markers in the last step
 	bc.hc.SetCurrentHeader(block.Header())
 
@@ -1020,6 +1028,64 @@ func (bc *BlockChain) RootIndexHead() (uint64, common.Hash, error) {
 // root as its root of the kind; it implements ghosttree.RootIndex.
 func (bc *BlockChain) RootFirstHeight(kind ghosttree.Kind, root common.Hash) (uint64, bool, error) {
 	return ghosttree.DBRootIndex{DB: bc.db}.RootFirstHeight(kind, root)
+}
+
+// SetTreeHistory makes the chain keep the commitment tree history at its
+// head block from now on, fed from the receipts of the canonical blocks, and
+// brings it to the current head: a history that is empty or does not match
+// the chain is built from genesis.
+func (bc *BlockChain) SetTreeHistory(history *ghosttree.History) error {
+	if !bc.chainmu.TryLock() {
+		return errChainStopped
+	}
+	defer bc.chainmu.Unlock()
+
+	bc.treeHistory = history
+	return bc.syncTreeHistory(bc.CurrentBlock())
+}
+
+// syncTreeHistory brings the tree history, if the chain keeps one, to head.
+// A failure is logged and leaves the history below head; the ghost methods
+// then answer with an error for anchors it does not hold, and the next move
+// of the head tries again. The caller holds chainmu.
+func (bc *BlockChain) syncTreeHistory(head *types.Header) error {
+	if bc.treeHistory == nil {
+		return nil
+	}
+	err := bc.treeHistory.Sync(head, bc.treeRecords)
+	if err != nil {
+		log.Error("Tree history not updated", "number", head.Number, "hash", head.Hash(), "err", err)
+	}
+	return err
+}
+
+// unwindTreeHistory reverts the tree history's head block if it is the block
+// being deleted from the top of the chain.
+func (bc *BlockChain) unwindTreeHistory(hash common.Hash, number uint64) {
+	if bc.treeHistory == nil {
+		return
+	}
+	if err := bc.treeHistory.Unwind(hash); err != nil {
+		log.Error("Tree history not rewound", "number", number, "hash", hash, "err", err)
+	}
+}
+
+// treeRecords returns the tree history records of a stored block, read from
+// the receipt logs of its transactions.
+func (bc *BlockChain) treeRecords(header *types.Header) ([]ghosttree.Record, error) {
+	hash, number := header.Hash(), header.Number.Uint64()
+	body := rawdb.ReadBody(bc.db, hash, number)
+	if body == nil {
+		return nil, fmt.Errorf("body of block %d missing", number)
+	}
+	if len(body.Transactions) == 0 {
+		return nil, nil
+	}
+	receipts := rawdb.ReadRawReceipts(bc.db, hash, number)
+	if len(receipts) != len(body.Transactions) {
+		return nil, fmt.Errorf("%d receipts for %d transactions in block %d", len(receipts), len(body.Transactions), number)
+	}
+	return ghostpriv.HistoryRecords(receipts)
 }
 
 // stopWithoutSaving stops the blockchain service. If any imports are currently in progress
