@@ -860,6 +860,12 @@ func (t *Tree) generating() (bool, error) {
 	return layer.genMarker != nil, nil
 }
 
+// Generating is a public helper function which reports whether the snapshot
+// is still under construction.
+func (t *Tree) Generating() (bool, error) {
+	return t.generating()
+}
+
 // DiskRoot is a external helper function to return the disk layer root.
 func (t *Tree) DiskRoot() common.Hash {
 	t.lock.Lock()

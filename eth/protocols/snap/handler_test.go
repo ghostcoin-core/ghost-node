@@ -19,7 +19,10 @@ package snap
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
+	"io"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -131,6 +134,266 @@ func TestAccountRangeResponseItemLimit(t *testing.T) {
 	t.Run("over-limit-rejected", func(t *testing.T) {
 		if err := check(t, realisticAccounts(limit+1)); err == nil {
 			t.Fatalf("response one item over the limit (%d) accepted", limit+1)
+		}
+	})
+}
+
+var errSyntheticIterator = errors.New("synthetic iterator failure")
+
+// failingAccountIterator yields a few accounts from the real iterator and then
+// stops with an error, like an iterator whose layer went stale mid-range.
+type failingAccountIterator struct {
+	accountIter
+	left int
+}
+
+func (it *failingAccountIterator) Next() bool {
+	if it.left == 0 {
+		return false
+	}
+	it.left--
+	return it.accountIter.Next()
+}
+
+func (it *failingAccountIterator) Error() error {
+	if it.left == 0 {
+		return errSyntheticIterator
+	}
+	return it.accountIter.Error()
+}
+
+// failingStorageIterator is failingAccountIterator for storage slots.
+type failingStorageIterator struct {
+	storageIter
+	left int
+}
+
+func (it *failingStorageIterator) Next() bool {
+	if it.left == 0 {
+		return false
+	}
+	it.left--
+	return it.storageIter.Next()
+}
+
+func (it *failingStorageIterator) Error() error {
+	if it.left == 0 {
+		return errSyntheticIterator
+	}
+	return it.storageIter.Error()
+}
+
+// recordingRW feeds one request message to the handler and records the
+// messages it sends back.
+type recordingRW struct {
+	code     uint64
+	data     []byte
+	codes    []uint64
+	payloads [][]byte
+}
+
+func (rw *recordingRW) ReadMsg() (p2p.Msg, error) {
+	return p2p.Msg{
+		Code:       rw.code,
+		Size:       uint32(len(rw.data)),
+		Payload:    bytes.NewReader(rw.data),
+		ReceivedAt: time.Now(),
+	}, nil
+}
+
+func (rw *recordingRW) WriteMsg(msg p2p.Msg) error {
+	payload, err := io.ReadAll(msg.Payload)
+	if err != nil {
+		return err
+	}
+	rw.codes = append(rw.codes, msg.Code)
+	rw.payloads = append(rw.payloads, payload)
+	return nil
+}
+
+// serveSnapRequest runs one request through HandleMessage and returns the code
+// and payload of the single reply, and how long serving took.
+func serveSnapRequest(t *testing.T, backend *dummyBackend, code uint64, req interface{}) (uint64, []byte, time.Duration) {
+	t.Helper()
+	data, err := rlp.EncodeToBytes(req)
+	if err != nil {
+		t.Fatalf("failed to encode request: %v", err)
+	}
+	rw := &recordingRW{code: code, data: data}
+	start := time.Now()
+	if err := HandleMessage(backend, NewFakePeer(1, "synthetic-peer", rw)); err != nil {
+		t.Fatalf("request %#x failed: %v", code, err)
+	}
+	elapsed := time.Since(start)
+	if len(rw.codes) != 1 {
+		t.Fatalf("request %#x got %d replies, want 1", code, len(rw.codes))
+	}
+	return rw.codes[0], rw.payloads[0], elapsed
+}
+
+// storageAccounts returns the hashes of the accounts with storage at root.
+func storageAccounts(t *testing.T, backend *dummyBackend, root common.Hash) []common.Hash {
+	t.Helper()
+	it, err := backend.chain.Snapshots().AccountIterator(root, common.Hash{})
+	if err != nil {
+		t.Fatalf("failed to open account iterator: %v", err)
+	}
+	defer it.Release()
+	var hashes []common.Hash
+	for it.Next() {
+		acc, err := types.FullAccount(it.Account())
+		if err != nil {
+			t.Fatalf("failed to decode account: %v", err)
+		}
+		if acc.Root != types.EmptyRootHash {
+			hashes = append(hashes, it.Hash())
+		}
+	}
+	return hashes
+}
+
+// TestSnapServingBoundedAndReadyChecked checks the bounds on snap serving: the
+// time limit applies to account, storage and bytecode queries, an iterator that
+// fails mid-range does not produce a silent partial reply, and while the
+// snapshot is not ready every snap handler answers empty at once.
+func TestSnapServingBoundedAndReadyChecked(t *testing.T) {
+	chain := getChain()
+	defer chain.Stop()
+	root := trieRoot
+	backend := &dummyBackend{chain}
+
+	contracts := storageAccounts(t, backend, root)
+	if len(contracts) == 0 {
+		t.Fatal("test chain has no account with storage")
+	}
+	var (
+		expired    = func() time.Time { return time.Now().Add(-2 * maxSnapServingTime) }
+		codeHashes = []common.Hash{types.EmptyCodeHash, types.EmptyCodeHash, types.EmptyCodeHash}
+		accountReq = func() *GetAccountRangePacket {
+			return &GetAccountRangePacket{ID: 1, Root: root, Limit: common.MaxHash, Bytes: softResponseLimit}
+		}
+		storageReq = func() *GetStorageRangesPacket {
+			return &GetStorageRangesPacket{ID: 2, Root: root, Accounts: contracts[:1], Bytes: softResponseLimit}
+		}
+		codesReq = func() *GetByteCodesPacket {
+			return &GetByteCodesPacket{ID: 3, Hashes: codeHashes, Bytes: softResponseLimit}
+		}
+	)
+
+	t.Run("time-bounded", func(t *testing.T) {
+		if accounts, _ := ServiceGetAccountRangeQuery(chain, accountReq(), time.Now()); len(accounts) < 2 {
+			t.Fatalf("account range within the time limit served %d accounts, want the whole range", len(accounts))
+		}
+		if accounts, _ := ServiceGetAccountRangeQuery(chain, accountReq(), expired()); len(accounts) != 1 {
+			t.Errorf("account range past the time limit served %d accounts, want 1", len(accounts))
+		}
+		if slots, _ := ServiceGetStorageRangesQuery(chain, storageReq(), time.Now()); len(slots) != 1 || len(slots[0]) == 0 {
+			t.Fatalf("storage range within the time limit served %d ranges, want 1", len(slots))
+		}
+		if slots, _ := ServiceGetStorageRangesQuery(chain, storageReq(), expired()); len(slots) != 0 {
+			t.Errorf("storage range past the time limit served %d ranges, want none", len(slots))
+		}
+		if codes := ServiceGetByteCodesQuery(chain, codesReq(), time.Now()); len(codes) != len(codeHashes) {
+			t.Fatalf("bytecodes within the time limit served %d codes, want %d", len(codes), len(codeHashes))
+		}
+		if codes := ServiceGetByteCodesQuery(chain, codesReq(), expired()); len(codes) != 1 {
+			t.Errorf("bytecodes past the time limit served %d codes, want 1", len(codes))
+		}
+	})
+
+	t.Run("iterator-errors", func(t *testing.T) {
+		origAccount, origStorage := wrapAccountIterator, wrapStorageIterator
+		defer func() { wrapAccountIterator, wrapStorageIterator = origAccount, origStorage }()
+
+		wrapAccountIterator = func(it accountIter, err error) (accountIter, error) {
+			if err != nil {
+				return nil, err
+			}
+			return &failingAccountIterator{accountIter: it, left: 3}, nil
+		}
+		wrapStorageIterator = func(it storageIter, err error) (storageIter, error) {
+			if err != nil {
+				return nil, err
+			}
+			return &failingStorageIterator{storageIter: it, left: 3}, nil
+		}
+		if accounts, proofs := ServiceGetAccountRangeQuery(chain, accountReq(), time.Now()); len(accounts) != 0 || len(proofs) != 0 {
+			t.Errorf("failing account iterator produced a reply with %d accounts and %d proofs, want an empty reply", len(accounts), len(proofs))
+		}
+		if slots, proofs := ServiceGetStorageRangesQuery(chain, storageReq(), time.Now()); len(slots) != 0 || len(proofs) != 0 {
+			t.Errorf("failing storage iterator produced a reply with %d ranges and %d proofs, want an empty reply", len(slots), len(proofs))
+		}
+	})
+
+	t.Run("not-ready", func(t *testing.T) {
+		chain.Snapshots().Disable()
+		if isSnapServingReady(chain) {
+			t.Fatal("snapshot reported ready after it was disabled")
+		}
+		origAccount, origStorage := wrapAccountIterator, wrapStorageIterator
+		defer func() { wrapAccountIterator, wrapStorageIterator = origAccount, origStorage }()
+
+		wrapAccountIterator = func(it accountIter, err error) (accountIter, error) {
+			t.Error("account iterator opened while the snapshot is not ready")
+			return it, err
+		}
+		wrapStorageIterator = func(it storageIter, err error) (storageIter, error) {
+			t.Error("storage iterator opened while the snapshot is not ready")
+			return it, err
+		}
+		checkReply := func(name string, code, wantCode uint64, elapsed time.Duration) {
+			t.Helper()
+			if code != wantCode {
+				t.Errorf("%s: reply code %#x, want %#x", name, code, wantCode)
+			}
+			if elapsed >= maxSnapServingTime {
+				t.Errorf("%s: reply took %v, want an immediate answer", name, elapsed)
+			}
+		}
+
+		code, payload, elapsed := serveSnapRequest(t, backend, GetAccountRangeMsg, accountReq())
+		checkReply("account range", code, AccountRangeMsg, elapsed)
+		var accounts AccountRangePacket
+		if err := rlp.DecodeBytes(payload, &accounts); err != nil {
+			t.Fatalf("account range: bad reply: %v", err)
+		}
+		if accounts.ID != 1 || len(accounts.Accounts) != 0 || len(accounts.Proof) != 0 {
+			t.Errorf("account range: reply id %d with %d accounts and %d proofs, want id 1 and empty", accounts.ID, len(accounts.Accounts), len(accounts.Proof))
+		}
+
+		code, payload, elapsed = serveSnapRequest(t, backend, GetStorageRangesMsg, storageReq())
+		checkReply("storage ranges", code, StorageRangesMsg, elapsed)
+		var storage StorageRangesPacket
+		if err := rlp.DecodeBytes(payload, &storage); err != nil {
+			t.Fatalf("storage ranges: bad reply: %v", err)
+		}
+		if storage.ID != 2 || len(storage.Slots) != 0 || len(storage.Proof) != 0 {
+			t.Errorf("storage ranges: reply id %d with %d ranges and %d proofs, want id 2 and empty", storage.ID, len(storage.Slots), len(storage.Proof))
+		}
+
+		code, payload, elapsed = serveSnapRequest(t, backend, GetByteCodesMsg, codesReq())
+		checkReply("bytecodes", code, ByteCodesMsg, elapsed)
+		var codes ByteCodesPacket
+		if err := rlp.DecodeBytes(payload, &codes); err != nil {
+			t.Fatalf("bytecodes: bad reply: %v", err)
+		}
+		if codes.ID != 3 || len(codes.Codes) != 0 {
+			t.Errorf("bytecodes: reply id %d with %d codes, want id 3 and empty", codes.ID, len(codes.Codes))
+		}
+
+		// The root node of the account trie (compact encoding of the empty path).
+		paths, err := rlp.EncodeToRawList([]TrieNodePathSet{{{0x00}}})
+		if err != nil {
+			t.Fatalf("failed to encode trie node paths: %v", err)
+		}
+		code, payload, elapsed = serveSnapRequest(t, backend, GetTrieNodesMsg, &GetTrieNodesPacket{ID: 4, Root: root, Paths: paths, Bytes: softResponseLimit})
+		checkReply("trie nodes", code, TrieNodesMsg, elapsed)
+		var nodes TrieNodesPacket
+		if err := rlp.DecodeBytes(payload, &nodes); err != nil {
+			t.Fatalf("trie nodes: bad reply: %v", err)
+		}
+		if nodes.ID != 4 || len(nodes.Nodes) != 0 {
+			t.Errorf("trie nodes: reply id %d with %d nodes, want id 4 and empty", nodes.ID, len(nodes.Nodes))
 		}
 	})
 }
