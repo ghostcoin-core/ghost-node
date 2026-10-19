@@ -1,0 +1,12 @@
+/work/ghostverifier/target/release/deps/chacha20-b4b09cce82b71dad.d: /home/agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.2/src/lib.rs /home/agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.2/src/variants.rs /home/agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.2/src/backends.rs /home/agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.2/src/rng.rs /home/agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.2/src/../README.md /home/agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.2/src/backends/neon.rs
+
+/work/ghostverifier/target/release/deps/libchacha20-b4b09cce82b71dad.rlib: /home/agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.2/src/lib.rs /home/agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.2/src/variants.rs /home/agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.2/src/backends.rs /home/agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.2/src/rng.rs /home/agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.2/src/../README.md /home/agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.2/src/backends/neon.rs
+
+/work/ghostverifier/target/release/deps/libchacha20-b4b09cce82b71dad.rmeta: /home/agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.2/src/lib.rs /home/agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.2/src/variants.rs /home/agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.2/src/backends.rs /home/agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.2/src/rng.rs /home/agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.2/src/../README.md /home/agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.2/src/backends/neon.rs
+
+/home/agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.2/src/lib.rs:
+/home/agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.2/src/variants.rs:
+/home/agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.2/src/backends.rs:
+/home/agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.2/src/rng.rs:
+/home/agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.2/src/../README.md:
+/home/agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.2/src/backends/neon.rs:
