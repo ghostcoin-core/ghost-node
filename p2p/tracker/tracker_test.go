@@ -43,6 +43,35 @@ func TestCleanAfterStop(t *testing.T) {
 	tr.clean()
 }
 
+// TestRequestTrackerNoCrash checks that a stopped tracker survives every call
+// that can still reach it: the expiration timer firing late, a direct clean, a
+// late response and a new request.
+func TestRequestTrackerNoCrash(t *testing.T) {
+	cap := p2p.Cap{Name: "test", Version: 1}
+	timeout := 10 * time.Millisecond
+	tr := New(cap, "synthetic-peer", timeout)
+
+	// Track a few requests so the expiration timer is armed and items pending.
+	for id := uint64(0); id < 3; id++ {
+		if err := tr.Track(Request{ID: id, ReqCode: 0x01, RespCode: 0x02, Size: 1}); err != nil {
+			t.Fatalf("failed to track request %d: %v", id, err)
+		}
+	}
+	// Stop once the timer is due, so its clean races with or runs after Stop.
+	time.Sleep(timeout)
+	tr.Stop()
+	time.Sleep(2 * timeout)
+
+	tr.clean()
+	if err := tr.Fulfil(Response{ID: 1, MsgCode: 0x02, Size: 1}); err != ErrNoMatchingRequest {
+		t.Errorf("response after stop: got %v, want %v", err, ErrNoMatchingRequest)
+	}
+	if err := tr.Track(Request{ID: 9, ReqCode: 0x01, RespCode: 0x02, Size: 1}); err != ErrStopped {
+		t.Errorf("request after stop: got %v, want %v", err, ErrStopped)
+	}
+	tr.Stop() // stopping twice must not crash either
+}
+
 // This checks that metrics gauges for pending requests are be decremented when a
 // Tracker is stopped.
 func TestMetricsOnStop(t *testing.T) {

@@ -28,6 +28,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/p2p"
 	"github.com/ethereum/go-ethereum/rlp"
+	"github.com/ethereum/go-ethereum/trie"
 	"github.com/holiman/uint256"
 )
 
@@ -394,6 +395,105 @@ func TestSnapServingBoundedAndReadyChecked(t *testing.T) {
 		}
 		if nodes.ID != 4 || len(nodes.Nodes) != 0 {
 			t.Errorf("trie nodes: reply id %d with %d nodes, want id 4 and empty", nodes.ID, len(nodes.Nodes))
+		}
+	})
+}
+
+// missingTrieNodePath returns the compact encoding of a short path that holds
+// no node in tr. Looking it up resolves nothing from the database once the
+// nodes above it are in memory.
+func missingTrieNodePath(t *testing.T, tr *trie.StateTrie) []byte {
+	t.Helper()
+	var candidates [][]byte
+	for n := byte(0); n < 16; n++ {
+		candidates = append(candidates, []byte{0x10 | n}) // one nibble
+	}
+	for b := 0; b < 256; b++ {
+		candidates = append(candidates, []byte{0x00, byte(b)}) // two nibbles
+	}
+	for n := byte(0); n < 16; n++ {
+		for b := 0; b < 256; b++ {
+			candidates = append(candidates, []byte{0x10 | n, byte(b)}) // three nibbles
+		}
+	}
+	for _, path := range candidates {
+		if blob, _, err := tr.GetNode(path); err == nil && blob == nil {
+			return path
+		}
+	}
+	t.Fatal("no missing trie node path found")
+	return nil
+}
+
+// TestSnapServeTrieNodeLoadCharge checks that every requested trie node counts
+// against maxTrieNodeLookups, even when the lookup reads nothing from the
+// database. Asking for a missing node over and over adds neither loads nor
+// bytes to the reply, so without a minimum charge it is never cut off.
+func TestSnapServeTrieNodeLoadCharge(t *testing.T) {
+	chain := getChain()
+	defer chain.Stop()
+	root := trieRoot
+	backend := &dummyBackend{chain}
+
+	contracts := storageAccounts(t, backend, root)
+	if len(contracts) == 0 {
+		t.Fatal("test chain has no account with storage")
+	}
+	accTrie, err := trie.NewStateTrie(trie.StateTrieID(root), chain.TrieDB())
+	if err != nil {
+		t.Fatalf("failed to open account trie: %v", err)
+	}
+	account, err := accTrie.GetAccountByHash(contracts[0])
+	if err != nil || account == nil {
+		t.Fatalf("failed to read account %x: %v", contracts[0], err)
+	}
+	stTrie, err := trie.NewStateTrie(trie.StorageTrieID(root, contracts[0], account.Root), chain.TrieDB())
+	if err != nil {
+		t.Fatalf("failed to open storage trie: %v", err)
+	}
+	const requested = 4 * maxTrieNodeLookups
+
+	t.Run("account", func(t *testing.T) {
+		missing := missingTrieNodePath(t, accTrie)
+		sets := make([]TrieNodePathSet, requested)
+		for i := range sets {
+			sets[i] = TrieNodePathSet{missing}
+		}
+		paths, err := rlp.EncodeToRawList(sets)
+		if err != nil {
+			t.Fatalf("failed to encode trie node paths: %v", err)
+		}
+		nodes, err := ServiceGetTrieNodesQuery(chain, &GetTrieNodesPacket{ID: 1, Root: root, Paths: paths, Bytes: softResponseLimit}, time.Now())
+		if err != nil {
+			t.Fatalf("trie nodes query failed: %v", err)
+		}
+		if len(nodes) == 0 {
+			t.Fatal("trie nodes query served no nodes")
+		}
+		if len(nodes) > maxTrieNodeLookups+1 {
+			t.Errorf("served %d missing account trie nodes, want at most %d", len(nodes), maxTrieNodeLookups+1)
+		}
+	})
+
+	t.Run("storage", func(t *testing.T) {
+		missing := missingTrieNodePath(t, stTrie)
+		set := TrieNodePathSet{contracts[0][:]}
+		for i := 0; i < requested; i++ {
+			set = append(set, missing)
+		}
+		paths, err := rlp.EncodeToRawList([]TrieNodePathSet{set})
+		if err != nil {
+			t.Fatalf("failed to encode trie node paths: %v", err)
+		}
+		nodes, err := ServiceGetTrieNodesQuery(chain, &GetTrieNodesPacket{ID: 2, Root: root, Paths: paths, Bytes: softResponseLimit}, time.Now())
+		if err != nil {
+			t.Fatalf("trie nodes query failed: %v", err)
+		}
+		if len(nodes) == 0 {
+			t.Fatal("trie nodes query served no nodes")
+		}
+		if len(nodes) > maxTrieNodeLookups+1 {
+			t.Errorf("served %d missing storage trie nodes, want at most %d", len(nodes), maxTrieNodeLookups+1)
 		}
 	})
 }
