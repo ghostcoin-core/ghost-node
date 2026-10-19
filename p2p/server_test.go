@@ -310,6 +310,102 @@ func TestServerAtCap(t *testing.T) {
 	}
 }
 
+// This test checks that a new connection with the same node ID takes the place
+// of a registered peer that has gone silent, and not of a working peer.
+func TestServerReplacesStalePeerOnDuplicateID(t *testing.T) {
+	remoteKey := newkey()
+	srv := &Server{
+		Config: Config{
+			PrivateKey:  newkey(),
+			MaxPeers:    10,
+			NoDial:      true,
+			NoDiscovery: true,
+			Logger:      testlog.Logger(t, log.LvlTrace),
+		},
+	}
+	if err := srv.Start(); err != nil {
+		t.Fatalf("could not start: %v", err)
+	}
+	defer srv.Stop()
+
+	id := randomID()
+	var remotes []net.Conn
+	defer func() {
+		for _, fd := range remotes {
+			fd.Close()
+		}
+	}()
+	newconn := func() *conn {
+		fd, remote := net.Pipe()
+		remotes = append(remotes, remote)
+		tx := newTestTransport(&remoteKey.PublicKey, fd, nil)
+		node := enode.SignNull(new(enr.Record), id)
+		return &conn{fd: fd, transport: tx, flags: inboundConn, node: node, cont: make(chan error)}
+	}
+	events := make(chan *PeerEvent, 16)
+	sub := srv.SubscribeEvents(events)
+	defer sub.Unsubscribe()
+
+	if err := srv.checkpoint(newconn(), srv.checkpointAddPeer); err != nil {
+		t.Fatalf("could not add the first connection: %v", err)
+	}
+	peers := srv.Peers()
+	if len(peers) != 1 {
+		t.Fatalf("have %d peers after the first connection, want 1", len(peers))
+	}
+	old := peers[0]
+
+	// The registered peer is working (it was just created): a duplicate is refused.
+	dup := newconn()
+	if err := srv.checkpoint(dup, srv.checkpointPostHandshake); err != DiscAlreadyConnected {
+		t.Fatalf("duplicate of a working peer @posthandshake: got %v, want %v", err, DiscAlreadyConnected)
+	}
+	if err := srv.checkpoint(dup, srv.checkpointAddPeer); err != DiscAlreadyConnected {
+		t.Fatalf("duplicate of a working peer @addpeer: got %v, want %v", err, DiscAlreadyConnected)
+	}
+	select {
+	case <-old.closed:
+		t.Fatal("working peer was disconnected by a duplicate connection")
+	default:
+	}
+
+	// The registered peer goes silent for longer than two ping intervals.
+	old.lastRecv.Store(time.Now().Add(-3 * pingInterval).UnixNano())
+	fresh := newconn()
+	if err := srv.checkpoint(fresh, srv.checkpointPostHandshake); err != nil {
+		t.Fatalf("new connection replacing a stale peer @posthandshake: %v", err)
+	}
+	if err := srv.checkpoint(fresh, srv.checkpointAddPeer); err != nil {
+		t.Fatalf("new connection replacing a stale peer @addpeer: %v", err)
+	}
+	select {
+	case <-old.closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stale peer was not disconnected")
+	}
+	// Wait until the server has processed the stale peer's exit.
+	timeout := time.After(5 * time.Second)
+	for dropped := false; !dropped; {
+		select {
+		case ev := <-events:
+			dropped = ev.Type == PeerEventTypeDrop && ev.Peer == id
+		case <-timeout:
+			t.Fatal("no drop event for the stale peer")
+		}
+	}
+	peers = srv.Peers()
+	if len(peers) != 1 || peers[0] == old || peers[0].ID() != id {
+		t.Fatalf("peer set after the stale peer left is %v, want only the new connection", peers)
+	}
+	if n := srv.PeerCount(); n != 1 {
+		t.Fatalf("peer count after the stale peer left is %d, want 1", n)
+	}
+	// The new connection is working, so another duplicate is refused again.
+	if err := srv.checkpoint(newconn(), srv.checkpointPostHandshake); err != DiscAlreadyConnected {
+		t.Fatalf("duplicate of the new peer: got %v, want %v", err, DiscAlreadyConnected)
+	}
+}
+
 func TestServerPeerLimits(t *testing.T) {
 	srvkey := newkey()
 	clientkey := newkey()

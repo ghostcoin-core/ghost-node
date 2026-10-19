@@ -722,7 +722,21 @@ func (srv *Server) run() {
 		peers        = make(map[enode.ID]*Peer)
 		inboundCount = 0
 		trusted      = make(map[enode.ID]bool, len(srv.TrustedNodes))
+		// superseded holds stale peers that a new connection with the same node
+		// ID has taken over. They are disconnected but may not have exited yet.
+		superseded = make(map[*Peer]struct{})
 	)
+	// removePeer updates the peer accounting for a peer that left the set.
+	removePeer := func(p *Peer) {
+		srv.dialsched.peerRemoved(p.rw)
+		if p.Inbound() {
+			inboundCount--
+			activeInboundPeerGauge.Dec(1)
+		} else {
+			activeOutboundPeerGauge.Dec(1)
+		}
+		activePeerGauge.Dec(1)
+	}
 	// Put trusted nodes into a map to speed up checks.
 	// Trusted peers are loaded on startup or added via AddTrustedPeer RPC.
 	for _, n := range srv.TrustedNodes {
@@ -775,6 +789,14 @@ running:
 			err := srv.addPeerChecks(peers, inboundCount, c)
 			if err == nil {
 				// The handshakes are done and it passed all checks.
+				if old := peers[c.node.ID()]; old != nil {
+					// The checks only let a duplicate through when the
+					// registered connection is stale; it has been told to
+					// disconnect and this one takes its place.
+					superseded[old] = struct{}{}
+					delete(peers, old.ID())
+					removePeer(old)
+				}
 				p := srv.launchPeer(c)
 				peers[c.node.ID()] = p
 				srv.log.Debug("Adding p2p peer", "peercount", len(peers), "id", p.ID(), "conn", c.flags, "addr", p.RemoteAddr(), "name", p.Name())
@@ -794,16 +816,16 @@ running:
 		case pd := <-srv.delpeer:
 			// A peer disconnected.
 			d := common.PrettyDuration(mclock.Now() - pd.created)
+			if _, ok := superseded[pd.Peer]; ok {
+				// A stale connection that was already superseded: its
+				// accounting was done then, and peers holds its successor.
+				delete(superseded, pd.Peer)
+				srv.log.Debug("Removed superseded p2p peer", "id", pd.ID(), "duration", d, "req", pd.requested, "err", pd.err)
+				continue
+			}
 			delete(peers, pd.ID())
 			srv.log.Debug("Removing p2p peer", "peercount", len(peers), "id", pd.ID(), "duration", d, "req", pd.requested, "err", pd.err)
-			srv.dialsched.peerRemoved(pd.rw)
-			if pd.Inbound() {
-				inboundCount--
-				activeInboundPeerGauge.Dec(1)
-			} else {
-				activeOutboundPeerGauge.Dec(1)
-			}
-			activePeerGauge.Dec(1)
+			removePeer(pd.Peer)
 		}
 	}
 
@@ -822,10 +844,15 @@ running:
 	}
 	// Wait for peers to shut down. Pending connections and tasks are
 	// not handled here and will terminate soon-ish because srv.quit
-	// is closed.
-	for len(peers) > 0 {
+	// is closed. Superseded peers are waited for too, as they still send
+	// on srv.delpeer when they exit.
+	for len(peers)+len(superseded) > 0 {
 		p := <-srv.delpeer
 		p.log.Trace("<-delpeer (spindown)")
+		if _, ok := superseded[p.Peer]; ok {
+			delete(superseded, p.Peer)
+			continue
+		}
 		delete(peers, p.ID())
 	}
 }
@@ -837,7 +864,18 @@ func (srv *Server) postHandshakeChecks(peers map[enode.ID]*Peer, inboundCount in
 	case !c.is(trustedConn) && c.is(inboundConn) && inboundCount >= srv.maxInboundConns():
 		return DiscTooManyPeers
 	case peers[c.node.ID()] != nil:
-		return DiscAlreadyConnected
+		existing := peers[c.node.ID()]
+		// If the existing connection has been silent for more than 2 ping intervals,
+		// it is likely a stale half-closed TCP connection (e.g. the remote peer
+		// restarted and the OS never sent a RST). Drop it in favour of the new one.
+		if !existing.isStale() {
+			return DiscAlreadyConnected
+		}
+		srv.log.Debug("Replacing stale peer connection", "id", c.node.ID(),
+			"old_addr", existing.RemoteAddr(), "new_addr", c.fd.RemoteAddr(),
+			"silent_for", time.Since(existing.lastRecvTime()).Round(time.Second))
+		existing.Disconnect(DiscNetworkError)
+		return nil
 	case c.node.ID() == srv.localnode.ID():
 		return DiscSelf
 	default:

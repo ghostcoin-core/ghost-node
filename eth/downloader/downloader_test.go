@@ -381,7 +381,7 @@ func (dlp *downloadTesterPeer) RequestAccountRange(id uint64, root, origin, limi
 		Limit:  limit,
 		Bytes:  uint64(bytes),
 	}
-	slimaccs, proofs := snap.ServiceGetAccountRangeQuery(dlp.chain, req)
+	slimaccs, proofs := snap.ServiceGetAccountRangeQuery(dlp.chain, req, time.Now())
 
 	// We need to convert to non-slim format, delegate to the packet code
 	res := &snap.AccountRangePacket{
@@ -408,7 +408,7 @@ func (dlp *downloadTesterPeer) RequestStorageRanges(id uint64, root common.Hash,
 		Limit:    limit,
 		Bytes:    uint64(bytes),
 	}
-	storage, proofs := snap.ServiceGetStorageRangesQuery(dlp.chain, req)
+	storage, proofs := snap.ServiceGetStorageRangesQuery(dlp.chain, req, time.Now())
 
 	// We need to convert to demultiplex, delegate to the packet code
 	res := &snap.StorageRangesPacket{
@@ -429,7 +429,7 @@ func (dlp *downloadTesterPeer) RequestByteCodes(id uint64, hashes []common.Hash,
 		Hashes: hashes,
 		Bytes:  uint64(bytes),
 	}
-	codes := snap.ServiceGetByteCodesQuery(dlp.chain, req)
+	codes := snap.ServiceGetByteCodesQuery(dlp.chain, req, time.Now())
 	go dlp.dl.downloader.SnapSyncer.OnByteCodes(dlp, id, codes)
 	return nil
 }
