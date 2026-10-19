@@ -792,8 +792,8 @@ func (pool *LegacyPool) add(tx *types.Transaction, local bool) (replaced bool, e
 		pool.queueTxEvent(tx)
 		log.Trace("Pooled new executable transaction", "hash", hash, "from", from, "to", tx.To())
 
-		// Successful promotion, bump the heartbeat
-		pool.beats[from] = time.Now()
+		// Successful replacement. If needed, bump the heartbeat giving more time to queued txs.
+		pool.bumpBeat(from)
 		return old != nil, nil
 	}
 	// New transaction isn't replacing a pending one, push into queue
@@ -923,9 +923,20 @@ func (pool *LegacyPool) promoteTx(addr common.Address, hash common.Hash, tx *typ
 	// Set the potentially new pending nonce and notify any subsystems of the new tx
 	pool.pendingNonces.set(addr, tx.Nonce()+1)
 
-	// Successful promotion, bump the heartbeat
-	pool.beats[addr] = time.Now()
+	// Successful promotion, bump the heartbeat, giving more time to queued txs.
+	pool.bumpBeat(addr)
 	return true
+}
+
+// bumpBeat refreshes the heartbeat of an account with queued transactions. If
+// the account is unknown (it has no queued transactions), the call is a no-op,
+// so that no heartbeat is left behind for an account the queue never cleans.
+//
+// Note, this method assumes the pool lock is held!
+func (pool *LegacyPool) bumpBeat(addr common.Address) {
+	if _, ok := pool.beats[addr]; ok {
+		pool.beats[addr] = time.Now()
+	}
 }
 
 // addLocals enqueues a batch of transactions into the pool if they are valid, marking the

@@ -1413,6 +1413,64 @@ func TestTransactionFetcherDrop(t *testing.T) {
 	})
 }
 
+// Tests that dropping a peer removes it from the alternate origins of the
+// transactions being fetched from someone else, so a dropped peer cannot leak.
+func TestTxFetcherDropClearsAlternates(t *testing.T) {
+	var fetcher *TxFetcher
+	testTransactionFetcherParallel(t, txFetcherTest{
+		init: func() *TxFetcher {
+			fetcher = NewTxFetcher(
+				func(common.Hash) bool { return false },
+				func(txs []*types.Transaction) []error {
+					return make([]error, len(txs))
+				},
+				func(string, []common.Hash) error { return nil },
+				nil,
+			)
+			return fetcher
+		},
+		steps: []interface{}{
+			doTxNotify{peer: "A", hashes: []common.Hash{testTxsHashes[0]}},
+			doWait{time: txArriveTimeout, step: true},
+			doTxNotify{peer: "B", hashes: []common.Hash{testTxsHashes[0]}},
+
+			isScheduled{
+				tracking: map[string][]common.Hash{
+					"A": {testTxsHashes[0]},
+					"B": {testTxsHashes[0]},
+				},
+				fetching: map[string][]common.Hash{
+					"A": {testTxsHashes[0]},
+				},
+			},
+			doDrop("B"),
+
+			isScheduled{
+				tracking: map[string][]common.Hash{
+					"A": {testTxsHashes[0]},
+				},
+				fetching: map[string][]common.Hash{
+					"A": {testTxsHashes[0]},
+				},
+			},
+			doFunc(func() {
+				if _, ok := fetcher.alternates[testTxsHashes[0]]["B"]; ok {
+					t.Errorf("dropped peer B still in alternates")
+				}
+			}),
+			doDrop("A"),
+			isScheduled{
+				tracking: nil, fetching: nil,
+			},
+			doFunc(func() {
+				if len(fetcher.alternates) != 0 {
+					t.Errorf("alternates not empty after all peers dropped: %v", fetcher.alternates)
+				}
+			}),
+		},
+	})
+}
+
 // Tests that dropping a peer instantly reschedules failed announcements to any
 // available peer.
 func TestTransactionFetcherDropRescheduling(t *testing.T) {

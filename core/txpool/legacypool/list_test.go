@@ -68,6 +68,32 @@ func TestListAddVeryExpensive(t *testing.T) {
 	}
 }
 
+// TestListTotalCostOverflow tests that a transaction whose cost fits in 256
+// bits, but would overflow the list's total cost, is refused and leaves the
+// total cost untouched instead of wrapping it around.
+func TestListTotalCostOverflow(t *testing.T) {
+	key, _ := crypto.GenerateKey()
+	list := newList(true)
+
+	gasprice := new(big.Int).Lsh(big.NewInt(1), 255) // cost of a 1 gas tx: 2^255
+	for i := 0; i < 2; i++ {
+		tx, _ := types.SignTx(types.NewTransaction(uint64(i), common.Address{}, new(big.Int), 1, gasprice, nil), types.HomesteadSigner{}, key)
+		if tx.Cost().BitLen() > 256 {
+			t.Fatalf("tx %d: cost %x does not fit in 256 bits", i, tx.Cost())
+		}
+		added, _ := list.Add(tx, DefaultConfig.PriceBump)
+		if want := i == 0; added != want {
+			t.Fatalf("tx %d: added %v, want %v", i, added, want)
+		}
+	}
+	if list.Len() != 1 {
+		t.Fatalf("list length %d, want 1", list.Len())
+	}
+	if want := uint256.MustFromBig(gasprice); list.totalcost.Cmp(want) != 0 {
+		t.Fatalf("total cost %v, want %v", list.totalcost, want)
+	}
+}
+
 func BenchmarkListAdd(b *testing.B) {
 	// Generate a list of transactions to insert
 	key, _ := crypto.GenerateKey()

@@ -72,6 +72,18 @@ func (p *testTxPool) Has(hash common.Hash) bool {
 	return p.pool[hash] != nil
 }
 
+// FilterType returns whether the pool takes transactions of the given type:
+// the account types and the two reveals, as the node's own pool.
+func (p *testTxPool) FilterType(kind byte) bool {
+	switch kind {
+	case types.LegacyTxType, types.AccessListTxType, types.DynamicFeeTxType,
+		types.GhostRevealTxType, types.GhostDataRevealTxType:
+		return true
+	default:
+		return false
+	}
+}
+
 // Get retrieves the transaction from local txpool with given
 // tx hash.
 func (p *testTxPool) Get(hash common.Hash) *types.Transaction {

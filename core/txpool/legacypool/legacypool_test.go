@@ -2234,6 +2234,41 @@ func TestReplacement(t *testing.T) {
 	}
 }
 
+// Tests that replacing a pending transaction of an account without queued
+// transactions leaves no heartbeat behind: only the queue cleans heartbeats,
+// so one set for a pending-only account would never be removed.
+func TestLegacyPoolHeartbeatNoLeak(t *testing.T) {
+	t.Parallel()
+
+	pool, key := setupPool()
+	defer pool.Close()
+
+	addr := crypto.PubkeyToAddress(key.PublicKey)
+	testAddBalance(pool, addr, big.NewInt(1000000000))
+
+	if err := pool.addRemoteSync(pricedTransaction(0, 100000, big.NewInt(1), key)); err != nil {
+		t.Fatalf("failed to add pending transaction: %v", err)
+	}
+	if err := pool.addRemoteSync(pricedTransaction(0, 100000, big.NewInt(2), key)); err != nil {
+		t.Fatalf("failed to replace pending transaction: %v", err)
+	}
+	pool.mu.RLock()
+	pending, queued := len(pool.pending), len(pool.queue)
+	_, beat := pool.beats[addr]
+	beats := len(pool.beats)
+	pool.mu.RUnlock()
+
+	if pending != 1 || queued != 0 {
+		t.Fatalf("pool has %d pending and %d queued accounts, want 1 and 0", pending, queued)
+	}
+	if beat || beats != 0 {
+		t.Fatalf("heartbeat left for an account without queued transactions: %d heartbeats", beats)
+	}
+	if err := validatePoolInternals(pool); err != nil {
+		t.Fatalf("pool internal state corrupted: %v", err)
+	}
+}
+
 // Tests that the pool rejects replacement dynamic fee transactions that don't
 // meet the minimum price bump required.
 func TestReplacementDynamicFee(t *testing.T) {

@@ -65,6 +65,10 @@ type txPool interface {
 	// cached with the given hash.
 	Has(hash common.Hash) bool
 
+	// FilterType returns whether the pool takes transactions of the given
+	// type, so that announcements of other types are never fetched.
+	FilterType(kind byte) bool
+
 	// Get retrieves the transaction from local txpool with given
 	// tx hash.
 	Get(hash common.Hash) *types.Transaction
@@ -315,7 +319,7 @@ func newHandler(config *handlerConfig) (*handler, error) {
 	addTxs := func(txs []*types.Transaction) []error {
 		return h.txpool.Add(txs, false, false)
 	}
-	h.txFetcher = fetcher.NewTxFetcher(h.txpool.Has, addTxs, fetchTx, h.removePeer)
+	h.txFetcher = fetcher.NewTxFetcherWithTypeFilter(h.txpool.Has, h.txpool.FilterType, addTxs, fetchTx, h.removePeer)
 	h.chainSync = newChainSyncer(h)
 	return h, nil
 }
