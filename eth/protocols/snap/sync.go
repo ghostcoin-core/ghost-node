@@ -1680,9 +1680,13 @@ func (s *Syncer) revertAccountRequest(req *accountRequest) {
 	}
 	close(req.stale)
 
-	// Remove the request from the tracked set
+	// Remove the request from the tracked set and restore the peer to the
+	// idle pool so it can be reassigned work (skip if peer already left).
 	s.lock.Lock()
 	delete(s.accountReqs, req.id)
+	if _, ok := s.peers[req.peer]; ok {
+		s.accountIdlers[req.peer] = struct{}{}
+	}
 	s.lock.Unlock()
 
 	// If there's a timeout timer still running, abort it and mark the account
@@ -1721,9 +1725,13 @@ func (s *Syncer) revertBytecodeRequest(req *bytecodeRequest) {
 	}
 	close(req.stale)
 
-	// Remove the request from the tracked set
+	// Remove the request from the tracked set and restore the peer to the
+	// idle pool so it can be reassigned work (skip if peer already left).
 	s.lock.Lock()
 	delete(s.bytecodeReqs, req.id)
+	if _, ok := s.peers[req.peer]; ok {
+		s.bytecodeIdlers[req.peer] = struct{}{}
+	}
 	s.lock.Unlock()
 
 	// If there's a timeout timer still running, abort it and mark the code
@@ -1762,9 +1770,13 @@ func (s *Syncer) revertStorageRequest(req *storageRequest) {
 	}
 	close(req.stale)
 
-	// Remove the request from the tracked set
+	// Remove the request from the tracked set and restore the peer to the
+	// idle pool so it can be reassigned work (skip if peer already left).
 	s.lock.Lock()
 	delete(s.storageReqs, req.id)
+	if _, ok := s.peers[req.peer]; ok {
+		s.storageIdlers[req.peer] = struct{}{}
+	}
 	s.lock.Unlock()
 
 	// If there's a timeout timer still running, abort it and mark the storage
@@ -1807,9 +1819,13 @@ func (s *Syncer) revertTrienodeHealRequest(req *trienodeHealRequest) {
 	}
 	close(req.stale)
 
-	// Remove the request from the tracked set
+	// Remove the request from the tracked set and restore the peer to the
+	// idle pool so it can be reassigned work (skip if peer already left).
 	s.lock.Lock()
 	delete(s.trienodeHealReqs, req.id)
+	if _, ok := s.peers[req.peer]; ok {
+		s.trienodeHealIdlers[req.peer] = struct{}{}
+	}
 	s.lock.Unlock()
 
 	// If there's a timeout timer still running, abort it and mark the trie node
@@ -1848,9 +1864,13 @@ func (s *Syncer) revertBytecodeHealRequest(req *bytecodeHealRequest) {
 	}
 	close(req.stale)
 
-	// Remove the request from the tracked set
+	// Remove the request from the tracked set and restore the peer to the
+	// idle pool so it can be reassigned work (skip if peer already left).
 	s.lock.Lock()
 	delete(s.bytecodeHealReqs, req.id)
+	if _, ok := s.peers[req.peer]; ok {
+		s.bytecodeHealIdlers[req.peer] = struct{}{}
+	}
 	s.lock.Unlock()
 
 	// If there's a timeout timer still running, abort it and mark the code
@@ -2475,6 +2495,19 @@ func (s *Syncer) forwardAccountTask(task *accountTask) {
 	log.Debug("Persisted range of accounts", "accounts", len(res.accounts), "bytes", s.accountBytes-oldAccountBytes)
 }
 
+// verifyRangeProof checks a range proof the way trie.VerifyRangeProof does, but
+// first rejects any key preceding the requested origin. Such keys sit outside
+// the proven range: trie.VerifyRangeProof drops their insertion errors, so they
+// can land in an unresolved part of the rebuilt trie, the root still matches,
+// and the bogus entries are then written to the database.
+func verifyRangeProof(root common.Hash, origin []byte, keys [][]byte, values [][]byte, proof ethdb.KeyValueReader) (bool, error) {
+	// A nil origin slice is equivalent to an empty slice.
+	if len(keys) > 0 && bytes.Compare(origin, keys[0]) > 0 {
+		return false, errors.New("unexpected key-value pairs preceding the requested range")
+	}
+	return trie.VerifyRangeProof(root, origin, keys, values, proof)
+}
+
 // OnAccounts is a callback method to invoke when a range of accounts are
 // received from a remote peer.
 func (s *Syncer) OnAccounts(peer SyncPeer, id uint64, hashes []common.Hash, accounts [][]byte, proof [][]byte) error {
@@ -2546,7 +2579,7 @@ func (s *Syncer) OnAccounts(peer SyncPeer, id uint64, hashes []common.Hash, acco
 	for i, node := range proof {
 		nodes[i] = node
 	}
-	cont, err := trie.VerifyRangeProof(root, req.origin[:], keys, accounts, nodes.Set())
+	cont, err := verifyRangeProof(root, req.origin[:], keys, accounts, nodes.Set())
 	if err != nil {
 		logger.Warn("Account range failed proof", "err", err)
 		// Signal this request as failed, and ready for rescheduling
@@ -2809,7 +2842,7 @@ func (s *Syncer) OnStorage(peer SyncPeer, id uint64, hashes [][]common.Hash, slo
 			// returned data is indeed part of the storage trie
 			proofdb := nodes.Set()
 
-			cont, err = trie.VerifyRangeProof(req.roots[i], req.origin[:], keys, slots[i], proofdb)
+			cont, err = verifyRangeProof(req.roots[i], req.origin[:], keys, slots[i], proofdb)
 			if err != nil {
 				s.scheduleRevertStorageRequest(req) // reschedule request
 				logger.Warn("Storage range failed proof", "err", err)
