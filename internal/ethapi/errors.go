@@ -76,3 +76,10 @@ func (e *TxIndexingError) ErrorCode() int {
 
 // ErrorData returns the hex encoded revert reason.
 func (e *TxIndexingError) ErrorData() interface{} { return "transaction indexing is in progress" }
+
+// invalidParamsError is an API error that indicates the request parameters
+// are invalid, using the JSON-RPC invalid params error code.
+type invalidParamsError struct{ message string }
+
+func (e *invalidParamsError) Error() string  { return e.message }
+func (e *invalidParamsError) ErrorCode() int { return -32602 }
