@@ -188,10 +188,11 @@ type TxFetcher struct {
 	alternates map[common.Hash]map[string]struct{} // In-flight transaction alternate origins if retrieval fails
 
 	// Callbacks
-	hasTx    func(common.Hash) bool             // Retrieves a tx from the local txpool
-	addTxs   func([]*types.Transaction) []error // Insert a batch of transactions into local txpool
-	fetchTxs func(string, []common.Hash) error  // Retrieves a set of txs from a remote peer
-	dropPeer func(string)                       // Drops a peer in case of announcement violation
+	hasTx      func(common.Hash) bool             // Retrieves a tx from the local txpool
+	filterType func(byte) bool                    // Reports whether the local txpool takes a tx type (nil takes all)
+	addTxs     func([]*types.Transaction) []error // Insert a batch of transactions into local txpool
+	fetchTxs   func(string, []common.Hash) error  // Retrieves a set of txs from a remote peer
+	dropPeer   func(string)                       // Drops a peer in case of announcement violation
 
 	step  chan struct{} // Notification channel when the fetcher loop iterates
 	clock mclock.Clock  // Time wrapper to simulate in tests
@@ -201,13 +202,25 @@ type TxFetcher struct {
 // NewTxFetcher creates a transaction fetcher to retrieve transaction
 // based on hash announcements.
 func NewTxFetcher(hasTx func(common.Hash) bool, addTxs func([]*types.Transaction) []error, fetchTxs func(string, []common.Hash) error, dropPeer func(string)) *TxFetcher {
-	return NewTxFetcherForTests(hasTx, addTxs, fetchTxs, dropPeer, mclock.System{}, nil)
+	return newTxFetcher(hasTx, nil, addTxs, fetchTxs, dropPeer, mclock.System{}, nil)
+}
+
+// NewTxFetcherWithTypeFilter creates a transaction fetcher that also ignores
+// the announcements of transaction types the local txpool does not take.
+func NewTxFetcherWithTypeFilter(hasTx func(common.Hash) bool, filterType func(byte) bool, addTxs func([]*types.Transaction) []error, fetchTxs func(string, []common.Hash) error, dropPeer func(string)) *TxFetcher {
+	return newTxFetcher(hasTx, filterType, addTxs, fetchTxs, dropPeer, mclock.System{}, nil)
 }
 
 // NewTxFetcherForTests is a testing method to mock out the realtime clock with
 // a simulated version and the internal randomness with a deterministic one.
 func NewTxFetcherForTests(
 	hasTx func(common.Hash) bool, addTxs func([]*types.Transaction) []error, fetchTxs func(string, []common.Hash) error, dropPeer func(string),
+	clock mclock.Clock, rand *mrand.Rand) *TxFetcher {
+	return newTxFetcher(hasTx, nil, addTxs, fetchTxs, dropPeer, clock, rand)
+}
+
+func newTxFetcher(
+	hasTx func(common.Hash) bool, filterType func(byte) bool, addTxs func([]*types.Transaction) []error, fetchTxs func(string, []common.Hash) error, dropPeer func(string),
 	clock mclock.Clock, rand *mrand.Rand) *TxFetcher {
 	return &TxFetcher{
 		notify:      make(chan *txAnnounce),
@@ -224,6 +237,7 @@ func NewTxFetcherForTests(
 		alternates:  make(map[common.Hash]map[string]struct{}),
 		underpriced: lru.NewCache[common.Hash, time.Time](maxTxUnderpricedSetSize),
 		hasTx:       hasTx,
+		filterType:  filterType,
 		addTxs:      addTxs,
 		fetchTxs:    fetchTxs,
 		dropPeer:    dropPeer,
@@ -254,6 +268,9 @@ func (f *TxFetcher) Notify(peer string, types []byte, sizes []uint32, hashes []c
 		switch {
 		case f.hasTx(hash):
 			duplicate++
+		case types != nil && f.filterType != nil && !f.filterType(types[i]):
+			// The local pool does not take this transaction type, so never
+			// track or fetch it.
 		case f.isKnownUnderpriced(hash):
 			underpriced++
 		default:
@@ -752,6 +769,10 @@ func (f *TxFetcher) loop() {
 					delete(f.announced[hash], drop.peer)
 					if len(f.announced[hash]) == 0 {
 						delete(f.announced, hash)
+					}
+					delete(f.alternates[hash], drop.peer)
+					if len(f.alternates[hash]) == 0 {
+						delete(f.alternates, hash)
 					}
 				}
 				delete(f.announces, drop.peer)

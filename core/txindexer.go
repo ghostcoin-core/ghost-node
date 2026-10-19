@@ -91,7 +91,7 @@ func (indexer *txIndexer) run(tail *uint64, head uint64, stop chan struct{}, don
 		if indexer.limit != 0 && head >= indexer.limit {
 			from = head - indexer.limit + 1
 		}
-		rawdb.IndexTransactions(indexer.db, from, head+1, stop, true)
+		indexer.index(from, head+1, stop)
 		return
 	}
 	// The tail flag is existent (which means indexes in [tail, head] should be
@@ -105,7 +105,7 @@ func (indexer *txIndexer) run(tail *uint64, head uint64, stop chan struct{}, don
 			if end > head+1 {
 				end = head + 1
 			}
-			rawdb.IndexTransactions(indexer.db, 0, end, stop, true)
+			indexer.index(0, end, stop)
 		}
 		return
 	}
@@ -113,10 +113,55 @@ func (indexer *txIndexer) run(tail *uint64, head uint64, stop chan struct{}, don
 	// limit and the latest chain head.
 	if head-indexer.limit+1 < *tail {
 		// Reindex a part of missing indices and rewind index tail to HEAD-limit
-		rawdb.IndexTransactions(indexer.db, head-indexer.limit+1, *tail, stop, true)
+		indexer.index(head-indexer.limit+1, *tail, stop)
 	} else {
 		// Unindex a part of stale indices and forward index tail to HEAD-limit
-		rawdb.UnindexTransactions(indexer.db, *tail, head-indexer.limit+1, stop, false)
+		indexer.unindex(*tail, head-indexer.limit+1, stop)
+	}
+}
+
+// index creates the transaction indexes of the blocks [from, to). The
+// iterator stops at a block whose body is missing or corrupt and leaves the
+// tail above it, so such a block is skipped here and indexing carries on
+// below it; otherwise every later run would stop at the same block.
+func (indexer *txIndexer) index(from uint64, to uint64, stop chan struct{}) {
+	for from < to {
+		rawdb.IndexTransactions(indexer.db, from, to, stop, true)
+		tail := rawdb.ReadTxIndexTail(indexer.db)
+		if tail == nil || *tail <= from || *tail > to || stopped(stop) {
+			return
+		}
+		log.Warn("Skipping tx indexing for block with missing/corrupt body", "block", *tail-1)
+		to = *tail - 1
+		rawdb.WriteTxIndexTail(indexer.db, to)
+	}
+}
+
+// unindex removes the transaction indexes of the blocks [from, to). The
+// iterator stops at a block whose body is missing or corrupt and leaves the
+// tail on it, so such a block is skipped here and unindexing carries on above
+// it; otherwise every later run would stop at the same block and the indexer
+// would loop on it forever.
+func (indexer *txIndexer) unindex(from uint64, to uint64, stop chan struct{}) {
+	for from < to {
+		rawdb.UnindexTransactions(indexer.db, from, to, stop, false)
+		tail := rawdb.ReadTxIndexTail(indexer.db)
+		if tail == nil || *tail >= to || *tail < from || stopped(stop) {
+			return
+		}
+		log.Warn("Skipping tx unindexing for block with missing/corrupt body", "block", *tail)
+		from = *tail + 1
+		rawdb.WriteTxIndexTail(indexer.db, from)
+	}
+}
+
+// stopped reports whether the stop channel of a task is closed.
+func stopped(stop chan struct{}) bool {
+	select {
+	case <-stop:
+		return true
+	default:
+		return false
 	}
 }
 

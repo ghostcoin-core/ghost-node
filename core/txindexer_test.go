@@ -20,11 +20,13 @@ import (
 	"math/big"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus/ethash"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/params"
@@ -242,5 +244,179 @@ func TestTxIndexer(t *testing.T) {
 
 		db.Close()
 		os.RemoveAll(frdir)
+	}
+}
+
+// TestTxLookupNoDeadlock tests that transaction lookups running alongside a
+// reorg, which rewrites the indexes, and the chain's shutdown, which stops
+// the indexer, all return. Lookups here take no lock that a reorg holds (the
+// lock the upstream deadlock was in), and a lookup on a stopped indexer
+// returns at once.
+func TestTxLookupNoDeadlock(t *testing.T) {
+	var (
+		testBankKey, _  = crypto.GenerateKey()
+		testBankAddress = crypto.PubkeyToAddress(testBankKey.PublicKey)
+		testBankFunds   = big.NewInt(1000000000000000000)
+
+		gspec = &genesisT.Genesis{
+			Config:  params.TestChainConfig,
+			Alloc:   genesisT.GenesisAlloc{testBankAddress: {Balance: testBankFunds}},
+			BaseFee: big.NewInt(vars.InitialBaseFee),
+		}
+		engine = ethash.NewFaker()
+		nonce  = uint64(0)
+	)
+	_, blocks, _ := GenerateChainWithGenesis(gspec, engine, 16, func(i int, gen *BlockGen) {
+		tx, _ := types.SignTx(types.NewTransaction(nonce, common.HexToAddress("0xdeadbeef"), big.NewInt(1000), vars.TxGas, big.NewInt(10*vars.InitialBaseFee), nil), types.HomesteadSigner{}, testBankKey)
+		gen.AddTx(tx)
+		nonce += 1
+	})
+	_, fork, _ := GenerateChainWithGenesis(gspec, engine, 24, func(i int, gen *BlockGen) {
+		gen.SetCoinbase(common.Address{0x01})
+	})
+	limit := uint64(0)
+	chain, err := NewBlockChain(rawdb.NewMemoryDatabase(), nil, gspec, nil, engine, vm.Config{}, nil, &limit)
+	if err != nil {
+		t.Fatalf("failed to create chain: %v", err)
+	}
+	if _, err := chain.InsertChain(blocks); err != nil {
+		t.Fatalf("failed to insert chain: %v", err)
+	}
+	var hashes []common.Hash
+	for _, block := range blocks {
+		for _, tx := range block.Transactions() {
+			hashes = append(hashes, tx.Hash())
+		}
+	}
+
+	quit := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			for _, hash := range hashes {
+				select {
+				case <-quit:
+					return
+				default:
+				}
+				chain.GetTransactionLookup(hash)
+			}
+		}
+	}()
+	finished := make(chan error, 1)
+	go func() {
+		// Reorg onto the longer fork, which drops every indexed transaction,
+		// then stop the chain while the lookups still run.
+		_, err := chain.InsertChain(fork)
+		chain.Stop()
+		finished <- err
+	}()
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatalf("failed to insert fork: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("reorg and shutdown deadlocked with concurrent tx lookups")
+	}
+	close(quit)
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("tx lookup deadlocked")
+	}
+	// A lookup on the stopped chain returns at once.
+	lookupDone := make(chan struct{})
+	go func() {
+		chain.GetTransactionLookup(common.Hash{0x01})
+		close(lookupDone)
+	}()
+	select {
+	case <-lookupDone:
+	case <-time.After(30 * time.Second):
+		t.Fatal("tx lookup on a stopped chain deadlocked")
+	}
+	if head := chain.CurrentBlock().Number.Uint64(); head != 24 {
+		t.Fatalf("head %d after the reorg, want 24", head)
+	}
+	for _, hash := range hashes {
+		if tx, _, _, _ := rawdb.ReadTransaction(chain.db, hash); tx != nil {
+			t.Fatalf("transaction %x still indexed after the reorg", hash)
+		}
+	}
+}
+
+// TestTxIndexerUnindexLoop tests that a block whose body is missing does not
+// stop the indexer for good: unindexing skips it and moves the tail to the
+// limit, instead of stopping on the block again in every later run.
+func TestTxIndexerUnindexLoop(t *testing.T) {
+	var (
+		testBankKey, _  = crypto.GenerateKey()
+		testBankAddress = crypto.PubkeyToAddress(testBankKey.PublicKey)
+		testBankFunds   = big.NewInt(1000000000000000000)
+
+		gspec = &genesisT.Genesis{
+			Config:  params.TestChainConfig,
+			Alloc:   genesisT.GenesisAlloc{testBankAddress: {Balance: testBankFunds}},
+			BaseFee: big.NewInt(vars.InitialBaseFee),
+		}
+		engine    = ethash.NewFaker()
+		nonce     = uint64(0)
+		chainHead = uint64(16)
+		limit     = uint64(8)
+		missing   = uint64(3)
+	)
+	_, blocks, _ := GenerateChainWithGenesis(gspec, engine, int(chainHead), func(i int, gen *BlockGen) {
+		tx, _ := types.SignTx(types.NewTransaction(nonce, common.HexToAddress("0xdeadbeef"), big.NewInt(1000), vars.TxGas, big.NewInt(10*vars.InitialBaseFee), nil), types.HomesteadSigner{}, testBankKey)
+		gen.AddTx(tx)
+		nonce += 1
+	})
+	db := rawdb.NewMemoryDatabase()
+	for _, block := range append([]*types.Block{GenesisToBlock(gspec, nil)}, blocks...) {
+		rawdb.WriteBlock(db, block)
+		rawdb.WriteCanonicalHash(db, block.Hash(), block.NumberU64())
+	}
+	indexer := &txIndexer{
+		limit:    0,
+		db:       db,
+		progress: make(chan chan TxIndexProgress),
+	}
+	stop := make(chan struct{})
+	defer close(stop)
+
+	indexer.run(nil, chainHead, stop, make(chan struct{}))
+	if tail := rawdb.ReadTxIndexTail(db); tail == nil || *tail != 0 {
+		t.Fatal("tail after indexing the whole chain is not 0")
+	}
+	// Lose the body of a block that is to be unindexed.
+	rawdb.DeleteBody(db, blocks[missing-1].Hash(), missing)
+
+	// Unindex down to the limit, twice: the tail must reach HEAD-limit+1 on
+	// the first run and stay there.
+	want := chainHead - limit + 1
+	indexer.limit = limit
+	for run := 0; run < 2; run++ {
+		indexer.run(rawdb.ReadTxIndexTail(db), chainHead, stop, make(chan struct{}))
+		tail := rawdb.ReadTxIndexTail(db)
+		if tail == nil {
+			t.Fatalf("run %d: no tail, want %d", run, want)
+		}
+		if *tail != want {
+			t.Fatalf("run %d: tail %d, want %d", run, *tail, want)
+		}
+	}
+	for number := uint64(1); number <= chainHead; number++ {
+		for _, tx := range blocks[number-1].Transactions() {
+			lookup := rawdb.ReadTxLookupEntry(db, tx.Hash())
+			switch {
+			case number == missing:
+				// The block's hashes could not be read, its indexes stay.
+			case number < want && lookup != nil:
+				t.Fatalf("block %d: index of %x not removed", number, tx.Hash())
+			case number >= want && lookup == nil:
+				t.Fatalf("block %d: index of %x missing", number, tx.Hash())
+			}
+		}
 	}
 }

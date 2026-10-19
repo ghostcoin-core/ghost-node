@@ -295,6 +295,42 @@ func (p *TxPool) Has(hash common.Hash) bool {
 	return false
 }
 
+// FilterType returns whether a transaction with the given type is supported
+// (can be added) by the pool.
+func (p *TxPool) FilterType(kind byte) bool {
+	probe := emptyTxOfType(kind)
+	if probe == nil {
+		return false
+	}
+	for _, subpool := range p.subpools {
+		if subpool.Filter(probe) {
+			return true
+		}
+	}
+	return false
+}
+
+// emptyTxOfType returns an empty transaction of the given type to ask the
+// subpools' Filter about, or nil for a type no subpool of this node takes
+// (the blob type included, its pool being turned off). The
+// subpools decide on the type alone, so the empty fields do not matter.
+func emptyTxOfType(kind byte) *types.Transaction {
+	switch kind {
+	case types.LegacyTxType:
+		return types.NewTx(&types.LegacyTx{})
+	case types.AccessListTxType:
+		return types.NewTx(&types.AccessListTx{})
+	case types.DynamicFeeTxType:
+		return types.NewTx(&types.DynamicFeeTx{})
+	case types.GhostRevealTxType:
+		return types.NewTx(&types.GhostRevealTx{})
+	case types.GhostDataRevealTxType:
+		return types.NewTx(&types.GhostDataRevealTx{})
+	default:
+		return nil
+	}
+}
+
 // Get returns a transaction if it is contained in the pool, or nil otherwise.
 func (p *TxPool) Get(hash common.Hash) *types.Transaction {
 	for _, subpool := range p.subpools {

@@ -879,3 +879,63 @@ func TestHandlerPassesPeerToGhostPool(t *testing.T) {
 		t.Fatalf("reveal pool dropped %v, want peer %s", dropped, peer.ID())
 	}
 }
+
+// TestHandlerIgnoresUnsupportedTxAnnouncements checks that the handler never
+// fetches an announced transaction of a type its pool does not take: only the
+// supported hash of a mixed announcement is requested from the peer.
+func TestHandlerIgnoresUnsupportedTxAnnouncements(t *testing.T) {
+	handler := newTestHandler()
+	defer handler.close()
+
+	pipe, remote := p2p.MsgPipe()
+	defer pipe.Close()
+	defer remote.Close()
+	peer := eth.NewPeer(eth.ETH68, p2p.NewPeerPipe(enode.ID{8}, "", nil, pipe), pipe, handler.txpool)
+	defer peer.Close()
+	if err := handler.handler.peers.registerPeer(peer, nil); err != nil {
+		t.Fatal(err)
+	}
+	backend := (*ethHandler)(handler.handler)
+
+	var (
+		unsupported = common.Hash{0x01}
+		supported   = common.Hash{0x02}
+	)
+	kinds := []byte{0x7f, types.LegacyTxType}
+	sizes := []uint32{100, 100}
+	hashes := []common.Hash{unsupported, supported}
+	if err := backend.Handle(peer, &eth.NewPooledTransactionHashesPacket{Types: kinds, Sizes: sizes, Hashes: hashes}); err != nil {
+		t.Fatalf("announcement: %v", err)
+	}
+
+	type result struct {
+		req *eth.GetPooledTransactionsPacket
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		msg, err := remote.ReadMsg()
+		if err != nil {
+			done <- result{err: err}
+			return
+		}
+		defer msg.Discard()
+		if msg.Code != eth.GetPooledTransactionsMsg {
+			done <- result{err: fmt.Errorf("message code %d, want %d", msg.Code, eth.GetPooledTransactionsMsg)}
+			return
+		}
+		req := new(eth.GetPooledTransactionsPacket)
+		done <- result{req: req, err: msg.Decode(req)}
+	}()
+	select {
+	case res := <-done:
+		if res.err != nil {
+			t.Fatalf("reading the transaction request: %v", res.err)
+		}
+		if got := res.req.GetPooledTransactionsRequest; len(got) != 1 || got[0] != supported {
+			t.Fatalf("requested %v, want only the supported hash %v", got, supported)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no transaction request sent for the supported announcement")
+	}
+}
