@@ -89,3 +89,28 @@ func TestFeeHistory(t *testing.T) {
 		}
 	}
 }
+
+// TestFeeHistoryPercentileLimit checks that a fee history request may ask for
+// at most maxQueryLimit reward percentiles.
+func TestFeeHistoryPercentileLimit(t *testing.T) {
+	backend := newTestBackend(t, big.NewInt(16), false)
+	defer backend.teardown()
+	oracle := NewOracle(backend, Config{MaxHeaderHistory: 1000, MaxBlockHistory: 1000})
+
+	percentiles := func(n int) []float64 {
+		p := make([]float64, n)
+		for i := range p {
+			p[i] = float64(i) * 100 / float64(n)
+		}
+		return p
+	}
+	if _, reward, _, _, err := oracle.FeeHistory(context.Background(), 2, 30, percentiles(maxQueryLimit)); err != nil {
+		t.Fatalf("%d percentiles: unexpected error %v", maxQueryLimit, err)
+	} else if len(reward) != 2 || len(reward[0]) != maxQueryLimit {
+		t.Fatalf("%d percentiles: wrong reward shape", maxQueryLimit)
+	}
+	_, _, _, _, err := oracle.FeeHistory(context.Background(), 2, 30, percentiles(maxQueryLimit+1))
+	if !errors.Is(err, errInvalidPercentile) {
+		t.Fatalf("%d percentiles: want %v, got %v", maxQueryLimit+1, errInvalidPercentile, err)
+	}
+}
