@@ -164,7 +164,8 @@ ghost-proofs header, and data reveals and revokes through
 `ghostverifier/ghost_data.h`, which the `ghostverifier` crate adds around the
 one data verifier of ghost-proofs, `verify_data_reveal`. A data reveal and a
 data revoke differ only in the purpose byte that starts the statement: `0x02`
-or `0x03`, then the root, marker, party (the verifier-or-recipient address
+or `0x03` in the codes of ghost-proofs, to which the node maps its own
+`PurposeReveal` (`0x01`) and `PurposeRevoke` (`0x02`), then the root, marker, party (the verifier-or-recipient address
 left-padded to 32 bytes), fee and rule, 32 bytes each. A kind or purpose it
 does not verify is `ErrProofStatement`, without calling it; every answer but
 acceptance is `ErrProofRejected`.
