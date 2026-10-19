@@ -10,6 +10,7 @@
 #   build/ci-gate.sh fixtures [part]    one part of the Ethereum test fixtures, or all of them
 #   build/ci-gate.sh --list             print the stage names and run nothing
 #   build/ci-gate.sh --check-shards     fail unless the unit shards cover every package once
+#   build/ci-gate.sh --prepare-fixtures fill the fixture test submodules and run nothing
 #
 # When several shards run, GATE_JOBS (default 4) of them run at once, each
 # with its output kept aside; the last 100 lines of a failed shard are printed.
@@ -21,6 +22,8 @@ cd "$(git rev-parse --show-toplevel)"
 mod=github.com/ethereum/go-ethereum
 unit_shards=(consensus core core-sub eth eth-sub cmd p2p rest)
 fixture_parts=(state blockchain other)
+# The submodules the fixture tests read.
+fixture_submodules=(tests/testdata tests/evm-benchmarks)
 
 # Every package the unit shards test: all of them except the fixture runner.
 unit_packages() {
@@ -127,11 +130,39 @@ stage_unit() {
 	go test -p 1 -tags integrationtests -timeout 20m $pkgs
 }
 
+is_empty() {
+	[ ! -d "$1" ] || [ -z "$(ls -A "$1")" ]
+}
+
+# Fills every submodule the fixture tests read, when it is empty: a shallow
+# fetch first, then a read-only copy on the host (GATE_FIXTURES_DIR, laid out
+# as <dir>/testdata and <dir>/evm-benchmarks) for hosts that cannot fetch.
+prepare_fixtures() {
+	local host=${GATE_FIXTURES_DIR:-/usr/local/share/fixtures-ghost-node}
+	local path name
+	for path in "${fixture_submodules[@]}"; do
+		if ! is_empty "$path"; then
+			continue
+		fi
+		if git submodule update --init --depth 1 "$path" && ! is_empty "$path"; then
+			continue
+		fi
+		name="$(basename "$path")"
+		if ! is_empty "$host/$name"; then
+			echo "Could not fetch $path; copying it from $host/$name"
+			mkdir -p "$path"
+			cp -R "$host/$name/." "$path/"
+			continue
+		fi
+		echo "$path is empty: it could not be fetched, and there is no copy in $host/$name."
+		echo "Run 'git submodule update --init --depth 1 $path', or set GATE_FIXTURES_DIR to a directory holding $name."
+		exit 1
+	done
+}
+
 stage_fixtures() {
 	local part=$1
-	if [ ! -d tests/testdata ] || [ -z "$(ls -A tests/testdata)" ]; then
-		git submodule update --init --depth 1 tests/testdata
-	fi
+	prepare_fixtures
 	case "$part" in
 	state) go test -timeout 20m -run '^TestState$' ./tests ;;
 	blockchain) go test -timeout 20m -run '^TestBlockchain$' ./tests ;;
@@ -240,6 +271,11 @@ run_all() {
 	for stage in "${fixture_parts[@]}"; do
 		shards+=("fixtures $stage")
 	done
+	# Once, before the parallel fixture parts would each fetch it at once.
+	echo "=== fixture data"
+	if ! bash "$self" --prepare-fixtures; then
+		failed="$failed  fixture data"$'\n'
+	fi
 	echo "=== unit and fixtures, ${GATE_JOBS:-4} at a time"
 	if ! run_pool "${shards[@]}"; then
 		failed="$failed  unit or fixtures"$'\n'
@@ -253,7 +289,7 @@ run_all() {
 }
 
 usage() {
-	echo "usage: $0 [--list | --check-shards | typecheck | build | unit [shard] | fixtures [part]]" >&2
+	echo "usage: $0 [--list | --check-shards | --prepare-fixtures | typecheck | build | unit [shard] | fixtures [part]]" >&2
 	exit 2
 }
 
@@ -270,6 +306,10 @@ case "$1" in
 --check-shards)
 	[ $# -eq 1 ] || usage
 	check_shards
+	;;
+--prepare-fixtures)
+	[ $# -eq 1 ] || usage
+	prepare_fixtures
 	;;
 typecheck)
 	[ $# -eq 1 ] || usage
@@ -301,6 +341,7 @@ fixtures)
 		for part in "${fixture_parts[@]}"; do
 			set -- "$@" "fixtures $part"
 		done
+		prepare_fixtures
 		run_pool "$@"
 		exit
 	fi
