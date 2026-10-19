@@ -4,6 +4,11 @@ name: CI
 #
 # This repository is public, so jobs run on GitHub-hosted runners: anyone can
 # open a pull request, and pull request code must never run on our own hosts.
+#
+# Pull requests run only typecheck: the full test suite runs as a gate before
+# merge (build/ci-gate.sh, the same commands these jobs call). Every other job
+# runs on push to main; on a pull request it does not run, and a job left out
+# that way still satisfies a required check.
 
 on:
   push:
@@ -13,9 +18,11 @@ on:
 permissions:
   contents: read
 
+# A new push to a pull request cancels its older run. Pushes to main are keyed
+# on their own commit, so they never cancel each other.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.sha }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   # Use the toolchain setup-go installs from go.mod, never download another.
@@ -33,31 +40,12 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      - name: gofmt
-        run: |
-          unformatted="$(git ls-files -z '*.go' | xargs -0 gofmt -l)"
-          if [ -n "$unformatted" ]; then
-            echo "These files need gofmt:"
-            echo "$unformatted"
-            exit 1
-          fi
-      - name: go mod tidy
-        run: go mod tidy -diff
-      - name: go vet
-        run: go vet -tags integrationtests ./...
-      - name: Release builds have no fake seals
-        run: go test -tags ghostrelease -run '^TestRelease' ./consensus/ethash
-      - name: No proof-of-stake code in the node
-        run: |
-          # The beacon wrapper is kept only for upstream tests and the evm
-          # test runner; the node itself must not link it.
-          if go list -deps ./cmd/geth | grep -x -E 'github.com/ethereum/go-ethereum/(consensus/beacon|eth/catalyst|beacon/.*)'; then
-            echo "geth links proof-of-stake code"
-            exit 1
-          fi
+      - name: gofmt, go mod tidy, go vet, release and link checks
+        run: bash build/ci-gate.sh typecheck
 
   build:
     name: build
+    if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -67,16 +55,8 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      - name: Build every command
-        run: go run build/ci.go install
-      - name: Real-proof verifier tests
-        env:
-          CGO_ENABLED: "1"
-        run: |
-          go test -tags ghostproofs -count=1 -v -run '^(TestGhostVerifierKnownAnswer|TestRealProofRevealRoundTrip)$' ./core/ghostpriv/
-          go test -tags ghostproofs -count=1 -v -run '^(TestRealProofRevealPoolAndBlock|TestRealProofTamperedRevealRejected)$' ./core/txpool/ghostpool/
-      - name: The Linux release is one self-contained file
-        run: file build/bin/geth | grep -q 'statically linked'
+      - name: Build every command, run the real-proof verifier tests
+        run: bash build/ci-gate.sh build
       - name: Record the geth hash
         run: |
           sha256sum build/bin/geth | cut -d' ' -f1 > geth-linux-amd64-build.sha256
@@ -88,6 +68,7 @@ jobs:
 
   unit-shard:
     name: unit (${{ matrix.shard }})
+    if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
@@ -104,29 +85,12 @@ jobs:
       - name: Test
         env:
           SHARD: ${{ matrix.shard }}
-        run: |
-          mod=github.com/ethereum/go-ethereum
-          all="$(go list ./... | grep -v -x "$mod/tests")"
-          case "$SHARD" in
-            consensus) pkgs="$(echo "$all" | grep -E "^$mod/consensus(/|$)")" ;;
-            core)      pkgs="$mod/core" ;;
-            core-sub)  pkgs="$(echo "$all" | grep -E "^$mod/core/")" ;;
-            eth)       pkgs="$(echo "$all" | grep -x -E "$mod/eth|$mod/eth/fetcher")" ;;
-            eth-sub)   pkgs="$(echo "$all" | grep -E "^$mod/eth/" | grep -v -x "$mod/eth/fetcher")" ;;
-            cmd)       pkgs="$(echo "$all" | grep -E "^$mod/cmd(/|$)")" ;;
-            p2p)       pkgs="$(echo "$all" | grep -E "^$mod/p2p(/|$)")" ;;
-            rest)      pkgs="$(echo "$all" | grep -v -E "^$mod/(consensus|core|eth|cmd|p2p)(/|$)")" ;;
-            *) echo "unknown shard $SHARD"; exit 1 ;;
-          esac
-          # One package at a time, as upstream's CI does: several upstream
-          # tests are timing-sensitive and fail when packages run in parallel
-          # on a small runner.
-          go test -p 1 -tags integrationtests -timeout 20m $pkgs
+        run: bash build/ci-gate.sh unit "$SHARD"
 
   unit:
     name: unit
     needs: unit-shard
-    if: always()
+    if: github.event_name == 'push' && always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -137,6 +101,7 @@ jobs:
 
   fixtures-part:
     name: fixtures (${{ matrix.part }})
+    if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
@@ -154,18 +119,12 @@ jobs:
       - name: Ethereum test fixtures
         env:
           PART: ${{ matrix.part }}
-        run: |
-          case "$PART" in
-            state)      go test -timeout 20m -run '^TestState$' ./tests ;;
-            blockchain) go test -timeout 20m -run '^TestBlockchain$' ./tests ;;
-            other)      go test -timeout 20m -skip '^(TestState|TestBlockchain)$' ./tests ;;
-            *) echo "unknown part $PART"; exit 1 ;;
-          esac
+        run: bash build/ci-gate.sh fixtures "$PART"
 
   fixtures:
     name: fixtures
     needs: fixtures-part
-    if: always()
+    if: github.event_name == 'push' && always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -176,6 +135,7 @@ jobs:
 
   reproducible-target:
     name: reproducible (${{ matrix.target }})
+    if: github.event_name == 'push'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
@@ -207,7 +167,7 @@ jobs:
   reproducible:
     name: reproducible
     needs: [build, reproducible-target]
-    if: always()
+    if: github.event_name == 'push' && always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
