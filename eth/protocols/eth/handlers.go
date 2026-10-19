@@ -45,6 +45,9 @@ func handleGetBlockHeaders(backend Backend, msg Decoder, peer *Peer) error {
 // ServiceGetBlockHeadersQuery assembles the response to a header query. It is
 // exposed to allow external packages to test protocol behavior.
 func ServiceGetBlockHeadersQuery(chain *core.BlockChain, query *GetBlockHeadersRequest, peer *Peer) []rlp.RawValue {
+	if query.Amount == 0 {
+		return nil
+	}
 	if query.Skip == 0 {
 		// The fast path: when the request is for a contiguous segment of headers.
 		return serviceContiguousBlockHeaderQuery(chain, query)
@@ -128,15 +131,22 @@ func serviceNonContiguousBlockHeaderQuery(chain *core.BlockChain, query *GetBloc
 			}
 		case query.Reverse:
 			// Number based traversal towards the genesis block
-			if query.Origin.Number >= query.Skip+1 {
-				query.Origin.Number -= query.Skip + 1
-			} else {
+			current := query.Origin.Number
+			ancestor := current - (query.Skip + 1)
+			if ancestor >= current { // check for underflow
 				unknown = true
+			} else {
+				query.Origin.Number = ancestor
 			}
 
 		case !query.Reverse:
-			// Number based traversal towards the leaf block
-			query.Origin.Number += query.Skip + 1
+			current := query.Origin.Number
+			next := current + query.Skip + 1
+			if next <= current { // check for overflow
+				unknown = true
+			} else {
+				query.Origin.Number = next
+			}
 		}
 	}
 	return headers
@@ -399,12 +409,54 @@ func handleBlockBodies(backend Backend, msg Decoder, peer *Peer) error {
 	if err != nil {
 		return fmt.Errorf("BlockBodies: %w", err)
 	}
+	for i := range items {
+		if err := checkBodyItemCounts(&items[i]); err != nil {
+			return fmt.Errorf("BlockBodies: body %d: %w", i, err)
+		}
+	}
 	metadata := func() any { return hashBodyParts(items) }
 	return peer.dispatchResponse(&Response{
 		id:   res.RequestId,
 		code: BlockBodiesMsg,
 		Res:  (*BlockBodiesResponse)(&items),
 	}, metadata)
+}
+
+const (
+	minTxEncodedSize         = 1 + 9      // Min size for RLP encoded transaction
+	minWithdrawalEncodedSize = 1 + 3 + 21 // Min size for RLP encoded withdrawal
+
+	// Min size for an RLP encoded receipt. Upstream uses 1+4 for the eth/69
+	// encoding, which drops the bloom; eth/68 carries the consensus encoding,
+	// whose smallest form is a legacy receipt with an empty status, zero gas,
+	// a 256-byte bloom and no logs: a 3-byte list header, 1+1 for the first two
+	// fields, 3+256 for the bloom and 1 for the logs.
+	minReceiptEncodedSize = 3 + 1 + 1 + 3 + 256 + 1
+)
+
+// checkBodyItemCounts rejects bodies containing more transactions or withdrawals
+// than can fit in their encoded size.
+func checkBodyItemCounts(body *BlockBody) error {
+	if n := body.Transactions.Len(); n*minTxEncodedSize > len(body.Transactions.Content()) {
+		return fmt.Errorf("%d transactions in %d bytes", n, len(body.Transactions.Content()))
+	}
+	if body.Withdrawals != nil {
+		if n := body.Withdrawals.Len(); n*minWithdrawalEncodedSize > len(body.Withdrawals.Content()) {
+			return fmt.Errorf("%d withdrawals in %d bytes", n, len(body.Withdrawals.Content()))
+		}
+	}
+	return nil
+}
+
+// checkReceiptItemCounts rejects receipt lists containing more receipts than
+// can fit in their encoded size.
+func checkReceiptItemCounts(lists []ReceiptList) error {
+	for i := range lists {
+		if n := lists[i].Len(); n*minReceiptEncodedSize > len(lists[i].Content()) {
+			return fmt.Errorf("list %d: %d receipts in %d bytes", i, n, len(lists[i].Content()))
+		}
+	}
+	return nil
 }
 
 // BlockBodyHashes contains the lists of block body part roots for a list of block bodies.
@@ -509,6 +561,9 @@ func handleReceipts(backend Backend, msg Decoder, peer *Peer) error {
 	if err != nil {
 		return fmt.Errorf("Receipts: %w", err)
 	}
+	if err := checkReceiptItemCounts(receiptLists); err != nil {
+		return fmt.Errorf("Receipts: %w", err)
+	}
 	metadata := func() interface{} {
 		hasher := trie.NewStackTrie(nil)
 		hashes := make([]common.Hash, len(receiptLists))
@@ -565,8 +620,8 @@ func answerGetPooledTransactions(backend Backend, query GetPooledTransactionsReq
 		hashes []common.Hash
 		txs    []rlp.RawValue
 	)
-	for _, hash := range query {
-		if bytes >= softResponseLimit {
+	for i, hash := range query {
+		if bytes >= softResponseLimit || i >= maxPooledTxServe {
 			break
 		}
 		// Retrieve the requested transaction, skipping if unknown to us
