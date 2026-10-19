@@ -164,7 +164,7 @@ func TestGhostDataVerifier(t *testing.T) {
 	}
 
 	// What the verifier does not verify is not passed to it.
-	for _, purpose := range []byte{0x00, 0x01, 0x04, 0xff} {
+	for _, purpose := range []byte{0x00, 0x03, 0x04, 0xff} {
 		if err := v.VerifyReveal(data(purpose), proof()); !errors.Is(err, ghostpriv.ErrProofStatement) {
 			t.Errorf("data purpose %#x: %v, want %v", purpose, err, ghostpriv.ErrProofStatement)
 		}
