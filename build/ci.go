@@ -351,6 +351,11 @@ func buildGhostVerifier() {
 	manifest := filepath.Join(root, ghostVerifierCrate, "Cargo.toml")
 	target := filepath.Join(root, ghostVerifierLib)
 
+	// The compiler rust-toolchain.toml pins, in the log of every build.
+	rustc := exec.Command("rustc", "--version")
+	rustc.Env = ghostVerifierEnv(root)
+	build.MustRun(rustc)
+
 	cargo := exec.Command("cargo", "build", "--release", "--locked", "--manifest-path", manifest, "--target-dir", target)
 	cargo.Env = ghostVerifierEnv(root)
 	build.MustRun(cargo)
