@@ -61,11 +61,6 @@ var (
 		utils.BootnodesFlag,
 		utils.MinFreeDiskSpaceFlag,
 		utils.KeyStoreDirFlag,
-		utils.ExternalSignerFlag,
-		utils.NoUSBFlag, // deprecated
-		utils.USBFlag,
-		utils.USBPathIDFlag,
-		utils.SmartCardDaemonPathFlag,
 		utils.EnablePersonal,
 		utils.EthashCacheDirFlag,
 		utils.EthashCachesInMemoryFlag,

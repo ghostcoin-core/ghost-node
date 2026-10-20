@@ -27,10 +27,7 @@ import (
 	"unicode"
 
 	"github.com/ethereum/go-ethereum/accounts"
-	"github.com/ethereum/go-ethereum/accounts/external"
 	"github.com/ethereum/go-ethereum/accounts/keystore"
-	"github.com/ethereum/go-ethereum/accounts/scwallet"
-	"github.com/ethereum/go-ethereum/accounts/usbwallet"
 	"github.com/ethereum/go-ethereum/cmd/utils"
 	"github.com/ethereum/go-ethereum/eth/ethconfig"
 	"github.com/ethereum/go-ethereum/internal/ethapi"
@@ -83,6 +80,10 @@ var tomlSettings = toml.Config{
 		return fmt.Errorf("field '%s' is not defined in %s%s", field, rt.String(), link)
 	},
 }
+
+// errExternalSignerRemoved is returned when the configuration still names an
+// external signer.
+var errExternalSignerRemoved = errors.New("external signers have been removed, remove ExternalSigner from the configuration")
 
 type ethstatsConfig struct {
 	URL string `toml:",omitempty"`
@@ -282,6 +283,9 @@ func deprecated(field string) bool {
 		return true
 	case "ethconfig.Config.TrieCleanCacheRejournal":
 		return true
+	case "node.Config.NoUSB", "node.Config.USB", "node.Config.SmartCardDaemonPath":
+		// Hardware-wallet backends have been removed.
+		return true
 	default:
 		return false
 	}
@@ -295,50 +299,11 @@ func setAccountManagerBackends(conf *node.Config, am *accounts.Manager, keydir s
 		scryptP = keystore.LightScryptP
 	}
 
-	// Assemble the supported backends
+	// External signers have been removed. Refuse a configuration that still asks
+	// for one instead of silently signing with a different backend.
 	if len(conf.ExternalSigner) > 0 {
-		log.Info("Using external signer", "url", conf.ExternalSigner)
-		if extBackend, err := external.NewExternalBackend(conf.ExternalSigner); err == nil {
-			am.AddBackend(extBackend)
-			return nil
-		} else {
-			return fmt.Errorf("error connecting to external signer: %v", err)
-		}
+		return errExternalSignerRemoved
 	}
-
-	// For now, we're using EITHER external signer OR local signers.
-	// If/when we implement some form of lockfile for USB and keystore wallets,
-	// we can have both, but it's very confusing for the user to see the same
-	// accounts in both externally and locally, plus very racey.
 	am.AddBackend(keystore.NewKeyStore(keydir, scryptN, scryptP))
-	if conf.USB {
-		// Start a USB hub for Ledger hardware wallets
-		if ledgerhub, err := usbwallet.NewLedgerHub(); err != nil {
-			log.Warn(fmt.Sprintf("Failed to start Ledger hub, disabling: %v", err))
-		} else {
-			am.AddBackend(ledgerhub)
-		}
-		// Start a USB hub for Trezor hardware wallets (HID version)
-		if trezorhub, err := usbwallet.NewTrezorHubWithHID(); err != nil {
-			log.Warn(fmt.Sprintf("Failed to start HID Trezor hub, disabling: %v", err))
-		} else {
-			am.AddBackend(trezorhub)
-		}
-		// Start a USB hub for Trezor hardware wallets (WebUSB version)
-		if trezorhub, err := usbwallet.NewTrezorHubWithWebUSB(); err != nil {
-			log.Warn(fmt.Sprintf("Failed to start WebUSB Trezor hub, disabling: %v", err))
-		} else {
-			am.AddBackend(trezorhub)
-		}
-	}
-	if len(conf.SmartCardDaemonPath) > 0 {
-		// Start a smart card hub
-		if schub, err := scwallet.NewHub(conf.SmartCardDaemonPath, scwallet.Scheme, keydir); err != nil {
-			log.Warn(fmt.Sprintf("Failed to start smart card hub, disabling: %v", err))
-		} else {
-			am.AddBackend(schub)
-		}
-	}
-
 	return nil
 }
