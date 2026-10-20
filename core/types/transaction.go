@@ -72,7 +72,7 @@ func NewTx(inner TxData) *Transaction {
 // TxData is the underlying data of a transaction.
 //
 // This is implemented by DynamicFeeTx, LegacyTx, AccessListTx, BlobTx,
-// GhostRevealTx and GhostDataRevealTx.
+// GhostRevealTx, GhostDataRevealTx and GhostAccountTx.
 type TxData interface {
 	txType() byte // returns the type ID
 	copy() TxData // creates a deep copy and initializes all fields
@@ -211,6 +211,8 @@ func (tx *Transaction) decodeTyped(b []byte) (TxData, error) {
 		inner = new(GhostRevealTx)
 	case GhostDataRevealTxType:
 		inner = new(GhostDataRevealTx)
+	case GhostAccountTxType:
+		inner = new(GhostAccountTx)
 	default:
 		return nil, ErrTxTypeNotSupported
 	}

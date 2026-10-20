@@ -17,6 +17,7 @@
 package core
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"math/big"
@@ -118,6 +119,27 @@ func IntrinsicGas(data []byte, accessList types.AccessList, isContractCreation b
 	return gas, nil
 }
 
+// ErrGhostAccountVerifyGas is returned for an account transaction of a
+// scheme whose verification gas is not set: until it is, no transaction of
+// that scheme is accepted (spec 09, section 13).
+var ErrGhostAccountVerifyGas = errors.New("account transaction scheme has no verification gas")
+
+// GhostAccountExtraIntrinsicGas returns the intrinsic gas an account
+// transaction (type 0x52) takes on top of the type 0x02 intrinsic gas:
+// 16 * (2 + len(public_key) + len(signature)) + VERIFY_GAS of its scheme
+// (spec 09, section 8.1). It is zero for every other type.
+func GhostAccountExtraIntrinsicGas(tx *types.Transaction) (uint64, error) {
+	scheme, publicKey, signature, ok := tx.GhostAccountAuth()
+	if !ok {
+		return 0, nil
+	}
+	verify := ghost.AccountTxVerifyGas(scheme)
+	if verify == 0 {
+		return 0, fmt.Errorf("%w: scheme %#04x", ErrGhostAccountVerifyGas, scheme)
+	}
+	return ghost.AccountTxSigByteGas*uint64(2+len(publicKey)+len(signature)) + verify, nil
+}
+
 // toWordSize returns the ceiled word size required for init code payment calculation.
 func toWordSize(size uint64) uint64 {
 	if size > math.MaxUint64-31 {
@@ -142,6 +164,10 @@ type Message struct {
 	AccessList    types.AccessList
 	BlobGasFeeCap *big.Int
 	BlobHashes    []common.Hash
+
+	// ExtraIntrinsicGas is added to the intrinsic gas: the signature gas of
+	// an account transaction (GhostAccountExtraIntrinsicGas), zero otherwise.
+	ExtraIntrinsicGas uint64
 
 	// When SkipAccountChecks is true, the message nonce is not checked against the
 	// account nonce in state. It also disables checking that the sender is an EOA.
@@ -171,7 +197,23 @@ func TransactionToMessage(tx *types.Transaction, s types.Signer, baseFee *big.In
 	}
 	var err error
 	msg.From, err = types.Sender(s, tx)
+	if err != nil {
+		return msg, err
+	}
+	msg.ExtraIntrinsicGas, err = GhostAccountExtraIntrinsicGas(tx)
 	return msg, err
+}
+
+// intrinsicGas is IntrinsicGas of the message plus its ExtraIntrinsicGas.
+func (msg *Message) intrinsicGas(isContractCreation bool, isEIP2, isEIP2028 bool, isEIP3860 bool) (uint64, error) {
+	gas, err := IntrinsicGas(msg.Data, msg.AccessList, isContractCreation, isEIP2, isEIP2028, isEIP3860)
+	if err != nil {
+		return 0, err
+	}
+	if gas > math.MaxUint64-msg.ExtraIntrinsicGas {
+		return 0, ErrGasUintOverflow
+	}
+	return gas + msg.ExtraIntrinsicGas, nil
 }
 
 // ApplyMessage computes the new state by applying the given message
@@ -382,7 +424,7 @@ func (st *StateTransition) checkCommit() error {
 		eip3860f = rules.IsEnabledByTime(rules.GetEIP3860TransitionTime, &st.evm.Context.Time) ||
 			rules.IsEnabled(rules.GetEIP3860Transition, number)
 	)
-	gas, err := IntrinsicGas(msg.Data, msg.AccessList, false, eip2f, eip2028f, eip3860f)
+	gas, err := msg.intrinsicGas(false, eip2f, eip2028f, eip3860f)
 	if err != nil {
 		return err
 	}
@@ -474,7 +516,7 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 	)
 
 	// Check clauses 4-5, subtract intrinsic gas if everything is correct
-	gas, err := IntrinsicGas(msg.Data, msg.AccessList, contractCreation, eip2f, eip2028f, eip3860f)
+	gas, err := msg.intrinsicGas(contractCreation, eip2f, eip2028f, eip3860f)
 	if err != nil {
 		return nil, err
 	}

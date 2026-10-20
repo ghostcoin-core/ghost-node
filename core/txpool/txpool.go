@@ -326,6 +326,8 @@ func emptyTxOfType(kind byte) *types.Transaction {
 		return types.NewTx(&types.GhostRevealTx{})
 	case types.GhostDataRevealTxType:
 		return types.NewTx(&types.GhostDataRevealTx{})
+	case types.GhostAccountTxType:
+		return types.NewTx(&types.GhostAccountTx{})
 	default:
 		return nil
 	}

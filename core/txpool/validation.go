@@ -20,6 +20,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -46,6 +47,11 @@ type ValidationOptions struct {
 	Accept  uint8    // Bitmap of transaction types that should be accepted for the calling pool
 	MaxSize uint64   // Maximum size of a transaction that the caller can meaningfully handle
 	MinTip  *big.Int // Minimum gas tip needed to allow a transaction into the caller pool
+
+	// AcceptGhostAccount accepts account transactions (type 0x52), which the
+	// Accept bitmap cannot name. The caller's signer must then come from
+	// types.NewGhostAccountSigner.
+	AcceptGhostAccount bool
 }
 
 // ValidateTransaction is a helper method to check whether a transaction is valid
@@ -54,9 +60,17 @@ type ValidationOptions struct {
 //
 // This check is public to allow different transaction pools to check the basic
 // rules without duplicating code and running the risk of missed updates.
+//
+// For an account transaction (type 0x52) only the cheap part of the sender
+// checks runs here; its signature is verified last, by
+// ValidateTransactionWithState.
 func ValidateTransaction(tx *types.Transaction, head *types.Header, signer types.Signer, opts *ValidationOptions) error {
 	// Ensure transactions not implemented by the calling pool are rejected
-	if opts.Accept&(1<<tx.Type()) == 0 {
+	if tx.Type() == types.GhostAccountTxType {
+		if !opts.AcceptGhostAccount {
+			return fmt.Errorf("%w: tx type %v not supported by this pool", core.ErrTxTypeNotSupported, tx.Type())
+		}
+	} else if opts.Accept&(1<<tx.Type()) == 0 {
 		return fmt.Errorf("%w: tx type %v not supported by this pool", core.ErrTxTypeNotSupported, tx.Type())
 	}
 	// Before performing any expensive validations, sanity check that the tx is
@@ -99,8 +113,15 @@ func ValidateTransaction(tx *types.Transaction, head *types.Header, signer types
 	if tx.GasFeeCapIntCmp(tx.GasTipCap()) < 0 {
 		return core.ErrTipAboveFeeCap
 	}
-	// Make sure the transaction is signed properly
-	if _, err := types.Sender(signer, tx); err != nil {
+	// Make sure the transaction is signed properly. For an account transaction
+	// this checks the scheme, the key and signature lengths and the chain ID
+	// and derives the sender; the signature is verified after the state
+	// checks.
+	if tx.Type() == types.GhostAccountTxType {
+		if _, err := types.GhostAccountAddress(signer, tx); err != nil {
+			return fmt.Errorf("%w: %w", ErrInvalidSender, err)
+		}
+	} else if _, err := types.Sender(signer, tx); err != nil {
 		return ErrInvalidSender
 	}
 	// Ensure the transaction has more gas than the bare minimum needed to cover
@@ -109,6 +130,14 @@ func ValidateTransaction(tx *types.Transaction, head *types.Header, signer types
 	if err != nil {
 		return err
 	}
+	extraGas, err := core.GhostAccountExtraIntrinsicGas(tx)
+	if err != nil {
+		return err
+	}
+	if intrGas > math.MaxUint64-extraGas {
+		return core.ErrGasUintOverflow
+	}
+	intrGas += extraGas
 	if tx.Gas() < intrGas {
 		return fmt.Errorf("%w: gas %v, minimum needed %v", core.ErrIntrinsicGas, tx.Gas(), intrGas)
 	}
@@ -201,13 +230,31 @@ type ValidationOptionsWithState struct {
 //
 // This check is public to allow different transaction pools to check the stateful
 // rules without duplicating code and running the risk of missed updates.
+//
+// The signature of an account transaction (type 0x52) is verified here, after
+// every other check has passed.
 func ValidateTransactionWithState(tx *types.Transaction, signer types.Signer, opts *ValidationOptionsWithState) error {
-	// Ensure the transaction adheres to nonce ordering
-	from, err := signer.Sender(tx) // already validated (and cached), but cleaner to check
-	if err != nil {
-		log.Error("Transaction sender recovery failed", "err", err)
-		return err
+	var (
+		from common.Address
+		err  error
+	)
+	if tx.Type() == types.GhostAccountTxType {
+		// The sender derived from the public key, not yet verified.
+		if from, err = types.GhostAccountAddress(signer, tx); err != nil {
+			return fmt.Errorf("%w: %w", ErrInvalidSender, err)
+		}
+		// No code at the sender (EIP-3607).
+		if codeHash := opts.State.GetCodeHash(from); codeHash != (common.Hash{}) && codeHash != types.EmptyCodeHash {
+			return fmt.Errorf("%w: address %v, codehash: %s", core.ErrSenderNoEOA, from.Hex(), codeHash)
+		}
+	} else {
+		from, err = signer.Sender(tx) // already validated (and cached), but cleaner to check
+		if err != nil {
+			log.Error("Transaction sender recovery failed", "err", err)
+			return err
+		}
 	}
+	// Ensure the transaction adheres to nonce ordering
 	next := opts.State.GetNonce(from)
 	if next > tx.Nonce() {
 		return fmt.Errorf("%w: next nonce %v, tx nonce %v", core.ErrNonceTooLow, next, tx.Nonce())
@@ -246,6 +293,13 @@ func ValidateTransactionWithState(tx *types.Transaction, signer types.Signer, op
 		// (i.e. max cancellable via out-of-bound transaction).
 		if used, left := opts.UsedAndLeftSlots(from); left <= 0 {
 			return fmt.Errorf("%w: pooled %d txs", ErrAccountLimitExceeded, used)
+		}
+	}
+	// Verify the signature of an account transaction last, the most
+	// expensive check. The sender is cached in the transaction.
+	if tx.Type() == types.GhostAccountTxType {
+		if _, err := types.Sender(signer, tx); err != nil {
+			return fmt.Errorf("%w: %w", ErrInvalidSender, err)
 		}
 	}
 	return nil

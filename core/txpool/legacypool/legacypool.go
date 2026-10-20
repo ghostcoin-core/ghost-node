@@ -208,6 +208,11 @@ type LegacyPool struct {
 	signer      types.Signer
 	mu          sync.RWMutex
 
+	// ghostAccounts is set when the chain gives its genesis block, which the
+	// signer needs to take account transactions (type 0x52). Without it
+	// they are refused.
+	ghostAccounts bool
+
 	currentHead   atomic.Pointer[types.Header] // Current head of the blockchain
 	currentState  *state.StateDB               // Current state in the blockchain head
 	pendingNonces *noncer                      // Pending state tracking virtual nonces
@@ -260,6 +265,14 @@ func New(config Config, chain BlockChain) *LegacyPool {
 		reorgShutdownCh: make(chan struct{}),
 		initDoneCh:      make(chan struct{}),
 	}
+	// Account transactions are bound to the genesis hash: take them only from
+	// a chain that gives its genesis block.
+	if chain, ok := chain.(interface{ Genesis() *types.Block }); ok {
+		if genesis := chain.Genesis(); genesis != nil {
+			pool.signer = types.NewGhostAccountSigner(pool.signer, genesis.Hash())
+			pool.ghostAccounts = true
+		}
+	}
 	pool.locals = newAccountSet(pool.signer)
 	for _, addr := range config.Locals {
 		log.Info("Setting new local account", "address", addr)
@@ -274,11 +287,14 @@ func New(config Config, chain BlockChain) *LegacyPool {
 }
 
 // Filter returns whether the given transaction can be consumed by the legacy
-// pool, specifically, whether it is a Legacy, AccessList or Dynamic transaction.
+// pool, specifically, whether it is a Legacy, AccessList or Dynamic transaction,
+// or an account transaction when the pool's chain gives its genesis block.
 func (pool *LegacyPool) Filter(tx *types.Transaction) bool {
 	switch tx.Type() {
 	case types.LegacyTxType, types.AccessListTxType, types.DynamicFeeTxType:
 		return true
+	case types.GhostAccountTxType:
+		return pool.ghostAccounts
 	default:
 		return false
 	}
@@ -610,8 +626,9 @@ func (pool *LegacyPool) validateTxBasics(tx *types.Transaction, local bool) erro
 			1<<types.LegacyTxType |
 			1<<types.AccessListTxType |
 			1<<types.DynamicFeeTxType,
-		MaxSize: txMaxSize,
-		MinTip:  pool.gasTip.Load().ToBig(),
+		AcceptGhostAccount: pool.ghostAccounts,
+		MaxSize:            txMaxSize,
+		MinTip:             pool.gasTip.Load().ToBig(),
 	}
 	if local {
 		opts.MinTip = new(big.Int)
@@ -1753,7 +1770,14 @@ func (as *accountSet) contains(addr common.Address) bool {
 
 // containsTx checks if the sender of a given tx is within the set. If the sender
 // cannot be derived, this method returns false.
+//
+// The sender of an account transaction is only derived here: its signature
+// is verified after the cheaper checks of validateTx.
 func (as *accountSet) containsTx(tx *types.Transaction) bool {
+	if tx.Type() == types.GhostAccountTxType {
+		addr, err := types.GhostAccountAddress(as.signer, tx)
+		return err == nil && as.contains(addr)
+	}
 	if addr, err := types.Sender(as.signer, tx); err == nil {
 		return as.contains(addr)
 	}

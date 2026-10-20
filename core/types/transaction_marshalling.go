@@ -48,6 +48,11 @@ type txJSON struct {
 	S                    *hexutil.Big    `json:"s"`
 	YParity              *hexutil.Uint64 `json:"yParity,omitempty"`
 
+	// Account transaction authentication:
+	Scheme    *hexutil.Uint64 `json:"scheme,omitempty"`
+	PublicKey *hexutil.Bytes  `json:"publicKey,omitempty"`
+	Signature *hexutil.Bytes  `json:"signature,omitempty"`
+
 	// Blob transaction sidecar encoding:
 	Blobs       []kzg4844.Blob       `json:"blobs,omitempty"`
 	Commitments []kzg4844.Commitment `json:"commitments,omitempty"`
@@ -167,6 +172,23 @@ func (tx *Transaction) MarshalJSON() ([]byte, error) {
 		enc.ChainID = (*hexutil.Big)(itx.chainID())
 		payload := hexutil.Bytes(common.CopyBytes(itx.Payload))
 		enc.Input = &payload
+
+	case *GhostAccountTx:
+		// An account transaction carries no V, R, S: its signature is the
+		// scheme, the public key and the signature bytes.
+		enc.ChainID = (*hexutil.Big)(itx.ChainID)
+		enc.Nonce = (*hexutil.Uint64)(&itx.Nonce)
+		enc.To = tx.To()
+		enc.Gas = (*hexutil.Uint64)(&itx.Gas)
+		enc.MaxFeePerGas = (*hexutil.Big)(itx.GasFeeCap)
+		enc.MaxPriorityFeePerGas = (*hexutil.Big)(itx.GasTipCap)
+		enc.Value = (*hexutil.Big)(itx.Value)
+		enc.Input = (*hexutil.Bytes)(&itx.Data)
+		enc.AccessList = &itx.AccessList
+		scheme := uint64(itx.SchemeID())
+		enc.Scheme = (*hexutil.Uint64)(&scheme)
+		enc.PublicKey = (*hexutil.Bytes)(&itx.PublicKey)
+		enc.Signature = (*hexutil.Bytes)(&itx.Signature)
 	}
 	return json.Marshal(&enc)
 }
@@ -439,6 +461,61 @@ func (tx *Transaction) UnmarshalJSON(input []byte) error {
 		}
 		var itx GhostDataRevealTx
 		if err := itx.decode(*dec.Input); err != nil {
+			return err
+		}
+		inner = &itx
+
+	case GhostAccountTxType:
+		var itx GhostAccountTx
+		if dec.ChainID == nil {
+			return errors.New("missing required field 'chainId' in transaction")
+		}
+		itx.ChainID = (*big.Int)(dec.ChainID)
+		if dec.Nonce == nil {
+			return errors.New("missing required field 'nonce' in transaction")
+		}
+		itx.Nonce = uint64(*dec.Nonce)
+		if dec.To != nil {
+			itx.To = dec.To
+		}
+		if dec.Gas == nil {
+			return errors.New("missing required field 'gas' for txdata")
+		}
+		itx.Gas = uint64(*dec.Gas)
+		if dec.MaxPriorityFeePerGas == nil {
+			return errors.New("missing required field 'maxPriorityFeePerGas' for txdata")
+		}
+		itx.GasTipCap = (*big.Int)(dec.MaxPriorityFeePerGas)
+		if dec.MaxFeePerGas == nil {
+			return errors.New("missing required field 'maxFeePerGas' for txdata")
+		}
+		itx.GasFeeCap = (*big.Int)(dec.MaxFeePerGas)
+		if dec.Value == nil {
+			return errors.New("missing required field 'value' in transaction")
+		}
+		itx.Value = (*big.Int)(dec.Value)
+		if dec.Input == nil {
+			return errors.New("missing required field 'input' in transaction")
+		}
+		itx.Data = *dec.Input
+		if dec.AccessList != nil {
+			itx.AccessList = *dec.AccessList
+		}
+		if dec.Scheme == nil || uint64(*dec.Scheme) > 0xffff {
+			return errors.New("missing or invalid field 'scheme' in transaction")
+		}
+		itx.Scheme = GhostScheme(uint16(*dec.Scheme))
+		if dec.PublicKey == nil {
+			return errors.New("missing required field 'publicKey' in transaction")
+		}
+		itx.PublicKey = *dec.PublicKey
+		if dec.Signature == nil {
+			return errors.New("missing required field 'signature' in transaction")
+		}
+		itx.Signature = *dec.Signature
+		// The same checks as the binary decoding: a known scheme and its
+		// exact lengths; nothing is repaired.
+		if err := itx.checkShape(); err != nil {
 			return err
 		}
 		inner = &itx
