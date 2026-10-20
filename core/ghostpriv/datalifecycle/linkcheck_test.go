@@ -248,7 +248,7 @@ func newWhitelist(n *node, verifiers []*holdingVerifier) *whitelist {
 	w.short[string(binary.BigEndian.AppendUint16(nil, ghostpriv.Version))] = "chain constant: the version"
 	w.short[string(ghostpriv.Data[:])] = "chain constant: the DATA type tag"
 	w.short[string([]byte{types.GhostDataRevealTxType})] = "chain constant: the data reveal type byte"
-	w.short[string([]byte{types.DynamicFeeTxType})] = "chain constant: the transaction type byte"
+	w.short[string([]byte{types.GhostAccountTxType})] = "chain constant: the transaction type byte"
 	return w
 }
 

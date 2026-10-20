@@ -17,11 +17,11 @@
 package ghostpriv_test
 
 import (
-	"crypto/ecdsa"
 	"errors"
 	"math/big"
 	"testing"
 
+	"github.com/cloudflare/circl/sign/mldsa/mldsa44"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/consensus/ghostrules"
@@ -34,7 +34,6 @@ import (
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params/ghost"
 	"github.com/ethereum/go-ethereum/params/types/genesisT"
 	"github.com/ethereum/go-ethereum/rpc"
@@ -119,23 +118,6 @@ var (
 	startBal = new(big.Int).Mul(big.NewInt(1000), oneGhost)
 )
 
-func testKey(name string) *ecdsa.PrivateKey {
-	key, err := crypto.ToECDSA(crypto.Keccak256([]byte("ghost synthetic test account " + name)))
-	if err != nil {
-		panic(err)
-	}
-	return key
-}
-
-var (
-	keyA  = testKey("a")
-	keyB  = testKey("b")
-	keyC  = testKey("c")
-	addrA = crypto.PubkeyToAddress(keyA.PublicKey)
-	addrB = crypto.PubkeyToAddress(keyB.PublicKey)
-	addrC = crypto.PubkeyToAddress(keyC.PublicKey)
-)
-
 // fixture is a chain on the internal network's configuration, with three
 // funded accounts and, when given, more allocations.
 type fixture struct {
@@ -145,6 +127,7 @@ type fixture struct {
 	engine  *testEngine
 	chainID uint64
 	signer  types.Signer
+	signed  map[common.Hash]*types.Transaction // by signature hash, see signAccountTx
 }
 
 func newFixture(t *testing.T, gasLimit uint64, extra genesisT.GenesisAlloc) *fixture {
@@ -169,7 +152,8 @@ func newFixture(t *testing.T, gasLimit uint64, extra genesisT.GenesisAlloc) *fix
 		genesis: genesis,
 		engine:  newTestEngine(),
 		chainID: gspec.Config.GetChainID().Uint64(),
-		signer:  types.LatestSigner(gspec.Config),
+		signer:  types.NewGhostAccountSigner(types.LatestSigner(gspec.Config), genesis.Hash()),
+		signed:  map[common.Hash]*types.Transaction{},
 	}
 }
 
@@ -234,28 +218,15 @@ func testMarker(name string) common.Hash {
 	return ghosttree.K("ghost/coin-marker/v1", []byte("synthetic r "+name), []byte("synthetic b "+name))
 }
 
-// commitTx is a commit of c from key, a dynamic-fee transaction to the
-// commit entry address.
-func (f *fixture) commitTx(key *ecdsa.PrivateKey, nonce uint64, c coin) *types.Transaction {
+// commitTx is a commit of c from key, an account transaction to the commit
+// entry address.
+func (f *fixture) commitTx(key *mldsa44.PrivateKey, nonce uint64, c coin) *types.Transaction {
 	f.t.Helper()
 	data, err := ghostpriv.CommitData(c.f, c.note)
 	if err != nil {
 		f.t.Fatal(err)
 	}
 	return f.callTx(key, nonce, ghost.CommitEntryAddress, c.value.ToBig(), data, 60_000)
-}
-
-func (f *fixture) callTx(key *ecdsa.PrivateKey, nonce uint64, to common.Address, value *big.Int, data []byte, gas uint64) *types.Transaction {
-	return types.MustSignNewTx(key, f.signer, &types.DynamicFeeTx{
-		ChainID:   new(big.Int).SetUint64(f.chainID),
-		Nonce:     nonce,
-		GasTipCap: new(big.Int).Set(gwei),
-		GasFeeCap: new(big.Int).Mul(gwei, big.NewInt(100)),
-		Gas:       gas,
-		To:        &to,
-		Value:     value,
-		Data:      data,
-	})
 }
 
 // newReveal is a reveal of the given fields with the stub proof of its

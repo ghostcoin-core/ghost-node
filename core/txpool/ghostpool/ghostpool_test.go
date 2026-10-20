@@ -17,7 +17,6 @@
 package ghostpool
 
 import (
-	"crypto/ecdsa"
 	"errors"
 	"fmt"
 	"math/big"
@@ -25,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cloudflare/circl/sign/mldsa/mldsa44"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus/ethash"
 	"github.com/ethereum/go-ethereum/consensus/misc/eip1559"
@@ -37,16 +37,14 @@ import (
 	"github.com/ethereum/go-ethereum/core/txpool/legacypool"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params/ghost"
 	"github.com/ethereum/go-ethereum/params/types/genesisT"
 	"github.com/holiman/uint256"
 )
 
 var (
-	testKey, _ = crypto.ToECDSA(crypto.Keccak256([]byte("ghost synthetic test account pool")))
-	testAddr   = crypto.PubkeyToAddress(testKey.PublicKey)
-	oneGhost   = new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+	poolKey, _, poolAddr = testAccount(0x01)
+	oneGhost             = new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
 )
 
 // fixture is a chain on the internal network's configuration whose first
@@ -76,7 +74,7 @@ func newSpec(t *testing.T) *fixture {
 	t.Helper()
 	t.Cleanup(ghostpriv.SetVerifier(ghostprivtest.Verifier{}))
 	gspec := ghost.InternalNetGenesis()
-	gspec.Alloc = genesisT.GenesisAlloc{testAddr: {Balance: new(big.Int).Mul(oneGhost, big.NewInt(100))}}
+	gspec.Alloc = genesisT.GenesisAlloc{poolAddr: {Balance: new(big.Int).Mul(oneGhost, big.NewInt(100))}}
 	return &fixture{t: t, gspec: gspec, genesis: core.GenesisToBlock(gspec, nil)}
 }
 
@@ -85,8 +83,8 @@ func (f *fixture) generate(n int, gen func(int, *core.BlockGen)) {
 	t := f.t
 	t.Helper()
 	gspec := f.gspec
-	signer := types.LatestSigner(gspec.Config)
-	commit := commitTx(t, testKey, signer, gspec.Config.GetChainID(), 0, oneGhost)
+	signer := types.NewGhostAccountSigner(types.LatestSigner(gspec.Config), f.genesis.Hash())
+	commit := commitTx(t, poolKey, signer, 0, oneGhost)
 
 	engine := ethash.NewFaker()
 	_, blocks, _ := core.GenerateChainWithGenesis(gspec, engine, n, func(i int, b *core.BlockGen) {
@@ -135,23 +133,16 @@ func (f *fixture) reset(p *Pool, old *types.Header) {
 	p.Reset(old, f.chain.CurrentBlock())
 }
 
-func commitTx(t *testing.T, key *ecdsa.PrivateKey, signer types.Signer, chainID *big.Int, nonce uint64, value *big.Int) *types.Transaction {
+// commitTx is the commit of value to the pool tests' fingerprint, an account
+// transaction of key signed for the chain of signer.
+func commitTx(t *testing.T, key *mldsa44.PrivateKey, signer types.Signer, nonce uint64, value *big.Int) *types.Transaction {
 	t.Helper()
 	data, err := ghostpriv.CommitData(ghosttree.K("ghost/test-coin-f", []byte("pool")), make([]byte, ghostpriv.NoteSize))
 	if err != nil {
 		t.Fatal(err)
 	}
 	to := ghost.CommitEntryAddress
-	return types.MustSignNewTx(key, signer, &types.DynamicFeeTx{
-		ChainID:   chainID,
-		Nonce:     nonce,
-		GasTipCap: big.NewInt(1_000_000_000),
-		GasFeeCap: big.NewInt(100_000_000_000),
-		Gas:       60_000,
-		To:        &to,
-		Value:     value,
-		Data:      data,
-	})
+	return signAccountTransfer(signer, key, nonce, &to, value, big.NewInt(1_000_000_000), big.NewInt(100_000_000_000), 60_000+accountTxExtraGas, data)
 }
 
 // windowFee is the fee of a reveal in the block at height number: from the

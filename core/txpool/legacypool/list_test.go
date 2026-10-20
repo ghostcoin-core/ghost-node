@@ -21,9 +21,7 @@ import (
 	"math/rand"
 	"testing"
 
-	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/holiman/uint256"
 )
 
@@ -31,7 +29,7 @@ import (
 // nonce boundaries are correctly maintained.
 func TestStrictListAdd(t *testing.T) {
 	// Generate a list of transactions to insert
-	key, _ := crypto.GenerateKey()
+	key, _, _ := testAccount(1)
 
 	txs := make(types.Transactions, 1024)
 	for i := 0; i < len(txs); i++ {
@@ -56,13 +54,12 @@ func TestStrictListAdd(t *testing.T) {
 // TestListAddVeryExpensive tests adding txs which exceed 256 bits in cost. It is
 // expected that the list does not panic.
 func TestListAddVeryExpensive(t *testing.T) {
-	key, _ := crypto.GenerateKey()
+	key, _, _ := testAccount(1)
 	list := newList(true)
 	for i := 0; i < 3; i++ {
-		value := big.NewInt(100)
 		gasprice, _ := new(big.Int).SetString("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", 0)
 		gaslimit := uint64(i)
-		tx, _ := types.SignTx(types.NewTransaction(uint64(i), common.Address{}, value, gaslimit, gasprice, nil), types.HomesteadSigner{}, key)
+		tx := pricedTransaction(uint64(i), gaslimit, gasprice, key) // value 100
 		t.Logf("cost: %x bitlen: %d\n", tx.Cost(), tx.Cost().BitLen())
 		list.Add(tx, DefaultConfig.PriceBump)
 	}
@@ -72,12 +69,12 @@ func TestListAddVeryExpensive(t *testing.T) {
 // bits, but would overflow the list's total cost, is refused and leaves the
 // total cost untouched instead of wrapping it around.
 func TestListTotalCostOverflow(t *testing.T) {
-	key, _ := crypto.GenerateKey()
+	key, _, _ := testAccount(1)
 	list := newList(true)
 
 	gasprice := new(big.Int).Lsh(big.NewInt(1), 255) // cost of a 1 gas tx: 2^255
 	for i := 0; i < 2; i++ {
-		tx, _ := types.SignTx(types.NewTransaction(uint64(i), common.Address{}, new(big.Int), 1, gasprice, nil), types.HomesteadSigner{}, key)
+		tx := pricedValuedTransaction(uint64(i), 0, 1, gasprice, key)
 		if tx.Cost().BitLen() > 256 {
 			t.Fatalf("tx %d: cost %x does not fit in 256 bits", i, tx.Cost())
 		}
@@ -96,7 +93,7 @@ func TestListTotalCostOverflow(t *testing.T) {
 
 func BenchmarkListAdd(b *testing.B) {
 	// Generate a list of transactions to insert
-	key, _ := crypto.GenerateKey()
+	key, _, _ := testAccount(1)
 
 	txs := make(types.Transactions, 100000)
 	for i := 0; i < len(txs); i++ {
@@ -116,7 +113,7 @@ func BenchmarkListAdd(b *testing.B) {
 
 func BenchmarkListCapOneTx(b *testing.B) {
 	// Generate a list of transactions to insert
-	key, _ := crypto.GenerateKey()
+	key, _, _ := testAccount(1)
 
 	txs := make(types.Transactions, 32)
 	for i := 0; i < len(txs); i++ {

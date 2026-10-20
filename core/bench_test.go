@@ -17,21 +17,21 @@
 package core
 
 import (
-	"crypto/ecdsa"
+	"encoding/binary"
 	"math/big"
+	"sync"
 	"testing"
 
+	"github.com/cloudflare/circl/sign/mldsa/mldsa44"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/math"
 	"github.com/ethereum/go-ethereum/consensus/ethash"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/params/types/genesisT"
-	"github.com/ethereum/go-ethereum/params/vars"
 )
 
 func BenchmarkInsertChain_empty_memdb(b *testing.B) {
@@ -73,10 +73,18 @@ func BenchmarkInsertChain_ring1000_diskdb(b *testing.B) {
 
 var (
 	// This is the content of the genesis block used by the benchmarks.
-	benchRootKey, _ = crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
-	benchRootAddr   = crypto.PubkeyToAddress(benchRootKey.PublicKey)
-	benchRootFunds  = math.BigPow(2, 200)
+	benchRootKey, _, benchRootAddr = testAccount(0xb7)
+	benchRootFunds                 = math.BigPow(2, 200)
 )
+
+// benchGasPrice returns the fee cap of the transactions of a generated
+// block: its base fee, zero before London.
+func benchGasPrice(gen *BlockGen) *big.Int {
+	if gen.header.BaseFee != nil {
+		return new(big.Int).Set(gen.header.BaseFee)
+	}
+	return new(big.Int)
+}
 
 // genValueTx returns a block generator that includes a single
 // value-transfer transaction with n bytes of extra data in each
@@ -86,75 +94,60 @@ func genValueTx(nbytes int) func(int, *BlockGen) {
 		toaddr := common.Address{}
 		data := make([]byte, nbytes)
 		gas, _ := IntrinsicGas(data, nil, false, false, false, false)
-		signer := gen.Signer()
-		gasPrice := big.NewInt(0)
-		if gen.header.BaseFee != nil {
-			gasPrice = gen.header.BaseFee
-		}
-		tx, _ := types.SignNewTx(benchRootKey, signer, &types.LegacyTx{
-			Nonce:    gen.TxNonce(benchRootAddr),
-			To:       &toaddr,
-			Value:    big.NewInt(1),
-			Gas:      gas,
-			Data:     data,
-			GasPrice: gasPrice,
-		})
-		gen.AddTx(tx)
+		gas += ghostExtraGas
+		gen.AddTx(signTransfer(gen.cm.config, genesisOf(gen), benchRootKey, gen.TxNonce(benchRootAddr), toaddr, big.NewInt(1), gas, benchGasPrice(gen), data))
 	}
 }
 
 var (
-	ringKeys  = make([]*ecdsa.PrivateKey, 1000)
-	ringAddrs = make([]common.Address, len(ringKeys))
+	ringKeys     = make([]*mldsa44.PrivateKey, 1000)
+	ringAddrs    = make([]common.Address, len(ringKeys))
+	ringKeysOnce sync.Once
 )
 
-func init() {
-	ringKeys[0] = benchRootKey
-	ringAddrs[0] = benchRootAddr
-	for i := 1; i < len(ringKeys); i++ {
-		ringKeys[i], _ = crypto.GenerateKey()
-		ringAddrs[i] = crypto.PubkeyToAddress(ringKeys[i].PublicKey)
-	}
+// initRingKeys makes the ring accounts from fixed seeds, the first being the
+// root account. They are made on first use, not for every test of the
+// package.
+func initRingKeys() {
+	ringKeysOnce.Do(func() {
+		ringKeys[0] = benchRootKey
+		ringAddrs[0] = benchRootAddr
+		for i := 1; i < len(ringKeys); i++ {
+			var seed [mldsa44.SeedSize]byte
+			binary.BigEndian.PutUint64(seed[:], uint64(i))
+			seed[mldsa44.SeedSize-1] = 0x52
+			_, key := mldsa44.NewKeyFromSeed(&seed)
+			ringKeys[i] = key
+			ringAddrs[i] = types.GhostAccountAddressOf(types.GhostSchemeMLDSA44, key.Public().(*mldsa44.PublicKey).Bytes())
+		}
+	})
 }
 
 // genTxRing returns a block generator that sends ether in a ring
 // among n accounts. This is creates n entries in the state database
 // and fills the blocks with many small transactions.
 func genTxRing(naccounts int) func(int, *BlockGen) {
+	initRingKeys()
 	from := 0
 	availableFunds := new(big.Int).Set(benchRootFunds)
 	return func(i int, gen *BlockGen) {
 		block := gen.PrevBlock(i - 1)
 		gas := block.GasLimit()
-		gasPrice := big.NewInt(0)
-		if gen.header.BaseFee != nil {
-			gasPrice = gen.header.BaseFee
-		}
-		signer := gen.Signer()
+		gasPrice := benchGasPrice(gen)
+		genesis := genesisOf(gen)
 		for {
-			gas -= vars.TxGas
-			if gas < vars.TxGas {
+			gas -= accountTransferGas
+			if gas < accountTransferGas {
 				break
 			}
 			to := (from + 1) % naccounts
-			burn := new(big.Int).SetUint64(vars.TxGas)
-			burn.Mul(burn, gen.header.BaseFee)
+			burn := new(big.Int).SetUint64(accountTransferGas)
+			burn.Mul(burn, gasPrice)
 			availableFunds.Sub(availableFunds, burn)
 			if availableFunds.Cmp(big.NewInt(1)) < 0 {
 				panic("not enough funds")
 			}
-			tx, err := types.SignNewTx(ringKeys[from], signer,
-				&types.LegacyTx{
-					Nonce:    gen.TxNonce(ringAddrs[from]),
-					To:       &ringAddrs[to],
-					Value:    availableFunds,
-					Gas:      vars.TxGas,
-					GasPrice: gasPrice,
-				})
-			if err != nil {
-				panic(err)
-			}
-			gen.AddTx(tx)
+			gen.AddTx(signTransfer(gen.cm.config, genesis, ringKeys[from], gen.TxNonce(ringAddrs[from]), ringAddrs[to], new(big.Int).Set(availableFunds), accountTransferGas, gasPrice, nil))
 			from = to
 		}
 	}

@@ -39,7 +39,6 @@ import (
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/params/ghost"
 	"github.com/ethereum/go-ethereum/rlp"
@@ -55,6 +54,9 @@ const (
 	sealTimeout = 2 * time.Minute
 
 	commitGas = 60_000
+
+	// payerSeed is the seed of the payer's account key.
+	payerSeed = 0x1c
 )
 
 // The names of the three hops.
@@ -384,11 +386,7 @@ func buildFixture(t *testing.T) *fixture {
 	chainID := config.GetChainID().Uint64()
 	genesis := c.bc.Genesis().Hash()
 
-	key, err := crypto.ToECDSA(crypto.Keccak256([]byte("ghost synthetic linkage account payer")))
-	if err != nil {
-		t.Fatal(err)
-	}
-	payer := crypto.PubkeyToAddress(key.PublicKey)
+	key, _, payer := testAccount(payerSeed)
 	for range 3 {
 		c.mine(payer)
 	}
@@ -407,17 +405,7 @@ func buildFixture(t *testing.T) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	to := ghost.CommitEntryAddress
-	commitTx := types.MustSignNewTx(key, types.LatestSigner(config), &types.DynamicFeeTx{
-		ChainID:   config.GetChainID(),
-		Nonce:     c.headState().GetNonce(payer),
-		GasTipCap: new(big.Int).Set(gwei),
-		GasFeeCap: new(big.Int).Mul(gwei, big.NewInt(100)),
-		Gas:       commitGas,
-		To:        &to,
-		Value:     value.ToBig(),
-		Data:      data,
-	})
+	commitTx := accountCallTx(t, c.bc, key, c.headState().GetNonce(payer), ghost.CommitEntryAddress, value.ToBig(), data, commitGas)
 	commitBlock := c.mine(miner, commitTx)
 
 	reveal := func(spend, rest coin, recipient common.Address, out *uint256.Int, fee ghostpriv.Fee) *types.Transaction {

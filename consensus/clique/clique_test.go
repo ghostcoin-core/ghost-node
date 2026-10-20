@@ -38,19 +38,20 @@ import (
 // already in the database. The bug was that processing the block *prior* to an
 // empty one **also completes** the empty one, ending up in a known-block error.
 func TestReimportMirroredState(t *testing.T) {
-	// Initialize a Clique chain with a single signer
+	// Initialize a Clique chain with a single signer, sealing with its
+	// secp256k1 key; the transactions are of a funded account.
 	var (
-		db     = rawdb.NewMemoryDatabase()
-		key, _ = crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
-		addr   = crypto.PubkeyToAddress(key.PublicKey)
-		engine = New(params.AllCliqueProtocolChanges.Clique, db)
-		signer = new(types.HomesteadSigner)
+		db                 = rawdb.NewMemoryDatabase()
+		key, _             = crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
+		addr               = crypto.PubkeyToAddress(key.PublicKey)
+		engine             = New(params.AllCliqueProtocolChanges.Clique, db)
+		txKey, _, txSender = testAccount(0x01)
 	)
 	genspec := &genesisT.Genesis{
 		Config:    params.AllCliqueProtocolChanges,
 		ExtraData: make([]byte, extraVanity+common.AddressLength+extraSeal),
 		Alloc: map[common.Address]genesisT.GenesisAccount{
-			addr: {Balance: big.NewInt(10000000000000000)},
+			txSender: {Balance: big.NewInt(10000000000000000)},
 		},
 		BaseFee: big.NewInt(vars.InitialBaseFee),
 	}
@@ -59,6 +60,7 @@ func TestReimportMirroredState(t *testing.T) {
 	// Generate a batch of blocks, each properly signed
 	chain, _ := core.NewBlockChain(rawdb.NewMemoryDatabase(), nil, genspec, nil, engine, vm.Config{}, nil, nil)
 	defer chain.Stop()
+	signer := types.NewGhostAccountSigner(types.LatestSigner(genspec.Config), chain.Genesis().Hash())
 
 	_, blocks, _ := core.GenerateChainWithGenesis(genspec, engine, 3, func(i int, block *core.BlockGen) {
 		// The chain maker doesn't have access to a chain, so the difficulty will be
@@ -68,10 +70,7 @@ func TestReimportMirroredState(t *testing.T) {
 		// We want to simulate an empty middle block, having the same state as the
 		// first one. The last is needs a state change again to force a reorg.
 		if i != 1 {
-			tx, err := types.SignTx(types.NewTransaction(block.TxNonce(addr), common.Address{0x00}, new(big.Int), vars.TxGas, block.BaseFee(), nil), signer, key)
-			if err != nil {
-				panic(err)
-			}
+			tx := signAccountTransfer(signer, txKey, block.TxNonce(txSender), &common.Address{0x00}, new(big.Int), new(big.Int), block.BaseFee(), vars.TxGas+accountTxExtraGas, nil)
 			block.AddTxWithChain(chain, tx)
 		}
 	})

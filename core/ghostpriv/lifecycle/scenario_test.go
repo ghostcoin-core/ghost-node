@@ -17,16 +17,15 @@
 package lifecycle
 
 import (
-	"crypto/ecdsa"
 	"math/big"
 	"testing"
 
+	"github.com/cloudflare/circl/sign/mldsa/mldsa44"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/ghostpriv"
 	"github.com/ethereum/go-ethereum/core/ghosttree"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params/ghost"
 	"github.com/holiman/uint256"
 )
@@ -43,20 +42,15 @@ func ghostAmount(num, den int64) *uint256.Int {
 	return uint256.MustFromBig(new(big.Int).Div(new(big.Int).Mul(oneGhost, big.NewInt(num)), big.NewInt(den)))
 }
 
-func testKey(name string) *ecdsa.PrivateKey {
-	key, err := crypto.ToECDSA(crypto.Keccak256([]byte("ghost synthetic lifecycle account " + name)))
-	if err != nil {
-		panic(err)
-	}
-	return key
-}
+// payerSeed is the seed of the payer's account key.
+const payerSeed = 0x9a
 
 // scenario is a network with a funded account and the wallet of the coin
 // the lifecycle follows.
 type scenario struct {
 	t      *testing.T
 	net    *network
-	funder *ecdsa.PrivateKey
+	funder *mldsa44.PrivateKey
 	payer  common.Address
 	owner  *wallet
 }
@@ -67,12 +61,11 @@ type scenario struct {
 func newScenario(t *testing.T) *scenario {
 	t.Helper()
 	s := &scenario{
-		t:      t,
-		net:    newNetwork(t, networkSize),
-		funder: testKey("payer"),
-		owner:  newWallet("synthetic digits for the owner wallet"),
+		t:     t,
+		net:   newNetwork(t, networkSize),
+		owner: newWallet("synthetic digits for the owner wallet"),
 	}
-	s.payer = crypto.PubkeyToAddress(s.funder.PublicKey)
+	s.funder, _, s.payer = testAccount(payerSeed)
 	for _, n := range s.net.nodes {
 		s.net.mine(n, blockPlan{coinbase: s.payer})
 	}
@@ -91,18 +84,7 @@ func (s *scenario) commitTx(n *node, c coin) *types.Transaction {
 	if err != nil {
 		s.t.Fatal(err)
 	}
-	config := n.chain.Config()
-	to := ghost.CommitEntryAddress
-	return types.MustSignNewTx(s.funder, types.LatestSigner(config), &types.DynamicFeeTx{
-		ChainID:   config.GetChainID(),
-		Nonce:     n.headState().GetNonce(s.payer),
-		GasTipCap: new(big.Int).Set(gwei),
-		GasFeeCap: new(big.Int).Mul(gwei, big.NewInt(100)),
-		Gas:       commitGas,
-		To:        &to,
-		Value:     c.value.ToBig(),
-		Data:      data,
-	})
+	return accountCallTx(s.t, n.chain, s.funder, n.headState().GetNonce(s.payer), ghost.CommitEntryAddress, c.value.ToBig(), data, commitGas)
 }
 
 // commit has miner commit c in a block of its own and checks the commit on
