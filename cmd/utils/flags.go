@@ -73,7 +73,6 @@ import (
 	"github.com/ethereum/go-ethereum/triedb"
 	"github.com/ethereum/go-ethereum/triedb/hashdb"
 	"github.com/ethereum/go-ethereum/triedb/pathdb"
-	pcsclite "github.com/gballet/go-libpcsclite"
 	gopsutil "github.com/shirou/gopsutil/mem"
 	"github.com/urfave/cli/v2"
 )
@@ -122,21 +121,6 @@ var (
 	KeyStoreDirFlag = &flags.DirectoryFlag{
 		Name:     "keystore",
 		Usage:    "Directory for the keystore (default = inside the datadir)",
-		Category: flags.AccountCategory,
-	}
-	USBFlag = &cli.BoolFlag{
-		Name:     "usb",
-		Usage:    "Enable monitoring and management of USB hardware wallets",
-		Category: flags.AccountCategory,
-	}
-	USBPathIDFlag = &cli.Uint64Flag{
-		Name:  "usb.pathid",
-		Usage: "Specify USB path ID per SLIP-0044 (1=all testnets, 60=ETH mainnet, 61=ETC mainnet)",
-	}
-	SmartCardDaemonPathFlag = &cli.StringFlag{
-		Name:     "pcscdpath",
-		Usage:    "Path to the smartcard daemon (pcscd) socket file",
-		Value:    pcsclite.PCSCDSockName,
 		Category: flags.AccountCategory,
 	}
 	NetworkIdFlag = &cli.Uint64Flag{
@@ -576,12 +560,6 @@ var (
 		Usage:     "Password file to use for non-interactive password input",
 		TakesFile: true,
 		Category:  flags.AccountCategory,
-	}
-	ExternalSignerFlag = &cli.StringFlag{
-		Name:     "signer",
-		Usage:    "External signer (url or path to ipc file)",
-		Value:    "",
-		Category: flags.AccountCategory,
 	}
 	InsecureUnlockAllowedFlag = &cli.BoolFlag{
 		Name:     "allow-insecure-unlock",
@@ -1405,7 +1383,6 @@ func SetNodeConfig(ctx *cli.Context, cfg *node.Config) {
 	setWS(ctx, cfg)
 	setNodeUserIdent(ctx, cfg)
 	SetDataDir(ctx, cfg)
-	setSmartCard(ctx, cfg)
 
 	if ctx.IsSet(JWTSecretFlag.Name) {
 		cfg.JWTSecret = ctx.String(JWTSecretFlag.Name)
@@ -1413,10 +1390,6 @@ func SetNodeConfig(ctx *cli.Context, cfg *node.Config) {
 
 	if ctx.IsSet(EnablePersonal.Name) {
 		cfg.EnablePersonal = true
-	}
-
-	if ctx.IsSet(ExternalSignerFlag.Name) {
-		cfg.ExternalSigner = ctx.String(ExternalSignerFlag.Name)
 	}
 
 	if ctx.IsSet(KeyStoreDirFlag.Name) {
@@ -1427,25 +1400,6 @@ func SetNodeConfig(ctx *cli.Context, cfg *node.Config) {
 	}
 	if ctx.IsSet(LightKDFFlag.Name) {
 		cfg.UseLightweightKDF = ctx.Bool(LightKDFFlag.Name)
-	}
-	if ctx.IsSet(NoUSBFlag.Name) || cfg.NoUSB {
-		log.Warn("Option nousb is deprecated and USB is deactivated by default. Use --usb to enable")
-	}
-	if ctx.IsSet(USBFlag.Name) {
-		cfg.USB = ctx.Bool(USBFlag.Name)
-
-		// We handle configuration of HD paths only if --usb is set to a truthy value.
-		if cfg.USB {
-			// Flag --usb.pathid allows configuration for arbitrary SLIP-0044 values.
-			if ctx.IsSet(USBPathIDFlag.Name) {
-				pathID := ctx.Uint64(USBPathIDFlag.Name)
-				if pathID > math.MaxUint32 {
-					Fatalf("Invalid USB path ID (exceeds uint32): %d", pathID)
-				}
-				accounts.SetCoinTypeConfiguration(uint32(pathID))
-				log.Info("Using custom HD derivation path", "pathid", uint32(pathID), "basepath", accounts.DefaultBaseDerivationPath)
-			}
-		}
 	}
 	if ctx.IsSet(InsecureUnlockAllowedFlag.Name) {
 		cfg.InsecureUnlockAllowed = ctx.Bool(InsecureUnlockAllowedFlag.Name)
@@ -1465,26 +1419,6 @@ func SetNodeConfig(ctx *cli.Context, cfg *node.Config) {
 	if ctx.IsSet(LogDebugFlag.Name) {
 		log.Warn("log.debug flag is deprecated")
 	}
-}
-
-func setSmartCard(ctx *cli.Context, cfg *node.Config) {
-	// Skip enabling smartcards if no path is set
-	path := ctx.String(SmartCardDaemonPathFlag.Name)
-	if path == "" {
-		return
-	}
-	// Sanity check that the smartcard path is valid
-	fi, err := os.Stat(path)
-	if err != nil {
-		log.Info("Smartcard socket not found, disabling", "err", err)
-		return
-	}
-	if fi.Mode()&os.ModeType != os.ModeSocket {
-		log.Error("Invalid smartcard daemon path", "path", path, "type", fi.Mode().String())
-		return
-	}
-	// Smartcard daemon path exists and is a socket, enable it
-	cfg.SmartCardDaemonPath = path
 }
 
 func SetDataDir(ctx *cli.Context, cfg *node.Config) {
@@ -1691,7 +1625,6 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 	// Avoid conflicting network flags
 	CheckExclusive(ctx, DeveloperFlag, DeveloperPoWFlag)
 	CheckExclusive(ctx, LightServeFlag, SyncModeFlag, "light")
-	CheckExclusive(ctx, DeveloperFlag, DeveloperPoWFlag, ExternalSignerFlag) // Can't use both ephemeral unlocked and external signer
 
 	setEtherbase(ctx, cfg)
 	setGPO(ctx, &cfg.GPO)

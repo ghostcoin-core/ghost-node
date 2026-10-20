@@ -76,7 +76,6 @@ var (
 		executablePath("evm"),
 		executablePath("geth"),
 		executablePath("rlpdump"),
-		executablePath("clef"),
 	}
 
 	// A debian package is created for all executables listed here.
@@ -100,10 +99,6 @@ var (
 		{
 			BinaryName:  "rlpdump",
 			Description: "Developer utility tool that prints RLP structures.",
-		},
-		{
-			BinaryName:  "clef",
-			Description: "Ethereum account management tool.",
 		},
 	}
 

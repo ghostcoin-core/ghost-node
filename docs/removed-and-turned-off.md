@@ -25,6 +25,13 @@ carry over.
 | The fake proof-of-work flags `--fakepow` and `--fakepow.poisson` | `cmd/utils` |
 | The blob transaction pool and its flags | `eth/backend.go`, `cmd/utils` |
 | Core-Geth's CI, documentation site, release scripts, chain-spec tool and Ethereum Classic test fixtures | repository root, `cmd/echainspec`, `tests` |
+| The clef command, an external signer that signed with secp256k1; the node keystore is the only signer left | `cmd/clef`, `build/ci.go` |
+| The signer packages behind clef (its API, rules engine, storage, typed-data and four-byte validation), which signed with secp256k1; the node keystore is the only signer left | `signer/` |
+| The external signer backend and the `--signer` flag, which handed secp256k1 signing to clef; the node keystore is the only signer left | `accounts/external`, `cmd/utils`, `cmd/geth`; a config file that still sets `ExternalSigner` makes the node refuse to start |
+| The Ledger and Trezor USB hardware-wallet backends and the `--usb`, `--usb.pathid` and `--nousb` flags, which signed with secp256k1; the node keystore is the only signer left | `accounts/usbwallet`, `cmd/utils`, `cmd/geth`, `console` |
+| The smart-card wallet backend and the `--pcscdpath` flag, which signed with secp256k1; the node keystore is the only signer left | `accounts/scwallet`, `cmd/utils`, `cmd/geth`, `console`, `internal/ethapi` |
+| The `abidump` tool, which did not sign but read its data from the removed `signer/fourbyte` package | `cmd/abidump` |
+| `bind.NewClefTransactor`, which signed through clef with secp256k1; the node keystore is the only signer left | `accounts/abi/bind` |
 
 ## Turned off, and how that is enforced
 

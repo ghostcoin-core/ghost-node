@@ -29,7 +29,6 @@ import (
 	"github.com/davecgh/go-spew/spew"
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/accounts/keystore"
-	"github.com/ethereum/go-ethereum/accounts/scwallet"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/common/math"
@@ -51,7 +50,6 @@ import (
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/ethereum/go-ethereum/trie"
 	"github.com/holiman/uint256"
-	"github.com/tyler-smith/go-bip39"
 )
 
 // estimateGasErrorRatio is the amount of overestimation eth_estimateGas is
@@ -580,44 +578,20 @@ func (s *PersonalAccountAPI) EcRecover(ctx context.Context, data, sig hexutil.By
 
 // InitializeWallet initializes a new wallet at the provided URL, by generating and returning a new private key.
 func (s *PersonalAccountAPI) InitializeWallet(ctx context.Context, url string) (string, error) {
-	wallet, err := s.am.Wallet(url)
-	if err != nil {
+	if _, err := s.am.Wallet(url); err != nil {
 		return "", err
 	}
-
-	entropy, err := bip39.NewEntropy(256)
-	if err != nil {
-		return "", err
-	}
-
-	mnemonic, err := bip39.NewMnemonic(entropy)
-	if err != nil {
-		return "", err
-	}
-
-	seed := bip39.NewSeed(mnemonic, "")
-
-	switch wallet := wallet.(type) {
-	case *scwallet.Wallet:
-		return mnemonic, wallet.Initialize(seed)
-	default:
-		return "", errors.New("specified wallet does not support initialization")
-	}
+	// Only the smart-card wallets supported initialization, and they have been removed.
+	return "", errors.New("specified wallet does not support initialization")
 }
 
 // Unpair deletes a pairing between wallet and geth.
 func (s *PersonalAccountAPI) Unpair(ctx context.Context, url string, pin string) error {
-	wallet, err := s.am.Wallet(url)
-	if err != nil {
+	if _, err := s.am.Wallet(url); err != nil {
 		return err
 	}
-
-	switch wallet := wallet.(type) {
-	case *scwallet.Wallet:
-		return wallet.Unpair([]byte(pin))
-	default:
-		return errors.New("specified wallet does not support pairing")
-	}
+	// Only the smart-card wallets supported pairing, and they have been removed.
+	return errors.New("specified wallet does not support pairing")
 }
 
 // BlockChainAPI provides an API to access Ethereum blockchain data.
