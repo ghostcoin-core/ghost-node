@@ -124,17 +124,17 @@ func (b *BlockGen) addTx(bc *BlockChain, vmConfig vm.Config, tx *types.Transacti
 		receipt *types.Receipt
 		err     error
 	)
+	// A reveal is checked against the ancestry of the block being built and
+	// an account transaction's signature is bound to the genesis hash, which
+	// the chain maker holds when the generation starts at the genesis block.
+	var genesis common.Hash
+	if g := b.cm.GetHeaderByNumber(0); g != nil {
+		genesis = g.Hash()
+	}
 	if tx.IsGhostReveal() {
-		// A coin or data reveal is checked against the ancestry of the
-		// block being built, which the chain maker holds from the
-		// generation's parent.
-		var genesis common.Hash
-		if g := b.cm.GetHeaderByNumber(0); g != nil {
-			genesis = g.Hash()
-		}
 		receipt, err = applyGhostReveal(b.cm.config, b.gasPool, b.statedb, b.header, b.cm, genesis, b.header.Hash(), tx, &b.header.GasUsed)
 	} else {
-		receipt, err = ApplyTransaction(b.cm.config, bc, &b.header.Coinbase, b.gasPool, b.statedb, b.header, tx, &b.header.GasUsed, vmConfig)
+		receipt, err = applyTransactionWithGenesis(b.cm.config, bc, genesis, &b.header.Coinbase, b.gasPool, b.statedb, b.header, tx, &b.header.GasUsed, vmConfig)
 	}
 	if err != nil {
 		panic(err)

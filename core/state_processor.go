@@ -78,7 +78,7 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 	var (
 		context = NewEVMBlockContext(header, p.bc, nil)
 		vmenv   = vm.NewEVM(context, vm.TxContext{}, statedb, p.config, cfg)
-		signer  = types.MakeSigner(p.config, header.Number, header.Time)
+		signer  = types.NewGhostAccountSigner(types.MakeSigner(p.config, header.Number, header.Time), p.genesisHash())
 	)
 	if beaconRoot := block.BeaconRoot(); beaconRoot != nil {
 		ProcessBeaconBlockRoot(*beaconRoot, vmenv, statedb)
@@ -120,6 +120,15 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 	p.engine.Finalize(p.bc, header, statedb, block.Transactions(), block.Uncles(), withdrawals)
 
 	return receipts, allLogs, *usedGas, nil
+}
+
+// genesisHash returns the hash of the chain's genesis block, zero without a
+// chain, which makes the signer refuse every account transaction.
+func (p *StateProcessor) genesisHash() common.Hash {
+	if p.bc == nil {
+		return common.Hash{}
+	}
+	return p.bc.Genesis().Hash()
 }
 
 func applyTransaction(msg *Message, config ctypes.ChainConfigurator, gp *GasPool, statedb *state.StateDB, blockNumber *big.Int, blockHash common.Hash, tx *types.Transaction, usedGas *uint64, evm *vm.EVM) (*types.Receipt, error) {
@@ -232,8 +241,22 @@ func applyGhostReveal(config ctypes.ChainConfigurator, gp *GasPool, statedb *sta
 // and uses the input parameters for its environment. It returns the receipt
 // for the transaction, gas used and an error if the transaction failed,
 // indicating the block was invalid.
+//
+// Account transactions (type 0x52) are taken when bc is the chain, whose
+// genesis hash their signatures are bound to, and refused otherwise.
 func ApplyTransaction(config ctypes.ChainConfigurator, bc ChainContext, author *common.Address, gp *GasPool, statedb *state.StateDB, header *types.Header, tx *types.Transaction, usedGas *uint64, cfg vm.Config) (*types.Receipt, error) {
-	msg, err := TransactionToMessage(tx, types.MakeSigner(config, header.Number, header.Time), header.BaseFee)
+	var genesis common.Hash
+	if chain, ok := bc.(*BlockChain); ok && chain != nil {
+		genesis = chain.Genesis().Hash()
+	}
+	return applyTransactionWithGenesis(config, bc, genesis, author, gp, statedb, header, tx, usedGas, cfg)
+}
+
+// applyTransactionWithGenesis is ApplyTransaction with the genesis hash of
+// the chain given; a zero hash refuses every account transaction.
+func applyTransactionWithGenesis(config ctypes.ChainConfigurator, bc ChainContext, genesis common.Hash, author *common.Address, gp *GasPool, statedb *state.StateDB, header *types.Header, tx *types.Transaction, usedGas *uint64, cfg vm.Config) (*types.Receipt, error) {
+	signer := types.NewGhostAccountSigner(types.MakeSigner(config, header.Number, header.Time), genesis)
+	msg, err := TransactionToMessage(tx, signer, header.BaseFee)
 	if err != nil {
 		return nil, err
 	}

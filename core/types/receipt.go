@@ -204,7 +204,7 @@ func (r *Receipt) decodeTyped(b []byte) error {
 		return errShortTypedReceipt
 	}
 	switch b[0] {
-	case DynamicFeeTxType, AccessListTxType, BlobTxType, GhostRevealTxType, GhostDataRevealTxType:
+	case DynamicFeeTxType, AccessListTxType, BlobTxType, GhostRevealTxType, GhostDataRevealTxType, GhostAccountTxType:
 		var data receiptRLP
 		err := rlp.DecodeBytes(b[1:], &data)
 		if err != nil {
@@ -312,7 +312,7 @@ func (rs Receipts) EncodeIndex(i int, w *bytes.Buffer) {
 	}
 	w.WriteByte(r.Type)
 	switch r.Type {
-	case AccessListTxType, DynamicFeeTxType, BlobTxType, GhostRevealTxType, GhostDataRevealTxType:
+	case AccessListTxType, DynamicFeeTxType, BlobTxType, GhostRevealTxType, GhostDataRevealTxType, GhostAccountTxType:
 		rlp.Encode(w, data)
 	default:
 		// For unsupported types, write nothing. Since this is for
@@ -350,8 +350,15 @@ func (rs Receipts) DeriveFields(config ctypes.ChainConfigurator, hash common.Has
 		// The contract address can be derived from the transaction itself
 		// A coin or data reveal has no sender and creates nothing.
 		if txs[i].To() == nil && !txs[i].IsGhostReveal() {
-			// Deriving the signer is expensive, only do if it's actually needed
-			from, _ := Sender(signer, txs[i])
+			// Deriving the signer is expensive, only do if it's actually needed.
+			// The sender of an account transaction in a block is derived
+			// from its public key; the block import verified the signature.
+			var from common.Address
+			if txs[i].Type() == GhostAccountTxType {
+				from, _ = GhostAccountAddress(signer, txs[i])
+			} else {
+				from, _ = Sender(signer, txs[i])
+			}
 			rs[i].ContractAddress = crypto.CreateAddress(from, txs[i].Nonce())
 		} else {
 			rs[i].ContractAddress = common.Address{}
