@@ -37,10 +37,9 @@ func getBlock(transactions int, uncles int, dataSize int) *types.Block {
 		engine = ethash.NewFaker()
 
 		// A sender who makes transactions, has some funds
-		key, _  = crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
-		address = crypto.PubkeyToAddress(key.PublicKey)
-		funds   = big.NewInt(1_000_000_000_000_000_000)
-		gspec   = &genesisT.Genesis{
+		key, _, address = testAccount(0xb7)
+		funds           = big.NewInt(1_000_000_000_000_000_000)
+		gspec           = &genesisT.Genesis{
 			Config: params.TestChainConfig,
 			Alloc:  genesisT.GenesisAlloc{address: {Balance: funds}},
 		}
@@ -51,9 +50,8 @@ func getBlock(transactions int, uncles int, dataSize int) *types.Block {
 			if n == uncles {
 				// Add transactions and stuff on the last block
 				for i := 0; i < transactions; i++ {
-					tx, _ := types.SignTx(types.NewTransaction(uint64(i), aa,
-						big.NewInt(0), 50000, b.header.BaseFee, make([]byte, dataSize)), types.HomesteadSigner{}, key)
-					b.AddTx(tx)
+					b.AddTx(signTransfer(b.cm.config, genesisOf(b), key, uint64(i), aa,
+						big.NewInt(0), 50000+ghostExtraGas, b.header.BaseFee, make([]byte, dataSize)))
 				}
 				for i := 0; i < uncles; i++ {
 					b.AddUncle(&types.Header{ParentHash: b.PrevBlock(n - 1 - i).Hash(), Number: big.NewInt(int64(n - i))})
@@ -109,7 +107,17 @@ func testRlpIterator(t *testing.T, txs, uncles, datasize int) {
 	var gotHashes []common.Hash
 	var expHashes []common.Hash
 	for txIt.Next() {
-		gotHashes = append(gotHashes, crypto.Keccak256Hash(txIt.Value()))
+		// A typed transaction is an RLP string holding its envelope, which
+		// is what its hash is taken over.
+		kind, content, _, err := rlp.Split(txIt.Value())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if kind == rlp.String {
+			gotHashes = append(gotHashes, crypto.Keccak256Hash(content))
+		} else {
+			gotHashes = append(gotHashes, crypto.Keccak256Hash(txIt.Value()))
+		}
 	}
 
 	var expBody types.Body
@@ -164,8 +172,13 @@ func BenchmarkHashing(b *testing.B) {
 				b.Fatal(err)
 			}
 			for txIt.Next() {
+				// A typed transaction's hash is over its envelope.
+				enc := txIt.Value()
+				if kind, content, _, err := rlp.Split(enc); err == nil && kind == rlp.String {
+					enc = content
+				}
 				hasher.Reset()
-				hasher.Write(txIt.Value())
+				hasher.Write(enc)
 				hasher.Sum(hash[:0])
 				got = hash
 			}

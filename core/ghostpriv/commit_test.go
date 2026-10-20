@@ -55,8 +55,8 @@ func commitLog(index, position uint32, c coin) []byte {
 	return append(data, c.note...)
 }
 
-// TestCommitBurnsAndRecordsCommitment commits from a dynamic-fee and a legacy
-// transaction in one block on the internal network and checks that each
+// TestCommitBurnsAndRecordsCommitment commits from two account transactions,
+// of two accounts with two tips, in one block on the internal network and checks that each
 // sender paid exactly its value and its gas, that nobody received the value,
 // that the coin tree holds the commitments the node computed under the
 // header's root, the receipt logs, and the total in.
@@ -71,24 +71,27 @@ func TestCommitBurnsAndRecordsCommitment(t *testing.T) {
 	var (
 		miner  = common.Address{0xcb}
 		first  = coin{f: known, value: uint256.NewInt(1_000_000_000_000_000_000), note: testNote(7)}
-		second = testCoin("legacy", ghostAmount(1, 4))
+		second = testCoin("second", ghostAmount(1, 4))
 		txs    []*types.Transaction
 	)
 	blocks, _ := f.generate(1, func(i int, b *core.BlockGen) {
 		b.SetCoinbase(miner)
 		txs = append(txs, f.commitTx(keyA, 0, first))
-		// Any ordinary transaction type commits: here a legacy one.
+		// A second account commits in the same block, with its tip at the
+		// fee cap: the gas price is the fee cap, as a legacy price was.
 		data, err := ghostpriv.CommitData(second.f, second.note)
 		if err != nil {
 			t.Fatal(err)
 		}
-		txs = append(txs, types.MustSignNewTx(keyB, f.signer, &types.LegacyTx{
-			Nonce:    0,
-			GasPrice: new(big.Int).Mul(gwei, big.NewInt(100)),
-			Gas:      60_000,
-			To:       &ghost.CommitEntryAddress,
-			Value:    second.value.ToBig(),
-			Data:     data,
+		txs = append(txs, f.signAccountTx(keyB, &types.GhostAccountTx{
+			ChainID:   new(big.Int).SetUint64(f.chainID),
+			Nonce:     0,
+			GasTipCap: new(big.Int).Mul(gwei, big.NewInt(100)),
+			GasFeeCap: new(big.Int).Mul(gwei, big.NewInt(100)),
+			Gas:       60_000 + accountExtraGas,
+			To:        &ghost.CommitEntryAddress,
+			Value:     second.value.ToBig(),
+			Data:      data,
 		}))
 		for _, tx := range txs {
 			b.AddTx(tx)

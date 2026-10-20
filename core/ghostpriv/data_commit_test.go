@@ -18,12 +18,12 @@ package ghostpriv_test
 
 import (
 	"bytes"
-	"crypto/ecdsa"
 	"encoding/binary"
 	"errors"
 	"math/big"
 	"testing"
 
+	"github.com/cloudflare/circl/sign/mldsa/mldsa44"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/ghostpriv"
@@ -53,8 +53,8 @@ func testDataFile(name string) dataFile {
 }
 
 // dataCommitTx is a data commit of d from key with the given value, a
-// dynamic-fee transaction to the data commit entry address.
-func (f *fixture) dataCommitTx(key *ecdsa.PrivateKey, nonce uint64, d dataFile, value *big.Int) *types.Transaction {
+// account transaction to the data commit entry address.
+func (f *fixture) dataCommitTx(key *mldsa44.PrivateKey, nonce uint64, d dataFile, value *big.Int) *types.Transaction {
 	f.t.Helper()
 	data, err := ghostpriv.CommitData(d.f, d.note)
 	if err != nil {
@@ -76,8 +76,8 @@ func dataLeafCount(st *state.StateDB) uint64 {
 	return st.GetState(ghosttree.TreeAccount(ghosttree.Data), ghosttree.Slot(ghosttree.SlotLeafCount)).Big().Uint64()
 }
 
-// TestDataCommitAppendsToDataTree commits two files, from a dynamic-fee and a
-// legacy transaction, in one block on the internal network and checks that
+// TestDataCommitAppendsToDataTree commits two files, from two account
+// transactions of two accounts, in one block on the internal network and checks that
 // the data tree holds the commitments the node computed under the header's
 // data root, the receipt logs with leaf, tree index, position and note, and
 // that the coin tree, the totals and every balance but the gas are as they
@@ -102,7 +102,7 @@ func TestDataCommitAppendsToDataTree(t *testing.T) {
 	var (
 		miner  = common.Address{0xcb}
 		first  = known
-		second = testDataFile("legacy")
+		second = testDataFile("second")
 		txs    []*types.Transaction
 	)
 	blocks, _ := f.generate(1, func(i int, b *core.BlockGen) {
@@ -112,13 +112,16 @@ func TestDataCommitAppendsToDataTree(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		txs = append(txs, types.MustSignNewTx(keyB, f.signer, &types.LegacyTx{
-			Nonce:    0,
-			GasPrice: new(big.Int).Mul(gwei, big.NewInt(100)),
-			Gas:      60_000,
-			To:       &ghost.DataCommitEntryAddress,
-			Value:    new(big.Int),
-			Data:     data,
+		// A second account, with its tip at the fee cap.
+		txs = append(txs, f.signAccountTx(keyB, &types.GhostAccountTx{
+			ChainID:   new(big.Int).SetUint64(f.chainID),
+			Nonce:     0,
+			GasTipCap: new(big.Int).Mul(gwei, big.NewInt(100)),
+			GasFeeCap: new(big.Int).Mul(gwei, big.NewInt(100)),
+			Gas:       60_000 + accountExtraGas,
+			To:        &ghost.DataCommitEntryAddress,
+			Value:     new(big.Int),
+			Data:      data,
 		}))
 		for _, tx := range txs {
 			b.AddTx(tx)

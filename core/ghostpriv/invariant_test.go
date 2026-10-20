@@ -17,7 +17,6 @@
 package ghostpriv_test
 
 import (
-	"crypto/ecdsa"
 	"fmt"
 	"math/big"
 	"math/rand"
@@ -25,6 +24,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/cloudflare/circl/sign/mldsa/mldsa44"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/ghostpriv"
@@ -70,7 +70,7 @@ func TestAccountingInvariantRandomized(t *testing.T) {
 	useStub(t)
 	f := newFixture(t, ghost.InternalNetGasLimit, nil)
 	var (
-		keys      = []*ecdsa.PrivateKey{keyA, keyB, keyC}
+		keys      = []*mldsa44.PrivateKey{keyA, keyB, keyC}
 		senders   = []common.Address{addrA, addrB, addrC}
 		coinbases = []common.Address{{0xcb, 1}, {0xcb, 2}, {0xcb, 3}}
 		tracked   = map[common.Address]bool{}

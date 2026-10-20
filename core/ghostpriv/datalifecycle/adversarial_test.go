@@ -369,18 +369,7 @@ func TestDataLifecycleCRD6(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	config := n.chain.Config()
-	to := ghost.CommitEntryAddress
-	coinTx := types.MustSignNewTx(s.funder, types.LatestSigner(config), &types.DynamicFeeTx{
-		ChainID:   config.GetChainID(),
-		Nonce:     n.headState().GetNonce(s.payer),
-		GasTipCap: new(big.Int).Set(gwei),
-		GasFeeCap: new(big.Int).Mul(gwei, big.NewInt(100)),
-		Gas:       dataCommitGas,
-		To:        &to,
-		Value:     big.NewInt(1),
-		Data:      coinData,
-	})
+	coinTx := accountCallTx(t, n.chain, s.funder, n.headState().GetNonce(s.payer), ghost.CommitEntryAddress, big.NewInt(1), coinData, dataCommitGas)
 	s.net.mine(n, blockPlan{coinbase: address("CR-D6 miner"), txs: []*types.Transaction{coinTx}})
 	head := n.head()
 	coinRoot := *head.CoinTreeRoot

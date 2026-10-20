@@ -56,6 +56,7 @@ const (
 	reasonChainID  = "the chain id, the same in every transaction of the chain"
 	reasonVersion  = "version 1 of the commit data and the reveal payload, the same in every private transaction"
 	reasonTxType   = "the private transaction type byte 0x50, the same in every reveal"
+	reasonScheme   = "the signature scheme ML-DSA-44, the same in every account transaction of that scheme"
 	reasonEntry    = "the commit entry address, where every commit is sent"
 	reasonTopic    = "a receipt topic constant, the same in every commit receipt or every reveal receipt"
 	reasonZero     = "zero padding: an all-zero value is the same in every transaction and tells nothing"
@@ -107,6 +108,10 @@ func (w *whitelist) roleValue(r role, v []byte) string {
 		if n, ok := smallInt(v); ok && n == uint64(ghostpriv.Version) {
 			return reasonVersion
 		}
+	case roleScheme:
+		if len(v) == 2 && binary.BigEndian.Uint16(v) == types.GhostSchemeMLDSA44 {
+			return reasonScheme
+		}
 	}
 	return ""
 }
@@ -133,6 +138,15 @@ func (w *whitelist) shared(a, b field) string {
 	if a.role == b.role {
 		if r := w.roleValue(a.role, a.value); r != "" {
 			return r
+		}
+	}
+	// The scheme ID 0x0001 of an account transaction has the bytes of
+	// version 1: two protocol constants, each where its own layout puts it,
+	// tie nothing.
+	if a.role == roleScheme || b.role == roleScheme {
+		ra, rb := w.roleValue(a.role, a.value), w.roleValue(b.role, b.value)
+		if ra != "" && rb != "" {
+			return ra + "; " + rb
 		}
 	}
 	if bytes.Equal(a.value, b.value) {

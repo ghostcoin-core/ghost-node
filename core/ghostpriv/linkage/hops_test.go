@@ -27,8 +27,9 @@ import (
 
 // role marks the fields whose value the whitelist may admit by position: a
 // short value is only a protocol constant where the layout puts one. The
-// roles are a transaction type byte, a chain id, and the version of the
-// commit data or reveal payload.
+// roles are a transaction type byte, a chain id, the version of the commit
+// data or reveal payload, and the signature scheme of an account
+// transaction.
 type role int
 
 const (
@@ -36,6 +37,7 @@ const (
 	roleTxType
 	roleChainID
 	roleVersion
+	roleScheme
 )
 
 // field is a decoded field or sub-field of a hop, at the width of its
@@ -98,8 +100,8 @@ func (h *hop) putNote(seg *segment, name string, off int) {
 }
 
 // decodeHop decodes a hop's transaction and logs. A transaction that is
-// neither a commit's dynamic-fee transaction nor a reveal is an error:
-// what the check cannot read, it cannot clear.
+// neither a commit's account transaction nor a reveal is an error: what the
+// check cannot read, it cannot clear.
 func decodeHop(raw rawHop) (*hop, error) {
 	h := &hop{name: raw.name}
 	if len(raw.tx) == 0 {
@@ -109,8 +111,8 @@ func decodeHop(raw rawHop) (*hop, error) {
 	switch raw.tx[0] {
 	case types.GhostRevealTxType:
 		err = h.decodeReveal(raw.tx)
-	case types.DynamicFeeTxType:
-		err = h.decodeDynamicFeeTx(raw.tx)
+	case types.GhostAccountTxType:
+		err = h.decodeAccountTx(raw.tx)
 	default:
 		err = fmt.Errorf("transaction type %#x", raw.tx[0])
 	}
@@ -163,9 +165,10 @@ func (h *hop) decodeReveal(raw []byte) error {
 	return nil
 }
 
-// The elements of a dynamic-fee transaction's RLP list, with the width each
-// takes as a field: integers are widened to the width of their type.
-var dynamicFeeLayout = []struct {
+// The elements of an account transaction's RLP list (type 0x52), with the
+// width each takes as a field: integers are widened to the width of their
+// type.
+var accountTxLayout = []struct {
 	name  string
 	width int // 0 for a variable-length byte string
 	isInt bool
@@ -181,12 +184,12 @@ var dynamicFeeLayout = []struct {
 	{name: "value", width: 32, isInt: true},
 	{name: "data"},
 	{name: "accessList", list: true},
-	{name: "yParity", width: 1, isInt: true},
-	{name: "r", width: 32, isInt: true},
-	{name: "s", width: 32, isInt: true},
+	{name: "scheme", width: 2, role: roleScheme},
+	{name: "publicKey"},
+	{name: "signature"},
 }
 
-func (h *hop) decodeDynamicFeeTx(raw []byte) error {
+func (h *hop) decodeAccountTx(raw []byte) error {
 	seg := &segment{name: "transaction", raw: raw}
 	h.put(seg, "transaction", 0, len(raw), roleNone, false)
 	h.put(seg, "transaction.type", 0, 1, roleTxType, true)
@@ -194,7 +197,7 @@ func (h *hop) decodeDynamicFeeTx(raw []byte) error {
 	if err != nil || len(rest) != 0 {
 		return fmt.Errorf("transaction is not one RLP list: %v", err)
 	}
-	for _, el := range dynamicFeeLayout {
+	for _, el := range accountTxLayout {
 		name := "transaction." + el.name
 		kind, val, next, err := rlp.Split(content)
 		if err != nil {

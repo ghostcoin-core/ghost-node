@@ -28,7 +28,6 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rlp"
 	"golang.org/x/crypto/sha3"
@@ -614,23 +613,15 @@ func BenchmarkWriteAncientBlocks(b *testing.B) {
 
 // makeTestBlocks creates fake blocks for the ancient write benchmark.
 func makeTestBlocks(nblock int, txsPerBlock int) []*types.Block {
-	key, _ := crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
-	signer := types.LatestSignerForChainID(big.NewInt(8))
+	// The transactions are only stored, so any fixed genesis hash will do.
+	key, _, _ := testAccount(0x01)
+	signer := types.NewGhostAccountSigner(types.LatestSignerForChainID(big.NewInt(8)), common.Hash{0x01})
 
 	// Create transactions.
 	txs := make([]*types.Transaction, txsPerBlock)
 	for i := 0; i < len(txs); i++ {
-		var err error
 		to := common.Address{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1}
-		txs[i], err = types.SignNewTx(key, signer, &types.LegacyTx{
-			Nonce:    2,
-			GasPrice: big.NewInt(30000),
-			Gas:      0x45454545,
-			To:       &to,
-		})
-		if err != nil {
-			panic(err)
-		}
+		txs[i] = signAccountTransfer(signer, key, 2, &to, new(big.Int), big.NewInt(30000), big.NewInt(30000), 0x45454545, nil)
 	}
 
 	// Create the blocks.

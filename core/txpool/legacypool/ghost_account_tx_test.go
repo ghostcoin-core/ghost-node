@@ -32,52 +32,16 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/params/ghost"
 	"github.com/ethereum/go-ethereum/params/vars"
-	"github.com/ethereum/go-ethereum/trie"
 	"github.com/holiman/uint256"
 )
 
-// ghostAccountTestChain is the test chain with a genesis block, which lets
-// the pool take account transactions.
-type ghostAccountTestChain struct {
-	*testBlockChain
-	genesis *types.Block
-}
-
-func (c *ghostAccountTestChain) Genesis() *types.Block { return c.genesis }
-
+// setupGhostAccountPool returns a pool on a test chain with a genesis block,
+// which lets it take account transactions, and the genesis hash.
 func setupGhostAccountPool(t *testing.T) (*LegacyPool, common.Hash) {
 	t.Helper()
-	statedb, _ := state.New(types.EmptyRootHash, state.NewDatabase(rawdb.NewMemoryDatabase()), nil)
-	genesis := types.NewBlock(&types.Header{Number: new(big.Int), GasLimit: 10_000_000, Extra: []byte("ghost account pool test")}, nil, nil, nil, trie.NewStackTrie(nil))
-	chain := &ghostAccountTestChain{
-		testBlockChain: newTestBlockChain(params.TestChainConfig, 10_000_000, statedb, new(event.Feed)),
-		genesis:        genesis,
-	}
-	pool := New(testTxPoolConfig, chain)
-	if err := pool.Init(testTxPoolConfig.PriceLimit, chain.CurrentBlock(), makeAddressReserver()); err != nil {
-		t.Fatal(err)
-	}
-	<-pool.initDoneCh
-	return pool, genesis.Hash()
+	pool, _, _ := setupPool()
+	return pool, testGenesis.Hash()
 }
-
-func ghostPoolKey(seed byte) *mldsa44.PrivateKey {
-	var s [mldsa44.SeedSize]byte
-	for i := range s {
-		s[i] = seed
-	}
-	_, sk := mldsa44.NewKeyFromSeed(&s)
-	return sk
-}
-
-func ghostPoolAddress(key *mldsa44.PrivateKey) common.Address {
-	return types.GhostAccountAddressOf(types.GhostSchemeMLDSA44, key.Public().(*mldsa44.PublicKey).Bytes())
-}
-
-// ghostPoolGas is the intrinsic gas of a plain transfer by account
-// transaction: the type 0x02 intrinsic gas, 16 gas per byte of the scheme,
-// key and signature, and the verification gas.
-var ghostPoolGas = vars.TxGas + 16*(2+types.GhostMLDSA44PublicKeySize+types.GhostMLDSA44SignatureSize) + ghost.AccountTxVerifyGasMLDSA44
 
 type ghostPoolTx struct {
 	nonce   uint64
@@ -139,12 +103,11 @@ func TestGhostAccountTxPool(t *testing.T) {
 	if ghost.AccountTxVerifyGasMLDSA44 == 0 {
 		t.Fatal("the verification gas of ML-DSA-44 is not set")
 	}
-	key := ghostPoolKey(1)
-	from := ghostPoolAddress(key)
+	key, _, from := testAccount(1)
 	testAddBalance(pool, from, big.NewInt(1_000_000_000_000_000_000))
 
 	// A valid account transaction is admitted, under its derived sender.
-	valid := makeGhostPoolTx(t, genesis, key, ghostPoolTx{nonce: 0, gas: ghostPoolGas})
+	valid := makeGhostPoolTx(t, genesis, key, ghostPoolTx{nonce: 0, gas: txGas})
 	if !pool.Filter(valid) {
 		t.Fatal("the pool does not take account transactions")
 	}
@@ -167,9 +130,9 @@ func TestGhostAccountTxPool(t *testing.T) {
 		tx   ghostPoolTx
 		want error
 	}{
-		{"bad signature", ghostPoolTx{nonce: 1, gas: ghostPoolGas, badSig: true}, types.ErrInvalidSig},
-		{"wrong chain ID", ghostPoolTx{nonce: 1, gas: ghostPoolGas, chainID: big.NewInt(999)}, types.ErrInvalidChainId},
-		{"gas one below the intrinsic gas", ghostPoolTx{nonce: 1, gas: ghostPoolGas - 1}, core.ErrIntrinsicGas},
+		{"bad signature", ghostPoolTx{nonce: 1, gas: txGas, badSig: true}, types.ErrInvalidSig},
+		{"wrong chain ID", ghostPoolTx{nonce: 1, gas: txGas, chainID: big.NewInt(999)}, types.ErrInvalidChainId},
+		{"gas one below the intrinsic gas", ghostPoolTx{nonce: 1, gas: txGas - 1}, core.ErrIntrinsicGas},
 		{"gas of a type 0x02 transfer", ghostPoolTx{nonce: 1, gas: vars.TxGas}, core.ErrIntrinsicGas},
 	} {
 		tx := makeGhostPoolTx(t, genesis, key, tc.tx)
@@ -183,15 +146,15 @@ func TestGhostAccountTxPool(t *testing.T) {
 
 	// The signature is not checked when a cheap check fails: each of these
 	// carries a bad signature too, and is refused for the cheap check.
-	poor := ghostPoolKey(2) // no balance
-	contract := ghostPoolKey(3)
+	poor, _, _ := testAccount(2) // no balance
+	contract, _, contractAddr := testAccount(3)
 	pool.mu.Lock()
-	pool.currentState.AddBalance(ghostPoolAddress(contract), uint256.NewInt(1_000_000_000_000_000_000))
-	pool.currentState.SetCode(ghostPoolAddress(contract), []byte{0x00})
+	pool.currentState.AddBalance(contractAddr, uint256.NewInt(1_000_000_000_000_000_000))
+	pool.currentState.SetCode(contractAddr, []byte{0x00})
 	pool.mu.Unlock()
-	stale := ghostPoolKey(4)
-	testAddBalance(pool, ghostPoolAddress(stale), big.NewInt(1_000_000_000_000_000_000))
-	testSetNonce(pool, ghostPoolAddress(stale), 5)
+	stale, _, staleAddr := testAccount(4)
+	testAddBalance(pool, staleAddr, big.NewInt(1_000_000_000_000_000_000))
+	testSetNonce(pool, staleAddr, 5)
 
 	for _, tc := range []struct {
 		name string
@@ -199,13 +162,13 @@ func TestGhostAccountTxPool(t *testing.T) {
 		tx   ghostPoolTx
 		want error
 	}{
-		{"unknown scheme", key, ghostPoolTx{nonce: 1, gas: ghostPoolGas, badSig: true, scheme: 0x0003}, types.ErrGhostAccountScheme},
-		{"lengths of another scheme", key, ghostPoolTx{nonce: 1, gas: ghostPoolGas, badSig: true, scheme: types.GhostSchemeHashBased}, types.ErrGhostAccountLength},
-		{"wrong chain ID", key, ghostPoolTx{nonce: 1, gas: ghostPoolGas, badSig: true, chainID: big.NewInt(999)}, types.ErrInvalidChainId},
-		{"intrinsic gas too low", key, ghostPoolTx{nonce: 1, gas: ghostPoolGas - 1, badSig: true}, core.ErrIntrinsicGas},
-		{"code at the sender", contract, ghostPoolTx{nonce: 0, gas: ghostPoolGas, badSig: true}, core.ErrSenderNoEOA},
-		{"nonce too low", stale, ghostPoolTx{nonce: 4, gas: ghostPoolGas, badSig: true}, core.ErrNonceTooLow},
-		{"balance too low", poor, ghostPoolTx{nonce: 0, gas: ghostPoolGas, badSig: true}, core.ErrInsufficientFunds},
+		{"unknown scheme", key, ghostPoolTx{nonce: 1, gas: txGas, badSig: true, scheme: 0x0003}, types.ErrGhostAccountScheme},
+		{"lengths of another scheme", key, ghostPoolTx{nonce: 1, gas: txGas, badSig: true, scheme: types.GhostSchemeHashBased}, types.ErrGhostAccountLength},
+		{"wrong chain ID", key, ghostPoolTx{nonce: 1, gas: txGas, badSig: true, chainID: big.NewInt(999)}, types.ErrInvalidChainId},
+		{"intrinsic gas too low", key, ghostPoolTx{nonce: 1, gas: txGas - 1, badSig: true}, core.ErrIntrinsicGas},
+		{"code at the sender", contract, ghostPoolTx{nonce: 0, gas: txGas, badSig: true}, core.ErrSenderNoEOA},
+		{"nonce too low", stale, ghostPoolTx{nonce: 4, gas: txGas, badSig: true}, core.ErrNonceTooLow},
+		{"balance too low", poor, ghostPoolTx{nonce: 0, gas: txGas, badSig: true}, core.ErrInsufficientFunds},
 	} {
 		tx := makeGhostPoolTx(t, genesis, tc.key, tc.tx)
 		err := pool.addRemoteSync(tx)
@@ -218,10 +181,10 @@ func TestGhostAccountTxPool(t *testing.T) {
 	}
 	// The same transactions with a good signature where the cheap check
 	// passes are admitted: the cases above failed for the cheap check alone.
-	if err := pool.addRemoteSync(makeGhostPoolTx(t, genesis, stale, ghostPoolTx{nonce: 5, gas: ghostPoolGas})); err != nil {
+	if err := pool.addRemoteSync(makeGhostPoolTx(t, genesis, stale, ghostPoolTx{nonce: 5, gas: txGas})); err != nil {
 		t.Errorf("stale account at its nonce: %v", err)
 	}
-	if err := pool.addRemoteSync(makeGhostPoolTx(t, genesis, key, ghostPoolTx{nonce: 1, gas: ghostPoolGas})); err != nil {
+	if err := pool.addRemoteSync(makeGhostPoolTx(t, genesis, key, ghostPoolTx{nonce: 1, gas: txGas})); err != nil {
 		t.Errorf("next nonce: %v", err)
 	}
 	if err := validatePoolInternals(pool); err != nil {
@@ -232,12 +195,20 @@ func TestGhostAccountTxPool(t *testing.T) {
 // TestGhostAccountTxPoolWithoutGenesis checks that a pool whose chain gives
 // no genesis block refuses account transactions.
 func TestGhostAccountTxPoolWithoutGenesis(t *testing.T) {
-	pool, _ := setupPool()
+	// The test chain without its genesis block.
+	statedb, _ := state.New(types.EmptyRootHash, state.NewDatabase(rawdb.NewMemoryDatabase()), nil)
+	chain := newTestBlockChain(params.TestChainConfig, 10_000_000, statedb, new(event.Feed))
+	chain.genesis = nil
+	pool := New(testTxPoolConfig, chain)
+	if err := pool.Init(testTxPoolConfig.PriceLimit, chain.CurrentBlock(), makeAddressReserver()); err != nil {
+		t.Fatal(err)
+	}
+	<-pool.initDoneCh
 	defer pool.Close()
 
-	key := ghostPoolKey(1)
-	testAddBalance(pool, ghostPoolAddress(key), big.NewInt(1_000_000_000_000_000_000))
-	tx := makeGhostPoolTx(t, common.HexToHash("0x01"), key, ghostPoolTx{nonce: 0, gas: ghostPoolGas})
+	key, _, from := testAccount(1)
+	testAddBalance(pool, from, big.NewInt(1_000_000_000_000_000_000))
+	tx := makeGhostPoolTx(t, testGenesis.Hash(), key, ghostPoolTx{nonce: 0, gas: txGas})
 	if pool.Filter(tx) {
 		t.Error("the pool takes account transactions without a genesis hash")
 	}

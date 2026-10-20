@@ -22,24 +22,29 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cloudflare/circl/sign/mldsa/mldsa44"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus/ethash"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/params/types/genesisT"
 	"github.com/ethereum/go-ethereum/params/vars"
 )
 
+// indexerTestTx signs the transfer of 1000 wei to 0xdeadbeef with the given
+// nonce that each block of the indexer tests carries.
+func indexerTestTx(gen *BlockGen, key *mldsa44.PrivateKey, nonce uint64) *types.Transaction {
+	return signTransfer(gen.cm.config, genesisOf(gen), key, nonce, common.HexToAddress("0xdeadbeef"), big.NewInt(1000), accountTransferGas, big.NewInt(10*vars.InitialBaseFee), nil)
+}
+
 // TestTxIndexer tests the functionalities for managing transaction indexes.
 func TestTxIndexer(t *testing.T) {
 	var (
-		testBankKey, _  = crypto.GenerateKey()
-		testBankAddress = crypto.PubkeyToAddress(testBankKey.PublicKey)
-		testBankFunds   = big.NewInt(1000000000000000000)
+		testBankKey, _, testBankAddress = testAccount(1)
+		testBankFunds                   = big.NewInt(1000000000000000000)
 
 		gspec = &genesisT.Genesis{
 			Config:  params.TestChainConfig,
@@ -51,8 +56,7 @@ func TestTxIndexer(t *testing.T) {
 		chainHead = uint64(128)
 	)
 	_, blocks, receipts := GenerateChainWithGenesis(gspec, engine, int(chainHead), func(i int, gen *BlockGen) {
-		tx, _ := types.SignTx(types.NewTransaction(nonce, common.HexToAddress("0xdeadbeef"), big.NewInt(1000), vars.TxGas, big.NewInt(10*vars.InitialBaseFee), nil), types.HomesteadSigner{}, testBankKey)
-		gen.AddTx(tx)
+		gen.AddTx(indexerTestTx(gen, testBankKey, nonce))
 		nonce += 1
 	})
 
@@ -254,9 +258,8 @@ func TestTxIndexer(t *testing.T) {
 // returns at once.
 func TestTxLookupNoDeadlock(t *testing.T) {
 	var (
-		testBankKey, _  = crypto.GenerateKey()
-		testBankAddress = crypto.PubkeyToAddress(testBankKey.PublicKey)
-		testBankFunds   = big.NewInt(1000000000000000000)
+		testBankKey, _, testBankAddress = testAccount(1)
+		testBankFunds                   = big.NewInt(1000000000000000000)
 
 		gspec = &genesisT.Genesis{
 			Config:  params.TestChainConfig,
@@ -267,8 +270,7 @@ func TestTxLookupNoDeadlock(t *testing.T) {
 		nonce  = uint64(0)
 	)
 	_, blocks, _ := GenerateChainWithGenesis(gspec, engine, 16, func(i int, gen *BlockGen) {
-		tx, _ := types.SignTx(types.NewTransaction(nonce, common.HexToAddress("0xdeadbeef"), big.NewInt(1000), vars.TxGas, big.NewInt(10*vars.InitialBaseFee), nil), types.HomesteadSigner{}, testBankKey)
-		gen.AddTx(tx)
+		gen.AddTx(indexerTestTx(gen, testBankKey, nonce))
 		nonce += 1
 	})
 	_, fork, _ := GenerateChainWithGenesis(gspec, engine, 24, func(i int, gen *BlockGen) {
@@ -352,9 +354,8 @@ func TestTxLookupNoDeadlock(t *testing.T) {
 // limit, instead of stopping on the block again in every later run.
 func TestTxIndexerUnindexLoop(t *testing.T) {
 	var (
-		testBankKey, _  = crypto.GenerateKey()
-		testBankAddress = crypto.PubkeyToAddress(testBankKey.PublicKey)
-		testBankFunds   = big.NewInt(1000000000000000000)
+		testBankKey, _, testBankAddress = testAccount(1)
+		testBankFunds                   = big.NewInt(1000000000000000000)
 
 		gspec = &genesisT.Genesis{
 			Config:  params.TestChainConfig,
@@ -368,8 +369,7 @@ func TestTxIndexerUnindexLoop(t *testing.T) {
 		missing   = uint64(3)
 	)
 	_, blocks, _ := GenerateChainWithGenesis(gspec, engine, int(chainHead), func(i int, gen *BlockGen) {
-		tx, _ := types.SignTx(types.NewTransaction(nonce, common.HexToAddress("0xdeadbeef"), big.NewInt(1000), vars.TxGas, big.NewInt(10*vars.InitialBaseFee), nil), types.HomesteadSigner{}, testBankKey)
-		gen.AddTx(tx)
+		gen.AddTx(indexerTestTx(gen, testBankKey, nonce))
 		nonce += 1
 	})
 	db := rawdb.NewMemoryDatabase()

@@ -29,7 +29,6 @@ import (
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/params/types/genesisT"
 	"github.com/ethereum/go-ethereum/params/types/goethereum"
@@ -39,15 +38,13 @@ import (
 
 func TestGeneratePOSChain(t *testing.T) {
 	var (
-		keyHex  = "9c647b8b7c4e7c3490668fb6c11473619db80c93704c70893d3813af4090c39c"
-		key, _  = crypto.HexToECDSA(keyHex)
-		address = crypto.PubkeyToAddress(key.PublicKey) // 658bdf435d810c91414ec09147daa6db62406379
-		aa      = common.Address{0xaa}
-		bb      = common.Address{0xbb}
-		funds   = big.NewInt(0).Mul(big.NewInt(1337), big.NewInt(vars.Ether))
-		config  = *params.AllEthashProtocolChanges
-		asm4788 = common.Hex2Bytes("3373fffffffffffffffffffffffffffffffffffffffe14604d57602036146024575f5ffd5b5f35801560495762001fff810690815414603c575f5ffd5b62001fff01545f5260205ff35b5f5ffd5b62001fff42064281555f359062001fff015500")
-		gspec   = &genesisT.Genesis{
+		key, _, address = testAccount(0x9c)
+		aa              = common.Address{0xaa}
+		bb              = common.Address{0xbb}
+		funds           = big.NewInt(0).Mul(big.NewInt(1337), big.NewInt(vars.Ether))
+		config          = *params.AllEthashProtocolChanges
+		asm4788         = common.Hex2Bytes("3373fffffffffffffffffffffffffffffffffffffffe14604d57602036146024575f5ffd5b5f35801560495762001fff810690815414603c575f5ffd5b62001fff01545f5260205ff35b5f5ffd5b62001fff42064281555f359062001fff015500")
+		gspec           = &genesisT.Genesis{
 			Config: &config,
 			Alloc: genesisT.GenesisAlloc{
 				address:                        {Balance: funds},
@@ -90,13 +87,8 @@ func TestGeneratePOSChain(t *testing.T) {
 		gen.SetParentBeaconRoot(common.Hash{byte(i + 1)})
 
 		// Add value transfer tx.
-		tx := types.MustSignNewTx(key, gen.Signer(), &types.LegacyTx{
-			Nonce:    gen.TxNonce(address),
-			To:       &address,
-			Value:    big.NewInt(1000),
-			Gas:      vars.TxGas,
-			GasPrice: new(big.Int).Add(gen.BaseFee(), common.Big1),
-		})
+		gasPrice := new(big.Int).Add(gen.BaseFee(), common.Big1)
+		tx := signTransfer(gen.cm.config, genesisOf(gen), key, gen.TxNonce(address), address, big.NewInt(1000), accountTransferGas, gasPrice, nil)
 		gen.AddTx(tx)
 
 		// Add withdrawals.
@@ -192,38 +184,42 @@ func TestGeneratePOSChain(t *testing.T) {
 
 func ExampleGenerateChain() {
 	var (
-		key1, _ = crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
-		key2, _ = crypto.HexToECDSA("8a1f9a8f95be41cd7ccb6168179afb4504aefe388d1e14474d32c45c72ce7b7a")
-		key3, _ = crypto.HexToECDSA("49a7b37aa6f6645917e7b807e9d1c00d4fa71f18343b0d4122a4d2df64dd6fee")
-		addr1   = crypto.PubkeyToAddress(key1.PublicKey)
-		addr2   = crypto.PubkeyToAddress(key2.PublicKey)
-		addr3   = crypto.PubkeyToAddress(key3.PublicKey)
-		db      = rawdb.NewMemoryDatabase()
-		genDb   = rawdb.NewMemoryDatabase()
+		key1, _, addr1 = testAccount(0xb7)
+		key2, _, addr2 = testAccount(0x8a)
+		_, _, addr3    = testAccount(0x49)
+		db             = rawdb.NewMemoryDatabase()
+		genDb          = rawdb.NewMemoryDatabase()
 	)
 
-	// Ensure that key1 has some funds in the genesis block.
+	// Ensure that key1 has some funds in the genesis block. Account
+	// transactions are bound to a chain ID, which takes EIP-155; the block
+	// rewards stay those of Homestead.
 	gspec := &genesisT.Genesis{
-		Config: &goethereum.ChainConfig{HomesteadBlock: new(big.Int)},
-		Alloc:  genesisT.GenesisAlloc{addr1: {Balance: big.NewInt(1000000)}},
+		Config: &goethereum.ChainConfig{
+			ChainID:        big.NewInt(1),
+			HomesteadBlock: new(big.Int),
+			EIP150Block:    new(big.Int),
+			EIP155Block:    new(big.Int),
+			EIP158Block:    new(big.Int),
+		},
+		Alloc: genesisT.GenesisAlloc{addr1: {Balance: big.NewInt(1000000)}},
 	}
 	genesis := MustCommitGenesis(genDb, triedb.NewDatabase(genDb, triedb.HashDefaults), gspec)
 
 	// This call generates a chain of 5 blocks. The function runs for
 	// each block and adds different features to gen based on the
-	// block index.
-	signer := types.HomesteadSigner{}
+	// block index. The transactions pay no gas price.
 	chain, _ := GenerateChain(gspec.Config, genesis, ethash.NewFaker(), genDb, 5, func(i int, gen *BlockGen) {
 		switch i {
 		case 0:
 			// In block 1, addr1 sends addr2 some ether.
-			tx, _ := types.SignTx(types.NewTransaction(gen.TxNonce(addr1), addr2, big.NewInt(10000), vars.TxGas, nil, nil), signer, key1)
+			tx := signTransfer(gspec.Config, genesis.Hash(), key1, gen.TxNonce(addr1), addr2, big.NewInt(10000), accountTransferGas, nil, nil)
 			gen.AddTx(tx)
 		case 1:
 			// In block 2, addr1 sends some more ether to addr2.
 			// addr2 passes it on to addr3.
-			tx1, _ := types.SignTx(types.NewTransaction(gen.TxNonce(addr1), addr2, big.NewInt(1000), vars.TxGas, nil, nil), signer, key1)
-			tx2, _ := types.SignTx(types.NewTransaction(gen.TxNonce(addr2), addr3, big.NewInt(1000), vars.TxGas, nil, nil), signer, key2)
+			tx1 := signTransfer(gspec.Config, genesis.Hash(), key1, gen.TxNonce(addr1), addr2, big.NewInt(1000), accountTransferGas, nil, nil)
+			tx2 := signTransfer(gspec.Config, genesis.Hash(), key2, gen.TxNonce(addr2), addr3, big.NewInt(1000), accountTransferGas, nil, nil)
 			gen.AddTx(tx1)
 			gen.AddTx(tx2)
 		case 2:

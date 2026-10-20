@@ -17,17 +17,16 @@
 package datalifecycle
 
 import (
-	"crypto/ecdsa"
 	"errors"
 	"math/big"
 	"testing"
 
+	"github.com/cloudflare/circl/sign/mldsa/mldsa44"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/ghostpriv"
 	"github.com/ethereum/go-ethereum/core/ghosttree"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params/ghost"
 )
 
@@ -35,20 +34,15 @@ const dataCommitGas = 60_000
 
 var gwei = big.NewInt(1_000_000_000)
 
-func testKey(name string) *ecdsa.PrivateKey {
-	key, err := crypto.ToECDSA(crypto.Keccak256([]byte("ghost synthetic data lifecycle account " + name)))
-	if err != nil {
-		panic(err)
-	}
-	return key
-}
+// payerSeed is the seed of the payer's account key.
+const payerSeed = 0xd7
 
 // scenario is a network with a funded payer, the off-chain host and the
 // proof system of a test.
 type scenario struct {
 	t      *testing.T
 	net    *network
-	funder *ecdsa.PrivateKey
+	funder *mldsa44.PrivateKey
 	payer  common.Address
 	host   *host
 	sys    *proofSystem
@@ -60,13 +54,12 @@ type scenario struct {
 func newScenario(t *testing.T) *scenario {
 	t.Helper()
 	s := &scenario{
-		t:      t,
-		net:    newNetwork(t, networkSize),
-		funder: testKey("payer"),
-		host:   newHost(),
-		sys:    newProofSystem("synthetic proof system " + t.Name()),
+		t:    t,
+		net:  newNetwork(t, networkSize),
+		host: newHost(),
+		sys:  newProofSystem("synthetic proof system " + t.Name()),
 	}
-	s.payer = crypto.PubkeyToAddress(s.funder.PublicKey)
+	s.funder, _, s.payer = testAccount(payerSeed)
 	for _, n := range s.net.nodes {
 		s.net.mine(n, blockPlan{coinbase: s.payer})
 	}
@@ -94,18 +87,7 @@ func (s *scenario) wallet(h *held) *wallet { return openWallet(h.key, s.chainID(
 // given data and value, signed with the payer's next nonce on n's head.
 func (s *scenario) dataCommitTx(n *node, data []byte, value *big.Int) *types.Transaction {
 	s.t.Helper()
-	config := n.chain.Config()
-	to := ghost.DataCommitEntryAddress
-	return types.MustSignNewTx(s.funder, types.LatestSigner(config), &types.DynamicFeeTx{
-		ChainID:   config.GetChainID(),
-		Nonce:     n.headState().GetNonce(s.payer),
-		GasTipCap: new(big.Int).Set(gwei),
-		GasFeeCap: new(big.Int).Mul(gwei, big.NewInt(100)),
-		Gas:       dataCommitGas,
-		To:        &to,
-		Value:     value,
-		Data:      data,
-	})
+	return accountCallTx(s.t, n.chain, s.funder, n.headState().GetNonce(s.payer), ghost.DataCommitEntryAddress, value, data, dataCommitGas)
 }
 
 // commitData is the 190 bytes of the data commit of a wallet's file.
