@@ -34,7 +34,6 @@ import (
 	"github.com/ethereum/go-ethereum/core/bloombits"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/internal/ethapi"
@@ -844,7 +843,6 @@ func TestLightFilterLogs(t *testing.T) {
 		db           = rawdb.NewMemoryDatabase()
 		backend, sys = newTestFilterSystem(t, db, Config{})
 		api          = NewFilterAPI(sys, true)
-		signer       = types.HomesteadSigner{}
 
 		firstAddr      = common.HexToAddress("0x1111111111111111111111111111111111111111")
 		secondAddr     = common.HexToAddress("0x2222222222222222222222222222222222222222")
@@ -886,9 +884,8 @@ func TestLightFilterLogs(t *testing.T) {
 			6: {FilterCriteria{FromBlock: big.NewInt(2), ToBlock: big.NewInt(3), Topics: [][]common.Hash{{secondTopic}}}, allLogs[3:4], ""},
 		}
 
-		key, _  = crypto.GenerateKey()
-		addr    = crypto.PubkeyToAddress(key.PublicKey)
-		genesis = &genesisT.Genesis{Config: params.TestChainConfig,
+		key, _, addr = testAccount(1)
+		genesis      = &genesisT.Genesis{Config: params.TestChainConfig,
 			Alloc: genesisT.GenesisAlloc{
 				addr: {Balance: big.NewInt(vars.Ether)},
 			},
@@ -902,13 +899,21 @@ func TestLightFilterLogs(t *testing.T) {
 		}}
 	)
 
+	genesisHash := core.GenesisToBlock(genesis, nil).Hash()
 	_, blocks, _ := core.GenerateChainWithGenesis(genesis, ethash.NewFaker(), 4, func(i int, b *core.BlockGen) {
 		if i == 0 {
 			return
 		}
 		receipts[i-1].Bloom = types.CreateBloom(types.Receipts{receipts[i-1]})
 		b.AddUncheckedReceipt(receipts[i-1])
-		tx, _ := types.SignTx(types.NewTx(&types.LegacyTx{Nonce: uint64(i - 1), To: &common.Address{}, Value: big.NewInt(1000), Gas: vars.TxGas, GasPrice: b.BaseFee(), Data: nil}), signer, key)
+		tx := signTestTx(genesis.Config, genesisHash, key, &types.GhostAccountTx{
+			Nonce:     uint64(i - 1),
+			GasTipCap: new(big.Int),
+			GasFeeCap: b.BaseFee(),
+			Gas:       vars.TxGas + testAccountGas,
+			To:        &common.Address{},
+			Value:     big.NewInt(1000),
+		})
 		b.AddTx(tx)
 	})
 	for i, block := range blocks {

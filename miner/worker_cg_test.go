@@ -50,9 +50,13 @@ func testGenerateBlockAndImportCG(t *testing.T, chainConfig ctypes.ChainConfigur
 	chain, _ := core.NewBlockChain(db2, nil, b.genesis, nil, engine, vm.Config{}, nil, nil)
 	defer chain.Stop()
 
+	// The test transactions are account transactions, which a chain takes
+	// from Berlin on: a chain before it builds its blocks without them.
+	withTxs := chainConfig.IsEnabled(chainConfig.GetEIP2565Transition, common.Big0)
+
 	// Ignore empty commit here for less noise.
 	w.skipSealHook = func(task *task) bool {
-		return len(task.receipts) == 0
+		return withTxs && len(task.receipts) == 0
 	}
 
 	// Wait for mined blocks.
@@ -63,8 +67,10 @@ func testGenerateBlockAndImportCG(t *testing.T, chainConfig ctypes.ChainConfigur
 	w.start()
 
 	for i := 0; i < numBlocks; i++ {
-		b.txPool.Add([]*types.Transaction{b.newRandomTx(true)}, true, false)
-		b.txPool.Add([]*types.Transaction{b.newRandomTx(false)}, true, false)
+		if withTxs {
+			b.txPool.Add([]*types.Transaction{b.newRandomTx(true)}, true, false)
+			b.txPool.Add([]*types.Transaction{b.newRandomTx(false)}, true, false)
+		}
 		w.postSideBlock(core.ChainSideEvent{Block: b.newRandomUncle()})
 		w.postSideBlock(core.ChainSideEvent{Block: b.newRandomUncle()})
 

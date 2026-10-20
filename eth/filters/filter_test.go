@@ -31,7 +31,6 @@ import (
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/params/types/genesisT"
 	"github.com/ethereum/go-ethereum/params/vars"
@@ -50,13 +49,12 @@ func makeReceipt(addr common.Address) *types.Receipt {
 
 func BenchmarkFilters(b *testing.B) {
 	var (
-		db, _   = rawdb.NewLevelDBDatabase(b.TempDir(), 0, 0, "", false)
-		_, sys  = newTestFilterSystem(b, db, Config{})
-		key1, _ = crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
-		addr1   = crypto.PubkeyToAddress(key1.PublicKey)
-		addr2   = common.BytesToAddress([]byte("jeff"))
-		addr3   = common.BytesToAddress([]byte("ethereum"))
-		addr4   = common.BytesToAddress([]byte("random addresses please"))
+		db, _       = rawdb.NewLevelDBDatabase(b.TempDir(), 0, 0, "", false)
+		_, sys      = newTestFilterSystem(b, db, Config{})
+		_, _, addr1 = testAccount(1)
+		addr2       = common.BytesToAddress([]byte("jeff"))
+		addr3       = common.BytesToAddress([]byte("ethereum"))
+		addr4       = common.BytesToAddress([]byte("random addresses please"))
 
 		gspec = &genesisT.Genesis{
 			Alloc:   genesisT.GenesisAlloc{addr1: {Balance: big.NewInt(1000000)}},
@@ -114,9 +112,7 @@ func TestFilters(t *testing.T) {
 		db     = rawdb.NewMemoryDatabase()
 		_, sys = newTestFilterSystem(t, db, Config{})
 		// Sender account
-		key1, _ = crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
-		addr    = crypto.PubkeyToAddress(key1.PublicKey)
-		signer  = types.NewEIP1559Signer(big.NewInt(1))
+		key1, _, addr = testAccount(1)
 		// Logging contract
 		contract  = common.Address{0xfe}
 		contract2 = common.Address{0xff}
@@ -187,70 +183,56 @@ func TestFilters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	chain, _ := core.GenerateChain(gspec.Config, g, ethash.NewFaker(), db, 1000, func(i int, gen *core.BlockGen) {
+	sign := func(gen *core.BlockGen, nonce uint64, to common.Address, data []byte) *types.Transaction {
+		return signTestTx(gspec.Config, g.Hash(), key1, &types.GhostAccountTx{
+			Nonce:     nonce,
+			GasTipCap: new(big.Int),
+			GasFeeCap: gen.BaseFee(),
+			Gas:       30000 + testAccountGas,
+			To:        &to,
+			Value:     new(big.Int),
+			Data:      data,
+		})
+	}
+	// The pending block is generated with the chain: an account transaction
+	// is only taken by a generation that starts at the genesis block, whose
+	// hash its signature is bound to.
+	blocks, blockReceipts := core.GenerateChain(gspec.Config, g, ethash.NewFaker(), db, 1001, func(i int, gen *core.BlockGen) {
 		switch i {
 		case 1:
 			data, err := contractABI.Pack("log1", hash1.Big())
 			if err != nil {
 				t.Fatal(err)
 			}
-			tx, _ := types.SignTx(types.NewTx(&types.LegacyTx{
-				Nonce:    0,
-				GasPrice: gen.BaseFee(),
-				Gas:      30000,
-				To:       &contract,
-				Data:     data,
-			}), signer, key1)
-			gen.AddTx(tx)
-			tx2, _ := types.SignTx(types.NewTx(&types.LegacyTx{
-				Nonce:    1,
-				GasPrice: gen.BaseFee(),
-				Gas:      30000,
-				To:       &contract2,
-				Data:     data,
-			}), signer, key1)
-			gen.AddTx(tx2)
+			gen.AddTx(sign(gen, 0, contract, data))
+			gen.AddTx(sign(gen, 1, contract2, data))
 		case 2:
 			data, err := contractABI.Pack("log2", hash2.Big(), hash1.Big())
 			if err != nil {
 				t.Fatal(err)
 			}
-			tx, _ := types.SignTx(types.NewTx(&types.LegacyTx{
-				Nonce:    2,
-				GasPrice: gen.BaseFee(),
-				Gas:      30000,
-				To:       &contract,
-				Data:     data,
-			}), signer, key1)
-			gen.AddTx(tx)
+			gen.AddTx(sign(gen, 2, contract, data))
 		case 998:
 			data, err := contractABI.Pack("log1", hash3.Big())
 			if err != nil {
 				t.Fatal(err)
 			}
-			tx, _ := types.SignTx(types.NewTx(&types.LegacyTx{
-				Nonce:    3,
-				GasPrice: gen.BaseFee(),
-				Gas:      30000,
-				To:       &contract2,
-				Data:     data,
-			}), signer, key1)
-			gen.AddTx(tx)
+			gen.AddTx(sign(gen, 3, contract2, data))
 		case 999:
 			data, err := contractABI.Pack("log1", hash4.Big())
 			if err != nil {
 				t.Fatal(err)
 			}
-			tx, _ := types.SignTx(types.NewTx(&types.LegacyTx{
-				Nonce:    4,
-				GasPrice: gen.BaseFee(),
-				Gas:      30000,
-				To:       &contract,
-				Data:     data,
-			}), signer, key1)
-			gen.AddTx(tx)
+			gen.AddTx(sign(gen, 4, contract, data))
+		case 1000:
+			data, err := contractABI.Pack("log1", hash5.Big())
+			if err != nil {
+				t.Fatal(err)
+			}
+			gen.AddTx(sign(gen, 5, contract, data))
 		}
 	})
+	chain := blocks[:1000]
 	var l uint64
 	bc, err := core.NewBlockChain(db, nil, gspec, nil, ethash.NewFaker(), vm.Config{}, nil, &l)
 	if err != nil {
@@ -264,23 +246,40 @@ func TestFilters(t *testing.T) {
 	// Set block 998 as Finalized (-3)
 	bc.SetFinalized(chain[998].Header())
 
-	// Generate pending block
-	pchain, preceipts := core.GenerateChain(gspec.Config, chain[len(chain)-1], ethash.NewFaker(), db, 1, func(i int, gen *core.BlockGen) {
-		data, err := contractABI.Pack("log1", hash5.Big())
+	// The last generated block is the pending block
+	pending := blocks[1000]
+	sys.backend.(*testBackend).pendingBlock = pending
+	sys.backend.(*testBackend).pendingReceipts = blockReceipts[1000]
+
+	// The expected logs. The account transactions' signatures are hedged, so
+	// the transaction and block hashes are taken from the generated blocks.
+	logAt := func(block *types.Block, txIndex, logIndex uint, addr common.Address, topics ...common.Hash) *types.Log {
+		return &types.Log{
+			Address:     addr,
+			Topics:      topics,
+			Data:        []byte{},
+			BlockNumber: block.NumberU64(),
+			TxHash:      block.Transactions()[txIndex].Hash(),
+			TxIndex:     txIndex,
+			BlockHash:   block.Hash(),
+			Index:       logIndex,
+		}
+	}
+	wantLogs := func(logs ...*types.Log) string {
+		have, err := json.Marshal(logs)
 		if err != nil {
 			t.Fatal(err)
 		}
-		tx, _ := types.SignTx(types.NewTx(&types.LegacyTx{
-			Nonce:    5,
-			GasPrice: gen.BaseFee(),
-			Gas:      30000,
-			To:       &contract,
-			Data:     data,
-		}), signer, key1)
-		gen.AddTx(tx)
-	})
-	sys.backend.(*testBackend).pendingBlock = pchain[0]
-	sys.backend.(*testBackend).pendingReceipts = preceipts[0]
+		return string(have)
+	}
+	var (
+		log2a   = logAt(chain[1], 0, 0, contract, hash1)
+		log2b   = logAt(chain[1], 1, 1, contract2, hash1)
+		log3    = logAt(chain[2], 0, 0, contract, hash2, hash1)
+		log999  = logAt(chain[998], 0, 0, contract2, hash3)
+		log1000 = logAt(chain[999], 0, 0, contract, hash4)
+		logPend = logAt(pending, 0, 0, contract, hash5)
+	)
 
 	for i, tc := range []struct {
 		f    *Filter
@@ -289,26 +288,26 @@ func TestFilters(t *testing.T) {
 	}{
 		{
 			f:    sys.NewBlockFilter(chain[2].Hash(), []common.Address{contract}, nil),
-			want: `[{"address":"0xfe00000000000000000000000000000000000000","topics":["0x0000000000000000000000000000000000000000000000000000746f70696332","0x0000000000000000000000000000000000000000000000000000746f70696331"],"data":"0x","blockNumber":"0x3","transactionHash":"0xdefe471992a07a02acdfbe33edaae22fbb86d7d3cec3f1b8e4e77702fb3acc1d","transactionIndex":"0x0","blockHash":"0x7a7556792ca7d37882882e2b001fe14833eaf81c2c7f865c9c771ec37a024f6b","logIndex":"0x0","removed":false}]`,
+			want: wantLogs(log3),
 		},
 		{
 			f:    sys.NewRangeFilter(0, int64(rpc.LatestBlockNumber), []common.Address{contract}, [][]common.Hash{{hash1, hash2, hash3, hash4}}),
-			want: `[{"address":"0xfe00000000000000000000000000000000000000","topics":["0x0000000000000000000000000000000000000000000000000000746f70696331"],"data":"0x","blockNumber":"0x2","transactionHash":"0xa8028c655b6423204c8edfbc339f57b042d6bec2b6a61145d76b7c08b4cccd42","transactionIndex":"0x0","blockHash":"0x24417bb49ce44cfad65da68f33b510bf2a129c0d89ccf06acb6958b8585ccf34","logIndex":"0x0","removed":false},{"address":"0xfe00000000000000000000000000000000000000","topics":["0x0000000000000000000000000000000000000000000000000000746f70696332","0x0000000000000000000000000000000000000000000000000000746f70696331"],"data":"0x","blockNumber":"0x3","transactionHash":"0xdefe471992a07a02acdfbe33edaae22fbb86d7d3cec3f1b8e4e77702fb3acc1d","transactionIndex":"0x0","blockHash":"0x7a7556792ca7d37882882e2b001fe14833eaf81c2c7f865c9c771ec37a024f6b","logIndex":"0x0","removed":false},{"address":"0xfe00000000000000000000000000000000000000","topics":["0x0000000000000000000000000000000000000000000000000000746f70696334"],"data":"0x","blockNumber":"0x3e8","transactionHash":"0x9a87842100a638dfa5da8842b4beda691d2fd77b0c84b57f24ecfa9fb208f747","transactionIndex":"0x0","blockHash":"0xb360bad5265261c075ece02d3bf0e39498a6a76310482cdfd90588748e6c5ee0","logIndex":"0x0","removed":false}]`,
+			want: wantLogs(log2a, log3, log1000),
 		},
 		{
 			f: sys.NewRangeFilter(900, 999, []common.Address{contract}, [][]common.Hash{{hash3}}),
 		},
 		{
 			f:    sys.NewRangeFilter(990, int64(rpc.LatestBlockNumber), []common.Address{contract2}, [][]common.Hash{{hash3}}),
-			want: `[{"address":"0xff00000000000000000000000000000000000000","topics":["0x0000000000000000000000000000000000000000000000000000746f70696333"],"data":"0x","blockNumber":"0x3e7","transactionHash":"0x53e3675800c6908424b61b35a44e51ca4c73ca603e58a65b32c67968b4f42200","transactionIndex":"0x0","blockHash":"0x2e4620a2b426b0612ec6cad9603f466723edaed87f98c9137405dd4f7a2409ff","logIndex":"0x0","removed":false}]`,
+			want: wantLogs(log999),
 		},
 		{
 			f:    sys.NewRangeFilter(1, 10, []common.Address{contract}, [][]common.Hash{{hash2}, {hash1}}),
-			want: `[{"address":"0xfe00000000000000000000000000000000000000","topics":["0x0000000000000000000000000000000000000000000000000000746f70696332","0x0000000000000000000000000000000000000000000000000000746f70696331"],"data":"0x","blockNumber":"0x3","transactionHash":"0xdefe471992a07a02acdfbe33edaae22fbb86d7d3cec3f1b8e4e77702fb3acc1d","transactionIndex":"0x0","blockHash":"0x7a7556792ca7d37882882e2b001fe14833eaf81c2c7f865c9c771ec37a024f6b","logIndex":"0x0","removed":false}]`,
+			want: wantLogs(log3),
 		},
 		{
 			f:    sys.NewRangeFilter(1, 10, nil, [][]common.Hash{{hash1, hash2}}),
-			want: `[{"address":"0xfe00000000000000000000000000000000000000","topics":["0x0000000000000000000000000000000000000000000000000000746f70696331"],"data":"0x","blockNumber":"0x2","transactionHash":"0xa8028c655b6423204c8edfbc339f57b042d6bec2b6a61145d76b7c08b4cccd42","transactionIndex":"0x0","blockHash":"0x24417bb49ce44cfad65da68f33b510bf2a129c0d89ccf06acb6958b8585ccf34","logIndex":"0x0","removed":false},{"address":"0xff00000000000000000000000000000000000000","topics":["0x0000000000000000000000000000000000000000000000000000746f70696331"],"data":"0x","blockNumber":"0x2","transactionHash":"0xdba3e2ea9a7d690b722d70ee605fd67ba4c00d1d3aecd5cf187a7b92ad8eb3df","transactionIndex":"0x1","blockHash":"0x24417bb49ce44cfad65da68f33b510bf2a129c0d89ccf06acb6958b8585ccf34","logIndex":"0x1","removed":false},{"address":"0xfe00000000000000000000000000000000000000","topics":["0x0000000000000000000000000000000000000000000000000000746f70696332","0x0000000000000000000000000000000000000000000000000000746f70696331"],"data":"0x","blockNumber":"0x3","transactionHash":"0xdefe471992a07a02acdfbe33edaae22fbb86d7d3cec3f1b8e4e77702fb3acc1d","transactionIndex":"0x0","blockHash":"0x7a7556792ca7d37882882e2b001fe14833eaf81c2c7f865c9c771ec37a024f6b","logIndex":"0x0","removed":false}]`,
+			want: wantLogs(log2a, log2b, log3),
 		},
 		{
 			f: sys.NewRangeFilter(0, int64(rpc.LatestBlockNumber), nil, [][]common.Hash{{common.BytesToHash([]byte("fail"))}}),
@@ -321,15 +320,15 @@ func TestFilters(t *testing.T) {
 		},
 		{
 			f:    sys.NewRangeFilter(int64(rpc.LatestBlockNumber), int64(rpc.LatestBlockNumber), nil, nil),
-			want: `[{"address":"0xfe00000000000000000000000000000000000000","topics":["0x0000000000000000000000000000000000000000000000000000746f70696334"],"data":"0x","blockNumber":"0x3e8","transactionHash":"0x9a87842100a638dfa5da8842b4beda691d2fd77b0c84b57f24ecfa9fb208f747","transactionIndex":"0x0","blockHash":"0xb360bad5265261c075ece02d3bf0e39498a6a76310482cdfd90588748e6c5ee0","logIndex":"0x0","removed":false}]`,
+			want: wantLogs(log1000),
 		},
 		{
 			f:    sys.NewRangeFilter(int64(rpc.FinalizedBlockNumber), int64(rpc.LatestBlockNumber), nil, nil),
-			want: `[{"address":"0xff00000000000000000000000000000000000000","topics":["0x0000000000000000000000000000000000000000000000000000746f70696333"],"data":"0x","blockNumber":"0x3e7","transactionHash":"0x53e3675800c6908424b61b35a44e51ca4c73ca603e58a65b32c67968b4f42200","transactionIndex":"0x0","blockHash":"0x2e4620a2b426b0612ec6cad9603f466723edaed87f98c9137405dd4f7a2409ff","logIndex":"0x0","removed":false},{"address":"0xfe00000000000000000000000000000000000000","topics":["0x0000000000000000000000000000000000000000000000000000746f70696334"],"data":"0x","blockNumber":"0x3e8","transactionHash":"0x9a87842100a638dfa5da8842b4beda691d2fd77b0c84b57f24ecfa9fb208f747","transactionIndex":"0x0","blockHash":"0xb360bad5265261c075ece02d3bf0e39498a6a76310482cdfd90588748e6c5ee0","logIndex":"0x0","removed":false}]`,
+			want: wantLogs(log999, log1000),
 		},
 		{
 			f:    sys.NewRangeFilter(int64(rpc.FinalizedBlockNumber), int64(rpc.FinalizedBlockNumber), nil, nil),
-			want: `[{"address":"0xff00000000000000000000000000000000000000","topics":["0x0000000000000000000000000000000000000000000000000000746f70696333"],"data":"0x","blockNumber":"0x3e7","transactionHash":"0x53e3675800c6908424b61b35a44e51ca4c73ca603e58a65b32c67968b4f42200","transactionIndex":"0x0","blockHash":"0x2e4620a2b426b0612ec6cad9603f466723edaed87f98c9137405dd4f7a2409ff","logIndex":"0x0","removed":false}]`,
+			want: wantLogs(log999),
 		},
 		{
 			f: sys.NewRangeFilter(int64(rpc.LatestBlockNumber), int64(rpc.FinalizedBlockNumber), nil, nil),
@@ -348,11 +347,11 @@ func TestFilters(t *testing.T) {
 		},
 		{
 			f:    sys.NewRangeFilter(int64(rpc.PendingBlockNumber), int64(rpc.PendingBlockNumber), nil, nil),
-			want: `[{"address":"0xfe00000000000000000000000000000000000000","topics":["0x0000000000000000000000000000000000000000000000000000746f70696335"],"data":"0x","blockNumber":"0x3e9","transactionHash":"0x4110587c1b8d86edc85dce929a34127f1cb8809515a9f177c91c866de3eb0638","transactionIndex":"0x0","blockHash":"0xd5e8d4e4eb51a2a2a6ec20ef68a4c2801240743c8deb77a6a1d118ac3eefb725","logIndex":"0x0","removed":false}]`,
+			want: wantLogs(logPend),
 		},
 		{
 			f:    sys.NewRangeFilter(int64(rpc.LatestBlockNumber), int64(rpc.PendingBlockNumber), nil, nil),
-			want: `[{"address":"0xfe00000000000000000000000000000000000000","topics":["0x0000000000000000000000000000000000000000000000000000746f70696334"],"data":"0x","blockNumber":"0x3e8","transactionHash":"0x9a87842100a638dfa5da8842b4beda691d2fd77b0c84b57f24ecfa9fb208f747","transactionIndex":"0x0","blockHash":"0xb360bad5265261c075ece02d3bf0e39498a6a76310482cdfd90588748e6c5ee0","logIndex":"0x0","removed":false},{"address":"0xfe00000000000000000000000000000000000000","topics":["0x0000000000000000000000000000000000000000000000000000746f70696335"],"data":"0x","blockNumber":"0x3e9","transactionHash":"0x4110587c1b8d86edc85dce929a34127f1cb8809515a9f177c91c866de3eb0638","transactionIndex":"0x0","blockHash":"0xd5e8d4e4eb51a2a2a6ec20ef68a4c2801240743c8deb77a6a1d118ac3eefb725","logIndex":"0x0","removed":false}]`,
+			want: wantLogs(log1000, logPend),
 		},
 		{
 			f:   sys.NewRangeFilter(int64(rpc.PendingBlockNumber), int64(rpc.LatestBlockNumber), nil, nil),

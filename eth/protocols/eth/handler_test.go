@@ -34,7 +34,6 @@ import (
 	"github.com/ethereum/go-ethereum/core/txpool/legacypool"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/p2p"
 	"github.com/ethereum/go-ethereum/p2p/enode"
@@ -42,18 +41,13 @@ import (
 	"github.com/ethereum/go-ethereum/params/types/ctypes"
 	"github.com/ethereum/go-ethereum/params/types/genesisT"
 	"github.com/ethereum/go-ethereum/params/types/goethereum"
-	"github.com/ethereum/go-ethereum/params/vars"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/trie"
 )
 
-var (
-	// testKey is a private key to use for funding a tester account.
-	testKey, _ = crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
-
-	// testAddr is the Ethereum address of the tester account.
-	testAddr = crypto.PubkeyToAddress(testKey.PublicKey)
-)
+// testKey is the ML-DSA-44 key of the funded tester account, and testAddr
+// the address of that account.
+var testKey, _, testAddr = testAccount(1)
 
 func u64(val uint64) *uint64 { return &val }
 
@@ -461,18 +455,17 @@ func encodeRL[T any](slice []T) rlp.RawList[T] {
 }
 
 func TestHashBody(t *testing.T) {
-	key, _ := crypto.HexToECDSA("8a1f9a8f95be41cd7ccb6168179afb4504aefe388d1e14474d32c45c72ce7b7a")
-	signer := types.NewCancunSigner(big.NewInt(1))
+	key, _, _ := testAccount(2)
+	genesis := common.HexToHash("0x01")
 
 	// create block 1
 	header := &types.Header{Number: big.NewInt(11)}
 	txs := []*types.Transaction{
-		types.MustSignNewTx(key, signer, &types.DynamicFeeTx{
-			ChainID: big.NewInt(1),
-			Nonce:   1,
-			Data:    []byte("testing"),
+		signTestTx(genesis, key, &types.GhostAccountTx{
+			Nonce: 1,
+			Data:  []byte("testing"),
 		}),
-		types.MustSignNewTx(key, signer, &types.LegacyTx{
+		signTestTx(genesis, key, &types.GhostAccountTx{
 			Nonce: 2,
 			Data:  []byte("testing"),
 		}),
@@ -507,24 +500,21 @@ func testGetBlockReceipts(t *testing.T, protocol uint) {
 	t.Parallel()
 
 	// Define three accounts to simulate transactions with
-	acc1Key, _ := crypto.HexToECDSA("8a1f9a8f95be41cd7ccb6168179afb4504aefe388d1e14474d32c45c72ce7b7a")
-	acc2Key, _ := crypto.HexToECDSA("49a7b37aa6f6645917e7b807e9d1c00d4fa71f18343b0d4122a4d2df64dd6fee")
-	acc1Addr := crypto.PubkeyToAddress(acc1Key.PublicKey)
-	acc2Addr := crypto.PubkeyToAddress(acc2Key.PublicKey)
+	acc1Key, _, acc1Addr := testAccount(2)
+	_, _, acc2Addr := testAccount(3)
 
-	signer := types.HomesteadSigner{}
 	// Create a chain generator with some simple transactions (blatantly stolen from @fjl/chain_markets_test)
 	generator := func(i int, block *core.BlockGen) {
 		switch i {
 		case 0:
 			// In block 1, the test bank sends account #1 some ether.
-			tx, _ := types.SignTx(types.NewTransaction(block.TxNonce(testAddr), acc1Addr, big.NewInt(10_000_000_000_000_000), vars.TxGas, block.BaseFee(), nil), signer, testKey)
+			tx := signTestTransfer(block, testKey, testAddr, acc1Addr, big.NewInt(10_000_000_000_000_000))
 			block.AddTx(tx)
 		case 1:
 			// In block 2, the test bank sends some more ether to account #1.
 			// acc1Addr passes it on to account #2.
-			tx1, _ := types.SignTx(types.NewTransaction(block.TxNonce(testAddr), acc1Addr, big.NewInt(1_000_000_000_000_000), vars.TxGas, block.BaseFee(), nil), signer, testKey)
-			tx2, _ := types.SignTx(types.NewTransaction(block.TxNonce(acc1Addr), acc2Addr, big.NewInt(1_000_000_000_000_000), vars.TxGas, block.BaseFee(), nil), signer, acc1Key)
+			tx1 := signTestTransfer(block, testKey, testAddr, acc1Addr, big.NewInt(1_000_000_000_000_000))
+			tx2 := signTestTransfer(block, acc1Key, acc1Addr, acc2Addr, big.NewInt(1_000_000_000_000_000))
 			block.AddTx(tx1)
 			block.AddTx(tx2)
 		case 2:

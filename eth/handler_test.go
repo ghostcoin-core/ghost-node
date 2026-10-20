@@ -29,7 +29,6 @@ import (
 	"github.com/ethereum/go-ethereum/core/txpool"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/eth/downloader"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/event"
@@ -38,13 +37,9 @@ import (
 	"github.com/holiman/uint256"
 )
 
-var (
-	// testKey is a private key to use for funding a tester account.
-	testKey, _ = crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
-
-	// testAddr is the Ethereum address of the tester account.
-	testAddr = crypto.PubkeyToAddress(testKey.PublicKey)
-)
+// testKey is the ML-DSA-44 key of the funded tester account, and testAddr
+// the address of that account.
+var testKey, _, testAddr = testAccount(1)
 
 // testTxPool is a mock transaction pool that blindly accepts all transactions.
 // Its goal is to get around setting up a valid statedb for the balance and nonce
@@ -77,7 +72,7 @@ func (p *testTxPool) Has(hash common.Hash) bool {
 func (p *testTxPool) FilterType(kind byte) bool {
 	switch kind {
 	case types.LegacyTxType, types.AccessListTxType, types.DynamicFeeTxType,
-		types.GhostRevealTxType, types.GhostDataRevealTxType:
+		types.GhostAccountTxType, types.GhostRevealTxType, types.GhostDataRevealTxType:
 		return true
 	default:
 		return false
@@ -112,7 +107,12 @@ func (p *testTxPool) Pending(filter txpool.PendingFilter) map[common.Address][]*
 
 	batches := make(map[common.Address][]*types.Transaction)
 	for _, tx := range p.pool {
-		from, _ := types.Sender(types.HomesteadSigner{}, tx)
+		var from common.Address
+		if scheme, pub, _, ok := tx.GhostAccountAuth(); ok {
+			from = types.GhostAccountAddressOf(scheme, pub)
+		} else {
+			from, _ = types.Sender(types.HomesteadSigner{}, tx)
+		}
 		batches[from] = append(batches[from], tx)
 	}
 	for _, batch := range batches {
