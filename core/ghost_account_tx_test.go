@@ -79,7 +79,7 @@ var ghostInitCode = []byte{
 	0x53,       // MSTORE8
 	0x60, 0x01, // PUSH1 1
 	0x60, 0x00, // PUSH1 0
-	0xf3,       // RETURN
+	0xf3, // RETURN
 }
 
 func TestGhostAccountTxVerifyGasSet(t *testing.T) {
