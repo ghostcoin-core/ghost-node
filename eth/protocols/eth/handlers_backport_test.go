@@ -26,8 +26,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/p2p"
-	"github.com/ethereum/go-ethereum/params"
-	"github.com/ethereum/go-ethereum/params/vars"
 	"github.com/ethereum/go-ethereum/rlp"
 )
 
@@ -115,15 +113,14 @@ func TestPooledTxLookupCap(t *testing.T) {
 	backend := newTestBackend(0)
 	defer backend.close()
 
-	signer := types.LatestSigner(params.TestChainConfig)
-	tx, err := types.SignTx(
-		types.NewTransaction(0, common.Address{0x01}, big.NewInt(10_000), vars.TxGas, big.NewInt(1_000_000_000), nil),
-		signer,
-		testKey,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	tx := signTestTx(backend.chain.Genesis().Hash(), testKey, &types.GhostAccountTx{
+		Nonce:     0,
+		GasTipCap: big.NewInt(1_000_000_000),
+		GasFeeCap: big.NewInt(1_000_000_000),
+		Gas:       testTransferGas,
+		To:        &common.Address{0x01},
+		Value:     big.NewInt(10_000),
+	})
 	if errs := backend.txpool.Add([]*types.Transaction{tx}, true, true); errs[0] != nil {
 		t.Fatal(errs[0])
 	}

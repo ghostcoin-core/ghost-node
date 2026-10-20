@@ -238,16 +238,12 @@ func TestHandleTransactionsCountLimit(t *testing.T) {
 // testChainGenerator fills blocks with a few value transfers and an uncle so
 // that the derived transaction, uncle and receipt roots are all non-trivial.
 func testChainGenerator(i int, block *core.BlockGen) {
-	signer := types.HomesteadSigner{}
 	switch i {
 	case 0:
-		tx, _ := types.SignTx(types.NewTransaction(block.TxNonce(testAddr), common.Address{0x01}, big.NewInt(1000), vars.TxGas, block.BaseFee(), nil), signer, testKey)
-		block.AddTx(tx)
+		block.AddTx(signTestTransfer(block, testKey, testAddr, common.Address{0x01}, big.NewInt(1000)))
 	case 1:
-		tx1, _ := types.SignTx(types.NewTransaction(block.TxNonce(testAddr), common.Address{0x02}, big.NewInt(1000), vars.TxGas, block.BaseFee(), nil), signer, testKey)
-		block.AddTx(tx1)
-		tx2, _ := types.SignTx(types.NewTransaction(block.TxNonce(testAddr), common.Address{0x03}, big.NewInt(1000), vars.TxGas, block.BaseFee(), nil), signer, testKey)
-		block.AddTx(tx2)
+		block.AddTx(signTestTransfer(block, testKey, testAddr, common.Address{0x02}, big.NewInt(1000)))
+		block.AddTx(signTestTransfer(block, testKey, testAddr, common.Address{0x03}, big.NewInt(1000)))
 	case 3:
 		b2 := block.PrevBlock(1).Header()
 		b2.Extra = []byte("foo")

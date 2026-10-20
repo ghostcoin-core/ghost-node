@@ -32,7 +32,6 @@ import (
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/internal/era"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/params/types/genesisT"
@@ -47,13 +46,11 @@ var (
 
 func TestHistoryImportAndExport(t *testing.T) {
 	var (
-		key, _  = crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
-		address = crypto.PubkeyToAddress(key.PublicKey)
-		genesis = &genesisT.Genesis{
+		key, _, address = testAccount(1)
+		genesis         = &genesisT.Genesis{
 			Config: params.TestChainConfig,
 			Alloc:  genesisT.GenesisAlloc{address: {Balance: big.NewInt(1000000000000000000)}},
 		}
-		signer = types.LatestSigner(genesis.Config)
 	)
 
 	// Generate chain.
@@ -61,12 +58,15 @@ func TestHistoryImportAndExport(t *testing.T) {
 		if i == 0 {
 			return
 		}
-		tx, err := types.SignNewTx(key, signer, &types.DynamicFeeTx{
+		// The generation starts at the genesis block, whose hash the account
+		// transaction's signature is bound to.
+		signer := types.NewGhostAccountSigner(types.LatestSigner(genesis.Config), g.PrevBlock(-1).Hash())
+		tx, err := types.SignGhostAccountTx(signer, key, &types.GhostAccountTx{
 			ChainID:    genesis.Config.GetChainID(),
 			Nonce:      uint64(i - 1),
 			GasTipCap:  common.Big0,
 			GasFeeCap:  g.PrevBlock(0).BaseFee(),
-			Gas:        50000,
+			Gas:        50000 + testAccountGas,
 			To:         &common.Address{0xaa},
 			Value:      big.NewInt(int64(i)),
 			Data:       nil,

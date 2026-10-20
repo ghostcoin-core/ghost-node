@@ -282,8 +282,7 @@ func testRecvTransactions(t *testing.T, protocol uint) {
 		t.Fatalf("failed to run protocol handshake")
 	}
 	// Send the transaction to the sink and verify that it's added to the tx pool
-	tx := types.NewTransaction(0, common.Address{}, big.NewInt(0), 100000, big.NewInt(0), nil)
-	tx, _ = types.SignTx(tx, types.HomesteadSigner{}, testKey)
+	tx := signTestTx(handler.chain, testKey, &types.GhostAccountTx{Nonce: 0, Gas: 100000, To: &common.Address{}})
 
 	if err := src.SendTransactions([]*types.Transaction{tx}); err != nil {
 		t.Fatalf("failed to send transaction: %v", err)
@@ -312,9 +311,7 @@ func testSendTransactions(t *testing.T, protocol uint) {
 
 	insert := make([]*types.Transaction, 100)
 	for nonce := range insert {
-		tx := types.NewTransaction(uint64(nonce), common.Address{}, big.NewInt(0), 100000, big.NewInt(0), make([]byte, 10240))
-		tx, _ = types.SignTx(tx, types.HomesteadSigner{}, testKey)
-		insert[nonce] = tx
+		insert[nonce] = signTestTx(handler.chain, testKey, &types.GhostAccountTx{Nonce: uint64(nonce), Gas: 100000, To: &common.Address{}, Data: make([]byte, 10240)})
 	}
 	go handler.txpool.Add(insert, false, false) // Need goroutine to not block on feed
 	time.Sleep(250 * time.Millisecond)          // Wait until tx events get out of the system (can't use events, tx broadcaster races with peer join)
@@ -433,9 +430,7 @@ func testTransactionPropagation(t *testing.T, protocol uint) {
 	// Fill the source pool with transactions and wait for them at the sinks
 	txs := make([]*types.Transaction, 1024)
 	for nonce := range txs {
-		tx := types.NewTransaction(uint64(nonce), common.Address{}, big.NewInt(0), 100000, big.NewInt(0), nil)
-		tx, _ = types.SignTx(tx, types.HomesteadSigner{}, testKey)
-		txs[nonce] = tx
+		txs[nonce] = signTestTx(source.chain, testKey, &types.GhostAccountTx{Nonce: uint64(nonce), Gas: 100000, To: &common.Address{}})
 	}
 	source.txpool.Add(txs, false, false)
 
@@ -812,10 +807,7 @@ func TestHandlerPassesPeerToGhostPool(t *testing.T) {
 		return tx
 	}
 	reveal1, reveal2, reveal3 := newReveal(1), newReveal(2), newReveal(3)
-	plain, err := types.SignTx(types.NewTransaction(0, common.Address{}, big.NewInt(0), 100000, big.NewInt(0), nil), types.HomesteadSigner{}, testKey)
-	if err != nil {
-		t.Fatal(err)
-	}
+	plain := signTestTx(handler.chain, testKey, &types.GhostAccountTx{Nonce: 0, Gas: 100000, To: &common.Address{}})
 
 	pipe, remote := p2p.MsgPipe()
 	defer pipe.Close()
@@ -853,11 +845,11 @@ func TestHandlerPassesPeerToGhostPool(t *testing.T) {
 
 	// An announcement passes the pool's budgets: what it refuses never
 	// reaches the fetcher.
-	kinds := []byte{types.GhostRevealTxType, types.LegacyTxType}
+	kinds := []byte{types.GhostRevealTxType, types.GhostAccountTxType}
 	sizes := []uint32{types.GhostRevealEnvelopeSize, uint32(plain.Size())}
 	hashes := []common.Hash{reveal3.Hash(), plain.Hash()}
 	fkinds, fsizes, fhashes := backend.filterRevealAnnounces(peer.ID(), kinds, sizes, hashes)
-	if len(fhashes) != 1 || fhashes[0] != plain.Hash() || fkinds[0] != types.LegacyTxType || fsizes[0] != sizes[1] {
+	if len(fhashes) != 1 || fhashes[0] != plain.Hash() || fkinds[0] != types.GhostAccountTxType || fsizes[0] != sizes[1] {
 		t.Fatalf("announcement after the budgets %v, want only the plain transaction", fhashes)
 	}
 	if err := backend.Handle(peer, &eth.NewPooledTransactionHashesPacket{Types: kinds, Sizes: sizes, Hashes: hashes}); err != nil {

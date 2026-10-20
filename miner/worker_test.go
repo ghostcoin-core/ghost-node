@@ -65,17 +65,15 @@ var (
 	ethashChainConfig ctypes.ChainConfigurator
 	cliqueChainConfig ctypes.ChainConfigurator
 
-	// Test accounts
-	testBankKey, _  = crypto.GenerateKey()
-	testBankAddress = crypto.PubkeyToAddress(testBankKey.PublicKey)
-	testBankFunds   = big.NewInt(1000000000000000000)
+	// Test accounts: the bank and the user are ML-DSA-44 accounts. The bank
+	// seals clique blocks as testBankSigner, with the ECDSA key testBankKey.
+	testBankKey, _ = crypto.GenerateKey()
+	testBankSigner = crypto.PubkeyToAddress(testBankKey.PublicKey)
 
-	testUserKey, _  = crypto.GenerateKey()
-	testUserAddress = crypto.PubkeyToAddress(testUserKey.PublicKey)
+	testBankAccountKey, _, testBankAddress = testAccount(1)
+	testBankFunds                          = big.NewInt(1000000000000000000)
 
-	// Test transactions
-	pendingTxs []*types.Transaction
-	newTxs     []*types.Transaction
+	_, _, testUserAddress = testAccount(2)
 
 	testConfig = &Config{
 		Recommit: time.Second,
@@ -93,27 +91,6 @@ func init() {
 	cliqueChainConfig.MustSetConsensusEngineType(ctypes.ConsensusEngineT_Clique)
 	cliqueChainConfig.SetCliquePeriod(10)
 	cliqueChainConfig.SetCliqueEpoch(30000)
-
-	signer := types.LatestSigner(params.TestChainConfig)
-	tx1 := types.MustSignNewTx(testBankKey, signer, &types.AccessListTx{
-		ChainID:  params.TestChainConfig.ChainID,
-		Nonce:    0,
-		To:       &testUserAddress,
-		Value:    big.NewInt(1000),
-		Gas:      vars.TxGas,
-		GasPrice: big.NewInt(vars.InitialBaseFee),
-	})
-	pendingTxs = append(pendingTxs, tx1)
-
-	tx2 := types.MustSignNewTx(testBankKey, signer, &types.LegacyTx{
-		Nonce:    1,
-		To:       &testUserAddress,
-		Value:    big.NewInt(1000),
-		Gas:      vars.TxGas,
-		GasPrice: big.NewInt(vars.InitialBaseFee),
-	})
-
-	newTxs = append(newTxs, tx2)
 }
 
 // testWorkerBackend implements worker.Backend interfaces and wraps all information needed during the testing.
@@ -133,8 +110,8 @@ func newTestWorkerBackend(t *testing.T, chainConfig ctypes.ChainConfigurator, en
 	switch e := engine.(type) {
 	case *clique.Clique:
 		gspec.ExtraData = make([]byte, 32+common.AddressLength+crypto.SignatureLength)
-		copy(gspec.ExtraData[32:32+common.AddressLength], testBankAddress.Bytes())
-		e.Authorize(testBankAddress, func(account accounts.Account, s string, data []byte) ([]byte, error) {
+		copy(gspec.ExtraData[32:32+common.AddressLength], testBankSigner.Bytes())
+		e.Authorize(testBankSigner, func(account accounts.Account, s string, data []byte) ([]byte, error) {
 			return crypto.Sign(crypto.Keccak256(data), testBankKey)
 		})
 	case *ethash.Ethash:
@@ -197,21 +174,64 @@ func (b *testWorkerBackend) newRandomUncle() *types.Block {
 }
 
 func (b *testWorkerBackend) newRandomTx(creation bool) *types.Transaction {
-	var tx *types.Transaction
 	gasPrice := big.NewInt(10 * vars.InitialBaseFee)
-	if creation {
-		tx, _ = types.SignTx(types.NewContractCreation(b.txPool.Nonce(testBankAddress), big.NewInt(0), testGas, gasPrice, common.FromHex(testCode)), types.HomesteadSigner{}, testBankKey)
-	} else {
-		tx, _ = types.SignTx(types.NewTransaction(b.txPool.Nonce(testBankAddress), testUserAddress, big.NewInt(1000), vars.TxGas, gasPrice, nil), types.HomesteadSigner{}, testBankKey)
+	txdata := &types.GhostAccountTx{
+		Nonce:     b.txPool.Nonce(testBankAddress),
+		GasTipCap: gasPrice,
+		GasFeeCap: gasPrice,
 	}
-	return tx
+	if creation {
+		txdata.Gas = testGas + testAccountGas
+		txdata.Value = big.NewInt(0)
+		txdata.Data = common.FromHex(testCode)
+	} else {
+		txdata.Gas = vars.TxGas + testAccountGas
+		txdata.To = &testUserAddress
+		txdata.Value = big.NewInt(1000)
+	}
+	return b.signBankTx(txdata)
+}
+
+// signBankTx signs an account transaction of the bank for the backend's chain.
+func (b *testWorkerBackend) signBankTx(txdata *types.GhostAccountTx) *types.Transaction {
+	return signTestTx(b.chain.Config(), b.chain.Genesis().Hash(), testBankAccountKey, txdata)
+}
+
+// bankTransfer returns the bank's transfer of 1000 wei to the user with the
+// given nonce, at the initial base fee.
+func (b *testWorkerBackend) bankTransfer(nonce uint64) *types.Transaction {
+	return b.signBankTx(&types.GhostAccountTx{
+		Nonce:     nonce,
+		GasTipCap: big.NewInt(vars.InitialBaseFee),
+		GasFeeCap: big.NewInt(vars.InitialBaseFee),
+		Gas:       vars.TxGas + testAccountGas,
+		To:        &testUserAddress,
+		Value:     big.NewInt(1000),
+	})
+}
+
+// pendingTxs returns the transactions in the pool when a test worker starts.
+func (b *testWorkerBackend) pendingTxs() []*types.Transaction {
+	return []*types.Transaction{b.bankTransfer(0)}
+}
+
+// newTxs returns the transactions a test adds to the pool once the worker
+// runs.
+func (b *testWorkerBackend) newTxs() []*types.Transaction {
+	return []*types.Transaction{b.bankTransfer(1)}
 }
 
 func newTestWorker(t *testing.T, chainConfig ctypes.ChainConfigurator, engine consensus.Engine, db ethdb.Database, blocks int) (*worker, *testWorkerBackend) {
 	backend := newTestWorkerBackend(t, chainConfig, engine, db, blocks)
-	backend.txPool.Add(pendingTxs, true, false)
+	backend.txPool.Add(backend.pendingTxs(), true, false)
 	w := newWorker(testConfig, chainConfig, engine, backend, new(event.TypeMux), nil, false)
-	w.setEtherbase(testBankAddress)
+	// The fees of a clique block go to its signer, which a block's importer
+	// takes as its author.
+	etherbase := testBankAddress
+	if _, ok := engine.(*clique.Clique); ok {
+		etherbase = testBankSigner
+	}
+	w.setEtherbase(etherbase)
 	return w, backend
 }
 
@@ -455,7 +475,7 @@ func testRegenerateMiningBlock(t *testing.T, chainConfig ctypes.ChainConfigurato
 			t.Error("new task timeout")
 		}
 	}
-	b.txPool.Add(newTxs, true, false)
+	b.txPool.Add(b.newTxs(), true, false)
 	time.Sleep(time.Second)
 
 	select {
@@ -741,10 +761,9 @@ func TestWorkerIncludesPendingReveal(t *testing.T) {
 		chainID  = gspec.Config.GetChainID()
 	)
 	gspec.Alloc = genesisT.GenesisAlloc{testBankAddress: {Balance: new(big.Int).Mul(oneGhost, big.NewInt(100))}}
-	signer := types.LatestSigner(gspec.Config)
+	genesisHash := core.GenesisToBlock(gspec, nil).Hash()
 	signed := func(nonce uint64, to common.Address, value *big.Int, data []byte, gas uint64) *types.Transaction {
-		return types.MustSignNewTx(testBankKey, signer, &types.DynamicFeeTx{
-			ChainID:   chainID,
+		return signTestTx(gspec.Config, genesisHash, testBankAccountKey, &types.GhostAccountTx{
 			Nonce:     nonce,
 			GasTipCap: big.NewInt(vars.InitialBaseFee),
 			GasFeeCap: big.NewInt(100 * vars.InitialBaseFee),
@@ -758,7 +777,7 @@ func TestWorkerIncludesPendingReveal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	commit := signed(0, ghost.CommitEntryAddress, oneGhost, commitData, 60_000)
+	commit := signed(0, ghost.CommitEntryAddress, oneGhost, commitData, 60_000+testAccountGas)
 
 	// Block 1 commits one GHOST, so that the hidden set holds what the
 	// reveal takes.
@@ -810,7 +829,10 @@ func TestWorkerIncludesPendingReveal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	transfer := signed(1, testUserAddress, big.NewInt(1000), nil, vars.TxGas)
+	if genesis.Hash() != genesisHash {
+		t.Fatalf("genesis hash %x, the transactions are signed for %x", genesis.Hash(), genesisHash)
+	}
+	transfer := signed(1, testUserAddress, big.NewInt(1000), nil, vars.TxGas+testAccountGas)
 	for i, err := range pool.Add([]*types.Transaction{transfer, reveal}, true, true) {
 		if err != nil {
 			t.Fatalf("transaction %d refused by the pool: %v", i, err)
@@ -838,7 +860,7 @@ func TestWorkerIncludesPendingReveal(t *testing.T) {
 	if len(txs) != 2 || txs[0].Hash() != reveal.Hash() || txs[1].Hash() != transfer.Hash() {
 		t.Fatalf("block carries %d transactions, want the reveal then the transfer", len(txs))
 	}
-	if want := uint64(types.GhostRevealGas + vars.TxGas); block.GasUsed() != want {
+	if want := uint64(types.GhostRevealGas+vars.TxGas) + testAccountGas; block.GasUsed() != want {
 		t.Fatalf("block gas used %d, want %d", block.GasUsed(), want)
 	}
 

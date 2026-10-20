@@ -29,7 +29,6 @@ import (
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/eth/protocols/eth"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/params/types/genesisT"
@@ -40,10 +39,9 @@ import (
 )
 
 var (
-	testdb      = rawdb.NewMemoryDatabase()
-	testKey, _  = crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
-	testAddress = crypto.PubkeyToAddress(testKey.PublicKey)
-	gspec       = &genesisT.Genesis{
+	testdb                  = rawdb.NewMemoryDatabase()
+	testKey, _, testAddress = testAccount(1)
+	gspec                   = &genesisT.Genesis{
 		Config:  params.TestChainConfig,
 		Alloc:   genesisT.GenesisAlloc{testAddress: {Balance: big.NewInt(1000000000000000)}},
 		BaseFee: big.NewInt(vars.InitialBaseFee),
@@ -62,12 +60,7 @@ func makeChain(n int, seed byte, parent *types.Block) ([]common.Hash, map[common
 
 		// If the block number is multiple of 3, send a bonus transaction to the miner
 		if parent == genesis && i%3 == 0 {
-			signer := types.MakeSigner(params.TestChainConfig, block.Number(), block.Timestamp())
-			tx, err := types.SignTx(types.NewTransaction(block.TxNonce(testAddress), common.Address{seed}, big.NewInt(1000), vars.TxGas, block.BaseFee(), nil), signer, testKey)
-			if err != nil {
-				panic(err)
-			}
-			block.AddTx(tx)
+			block.AddTx(signTestTransfer(block, common.Address{seed}, big.NewInt(1000)))
 		}
 		// If the block number is a multiple of 5, add a bonus uncle to the block
 		if i > 0 && i%5 == 0 {

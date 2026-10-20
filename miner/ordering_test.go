@@ -17,16 +17,15 @@
 package miner
 
 import (
-	"crypto/ecdsa"
 	"math/big"
 	"math/rand"
 	"testing"
 	"time"
 
+	"github.com/cloudflare/circl/sign/mldsa/mldsa44"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/txpool"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/holiman/uint256"
 )
 
@@ -47,45 +46,41 @@ func TestTransactionPriceNonceSort1559(t *testing.T) {
 // the same account.
 func testTransactionPriceNonceSort(t *testing.T, baseFee *big.Int) {
 	// Generate a batch of accounts to start with
-	keys := make([]*ecdsa.PrivateKey, 25)
+	keys := make([]*mldsa44.PrivateKey, 25)
+	addrs := make([]common.Address, len(keys))
 	for i := 0; i < len(keys); i++ {
-		keys[i], _ = crypto.GenerateKey()
+		keys[i], _, addrs[i] = testAccount(byte(i + 1))
 	}
-	signer := types.LatestSignerForChainID(common.Big1)
+	signer := types.NewGhostAccountSigner(types.LatestSignerForChainID(common.Big1), common.HexToHash("0x01"))
 
 	// Generate a batch of transactions with overlapping values, but shifted nonces
 	groups := map[common.Address][]*txpool.LazyTransaction{}
 	expectedCount := 0
 	for start, key := range keys {
-		addr := crypto.PubkeyToAddress(key.PublicKey)
+		addr := addrs[start]
 		count := 25
 		for i := 0; i < 25; i++ {
-			var tx *types.Transaction
 			gasFeeCap := rand.Intn(50)
+			txdata := &types.GhostAccountTx{
+				ChainID:   common.Big1,
+				Nonce:     uint64(start + i),
+				To:        &common.Address{},
+				Value:     big.NewInt(100),
+				Gas:       100,
+				GasFeeCap: big.NewInt(int64(gasFeeCap)),
+				Data:      nil,
+			}
 			if baseFee == nil {
-				tx = types.NewTx(&types.LegacyTx{
-					Nonce:    uint64(start + i),
-					To:       &common.Address{},
-					Value:    big.NewInt(100),
-					Gas:      100,
-					GasPrice: big.NewInt(int64(gasFeeCap)),
-					Data:     nil,
-				})
+				// Without a base fee the whole fee cap is the tip, as the
+				// gas price of a legacy transaction.
+				txdata.GasTipCap = big.NewInt(int64(gasFeeCap))
 			} else {
-				tx = types.NewTx(&types.DynamicFeeTx{
-					Nonce:     uint64(start + i),
-					To:        &common.Address{},
-					Value:     big.NewInt(100),
-					Gas:       100,
-					GasFeeCap: big.NewInt(int64(gasFeeCap)),
-					GasTipCap: big.NewInt(int64(rand.Intn(gasFeeCap + 1))),
-					Data:      nil,
-				})
+				txdata.GasTipCap = big.NewInt(int64(rand.Intn(gasFeeCap + 1)))
 				if count == 25 && int64(gasFeeCap) < baseFee.Int64() {
 					count = i
 				}
 			}
-			tx, err := types.SignTx(tx, signer, key)
+			tx, err := types.SignGhostAccountTx(signer, key, txdata)
 			if err != nil {
 				t.Fatalf("failed to sign tx: %s", err)
 			}
@@ -143,18 +138,30 @@ func testTransactionPriceNonceSort(t *testing.T, baseFee *big.Int) {
 func TestTransactionTimeSort(t *testing.T) {
 	t.Parallel()
 	// Generate a batch of accounts to start with
-	keys := make([]*ecdsa.PrivateKey, 5)
+	keys := make([]*mldsa44.PrivateKey, 5)
+	addrs := make([]common.Address, len(keys))
 	for i := 0; i < len(keys); i++ {
-		keys[i], _ = crypto.GenerateKey()
+		keys[i], _, addrs[i] = testAccount(byte(i + 1))
 	}
-	signer := types.HomesteadSigner{}
+	signer := types.NewGhostAccountSigner(types.LatestSignerForChainID(common.Big1), common.HexToHash("0x01"))
 
 	// Generate a batch of transactions with overlapping prices, but different creation times
 	groups := map[common.Address][]*txpool.LazyTransaction{}
 	for start, key := range keys {
-		addr := crypto.PubkeyToAddress(key.PublicKey)
+		addr := addrs[start]
 
-		tx, _ := types.SignTx(types.NewTransaction(0, common.Address{}, big.NewInt(100), 100, big.NewInt(1), nil), signer, key)
+		tx, err := types.SignGhostAccountTx(signer, key, &types.GhostAccountTx{
+			ChainID:   common.Big1,
+			Nonce:     0,
+			To:        &common.Address{},
+			Value:     big.NewInt(100),
+			Gas:       100,
+			GasTipCap: big.NewInt(1),
+			GasFeeCap: big.NewInt(1),
+		})
+		if err != nil {
+			t.Fatalf("failed to sign tx: %s", err)
+		}
 		tx.SetTime(time.Unix(0, int64(len(keys)-start)))
 
 		groups[addr] = append(groups[addr], &txpool.LazyTransaction{

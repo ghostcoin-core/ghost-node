@@ -17,7 +17,6 @@
 package ghost_test
 
 import (
-	"crypto/ecdsa"
 	"errors"
 	"fmt"
 	"math/big"
@@ -28,8 +27,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cloudflare/circl/sign/mldsa/mldsa44"
 	"github.com/ethereum/go-ethereum/cmd/utils"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/consensus/ethash"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state"
@@ -579,13 +580,15 @@ func checkNamespaces(t *testing.T) {
 }
 
 // testChain applies signed transactions to a state the way block processing
-// does, all in the test block.
+// does, all in the test block. The chain of the internal network's genesis is
+// there for the genesis hash the account transactions are bound to.
 type testChain struct {
 	t       *testing.T
 	config  ctypes.ChainConfigurator
+	chain   *core.BlockChain
 	header  *types.Header
 	statedb *state.StateDB
-	key     *ecdsa.PrivateKey
+	key     *mldsa44.PrivateKey
 	sender  common.Address
 	nonce   uint64
 	gp      *core.GasPool
@@ -594,17 +597,20 @@ type testChain struct {
 }
 
 func newTestChain(t *testing.T) *testChain {
-	key, err := crypto.GenerateKey()
+	chain, err := core.NewBlockChain(rawdb.NewMemoryDatabase(), nil, ghost.InternalNetGenesis(), nil, ethash.NewFaker(), vm.Config{}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(chain.Stop)
+	key, _, sender := testAccount(1)
 	c := &testChain{
 		t:       t,
 		config:  profileConfig(),
+		chain:   chain,
 		header:  profileHeader(),
 		statedb: newState(t),
 		key:     key,
-		sender:  crypto.PubkeyToAddress(key.PublicKey),
+		sender:  sender,
 		tip:     big.NewInt(2_000_000_000),
 	}
 	c.gp = new(core.GasPool).AddGas(c.header.GasLimit)
@@ -612,15 +618,16 @@ func newTestChain(t *testing.T) *testChain {
 	return c
 }
 
-// send applies a type-2 transaction and returns its receipt.
+// send applies an account transaction and returns its receipt.
 func (c *testChain) send(to *common.Address, value int64, data []byte) *types.Receipt {
 	c.t.Helper()
-	tx, err := types.SignNewTx(c.key, types.MakeSigner(c.config, c.header.Number, c.header.Time), &types.DynamicFeeTx{
+	signer := types.NewGhostAccountSigner(types.MakeSigner(c.config, c.header.Number, c.header.Time), c.chain.Genesis().Hash())
+	tx, err := types.SignGhostAccountTx(signer, c.key, &types.GhostAccountTx{
 		ChainID:   c.config.GetChainID(),
 		Nonce:     c.nonce,
 		GasTipCap: c.tip,
 		GasFeeCap: new(big.Int).Add(c.header.BaseFee, new(big.Int).Mul(c.tip, big.NewInt(3))),
-		Gas:       500_000,
+		Gas:       500_000 + testAccountGas,
 		To:        to,
 		Value:     big.NewInt(value),
 		Data:      data,
@@ -630,7 +637,7 @@ func (c *testChain) send(to *common.Address, value int64, data []byte) *types.Re
 	}
 	c.nonce++
 	c.statedb.SetTxContext(tx.Hash(), int(c.nonce-1))
-	receipt, err := core.ApplyTransaction(c.config, nil, &c.header.Coinbase, c.gp, c.statedb, c.header, tx, &c.used, vm.Config{})
+	receipt, err := core.ApplyTransaction(c.config, c.chain, &c.header.Coinbase, c.gp, c.statedb, c.header, tx, &c.used, vm.Config{})
 	if err != nil {
 		c.t.Fatalf("transaction %d: %v", c.nonce-1, err)
 	}
@@ -757,7 +764,7 @@ func totalBalance(t *testing.T, db state.Database, root common.Hash) *big.Int {
 	return total
 }
 
-// TestBaseFeeIsBurned applies a type-2 transaction: the coinbase gains gas
+// TestBaseFeeIsBurned applies an account transaction: the coinbase gains gas
 // used times the tip, the sender pays gas used times the full price, and the
 // base-fee part goes to no account.
 func TestBaseFeeIsBurned(t *testing.T) {
