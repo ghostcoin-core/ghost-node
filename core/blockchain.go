@@ -1704,6 +1704,43 @@ func (bc *BlockChain) InsertChain(chain types.Blocks) (int, error) {
 	return bc.insertChain(chain, true, true)
 }
 
+// recoverSendersAfterHeaders passes on the header verification results of
+// chain, in order, and starts the parallel sender recovery of a block, which
+// verifies its signatures on SenderCacher's workers, only once the block's
+// header result came back clean. The recovery of a block is started before
+// its result is passed on. Each block is recovered with its own signer, bound
+// to the chain's genesis so that account transactions are verified too. The
+// returned function stops the forwarding and waits for it to end.
+func (bc *BlockChain) recoverSendersAfterHeaders(chain types.Blocks, results <-chan error) (<-chan error, func()) {
+	var (
+		cacher  = SenderCacher
+		genesis = bc.genesisBlock.Hash()
+		out     = make(chan error, len(chain))
+		stop    = make(chan struct{})
+		done    = make(chan struct{})
+	)
+	go func() {
+		defer close(done)
+		for _, block := range chain {
+			var err error
+			select {
+			case err = <-results:
+			case <-stop:
+				return
+			}
+			if err == nil && len(block.Transactions()) > 0 {
+				signer := types.NewGhostAccountSigner(types.MakeSigner(bc.chainConfig, block.Number(), block.Time()), genesis)
+				cacher.Recover(signer, block.Transactions())
+			}
+			out <- err
+		}
+	}()
+	return out, func() {
+		close(stop)
+		<-done
+	}
+}
+
 // insertChain is the internal implementation of InsertChain, which assumes that
 // 1) chains are contiguous, and 2) The chain mutex is held.
 //
@@ -1717,9 +1754,6 @@ func (bc *BlockChain) insertChain(chain types.Blocks, verifySeals, setHead bool)
 	if bc.insertStopped() {
 		return 0, nil
 	}
-
-	// Start a parallel signature recovery (signer will fluke on fork transition, minimal perf loss)
-	SenderCacher.RecoverFromBlocks(types.MakeSigner(bc.chainConfig, chain[0].Number(), chain[0].Time()), chain)
 
 	var (
 		stats = insertStats{
@@ -1746,8 +1780,14 @@ func (bc *BlockChain) insertChain(chain types.Blocks, verifySeals, setHead bool)
 	abort, results := bc.engine.VerifyHeaders(bc, headers, seals)
 	defer close(abort)
 
+	// Start each block's parallel signature recovery once its header checks,
+	// the seal included, have passed: a block whose header fails has none of
+	// its signatures verified.
+	verified, stopRecovery := bc.recoverSendersAfterHeaders(chain, results)
+	defer stopRecovery()
+
 	// Peek the error for the first block to decide the directing import logic
-	it := newInsertIterator(chain, results, bc.validator)
+	it := newInsertIterator(chain, verified, bc.validator)
 	block, err := it.next()
 
 	// Left-trim all the known blocks that don't need to build snapshot

@@ -31,6 +31,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/ghosttree"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/params/ghost"
 	"github.com/ethereum/go-ethereum/params/vars"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/rpc"
@@ -50,6 +51,7 @@ var (
 	errNoWithdrawals     = errors.New("withdrawals not supported")
 	errMissingTreeRoot   = errors.New("header has no tree root")
 	errMissingBaseFee    = errors.New("header has no base fee")
+	errGasLimitAboveMax  = errors.New("gas limit above the consensus maximum")
 )
 
 // Author implements consensus.Engine, returning the header's coinbase.
@@ -191,8 +193,8 @@ func (r *RandomX) verifyHeader(chain consensus.ChainHeaderReader, header, parent
 		return fmt.Errorf("%w: have %v, want %v", errInvalidDifficulty, header.Difficulty, expected)
 	}
 	// Gas limit and base fee.
-	if header.GasLimit > vars.MaxGasLimit {
-		return fmt.Errorf("invalid gasLimit: have %v, max %v", header.GasLimit, vars.MaxGasLimit)
+	if header.GasLimit > ghost.MaxBlockGasLimit {
+		return fmt.Errorf("%w: have %v, max %v", errGasLimitAboveMax, header.GasLimit, ghost.MaxBlockGasLimit)
 	}
 	if header.GasUsed > header.GasLimit {
 		return fmt.Errorf("invalid gasUsed: have %d, gasLimit %d", header.GasUsed, header.GasLimit)

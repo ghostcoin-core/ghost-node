@@ -22,7 +22,11 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 )
 
-// SenderCacher is a concurrent transaction sender recoverer and cacher.
+// SenderCacher is a concurrent transaction sender recoverer and cacher, with
+// one worker per CPU. Block import hands it a block's transactions once the
+// block's header and seal checks have passed, so that the block's signatures,
+// the ML-DSA signatures of its account transactions included, are verified in
+// parallel before the block is executed.
 var SenderCacher = newTxSenderCacher(runtime.NumCPU())
 
 // txSenderCacherRequest is a request for recovering transaction senders with a
@@ -87,19 +91,4 @@ func (cacher *txSenderCacher) Recover(signer types.Signer, txs []*types.Transact
 			inc:    tasks,
 		}
 	}
-}
-
-// RecoverFromBlocks recovers the senders from a batch of blocks and caches them
-// back into the same data structures. There is no validation being done, nor
-// any reaction to invalid signatures. That is up to calling code later.
-func (cacher *txSenderCacher) RecoverFromBlocks(signer types.Signer, blocks []*types.Block) {
-	count := 0
-	for _, block := range blocks {
-		count += len(block.Transactions())
-	}
-	txs := make([]*types.Transaction, 0, count)
-	for _, block := range blocks {
-		txs = append(txs, block.Transactions()...)
-	}
-	cacher.Recover(signer, txs)
 }
