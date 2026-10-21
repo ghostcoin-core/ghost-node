@@ -17,8 +17,8 @@
 package p2p
 
 import (
-	"crypto/ecdsa"
-	"crypto/sha256"
+	"bytes"
+	"encoding/binary"
 	"errors"
 	"io"
 	"math/rand"
@@ -26,62 +26,100 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/internal/testlog"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/ethereum/go-ethereum/p2p/enr"
-	"github.com/ethereum/go-ethereum/p2p/rlpx"
+	"github.com/ethereum/go-ethereum/p2p/qsconn"
 )
 
+// testTransport skips the encryption handshake: it reports the remote
+// identity it was made with, and frames messages in the clear (code, size,
+// data) on the underlying connection.
 type testTransport struct {
-	*rlpxTransport
-	rpub     *ecdsa.PublicKey
+	remote   *qsconn.Identity
+	fd       net.Conn
+	rmu, wmu sync.Mutex
 	closeErr error
 }
 
-func newTestTransport(rpub *ecdsa.PublicKey, fd net.Conn, dialDest *ecdsa.PublicKey) transport {
-	wrapped := newRLPX(fd, dialDest).(*rlpxTransport)
-	wrapped.conn.InitWithSecrets(rlpx.Secrets{
-		AES:        make([]byte, 16),
-		MAC:        make([]byte, 16),
-		EgressMAC:  sha256.New(),
-		IngressMAC: sha256.New(),
-	})
-	return &testTransport{rpub: rpub, rlpxTransport: wrapped}
+func newTestTransport(remote *qsconn.Identity, fd net.Conn) transport {
+	return &testTransport{remote: remote, fd: fd}
 }
 
-func (c *testTransport) doEncHandshake(prv *ecdsa.PrivateKey) (*ecdsa.PublicKey, error) {
-	return c.rpub, nil
+func (c *testTransport) doEncHandshake() (*qsconn.RemoteIdentity, error) {
+	return remoteIdentity(c.remote), nil
 }
 
 func (c *testTransport) doProtoHandshake(our *protoHandshake) (*protoHandshake, error) {
-	pubkey := crypto.FromECDSAPub(c.rpub)[1:]
-	return &protoHandshake{ID: pubkey, Name: "test"}, nil
+	id := c.remote.ID()
+	return &protoHandshake{ID: id[:], Name: "test"}, nil
+}
+
+func (c *testTransport) ReadMsg() (Msg, error) {
+	c.rmu.Lock()
+	defer c.rmu.Unlock()
+
+	var hdr [12]byte
+	if _, err := io.ReadFull(c.fd, hdr[:]); err != nil {
+		return Msg{}, err
+	}
+	data := make([]byte, binary.BigEndian.Uint32(hdr[8:]))
+	if _, err := io.ReadFull(c.fd, data); err != nil {
+		return Msg{}, err
+	}
+	return Msg{
+		Code:       binary.BigEndian.Uint64(hdr[:8]),
+		Size:       uint32(len(data)),
+		meterSize:  uint32(len(data)),
+		Payload:    bytes.NewReader(data),
+		ReceivedAt: time.Now(),
+	}, nil
+}
+
+func (c *testTransport) WriteMsg(msg Msg) error {
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+
+	buf := make([]byte, 12, 12+msg.Size)
+	binary.BigEndian.PutUint64(buf, msg.Code)
+	binary.BigEndian.PutUint32(buf[8:], msg.Size)
+	data := make([]byte, msg.Size)
+	if _, err := io.ReadFull(msg.Payload, data); err != nil {
+		return err
+	}
+	_, err := c.fd.Write(append(buf, data...))
+	return err
 }
 
 func (c *testTransport) close(err error) {
-	c.conn.Close()
+	c.fd.Close()
 	c.closeErr = err
 }
 
-func startTestServer(t *testing.T, remoteKey *ecdsa.PublicKey, pf func(*Peer)) *Server {
+// remoteIdentity is what the handshake reports for a peer holding key.
+func remoteIdentity(key *qsconn.Identity) *qsconn.RemoteIdentity {
+	return &qsconn.RemoteIdentity{ID: key.ID(), Scheme: key.Scheme(), PublicKey: key.PublicKey()}
+}
+
+func startTestServer(t *testing.T, remoteKey *qsconn.Identity, pf func(*Peer)) *Server {
 	config := Config{
 		Name:        "test",
 		MaxPeers:    10,
 		ListenAddr:  "127.0.0.1:0",
 		NoDiscovery: true,
-		PrivateKey:  newkey(),
+		Identity:    newkey(),
 		Logger:      testlog.Logger(t, log.LvlTrace),
 	}
 	server := &Server{
 		Config:      config,
 		newPeerHook: pf,
-		newTransport: func(fd net.Conn, dialDest *ecdsa.PublicKey) transport {
-			return newTestTransport(remoteKey, fd, dialDest)
+		newTransport: func(fd net.Conn, key *qsconn.Identity, dialDest *enode.Node) transport {
+			return newTestTransport(remoteKey, fd)
 		},
 	}
 	if err := server.Start(); err != nil {
@@ -93,9 +131,9 @@ func startTestServer(t *testing.T, remoteKey *ecdsa.PublicKey, pf func(*Peer)) *
 func TestServerListen(t *testing.T) {
 	// start the test server
 	connected := make(chan *Peer)
-	remid := &newkey().PublicKey
+	remid := newkey()
 	srv := startTestServer(t, remid, func(p *Peer) {
-		if p.ID() != enode.PubkeyToIDV4(remid) {
+		if p.ID() != enode.ID(remid.ID()) {
 			t.Error("peer func called with wrong node id")
 		}
 		connected <- p
@@ -143,14 +181,14 @@ func TestServerDial(t *testing.T) {
 
 	// start the server
 	connected := make(chan *Peer)
-	remid := &newkey().PublicKey
+	remid := newkey()
 	srv := startTestServer(t, remid, func(p *Peer) { connected <- p })
 	defer close(connected)
 	defer srv.Stop()
 
 	// tell the server to connect
 	tcpAddr := listener.Addr().(*net.TCPAddr)
-	node := enode.NewV4(remid, tcpAddr.IP, tcpAddr.Port, 0)
+	node := enode.NewQuantumSafe(enode.ID(remid.ID()), tcpAddr.IP, tcpAddr.Port)
 	srv.AddPeer(node)
 
 	select {
@@ -159,7 +197,7 @@ func TestServerDial(t *testing.T) {
 
 		select {
 		case peer := <-connected:
-			if peer.ID() != enode.PubkeyToIDV4(remid) {
+			if peer.ID() != enode.ID(remid.ID()) {
 				t.Errorf("peer has wrong id")
 			}
 			if peer.Name() != "test" {
@@ -208,13 +246,13 @@ func TestServerDial(t *testing.T) {
 // This test checks that RemovePeer disconnects the peer if it is connected.
 func TestServerRemovePeerDisconnect(t *testing.T) {
 	srv1 := &Server{Config: Config{
-		PrivateKey:  newkey(),
+		Identity:    newkey(),
 		MaxPeers:    1,
 		NoDiscovery: true,
 		Logger:      testlog.Logger(t, log.LvlTrace).New("server", "1"),
 	}}
 	srv2 := &Server{Config: Config{
-		PrivateKey:  newkey(),
+		Identity:    newkey(),
 		MaxPeers:    1,
 		NoDiscovery: true,
 		NoDial:      true,
@@ -247,10 +285,10 @@ func TestServerRemovePeerDisconnect(t *testing.T) {
 // when the server is at capacity. Trusted connections should still be accepted.
 func TestServerAtCap(t *testing.T) {
 	trustedNode := newkey()
-	trustedID := enode.PubkeyToIDV4(&trustedNode.PublicKey)
+	trustedID := enode.ID(trustedNode.ID())
 	srv := &Server{
 		Config: Config{
-			PrivateKey:   newkey(),
+			Identity:     newkey(),
 			MaxPeers:     10,
 			NoDial:       true,
 			NoDiscovery:  true,
@@ -265,7 +303,7 @@ func TestServerAtCap(t *testing.T) {
 
 	newconn := func(id enode.ID) *conn {
 		fd, _ := net.Pipe()
-		tx := newTestTransport(&trustedNode.PublicKey, fd, nil)
+		tx := newTestTransport(trustedNode, fd)
 		node := enode.SignNull(new(enr.Record), id)
 		return &conn{fd: fd, transport: tx, flags: inboundConn, node: node, cont: make(chan error)}
 	}
@@ -316,7 +354,7 @@ func TestServerReplacesStalePeerOnDuplicateID(t *testing.T) {
 	remoteKey := newkey()
 	srv := &Server{
 		Config: Config{
-			PrivateKey:  newkey(),
+			Identity:    newkey(),
 			MaxPeers:    10,
 			NoDial:      true,
 			NoDiscovery: true,
@@ -338,7 +376,7 @@ func TestServerReplacesStalePeerOnDuplicateID(t *testing.T) {
 	newconn := func() *conn {
 		fd, remote := net.Pipe()
 		remotes = append(remotes, remote)
-		tx := newTestTransport(&remoteKey.PublicKey, fd, nil)
+		tx := newTestTransport(remoteKey, fd)
 		node := enode.SignNull(new(enr.Record), id)
 		return &conn{fd: fd, transport: tx, flags: inboundConn, node: node, cont: make(chan error)}
 	}
@@ -407,14 +445,14 @@ func TestServerReplacesStalePeerOnDuplicateID(t *testing.T) {
 }
 
 func TestServerPeerLimits(t *testing.T) {
-	srvkey := newkey()
 	clientkey := newkey()
-	clientnode := enode.NewV4(&clientkey.PublicKey, nil, 0, 0)
+	clientID := clientkey.ID()
+	clientnode := enode.NewQuantumSafe(enode.ID(clientID), nil, 0)
 
 	var tp = &setupTransport{
-		pubkey: &clientkey.PublicKey,
+		remote: remoteIdentity(clientkey),
 		phs: protoHandshake{
-			ID: crypto.FromECDSAPub(&clientkey.PublicKey)[1:],
+			ID: clientID[:],
 			// Force "DiscUselessPeer" due to unmatching caps
 			// Caps: []Cap{discard.cap()},
 		},
@@ -422,14 +460,14 @@ func TestServerPeerLimits(t *testing.T) {
 
 	srv := &Server{
 		Config: Config{
-			PrivateKey:  srvkey,
+			Identity:    newkey(),
 			MaxPeers:    0,
 			NoDial:      true,
 			NoDiscovery: true,
 			Protocols:   []Protocol{discard},
 			Logger:      testlog.Logger(t, log.LvlTrace),
 		},
-		newTransport: func(fd net.Conn, dialDest *ecdsa.PublicKey) transport { return tp },
+		newTransport: func(net.Conn, *qsconn.Identity, *enode.Node) transport { return tp },
 	}
 	if err := srv.Start(); err != nil {
 		t.Fatalf("couldn't start server: %v", err)
@@ -473,11 +511,18 @@ func TestServerPeerLimits(t *testing.T) {
 
 func TestServerSetupConn(t *testing.T) {
 	var (
-		clientkey, srvkey = newkey(), newkey()
-		clientpub         = &clientkey.PublicKey
-		srvpub            = &srvkey.PublicKey
+		clientkey, srvkey, otherkey = newkey(), newkey(), newkey()
+		client                      = remoteIdentity(clientkey)
+		clientID                    = clientkey.ID()
+		srvID                       = srvkey.ID()
+		clientnode                  = enode.NewQuantumSafe(enode.ID(clientID), nil, 0)
 	)
+	// forged claims the client's node ID with another key.
+	forged := remoteIdentity(otherkey)
+	forged.ID = clientID
+
 	tests := []struct {
+		name      string
 		dontstart bool
 		tt        *setupTransport
 		flags     connFlag
@@ -487,39 +532,60 @@ func TestServerSetupConn(t *testing.T) {
 		wantCalls    string
 	}{
 		{
+			name:         "stopped",
 			dontstart:    true,
-			tt:           &setupTransport{pubkey: clientpub},
+			tt:           &setupTransport{remote: client},
 			wantCalls:    "close,",
 			wantCloseErr: errServerStopped,
 		},
 		{
-			tt:           &setupTransport{pubkey: clientpub, encHandshakeErr: errEncHandshakeError},
+			name:         "enc-handshake-error",
+			tt:           &setupTransport{remote: client, encHandshakeErr: errors.New("handshake failed")},
 			flags:        inboundConn,
 			wantCalls:    "doEncHandshake,close,",
 			wantCloseErr: errEncHandshakeError,
 		},
 		{
-			tt:           &setupTransport{pubkey: clientpub, phs: protoHandshake{ID: randomID().Bytes()}},
-			dialDest:     enode.NewV4(clientpub, nil, 0, 0),
+			name:         "dialled-id-mismatch",
+			tt:           &setupTransport{remote: remoteIdentity(otherkey)},
+			dialDest:     clientnode,
+			flags:        dynDialedConn,
+			wantCalls:    "doEncHandshake,close,",
+			wantCloseErr: errEncHandshakeError,
+		},
+		{
+			name:         "key-does-not-hash-to-id",
+			tt:           &setupTransport{remote: forged},
+			flags:        inboundConn,
+			wantCalls:    "doEncHandshake,close,",
+			wantCloseErr: errEncHandshakeError,
+		},
+		{
+			name:         "proto-handshake-identity",
+			tt:           &setupTransport{remote: client, phs: protoHandshake{ID: randomID().Bytes()}},
+			dialDest:     clientnode,
 			flags:        dynDialedConn,
 			wantCalls:    "doEncHandshake,doProtoHandshake,close,",
 			wantCloseErr: DiscUnexpectedIdentity,
 		},
 		{
-			tt:           &setupTransport{pubkey: clientpub, protoHandshakeErr: errProtoHandshakeError},
-			dialDest:     enode.NewV4(clientpub, nil, 0, 0),
+			name:         "proto-handshake-error",
+			tt:           &setupTransport{remote: client, protoHandshakeErr: errProtoHandshakeError},
+			dialDest:     clientnode,
 			flags:        dynDialedConn,
 			wantCalls:    "doEncHandshake,doProtoHandshake,close,",
 			wantCloseErr: errProtoHandshakeError,
 		},
 		{
-			tt:           &setupTransport{pubkey: srvpub, phs: protoHandshake{ID: crypto.FromECDSAPub(srvpub)[1:]}},
+			name:         "self",
+			tt:           &setupTransport{remote: remoteIdentity(srvkey), phs: protoHandshake{ID: srvID[:]}},
 			flags:        inboundConn,
 			wantCalls:    "doEncHandshake,close,",
 			wantCloseErr: DiscSelf,
 		},
 		{
-			tt:           &setupTransport{pubkey: clientpub, phs: protoHandshake{ID: crypto.FromECDSAPub(clientpub)[1:]}},
+			name:         "useless-peer",
+			tt:           &setupTransport{remote: client, phs: protoHandshake{ID: clientID[:]}},
 			flags:        inboundConn,
 			wantCalls:    "doEncHandshake,doProtoHandshake,close,",
 			wantCloseErr: DiscUselessPeer,
@@ -527,9 +593,9 @@ func TestServerSetupConn(t *testing.T) {
 	}
 
 	for i, test := range tests {
-		t.Run(test.wantCalls, func(t *testing.T) {
+		t.Run(test.name, func(t *testing.T) {
 			cfg := Config{
-				PrivateKey:  srvkey,
+				Identity:    srvkey,
 				MaxPeers:    10,
 				NoDial:      true,
 				NoDiscovery: true,
@@ -538,7 +604,7 @@ func TestServerSetupConn(t *testing.T) {
 			}
 			srv := &Server{
 				Config:       cfg,
-				newTransport: func(fd net.Conn, dialDest *ecdsa.PublicKey) transport { return test.tt },
+				newTransport: func(net.Conn, *qsconn.Identity, *enode.Node) transport { return test.tt },
 				log:          cfg.Logger,
 			}
 			if !test.dontstart {
@@ -560,7 +626,7 @@ func TestServerSetupConn(t *testing.T) {
 }
 
 type setupTransport struct {
-	pubkey            *ecdsa.PublicKey
+	remote            *qsconn.RemoteIdentity
 	encHandshakeErr   error
 	phs               protoHandshake
 	protoHandshakeErr error
@@ -569,9 +635,12 @@ type setupTransport struct {
 	closeErr error
 }
 
-func (c *setupTransport) doEncHandshake(prv *ecdsa.PrivateKey) (*ecdsa.PublicKey, error) {
+func (c *setupTransport) doEncHandshake() (*qsconn.RemoteIdentity, error) {
 	c.calls += "doEncHandshake,"
-	return c.pubkey, c.encHandshakeErr
+	if c.encHandshakeErr != nil {
+		return nil, c.encHandshakeErr
+	}
+	return c.remote, nil
 }
 
 func (c *setupTransport) doProtoHandshake(our *protoHandshake) (*protoHandshake, error) {
@@ -594,10 +663,11 @@ func (c *setupTransport) ReadMsg() (Msg, error) {
 	panic("ReadMsg called on setupTransport")
 }
 
-func newkey() *ecdsa.PrivateKey {
-	key, err := crypto.GenerateKey()
+// newkey makes a node identity.
+func newkey() *qsconn.Identity {
+	key, err := qsconn.GenerateIdentity()
 	if err != nil {
-		panic("couldn't generate key: " + err.Error())
+		panic("couldn't generate identity: " + err.Error())
 	}
 	return key
 }
@@ -615,7 +685,7 @@ func TestServerInboundThrottle(t *testing.T) {
 	newTransportCalled := make(chan struct{})
 	srv := &Server{
 		Config: Config{
-			PrivateKey:  newkey(),
+			Identity:    newkey(),
 			ListenAddr:  "127.0.0.1:0",
 			MaxPeers:    10,
 			NoDial:      true,
@@ -623,9 +693,9 @@ func TestServerInboundThrottle(t *testing.T) {
 			Protocols:   []Protocol{discard},
 			Logger:      testlog.Logger(t, log.LvlTrace),
 		},
-		newTransport: func(fd net.Conn, dialDest *ecdsa.PublicKey) transport {
+		newTransport: func(fd net.Conn, key *qsconn.Identity, dialDest *enode.Node) transport {
 			newTransportCalled <- struct{}{}
-			return newRLPX(fd, dialDest)
+			return newQSConn(fd, key, dialDest)
 		},
 		listenFunc: func(network, laddr string) (net.Listener, error) {
 			fakeAddr := &net.TCPAddr{IP: net.IP{95, 33, 21, 2}, Port: 4444}

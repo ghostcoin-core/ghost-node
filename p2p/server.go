@@ -19,7 +19,6 @@ package p2p
 
 import (
 	"bytes"
-	"crypto/ecdsa"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -31,7 +30,6 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/mclock"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/p2p/discover"
@@ -68,21 +66,18 @@ const (
 
 var (
 	errServerStopped       = errors.New("server stopped")
-	errEncHandshakeError   = errors.New("rlpx enc error")
-	errProtoHandshakeError = errors.New("rlpx proto error")
+	errEncHandshakeError   = errors.New("enc handshake error")
+	errProtoHandshakeError = errors.New("proto handshake error")
 )
 
 // Config holds Server options.
 type Config struct {
-	// This field must be set to a valid secp256k1 private key.
-	PrivateKey *ecdsa.PrivateKey `toml:"-"`
-
-	// Identity is the node's quantum-safe identity. When it is set, every
+	// Identity is the node's quantum-safe identity and must be set. Every
 	// connection, dialled and accepted, runs on the quantum-safe transport
-	// of package p2p/qsconn, the node ID is the hash of its public key, and
-	// PrivateKey is not used for connections. Static and trusted nodes are
-	// then named by that ID (enode://<64 hex chars>@host:port), and the
-	// server finds no peers by itself: it dials only the static nodes.
+	// of package p2p/qsconn, and the node ID is the hash of its public key.
+	// Static and trusted nodes are named by that ID
+	// (enode://<64 hex chars>@host:port), and the server finds no peers by
+	// itself: it dials only the static nodes.
 	Identity *qsconn.Identity `toml:"-"`
 
 	// MaxPeers is the maximum number of peers that can be
@@ -101,6 +96,10 @@ type Config struct {
 
 	// NoDiscovery can be used to disable the peer discovery mechanism.
 	// Disabling is useful for protocol debugging (manual topology).
+	//
+	// NoDiscovery, DiscoveryV4, DiscoveryV5, the bootstrap nodes and DiscAddr
+	// are kept in the configuration but not used for now: the server opens
+	// no UDP port and only dials its static nodes.
 	NoDiscovery bool
 
 	// DiscoveryV4 specifies whether V4 discovery should be started.
@@ -185,7 +184,7 @@ type Server struct {
 
 	// Hooks for testing. These are useful because we can inhibit
 	// the whole protocol stack.
-	newTransport func(net.Conn, *ecdsa.PublicKey) transport
+	newTransport func(fd net.Conn, key *qsconn.Identity, dialDest *enode.Node) transport
 	newPeerHook  func(*Peer)
 	listenFunc   func(network, addr string) (net.Listener, error)
 
@@ -200,8 +199,6 @@ type Server struct {
 
 	nodedb    *enode.DB
 	localnode *enode.LocalNode
-	discv4    *discover.UDPv4
-	discv5    *discover.UDPv5
 	discmix   *enode.FairMix
 	dialsched *dialScheduler
 
@@ -244,16 +241,19 @@ const (
 type conn struct {
 	fd net.Conn
 	transport
-	node  *enode.Node
-	flags connFlag
-	cont  chan error // The run loop uses cont to signal errors to SetupConn.
-	caps  []Cap      // valid after the protocol handshake
-	name  string     // valid after the protocol handshake
+	node   *enode.Node
+	pubkey []byte // the remote ML-DSA-44 public key, valid after the encryption handshake
+	flags  connFlag
+	cont   chan error // The run loop uses cont to signal errors to SetupConn.
+	caps   []Cap      // valid after the protocol handshake
+	name   string     // valid after the protocol handshake
 }
 
 type transport interface {
-	// The two handshakes.
-	doEncHandshake(prv *ecdsa.PrivateKey) (*ecdsa.PublicKey, error)
+	// The two handshakes. The encryption handshake is the quantum-safe one
+	// of package p2p/qsconn; it returns the remote identity it
+	// authenticated.
+	doEncHandshake() (*qsconn.RemoteIdentity, error)
 	doProtoHandshake(our *protoHandshake) (*protoHandshake, error)
 	// The MsgReadWriter can only be used after the encryption
 	// handshake has completed. The code uses conn.id to track this
@@ -405,22 +405,21 @@ func (srv *Server) Self() *enode.Node {
 	srv.lock.Unlock()
 
 	if ln == nil {
-		if srv.Identity != nil {
-			return enode.NewQuantumSafe(enode.ID(srv.Identity.ID()), net.ParseIP("0.0.0.0"), 0)
-		}
-		return enode.NewV4(&srv.PrivateKey.PublicKey, net.ParseIP("0.0.0.0"), 0, 0)
+		return enode.NewQuantumSafe(enode.ID(srv.Identity.ID()), net.ParseIP("0.0.0.0"), 0)
 	}
 	return ln.Node()
 }
 
-// DiscoveryV4 returns the discovery v4 instance, if configured.
+// DiscoveryV4 returns the UDPv4 instance. The server opens no UDP port, so
+// it is nil.
 func (srv *Server) DiscoveryV4() *discover.UDPv4 {
-	return srv.discv4
+	return nil
 }
 
-// DiscoveryV5 returns the discovery v5 instance, if configured.
+// DiscoveryV5 returns the UDPv5 instance. The server opens no UDP port, so
+// it is nil.
 func (srv *Server) DiscoveryV5() *discover.UDPv5 {
-	return srv.discv5
+	return nil
 }
 
 // Stop terminates the server and all active peer connections.
@@ -439,32 +438,6 @@ func (srv *Server) Stop() {
 	close(srv.quit)
 	srv.lock.Unlock()
 	srv.loopWG.Wait()
-}
-
-// sharedUDPConn implements a shared connection. Write sends messages to the underlying connection while read returns
-// messages that were found unprocessable and sent to the unhandled channel by the primary listener.
-type sharedUDPConn struct {
-	*net.UDPConn
-	unhandled chan discover.ReadPacket
-}
-
-// ReadFromUDPAddrPort implements discover.UDPConn
-func (s *sharedUDPConn) ReadFromUDPAddrPort(b []byte) (n int, addr netip.AddrPort, err error) {
-	packet, ok := <-s.unhandled
-	if !ok {
-		return 0, netip.AddrPort{}, errors.New("connection was closed")
-	}
-	l := len(packet.Data)
-	if l > len(b) {
-		l = len(b)
-	}
-	copy(b[:l], packet.Data[:l])
-	return l, packet.Addr, nil
-}
-
-// Close implements discover.UDPConn
-func (s *sharedUDPConn) Close() error {
-	return nil
 }
 
 // Start starts running the server.
@@ -488,11 +461,11 @@ func (srv *Server) Start() (err error) {
 	}
 
 	// static fields
-	if srv.PrivateKey == nil && srv.Identity == nil {
-		return errors.New("Server.PrivateKey or Server.Identity must be set to a non-nil key")
+	if srv.Identity == nil {
+		return errors.New("Server.Identity must be set to a non-nil identity")
 	}
 	if srv.newTransport == nil {
-		srv.newTransport = newRLPX
+		srv.newTransport = newQSConn
 	}
 	if srv.listenFunc == nil {
 		srv.listenFunc = net.Listen
@@ -516,9 +489,7 @@ func (srv *Server) Start() (err error) {
 			return err
 		}
 	}
-	if err := srv.setupDiscovery(); err != nil {
-		return err
-	}
+	srv.setupDiscovery()
 	srv.setupDialScheduler()
 
 	srv.loopWG.Add(1)
@@ -527,16 +498,9 @@ func (srv *Server) Start() (err error) {
 }
 
 func (srv *Server) setupLocalNode() error {
-	// Create the devp2p handshake. With a quantum-safe identity, its ID is
-	// the 32-byte node ID.
-	srv.ourHandshake = &protoHandshake{Version: baseProtocolVersion, Name: srv.Name}
-	if srv.Identity != nil {
-		id := srv.Identity.ID()
-		srv.ourHandshake.ID = id[:]
-	} else {
-		pubkey := crypto.FromECDSAPub(&srv.PrivateKey.PublicKey)
-		srv.ourHandshake.ID = pubkey[1:]
-	}
+	// Create the protocol handshake. Its ID is the 32-byte node ID.
+	id := srv.Identity.ID()
+	srv.ourHandshake = &protoHandshake{Version: baseProtocolVersion, Name: srv.Name, ID: id[:]}
 	for _, p := range srv.Protocols {
 		srv.ourHandshake.Caps = append(srv.ourHandshake.Caps, p.cap())
 	}
@@ -548,11 +512,7 @@ func (srv *Server) setupLocalNode() error {
 		return err
 	}
 	srv.nodedb = db
-	if srv.Identity != nil {
-		srv.localnode = enode.NewLocalNodeQuantumSafe(db, enode.ID(srv.Identity.ID()))
-	} else {
-		srv.localnode = enode.NewLocalNode(db, srv.PrivateKey)
-	}
+	srv.localnode = enode.NewLocalNodeQuantumSafe(db, enode.ID(id))
 	srv.localnode.SetFallbackIP(net.IP{127, 0, 0, 1})
 	// TODO: check conflicts
 	for _, p := range srv.Protocols {
@@ -563,70 +523,12 @@ func (srv *Server) setupLocalNode() error {
 	return nil
 }
 
-func (srv *Server) setupDiscovery() error {
+// setupDiscovery creates the source of dial candidates. It has no sources:
+// the server only knows its static and trusted nodes. It opens no UDP port,
+// whatever NoDiscovery, DiscoveryV4 and DiscoveryV5 say, and does not take
+// candidates from the protocols, which name nodes it cannot identify.
+func (srv *Server) setupDiscovery() {
 	srv.discmix = enode.NewFairMix(discmixTimeout)
-
-	// Don't listen on UDP endpoint if DHT is disabled. A server with a
-	// quantum-safe identity only knows the static and trusted nodes: the
-	// UDP protocols and the protocols' candidate sources name secp256k1
-	// nodes, which it cannot identify.
-	if srv.NoDiscovery || srv.Identity != nil {
-		return nil
-	}
-	conn, err := srv.setupUDPListening()
-	if err != nil {
-		return err
-	}
-
-	var (
-		sconn     discover.UDPConn = conn
-		unhandled chan discover.ReadPacket
-	)
-	// If both versions of discovery are running, setup a shared
-	// connection, so v5 can read unhandled messages from v4.
-	if srv.Config.DiscoveryV4 && srv.Config.DiscoveryV5 {
-		unhandled = make(chan discover.ReadPacket, 100)
-		sconn = &sharedUDPConn{conn, unhandled}
-	}
-
-	// Start discovery services.
-	if srv.Config.DiscoveryV4 {
-		cfg := discover.Config{
-			PrivateKey:  srv.PrivateKey,
-			NetRestrict: srv.NetRestrict,
-			Bootnodes:   srv.BootstrapNodes,
-			Unhandled:   unhandled,
-			Log:         srv.log,
-		}
-		ntab, err := discover.ListenV4(conn, srv.localnode, cfg)
-		if err != nil {
-			return err
-		}
-		srv.discv4 = ntab
-		srv.discmix.AddSource(ntab.RandomNodes())
-	}
-	if srv.Config.DiscoveryV5 {
-		cfg := discover.Config{
-			PrivateKey:  srv.PrivateKey,
-			NetRestrict: srv.NetRestrict,
-			Bootnodes:   srv.BootstrapNodesV5,
-			Log:         srv.log,
-		}
-		srv.discv5, err = discover.ListenV5(sconn, srv.localnode, cfg)
-		if err != nil {
-			return err
-		}
-	}
-
-	// Add protocol-specific discovery sources.
-	added := make(map[string]bool)
-	for _, proto := range srv.Protocols {
-		if proto.DialCandidates != nil && !added[proto.Name] {
-			srv.discmix.AddSource(proto.DialCandidates)
-			added[proto.Name] = true
-		}
-	}
-	return nil
 }
 
 func (srv *Server) setupDialScheduler() {
@@ -638,9 +540,6 @@ func (srv *Server) setupDialScheduler() {
 		netRestrict:    srv.NetRestrict,
 		dialer:         srv.Dialer,
 		clock:          srv.clock,
-	}
-	if srv.discv4 != nil {
-		config.resolver = srv.discv4
 	}
 	if config.dialer == nil {
 		config.dialer = tcpDialer{&net.Dialer{Timeout: defaultDialTimeout}}
@@ -695,36 +594,6 @@ func (srv *Server) setupListening() error {
 	srv.loopWG.Add(1)
 	go srv.listenLoop()
 	return nil
-}
-
-func (srv *Server) setupUDPListening() (*net.UDPConn, error) {
-	listenAddr := srv.ListenAddr
-
-	// Use an alternate listening address for UDP if
-	// a custom discovery address is configured.
-	if srv.DiscAddr != "" {
-		listenAddr = srv.DiscAddr
-	}
-	addr, err := net.ResolveUDPAddr("udp", listenAddr)
-	if err != nil {
-		return nil, err
-	}
-	conn, err := net.ListenUDP("udp", addr)
-	if err != nil {
-		return nil, err
-	}
-	laddr := conn.LocalAddr().(*net.UDPAddr)
-	srv.localnode.SetFallbackUDP(laddr.Port)
-	srv.log.Debug("UDP listener up", "addr", laddr)
-	if !laddr.IP.IsLoopback() && !laddr.IP.IsPrivate() {
-		srv.portMappingRegister <- &portMapping{
-			protocol: "UDP",
-			name:     "ethereum peer discovery",
-			port:     laddr.Port,
-		}
-	}
-
-	return conn, nil
 }
 
 // doPeerOp runs fn on the main loop.
@@ -857,13 +726,6 @@ running:
 
 	srv.log.Trace("P2P networking is spinning down")
 
-	// Terminate discovery. If there is a running lookup it will terminate soon.
-	if srv.discv4 != nil {
-		srv.discv4.Close()
-	}
-	if srv.discv5 != nil {
-		srv.discv5.Close()
-	}
 	// Disconnect all peers.
 	for _, p := range peers {
 		p.Disconnect(DiscQuitting)
@@ -1012,13 +874,7 @@ func (srv *Server) checkInboundConn(remoteIP netip.Addr) error {
 // or the handshakes have failed.
 func (srv *Server) SetupConn(fd net.Conn, flags connFlag, dialDest *enode.Node) error {
 	c := &conn{fd: fd, flags: flags, cont: make(chan error)}
-	if srv.Identity != nil {
-		c.transport = newQSConn(fd, srv.Identity, dialDest)
-	} else if dialDest == nil {
-		c.transport = srv.newTransport(fd, nil)
-	} else {
-		c.transport = srv.newTransport(fd, dialDest.Pubkey())
-	}
+	c.transport = srv.newTransport(fd, srv.Identity, dialDest)
 
 	err := srv.setupConn(c, dialDest)
 	if err != nil {
@@ -1039,33 +895,9 @@ func (srv *Server) setupConn(c *conn, dialDest *enode.Node) error {
 		return errServerStopped
 	}
 
-	if srv.Identity != nil {
-		if err := srv.setupQSConn(c, dialDest); err != nil {
-			srv.log.Trace("Failed quantum-safe handshake", "addr", c.fd.RemoteAddr(), "conn", c.flags, "err", err)
-			return fmt.Errorf("%w: %v", errEncHandshakeError, err)
-		}
-	} else {
-		// If dialing, figure out the remote public key.
-		if dialDest != nil {
-			dialPubkey := new(ecdsa.PublicKey)
-			if err := dialDest.Load((*enode.Secp256k1)(dialPubkey)); err != nil {
-				err = fmt.Errorf("%w: dial destination doesn't have a secp256k1 public key", errEncHandshakeError)
-				srv.log.Trace("Setting up connection failed", "addr", c.fd.RemoteAddr(), "conn", c.flags, "err", err)
-				return err
-			}
-		}
-
-		// Run the RLPx handshake.
-		remotePubkey, err := c.doEncHandshake(srv.PrivateKey)
-		if err != nil {
-			srv.log.Trace("Failed RLPx handshake", "addr", c.fd.RemoteAddr(), "conn", c.flags, "err", err)
-			return fmt.Errorf("%w: %v", errEncHandshakeError, err)
-		}
-		if dialDest != nil {
-			c.node = dialDest
-		} else {
-			c.node = nodeFromConn(remotePubkey, c.fd)
-		}
+	if err := srv.doEncHandshake(c, dialDest); err != nil {
+		srv.log.Trace("Failed quantum-safe handshake", "addr", c.fd.RemoteAddr(), "conn", c.flags, "err", err)
+		return fmt.Errorf("%w: %v", errEncHandshakeError, err)
 	}
 	clog := srv.log.New("id", c.node.ID(), "addr", c.fd.RemoteAddr(), "conn", c.flags)
 	err := srv.checkpoint(c, srv.checkpointPostHandshake)
@@ -1080,8 +912,7 @@ func (srv *Server) setupConn(c *conn, dialDest *enode.Node) error {
 		clog.Trace("Failed p2p handshake", "err", err)
 		return fmt.Errorf("%w: %v", errProtoHandshakeError, err)
 	}
-	if id := c.node.ID(); srv.Identity != nil && !bytes.Equal(phs.ID, id[:]) ||
-		srv.Identity == nil && !bytes.Equal(crypto.Keccak256(phs.ID), id[:]) {
+	if id := c.node.ID(); !bytes.Equal(phs.ID, id[:]) {
 		clog.Trace("Wrong devp2p handshake identity", "phsid", hex.EncodeToString(phs.ID))
 		return DiscUnexpectedIdentity
 	}
@@ -1095,15 +926,12 @@ func (srv *Server) setupConn(c *conn, dialDest *enode.Node) error {
 	return nil
 }
 
-// setupQSConn runs the quantum-safe handshake and sets c.node. The node ID is
-// the one the handshake authenticated; when dialling, it must be the dialled
-// ID. Anything else closes the connection: there is no other transport.
-func (srv *Server) setupQSConn(c *conn, dialDest *enode.Node) error {
-	qs, ok := c.transport.(qsHandshaker)
-	if !ok {
-		return errors.New("transport has no quantum-safe handshake")
-	}
-	remote, err := qs.doQSHandshake()
+// doEncHandshake runs the quantum-safe handshake and sets c.node and
+// c.pubkey. The node ID is the one the handshake authenticated; when
+// dialling, it must be the dialled ID. Anything else closes the connection:
+// there is no other transport.
+func (srv *Server) doEncHandshake(c *conn, dialDest *enode.Node) error {
+	remote, err := c.doEncHandshake()
 	if err != nil {
 		return err
 	}
@@ -1117,19 +945,10 @@ func (srv *Server) setupQSConn(c *conn, dialDest *enode.Node) error {
 		}
 		c.node = dialDest
 	} else {
-		c.node = quantumSafeNodeFromConn(id, c.fd)
+		c.node = nodeFromConn(id, c.fd)
 	}
+	c.pubkey = remote.PublicKey
 	return nil
-}
-
-func nodeFromConn(pubkey *ecdsa.PublicKey, conn net.Conn) *enode.Node {
-	var ip net.IP
-	var port int
-	if tcp, ok := conn.RemoteAddr().(*net.TCPAddr); ok {
-		ip = tcp.IP
-		port = tcp.Port
-	}
-	return enode.NewV4(pubkey, ip, port, port)
 }
 
 // checkpoint sends the conn to run, which performs the
@@ -1189,17 +1008,18 @@ func (srv *Server) runPeer(p *Peer) {
 
 // NodeInfo represents a short summary of the information known about the host.
 type NodeInfo struct {
-	ID    string `json:"id"`    // Unique node identifier (also the encryption key)
+	ID    string `json:"id"`    // Node ID, the hash of the identity's scheme and public key
 	Name  string `json:"name"`  // Name of the node, including client type, version, OS, custom data
 	Enode string `json:"enode"` // Enode URL for adding this peer from remote peers
 	ENR   string `json:"enr"`   // Ethereum Node Record
 	IP    string `json:"ip"`    // IP address of the node
 	Ports struct {
 		Discovery int `json:"discovery"` // UDP listening port for discovery protocol
-		Listener  int `json:"listener"`  // TCP listening port for RLPx
+		Listener  int `json:"listener"`  // TCP listening port for peer connections
 	} `json:"ports"`
 	ListenAddr string                 `json:"listenAddr"`
 	Protocols  map[string]interface{} `json:"protocols"`
+	PublicKey  string                 `json:"publicKey"` // ML-DSA-44 public key of the node identity, hex
 }
 
 // NodeInfo gathers and returns a collection of metadata known about the host.
@@ -1210,6 +1030,7 @@ func (srv *Server) NodeInfo() *NodeInfo {
 		Name:       srv.Name,
 		Enode:      node.URLv4(),
 		ID:         node.ID().String(),
+		PublicKey:  hex.EncodeToString(srv.Identity.PublicKey()),
 		IP:         node.IPAddr().String(),
 		ListenAddr: srv.ListenAddr,
 		Protocols:  make(map[string]interface{}),

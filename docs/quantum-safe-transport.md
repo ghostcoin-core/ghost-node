@@ -132,9 +132,12 @@ after a failed write, returns the same error. A failed handshake fails both.
 
 ## The p2p server
 
-`p2p.Config.Identity` holds a `*qsconn.Identity`. When it is set, every
-connection the server dials or accepts runs on `qsconn.Conn`, through the
-transport in `p2p/transport_qsconn.go`, and nothing else:
+`p2p.Config.Identity` holds a `*qsconn.Identity`, and a server without one
+does not start (`TestServerRequiresIdentity`). Every connection the server
+dials or accepts runs on `qsconn.Conn`, through the transport in
+`p2p/transport_qsconn.go`, and nothing else. The old RLPx handshake and the
+secp256k1 node key (`Config.PrivateKey`) are gone from the server; the
+package `p2p/rlpx` itself remains for now, but the server does not use it.
 
 - The node ID of the server (`Server.Self`, `Server.LocalNode`) is the
   identity's node ID.
@@ -142,8 +145,8 @@ transport in `p2p/transport_qsconn.go`, and nothing else:
   node ID it dialled (inside `qsconn`, and again in the server). An accepted
   connection takes the remote node ID from the handshake.
 - The protocol handshake that follows carries the 32-byte node ID, and it
-  must equal the one the handshake authenticated. Frames are not
-  compressed.
+  must equal the one the handshake authenticated; any other length, such as
+  a 64-byte secp256k1 public key, is refused. Frames are not compressed.
 - Any handshake failure, any mismatch between the dialled ID and the
   responder's key hash, and any peer that cannot be identified closes the
   connection. There is no retry on another transport; a peer that speaks
@@ -151,8 +154,17 @@ transport in `p2p/transport_qsconn.go`, and nothing else:
   (`TestServerQSConnRefusesLegacyPeer`).
 - The server connects only to its static and trusted nodes: it does not
   open its UDP port or take candidates from the protocols.
+  `Config.NoDiscovery`, `DiscoveryV4`, `DiscoveryV5` and their flags stay in
+  the configuration and are ignored for now.
 
-`Config.PrivateKey` is no longer needed when `Identity` is set.
+### Admin API
+
+`admin_nodeInfo` reports the node's own identity: `id` is the 64 hex chars
+of the node ID, `publicKey` the hex of the ML-DSA-44 public key, and
+`enode` the URL below. `admin_peers` reports, for each peer, the node ID the
+handshake authenticated (`id`), its public key (`publicKey`) and its URL
+(`enode`). `admin_addPeer`, `admin_removePeer`, `admin_addTrustedPeer` and
+`admin_removeTrustedPeer` take that URL.
 
 ### Node URLs
 
@@ -181,11 +193,21 @@ identity is made with `GenerateIdentity` and written with `Save`, mode
 `LoadIdentity` refuses stops the node with that error; the file is not
 replaced. Without a data directory the identity is new on every start.
 
-One exception remains until the secp256k1 node key is removed: a key handed
-over in the node configuration itself (`P2P.PrivateKey`, set by the old node
-key flags and by the in-process simulation adapters, which name nodes by
-that key) keeps the old handshake, and the node logs a warning. A node
-started without one always runs on the quantum-safe transport.
+An identity handed over in the node configuration (`P2P.Identity`) is used
+instead and is not written to the data directory. The command line sets it
+with the flags of the old node key, which keep their names:
+
+| Flag | Value |
+|---|---|
+| `--nodekey <file>` | an identity file written by `Identity.Save`, read with `LoadIdentity` |
+| `--nodekeyhex <hex>` | the text of such a file, the 5,120 hex chars of the private key, read with `ParseIdentityHex` |
+
+The two flags exclude each other, and a value that cannot be loaded stops
+the node; it does not fall back to the stored or a new identity
+(`TestNodeKeyFlagNamesQuantumSafeIdentity` in `cmd/geth/`). A secp256k1 key
+is not accepted. The simulation framework of `p2p/simulations` and
+`cmd/p2psim`, which named nodes by secp256k1 key, are removed;
+`p2p/simulations/pipes` remains.
 
 Two nodes that know each other this way connect and sync over the eth
 protocol (`TestSyncOverQSConn` in `eth/`).

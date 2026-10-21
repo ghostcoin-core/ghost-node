@@ -17,6 +17,7 @@
 package p2p
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -518,7 +519,7 @@ func (rw *protoRW) ReadMsg() (Msg, error) {
 type PeerInfo struct {
 	ENR     string   `json:"enr,omitempty"` // Ethereum Node Record
 	Enode   string   `json:"enode"`         // Node URL
-	ID      string   `json:"id"`            // Unique node identifier
+	ID      string   `json:"id"`            // Node ID, the hash of the identity's scheme and public key
 	Name    string   `json:"name"`          // Name of the node, including client type, version, OS, custom data
 	Caps    []string `json:"caps"`          // Protocols advertised by this peer
 	Network struct {
@@ -529,6 +530,7 @@ type PeerInfo struct {
 		Static        bool   `json:"static"`
 	} `json:"network"`
 	Protocols map[string]interface{} `json:"protocols"` // Sub-protocol specific metadata fields
+	PublicKey string                 `json:"publicKey"` // ML-DSA-44 public key the handshake authenticated, hex
 }
 
 // Info gathers and returns a collection of metadata known about a peer.
@@ -542,6 +544,7 @@ func (p *Peer) Info() *PeerInfo {
 	info := &PeerInfo{
 		Enode:     p.Node().URLv4(),
 		ID:        p.ID().String(),
+		PublicKey: hex.EncodeToString(p.rw.pubkey),
 		Name:      p.Fullname(),
 		Caps:      caps,
 		Protocols: make(map[string]interface{}, len(p.running)),

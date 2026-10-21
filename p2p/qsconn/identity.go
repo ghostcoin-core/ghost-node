@@ -167,6 +167,22 @@ func LoadIdentity(path string) (*Identity, error) {
 	if _, err := f.ReadAt(text, 0); err != nil {
 		return nil, err
 	}
+	return parseIdentity(text)
+}
+
+// ParseIdentityHex parses the text of an identity file written by Save: the
+// hex encoding of one ML-DSA-44 private key, exactly, with no prefix and no
+// line ending.
+func ParseIdentityHex(text string) (*Identity, error) {
+	if len(text) != 2*mldsa44.PrivateKeySize {
+		return nil, fmt.Errorf("qsconn: node key has %d hex chars, want %d", len(text), 2*mldsa44.PrivateKeySize)
+	}
+	return parseIdentity([]byte(text))
+}
+
+// parseIdentity decodes the 2*mldsa44.PrivateKeySize hex chars of a
+// private key.
+func parseIdentity(text []byte) (*Identity, error) {
 	raw := make([]byte, mldsa44.PrivateKeySize)
 	if n, err := hex.Decode(raw, text); err != nil || n != len(raw) {
 		return nil, errors.New("qsconn: node key is not hex")

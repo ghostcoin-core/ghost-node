@@ -17,8 +17,12 @@
 package p2p
 
 import (
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
+	"io"
 	"net"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -117,9 +121,6 @@ func TestServerQSConnTwoNodes(t *testing.T) {
 	}
 
 	srvB := startQSServer(t, "b", keyB, true, []Protocol{proto})
-	if srvB.PrivateKey != nil {
-		t.Fatal("server has a secp256k1 key")
-	}
 	urlB := srvB.Self().URLv4()
 	wantPrefix := "enode://" + keyB.ID().String() + "@127.0.0.1:"
 	if !strings.HasPrefix(urlB, wantPrefix) {
@@ -161,6 +162,23 @@ func TestServerQSConnTwoNodes(t *testing.T) {
 		}
 		if !strings.HasPrefix(p.Info().Enode, "enode://"+s.peer.String()+"@") {
 			t.Fatalf("peer URL %s does not name the node ID", p.Info().Enode)
+		}
+	}
+	// Each side reports the other's ID and public key, and its own.
+	for _, s := range []struct {
+		srv         *Server
+		self, other *qsconn.Identity
+	}{{srvA, keyA, keyB}, {srvB, keyB, keyA}} {
+		info := s.srv.NodeInfo()
+		if info.ID != s.self.ID().String() || info.PublicKey != hex.EncodeToString(s.self.PublicKey()) {
+			t.Fatalf("node info names %s, want the identity's ID and public key", info.ID)
+		}
+		if !strings.HasPrefix(info.Enode, "enode://"+s.self.ID().String()+"@") {
+			t.Fatalf("node info URL %s does not name the node ID", info.Enode)
+		}
+		peers := s.srv.PeersInfo()
+		if len(peers) != 1 || peers[0].ID != s.other.ID().String() || peers[0].PublicKey != hex.EncodeToString(s.other.PublicKey()) {
+			t.Fatalf("peers info %+v, want the remote identity's ID and public key", peers)
 		}
 	}
 
@@ -205,7 +223,7 @@ func TestServerQSConnWrongNodeID(t *testing.T) {
 
 	wrong := []*enode.Node{
 		enode.NewQuantumSafe(enode.ID(other.ID()), addrB.IP, addrB.Port),
-		enode.NewV4(&newkey().PublicKey, addrB.IP, addrB.Port, addrB.Port),
+		enode.NewQuantumSafe(randomID(), addrB.IP, addrB.Port),
 	}
 	for _, dest := range wrong {
 		fd, err := net.Dial("tcp", addrB.String())
@@ -243,38 +261,71 @@ func TestServerQSConnWrongNodeID(t *testing.T) {
 	}
 }
 
-// TestServerQSConnRefusesLegacyPeer has a server with only a secp256k1 key
-// dial a quantum-safe server. Neither side falls back to the old handshake.
+// TestServerQSConnRefusesLegacyPeer sends a server the first message of the
+// old secp256k1 handshake (an EIP-8 auth message: a 2-byte size and the
+// encrypted body). The server closes the connection and adds no peer: there
+// is no handshake to fall back to.
 func TestServerQSConnRefusesLegacyPeer(t *testing.T) {
-	keyB := newQSIdentity(t)
-	srvB := startQSServer(t, "b", keyB, true, nil)
-	addrB := srvB.listener.Addr().(*net.TCPAddr)
+	srv := startQSServer(t, "b", newQSIdentity(t), true, nil)
+	ch := make(chan *PeerEvent, 10)
+	sub := srv.SubscribeEvents(ch)
+	defer sub.Unsubscribe()
 
-	legacy := &Server{Config: Config{
-		PrivateKey:  newkey(),
-		MaxPeers:    10,
-		NoDiscovery: true,
-		NoDial:      true,
-		Logger:      testlog.Logger(t, log.LvlTrace).New("server", "legacy"),
-	}}
-	if err := legacy.Start(); err != nil {
-		t.Fatal(err)
-	}
-	defer legacy.Stop()
-
-	fd, err := net.Dial("tcp", addrB.String())
+	fd, err := net.Dial("tcp", srv.listener.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The legacy side needs a secp256k1 key to dial at all; it reaches the
-	// quantum-safe server, which closes the connection on the first message.
-	dest := enode.NewV4(&newkey().PublicKey, addrB.IP, addrB.Port, addrB.Port)
-	if err := legacy.SetupConn(fd, staticDialedConn, dest); !errors.Is(err, errEncHandshakeError) {
-		t.Fatalf("legacy handshake to a quantum-safe server: got %v, want a handshake error", err)
+	defer fd.Close()
+	auth := make([]byte, 2+399)
+	binary.BigEndian.PutUint16(auth, 399)
+	for i := 2; i < len(auth); i++ {
+		auth[i] = byte(i)
 	}
-	time.Sleep(200 * time.Millisecond)
-	if n := srvB.PeerCount() + legacy.PeerCount(); n != 0 {
+	if _, err := fd.Write(auth); err != nil {
+		t.Fatal(err)
+	}
+	fd.SetReadDeadline(time.Now().Add(10 * time.Second))
+	// The server may reset the connection, as it leaves the body unread.
+	n, err := io.Copy(io.Discard, fd)
+	if errors.Is(err, os.ErrDeadlineExceeded) || n != 0 {
+		t.Fatalf("server answered %d bytes (err %v), want the connection closed without an answer", n, err)
+	}
+	select {
+	case ev := <-ch:
+		t.Fatalf("server event %v after a legacy handshake", ev.Type)
+	default:
+	}
+	if n := srv.PeerCount(); n != 0 {
 		t.Fatalf("%d peers after a legacy handshake", n)
+	}
+}
+
+// TestServerRequiresIdentity checks that a server without a quantum-safe
+// identity does not start: it has no other key to run connections with.
+func TestServerRequiresIdentity(t *testing.T) {
+	srv := &Server{Config: Config{
+		MaxPeers:    10,
+		ListenAddr:  "127.0.0.1:0",
+		NoDiscovery: true,
+		Logger:      testlog.Logger(t, log.LvlTrace),
+	}}
+	if err := srv.Start(); err == nil {
+		srv.Stop()
+		t.Fatal("server started without an identity")
+	}
+}
+
+// TestServerDefaultTransportIsQSConn checks that the server makes every
+// connection, accepted and dialled, on the quantum-safe transport.
+func TestServerDefaultTransportIsQSConn(t *testing.T) {
+	srv := startQSServer(t, "a", newQSIdentity(t), false, nil)
+	fd, _ := net.Pipe()
+	defer fd.Close()
+	for _, dest := range []*enode.Node{nil, enode.NewQuantumSafe(randomID(), net.IP{127, 0, 0, 1}, 30303)} {
+		tr := srv.newTransport(fd, srv.Identity, dest)
+		if _, ok := tr.(*qsconnTransport); !ok {
+			t.Fatalf("transport for dial destination %v is %T, want the quantum-safe transport", dest, tr)
+		}
 	}
 }
 
