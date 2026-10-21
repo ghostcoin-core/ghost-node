@@ -18,6 +18,8 @@ package gasprice
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"math/big"
 	"sync"
 
@@ -241,7 +243,14 @@ func (oracle *Oracle) getBlockValues(ctx context.Context, blockNum uint64, limit
 		}
 		return
 	}
-	signer := types.MakeSigner(oracle.backend.ChainConfig(), block.Number(), block.Time())
+	signer, err := oracle.signer(ctx, block)
+	if err != nil {
+		select {
+		case result <- results{nil, err}:
+		case <-quit:
+		}
+		return
+	}
 
 	// Sort the transaction by effective tip in ascending sort.
 	txs := block.Transactions()
@@ -262,8 +271,17 @@ func (oracle *Oracle) getBlockValues(ctx context.Context, blockNum uint64, limit
 		if ignoreUnder != nil && tip.Cmp(ignoreUnder) == -1 {
 			continue
 		}
+		// A sender that cannot be derived is an error, so a transaction of
+		// the coinbase is never sampled in place of skipped.
 		sender, err := types.Sender(signer, tx)
-		if err == nil && sender != block.Coinbase() {
+		if err != nil {
+			select {
+			case result <- results{nil, fmt.Errorf("transaction %#x: %w", tx.Hash(), err)}:
+			case <-quit:
+			}
+			return
+		}
+		if sender != block.Coinbase() {
 			prices = append(prices, tip)
 			if len(prices) >= limit {
 				break
@@ -274,4 +292,19 @@ func (oracle *Oracle) getBlockValues(ctx context.Context, blockNum uint64, limit
 	case result <- results{prices, nil}:
 	case <-quit:
 	}
+}
+
+// signer returns the signer of block: the plain signer of its fork, wrapped so
+// that it also derives the sender of an account transaction, whose signature
+// is bound to the chain's genesis hash.
+func (oracle *Oracle) signer(ctx context.Context, block *types.Block) (types.Signer, error) {
+	genesis, err := oracle.backend.HeaderByNumber(ctx, 0)
+	if err != nil {
+		return nil, err
+	}
+	if genesis == nil {
+		return nil, errors.New("genesis header not found")
+	}
+	base := types.MakeSigner(oracle.backend.ChainConfig(), block.Number(), block.Time())
+	return types.NewGhostAccountSigner(base, genesis.Hash()), nil
 }

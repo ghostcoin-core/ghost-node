@@ -237,10 +237,17 @@ func (eth *Ethereum) stateAtTransaction(ctx context.Context, block *types.Block,
 		return nil, vm.BlockContext{}, statedb, release, nil
 	}
 	// Recompute transactions up to the target index.
-	signer := types.MakeSigner(eth.blockchain.Config(), block.Number(), block.Time())
+	// The signer also derives the sender of an account transaction, whose
+	// signature is bound to the chain's genesis hash.
+	signer := types.NewGhostAccountSigner(types.MakeSigner(eth.blockchain.Config(), block.Number(), block.Time()), eth.blockchain.Genesis().Hash())
 	for idx, tx := range block.Transactions() {
-		// Assemble the transaction call message and return if the requested offset
-		msg, _ := core.TransactionToMessage(tx, signer, block.BaseFee())
+		// Assemble the transaction call message and return if the requested offset.
+		// A sender that cannot be derived is an error, never the zero address.
+		msg, err := core.TransactionToMessage(tx, signer, block.BaseFee())
+		if err != nil {
+			release()
+			return nil, vm.BlockContext{}, nil, nil, fmt.Errorf("transaction %#x: %w", tx.Hash(), err)
+		}
 		txContext := core.NewEVMTxContext(msg)
 		context := core.NewEVMBlockContext(block.Header(), eth.blockchain, nil)
 		if idx == txIndex {
