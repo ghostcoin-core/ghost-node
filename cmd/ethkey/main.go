@@ -31,13 +31,13 @@ const (
 var app *cli.App
 
 func init() {
-	app = flags.NewApp("Ghost account key manager")
-	// There are no message signing commands: they signed secp256k1 message
-	// signatures, and no quantum-safe message signature is specified.
+	app = flags.NewApp("Ethereum key manager")
 	app.Commands = []*cli.Command{
 		commandGenerate,
 		commandInspect,
 		commandChangePassphrase,
+		commandSignMessage,
+		commandVerifyMessage,
 	}
 }
 

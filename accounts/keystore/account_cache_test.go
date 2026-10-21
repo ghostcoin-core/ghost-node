@@ -17,7 +17,6 @@
 package keystore
 
 import (
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -34,77 +33,23 @@ import (
 	"golang.org/x/exp/slices"
 )
 
-// cachetestDir is a keystore directory built by TestMain: the files of
-// testdata/keystore, whose key files hold secp256k1 keys and must not be
-// listed, and the ML-DSA-44 key files of cachetestAccounts, which must.
 var (
-	cachetestDir      string
-	cachetestAccounts []accounts.Account
+	cachetestDir, _   = filepath.Abs(filepath.Join("testdata", "keystore"))
+	cachetestAccounts = []accounts.Account{
+		{
+			Address: common.HexToAddress("7ef5a6135f1fd6a02593eedc869c6d41d934aef8"),
+			URL:     accounts.URL{Scheme: KeyStoreScheme, Path: filepath.Join(cachetestDir, "UTC--2016-03-22T12-57-55.920751759Z--7ef5a6135f1fd6a02593eedc869c6d41d934aef8")},
+		},
+		{
+			Address: common.HexToAddress("f466859ead1932d743d622cb74fc058882e8648a"),
+			URL:     accounts.URL{Scheme: KeyStoreScheme, Path: filepath.Join(cachetestDir, "aaa")},
+		},
+		{
+			Address: common.HexToAddress("289d485d9771714cce91d3393d764e1311907acc"),
+			URL:     accounts.URL{Scheme: KeyStoreScheme, Path: filepath.Join(cachetestDir, "zzz")},
+		},
+	}
 )
-
-func TestMain(m *testing.M) {
-	dir, err := os.MkdirTemp("", "keystore-cachetest")
-	if err != nil {
-		panic(err)
-	}
-	cachetestDir, cachetestAccounts, err = makeCacheTestDir(dir)
-	if err != nil {
-		os.RemoveAll(dir)
-		panic(err)
-	}
-	code := m.Run()
-	os.RemoveAll(dir)
-	os.Exit(code)
-}
-
-// makeCacheTestDir fills dir with the files of testdata/keystore and three
-// ML-DSA-44 key files, of the seeds 0x0a, 0x0b and 0x0c and the password
-// "foobar", next to two that are refused: one without the scheme field and
-// one of another scheme.
-func makeCacheTestDir(dir string) (string, []accounts.Account, error) {
-	dir, err := filepath.Abs(dir)
-	if err != nil {
-		return "", nil, err
-	}
-	src := filepath.Join("testdata", "keystore")
-	entries, err := os.ReadDir(src)
-	if err != nil {
-		return "", nil, err
-	}
-	for _, e := range entries {
-		if e.Type().IsRegular() {
-			if err := cp.CopyFile(filepath.Join(dir, e.Name()), filepath.Join(src, e.Name())); err != nil {
-				return "", nil, err
-			}
-		}
-	}
-	addrA := testKey(0x0a).Address
-	files := []struct {
-		name string
-		seed byte
-	}{
-		{"UTC--2026-10-21T00-00-00.000000000Z--" + hex.EncodeToString(addrA[:]), 0x0a},
-		{"mldsa-b", 0x0b},
-		{"mldsa-c", 0x0c},
-	}
-	var accs []accounts.Account
-	for _, f := range files {
-		a, err := writeTestKeyFile(filepath.Join(dir, f.name), f.seed, "foobar", nil)
-		if err != nil {
-			return "", nil, err
-		}
-		accs = append(accs, a)
-	}
-	noScheme := func(m map[string]interface{}) { delete(m, "scheme") }
-	if _, err := writeTestKeyFile(filepath.Join(dir, "no-scheme"), 0x0d, "foobar", noScheme); err != nil {
-		return "", nil, err
-	}
-	otherScheme := func(m map[string]interface{}) { m["scheme"] = 2 }
-	if _, err := writeTestKeyFile(filepath.Join(dir, "other-scheme"), 0x0e, "foobar", otherScheme); err != nil {
-		return "", nil, err
-	}
-	return dir, accs, nil
-}
 
 // waitWatcherStarts waits up to 1s for the keystore watcher to start.
 func waitWatcherStart(ks *KeyStore) bool {

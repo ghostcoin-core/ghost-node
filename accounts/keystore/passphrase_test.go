@@ -17,24 +17,11 @@
 package keystore
 
 import (
-	"errors"
 	"os"
 	"testing"
-)
 
-// TestDecryptKeyRefusesSecp256k1 checks that the very light scrypt key file,
-// which holds a secp256k1 key and has no scheme field, is refused with its
-// password.
-func TestDecryptKeyRefusesSecp256k1(t *testing.T) {
-	t.Parallel()
-	keyjson, err := os.ReadFile("testdata/very-light-scrypt.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := DecryptKey(keyjson, ""); !errors.Is(err, ErrNotAccountKey) {
-		t.Fatalf("secp256k1 key file: error %v, want %v", err, ErrNotAccountKey)
-	}
-}
+	"github.com/ethereum/go-ethereum/common"
+)
 
 const (
 	veryLightScryptN = 2
@@ -44,13 +31,12 @@ const (
 // Tests that a json key file can be decrypted and encrypted in multiple rounds.
 func TestKeyEncryptDecrypt(t *testing.T) {
 	t.Parallel()
-	key := testKey(0x0d)
-	password := ""
-	keyjson, err := EncryptKey(key, password, veryLightScryptN, veryLightScryptP)
+	keyjson, err := os.ReadFile("testdata/very-light-scrypt.json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	address := key.Address
+	password := ""
+	address := common.HexToAddress("45dea0fb0bba44f4fcf290bba71fd57d7117cbb8")
 
 	// Do a few rounds of decryption and encryption
 	for i := 0; i < 3; i++ {
@@ -65,9 +51,6 @@ func TestKeyEncryptDecrypt(t *testing.T) {
 		}
 		if key.Address != address {
 			t.Errorf("test %d: key address mismatch: have %x, want %x", i, key.Address, address)
-		}
-		if key.Seed != testKey(0x0d).Seed {
-			t.Errorf("test %d: key seed changed", i)
 		}
 		// Recrypt with a new password and start over
 		password += "new data appended" // nolint: gosec

@@ -1,12 +1,7 @@
-This directory contains key files for testing.
+This directory contains accounts for testing.
 The password that unlocks them is "foobar".
 
-None of them is supposed to be loadable: the keystore holds ML-DSA-44
-account keys only, and a key file must carry the scheme field set to 1.
-The tests write their ML-DSA-44 key files next to copies of these.
-
-These key files hold secp256k1 keys and have no scheme field, so they
-must be refused when listed, imported or unlocked:
+The "good" key files which are supposed to be loadable are:
 
 - File: UTC--2016-03-22T12-57-55.920751759Z--7ef5a6135f1fd6a02593eedc869c6d41d934aef8
   Address: 0x7ef5a6135f1fd6a02593eedc869c6d41d934aef8

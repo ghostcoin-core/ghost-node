@@ -17,9 +17,6 @@
 package main
 
 import (
-	"bytes"
-	"encoding/hex"
-	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -27,77 +24,22 @@ import (
 	"testing"
 
 	"github.com/cespare/cp"
-	"github.com/cloudflare/circl/sign/mldsa/mldsa44"
-	"github.com/ethereum/go-ethereum/accounts/keystore"
-	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/google/uuid"
 )
 
 // These tests are 'smoke tests' for the account related
 // subcommands and flags.
 //
-// For most tests, the secp256k1 key files of package accounts, which must not
-// be listed, are copied into a temporary keystore directory next to three
-// ML-DSA-44 key files of fixed seeds, with the password "foobar".
-
-// seedAddress returns the account address of a 32-byte ML-DSA-44 seed.
-func seedAddress(seed []byte) common.Address {
-	var s [keystore.SeedSize]byte
-	copy(s[:], seed)
-	pub, _ := mldsa44.NewKeyFromSeed(&s)
-	return types.GhostAccountAddressOf(types.GhostSchemeMLDSA44, pub.Bytes())
-}
-
-// testAccountSeed returns the seed of 32 bytes b of a test account.
-func testAccountSeed(b byte) []byte {
-	return bytes.Repeat([]byte{b}, keystore.SeedSize)
-}
-
-var (
-	accountA = seedAddress(testAccountSeed(0x0a))
-	accountB = seedAddress(testAccountSeed(0x0b))
-	accountC = seedAddress(testAccountSeed(0x0c))
-
-	accountAFile = "UTC--2026-10-21T00-00-00.000000000Z--" + hex.EncodeToString(accountA[:])
-)
-
-// writeTestKeyFile writes the key file of an ML-DSA-44 seed, encrypted with
-// the password "foobar".
-func writeTestKeyFile(t *testing.T, path string, seed []byte) {
-	t.Helper()
-	key := &keystore.Key{Id: uuid.New(), Address: seedAddress(seed)}
-	copy(key.Seed[:], seed)
-	keyjson, err := keystore.EncryptKey(key, "foobar", 2, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, keyjson, 0600); err != nil {
-		t.Fatal(err)
-	}
-}
+// For most tests, the test files from package accounts
+// are copied into a temporary keystore directory.
 
 func tmpDatadirWithKeystore(t *testing.T) string {
 	datadir := t.TempDir()
-	keystoreDir := filepath.Join(datadir, "keystore")
+	keystore := filepath.Join(datadir, "keystore")
 	source := filepath.Join("..", "..", "accounts", "keystore", "testdata", "keystore")
-	if err := cp.CopyAll(keystoreDir, source); err != nil {
+	if err := cp.CopyAll(keystore, source); err != nil {
 		t.Fatal(err)
 	}
-	writeTestKeyFile(t, filepath.Join(keystoreDir, accountAFile), testAccountSeed(0x0a))
-	writeTestKeyFile(t, filepath.Join(keystoreDir, "mldsa-b"), testAccountSeed(0x0b))
-	writeTestKeyFile(t, filepath.Join(keystoreDir, "mldsa-c"), testAccountSeed(0x0c))
 	return datadir
-}
-
-// tmpDupesKeystore returns a keystore directory with two key files of
-// account B and one of account A.
-func tmpDupesKeystore(t *testing.T) string {
-	dir := t.TempDir()
-	writeTestKeyFile(t, filepath.Join(dir, "1"), testAccountSeed(0x0b))
-	writeTestKeyFile(t, filepath.Join(dir, "2"), testAccountSeed(0x0b))
-	writeTestKeyFile(t, filepath.Join(dir, "foo"), testAccountSeed(0x0a))
-	return dir
 }
 
 func TestAccountListEmpty(t *testing.T) {
@@ -109,15 +51,18 @@ func TestAccountListEmpty(t *testing.T) {
 func TestAccountList(t *testing.T) {
 	t.Parallel()
 	datadir := tmpDatadirWithKeystore(t)
-	sep := "/"
+	var want = `
+Account #0: {7ef5a6135f1fd6a02593eedc869c6d41d934aef8} keystore://{{.Datadir}}/keystore/UTC--2016-03-22T12-57-55.920751759Z--7ef5a6135f1fd6a02593eedc869c6d41d934aef8
+Account #1: {f466859ead1932d743d622cb74fc058882e8648a} keystore://{{.Datadir}}/keystore/aaa
+Account #2: {289d485d9771714cce91d3393d764e1311907acc} keystore://{{.Datadir}}/keystore/zzz
+`
 	if runtime.GOOS == "windows" {
-		sep = `\`
+		want = `
+Account #0: {7ef5a6135f1fd6a02593eedc869c6d41d934aef8} keystore://{{.Datadir}}\keystore\UTC--2016-03-22T12-57-55.920751759Z--7ef5a6135f1fd6a02593eedc869c6d41d934aef8
+Account #1: {f466859ead1932d743d622cb74fc058882e8648a} keystore://{{.Datadir}}\keystore\aaa
+Account #2: {289d485d9771714cce91d3393d764e1311907acc} keystore://{{.Datadir}}\keystore\zzz
+`
 	}
-	want := fmt.Sprintf(`
-Account #0: {%x} keystore://{{.Datadir}}%skeystore%s%s
-Account #1: {%x} keystore://{{.Datadir}}%skeystore%smldsa-b
-Account #2: {%x} keystore://{{.Datadir}}%skeystore%smldsa-c
-`, accountA, sep, sep, accountAFile, accountB, sep, sep, accountC, sep, sep)
 	{
 		geth := runGeth(t, "account", "list", "--datadir", datadir)
 		geth.Expect(want)
@@ -155,22 +100,16 @@ Path of the secret key file: .*UTC--.+--[0-9a-f]{40}
 
 func TestAccountImport(t *testing.T) {
 	t.Parallel()
-	seed, _ := hex.DecodeString("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 	tests := []struct{ name, key, output string }{
 		{
 			name:   "correct account",
-			key:    hex.EncodeToString(seed),
-			output: fmt.Sprintf("Address: {%x}\n", seedAddress(seed)),
+			key:    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+			output: "Address: {fcad0b19bb29d4674531d6f115237e16afce377c}\n",
 		},
 		{
 			name:   "invalid character",
-			key:    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeg",
-			output: "Fatal: Failed to load the key seed: encoding/hex: invalid byte: U+0067 'g'\n",
-		},
-		{
-			name:   "short seed",
-			key:    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd",
-			output: "Fatal: Failed to load the key seed: a key seed is 32 bytes, have 31\n",
+			key:    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef1",
+			output: "Fatal: Failed to load the private key: invalid character '1' at end of key file\n",
 		},
 	}
 	for _, test := range tests {
@@ -229,46 +168,60 @@ func TestAccountUpdate(t *testing.T) {
 	datadir := tmpDatadirWithKeystore(t)
 	geth := runGeth(t, "account", "update",
 		"--datadir", datadir, "--lightkdf",
-		hex.EncodeToString(accountB[:]))
+		"f466859ead1932d743d622cb74fc058882e8648a")
 	defer geth.ExpectExit()
-	geth.Expect(fmt.Sprintf(`
-Unlocking account %x | Attempt 1/3
+	geth.Expect(`
+Unlocking account f466859ead1932d743d622cb74fc058882e8648a | Attempt 1/3
 !! Unsupported terminal, password will be echoed.
 Password: {{.InputLine "foobar"}}
 Please give a new password. Do not forget this password.
 Password: {{.InputLine "foobar2"}}
 Repeat password: {{.InputLine "foobar2"}}
-`, accountB))
+`)
 }
 
-// TestUnlockFlagSecp256k1Refused checks that the address of a secp256k1 key
-// file of the keystore cannot be unlocked: the file is not listed.
-func TestUnlockFlagSecp256k1Refused(t *testing.T) {
+func TestWalletImport(t *testing.T) {
 	t.Parallel()
-	geth := runMinimalGeth(t, "--port", "0", "--ipcdisable", "--datadir", tmpDatadirWithKeystore(t),
-		"--unlock", "f466859ead1932d743d622cb74fc058882e8648a", "--password", "testdata/passwords.txt")
+	geth := runGeth(t, "wallet", "import", "--lightkdf", "testdata/guswallet.json")
 	defer geth.ExpectExit()
 	geth.Expect(`
-Fatal: Failed to unlock account f466859ead1932d743d622cb74fc058882e8648a (no key for given address or file)
+!! Unsupported terminal, password will be echoed.
+Password: {{.InputLine "foo"}}
+Address: {d4584b5f6229b7be90727b0fc8c6b91bb427821f}
+`)
+
+	files, err := os.ReadDir(filepath.Join(geth.Datadir, "keystore"))
+	if len(files) != 1 {
+		t.Errorf("expected one key file in keystore directory, found %d files (error: %v)", len(files), err)
+	}
+}
+
+func TestWalletImportBadPassword(t *testing.T) {
+	t.Parallel()
+	geth := runGeth(t, "wallet", "import", "--lightkdf", "testdata/guswallet.json")
+	defer geth.ExpectExit()
+	geth.Expect(`
+!! Unsupported terminal, password will be echoed.
+Password: {{.InputLine "wrong"}}
+Fatal: could not decrypt key with given password
 `)
 }
 
 func TestUnlockFlag(t *testing.T) {
 	t.Parallel()
-	b := hex.EncodeToString(accountB[:])
 	geth := runMinimalGeth(t, "--port", "0", "--ipcdisable", "--datadir", tmpDatadirWithKeystore(t),
-		"--unlock", b, "console", "--exec", "loadScript('testdata/empty.js')")
-	geth.Expect(fmt.Sprintf(`
-Unlocking account %s | Attempt 1/3
+		"--unlock", "f466859ead1932d743d622cb74fc058882e8648a", "console", "--exec", "loadScript('testdata/empty.js')")
+	geth.Expect(`
+Unlocking account f466859ead1932d743d622cb74fc058882e8648a | Attempt 1/3
 !! Unsupported terminal, password will be echoed.
 Password: {{.InputLine "foobar"}}
 undefined
-`, b))
+`)
 	geth.ExpectExit()
 
 	wantMessages := []string{
 		"Unlocked account",
-		"=" + accountB.Hex(),
+		"=0xf466859eAD1932D743d622CB74FC058882E8648A",
 	}
 	for _, m := range wantMessages {
 		if !strings.Contains(geth.StderrText(), m) {
@@ -279,28 +232,27 @@ undefined
 
 func TestUnlockFlagWrongPassword(t *testing.T) {
 	t.Parallel()
-	b := hex.EncodeToString(accountB[:])
 	geth := runMinimalGeth(t, "--port", "0", "--ipcdisable", "--datadir", tmpDatadirWithKeystore(t),
-		"--unlock", b, "console", "--exec", "loadScript('testdata/empty.js')")
+		"--unlock", "f466859ead1932d743d622cb74fc058882e8648a", "console", "--exec", "loadScript('testdata/empty.js')")
 
 	defer geth.ExpectExit()
-	geth.Expect(fmt.Sprintf(`
-Unlocking account %[1]s | Attempt 1/3
+	geth.Expect(`
+Unlocking account f466859ead1932d743d622cb74fc058882e8648a | Attempt 1/3
 !! Unsupported terminal, password will be echoed.
 Password: {{.InputLine "wrong1"}}
-Unlocking account %[1]s | Attempt 2/3
+Unlocking account f466859ead1932d743d622cb74fc058882e8648a | Attempt 2/3
 Password: {{.InputLine "wrong2"}}
-Unlocking account %[1]s | Attempt 3/3
+Unlocking account f466859ead1932d743d622cb74fc058882e8648a | Attempt 3/3
 Password: {{.InputLine "wrong3"}}
-Fatal: Failed to unlock account %[1]s (could not decrypt key with given password)
-`, b))
+Fatal: Failed to unlock account f466859ead1932d743d622cb74fc058882e8648a (could not decrypt key with given password)
+`)
 }
 
 // https://github.com/ethereum/go-ethereum/issues/1785
 func TestUnlockFlagMultiIndex(t *testing.T) {
 	t.Parallel()
 	geth := runMinimalGeth(t, "--port", "0", "--ipcdisable", "--datadir", tmpDatadirWithKeystore(t),
-		"--unlock", hex.EncodeToString(accountB[:]), "--unlock", "0,2", "console", "--exec", "loadScript('testdata/empty.js')")
+		"--unlock", "f466859ead1932d743d622cb74fc058882e8648a", "--unlock", "0,2", "console", "--exec", "loadScript('testdata/empty.js')")
 
 	geth.Expect(`
 Unlocking account 0 | Attempt 1/3
@@ -314,8 +266,8 @@ undefined
 
 	wantMessages := []string{
 		"Unlocked account",
-		"=" + accountA.Hex(),
-		"=" + accountC.Hex(),
+		"=0x7EF5A6135f1FD6a02593eEdC869c6D41D934aef8",
+		"=0x289d485D9771714CCe91D3393D764E1311907ACc",
 	}
 	for _, m := range wantMessages {
 		if !strings.Contains(geth.StderrText(), m) {
@@ -327,7 +279,7 @@ undefined
 func TestUnlockFlagPasswordFile(t *testing.T) {
 	t.Parallel()
 	geth := runMinimalGeth(t, "--port", "0", "--ipcdisable", "--datadir", tmpDatadirWithKeystore(t),
-		"--unlock", hex.EncodeToString(accountB[:]), "--password", "testdata/passwords.txt", "--unlock", "0,2", "console", "--exec", "loadScript('testdata/empty.js')")
+		"--unlock", "f466859ead1932d743d622cb74fc058882e8648a", "--password", "testdata/passwords.txt", "--unlock", "0,2", "console", "--exec", "loadScript('testdata/empty.js')")
 
 	geth.Expect(`
 undefined
@@ -336,8 +288,8 @@ undefined
 
 	wantMessages := []string{
 		"Unlocked account",
-		"=" + accountA.Hex(),
-		"=" + accountC.Hex(),
+		"=0x7EF5A6135f1FD6a02593eEdC869c6D41D934aef8",
+		"=0x289d485D9771714CCe91D3393D764E1311907ACc",
 	}
 	for _, m := range wantMessages {
 		if !strings.Contains(geth.StderrText(), m) {
@@ -349,7 +301,7 @@ undefined
 func TestUnlockFlagPasswordFileWrongPassword(t *testing.T) {
 	t.Parallel()
 	geth := runMinimalGeth(t, "--port", "0", "--ipcdisable", "--datadir", tmpDatadirWithKeystore(t),
-		"--unlock", hex.EncodeToString(accountB[:]), "--password",
+		"--unlock", "f466859ead1932d743d622cb74fc058882e8648a", "--password",
 		"testdata/wrong-passwords.txt", "--unlock", "0,2")
 	defer geth.ExpectExit()
 	geth.Expect(`
@@ -359,11 +311,10 @@ Fatal: Failed to unlock account 0 (could not decrypt key with given password)
 
 func TestUnlockFlagAmbiguous(t *testing.T) {
 	t.Parallel()
-	store := tmpDupesKeystore(t)
-	b := hex.EncodeToString(accountB[:])
+	store := filepath.Join("..", "..", "accounts", "keystore", "testdata", "dupes")
 	geth := runMinimalGeth(t, "--port", "0", "--ipcdisable", "--datadir", tmpDatadirWithKeystore(t),
-		"--unlock", b, "--keystore",
-		store, "--unlock", b,
+		"--unlock", "f466859ead1932d743d622cb74fc058882e8648a", "--keystore",
+		store, "--unlock", "f466859ead1932d743d622cb74fc058882e8648a",
 		"console", "--exec", "loadScript('testdata/empty.js')")
 	defer geth.ExpectExit()
 
@@ -372,11 +323,11 @@ func TestUnlockFlagAmbiguous(t *testing.T) {
 		abs, _ := filepath.Abs(filepath.Join(store, file))
 		return abs
 	})
-	geth.Expect(fmt.Sprintf(`
-Unlocking account %[1]s | Attempt 1/3
+	geth.Expect(`
+Unlocking account f466859ead1932d743d622cb74fc058882e8648a | Attempt 1/3
 !! Unsupported terminal, password will be echoed.
 Password: {{.InputLine "foobar"}}
-Multiple key files exist for address %[1]s:
+Multiple key files exist for address f466859ead1932d743d622cb74fc058882e8648a:
    keystore://{{keypath "1"}}
    keystore://{{keypath "2"}}
 Testing your password against all of them...
@@ -384,12 +335,12 @@ Your password unlocked keystore://{{keypath "1"}}
 In order to avoid this warning, you need to remove the following duplicate key files:
    keystore://{{keypath "2"}}
 undefined
-`, b))
+`)
 	geth.ExpectExit()
 
 	wantMessages := []string{
 		"Unlocked account",
-		"=" + accountB.Hex(),
+		"=0xf466859eAD1932D743d622CB74FC058882E8648A",
 	}
 	for _, m := range wantMessages {
 		if !strings.Contains(geth.StderrText(), m) {
@@ -400,11 +351,10 @@ undefined
 
 func TestUnlockFlagAmbiguousWrongPassword(t *testing.T) {
 	t.Parallel()
-	store := tmpDupesKeystore(t)
-	b := hex.EncodeToString(accountB[:])
+	store := filepath.Join("..", "..", "accounts", "keystore", "testdata", "dupes")
 	geth := runMinimalGeth(t, "--port", "0", "--ipcdisable", "--datadir", tmpDatadirWithKeystore(t),
-		"--unlock", b, "--keystore",
-		store, "--unlock", b)
+		"--unlock", "f466859ead1932d743d622cb74fc058882e8648a", "--keystore",
+		store, "--unlock", "f466859ead1932d743d622cb74fc058882e8648a")
 
 	defer geth.ExpectExit()
 
@@ -413,15 +363,15 @@ func TestUnlockFlagAmbiguousWrongPassword(t *testing.T) {
 		abs, _ := filepath.Abs(filepath.Join(store, file))
 		return abs
 	})
-	geth.Expect(fmt.Sprintf(`
-Unlocking account %[1]s | Attempt 1/3
+	geth.Expect(`
+Unlocking account f466859ead1932d743d622cb74fc058882e8648a | Attempt 1/3
 !! Unsupported terminal, password will be echoed.
 Password: {{.InputLine "wrong"}}
-Multiple key files exist for address %[1]s:
+Multiple key files exist for address f466859ead1932d743d622cb74fc058882e8648a:
    keystore://{{keypath "1"}}
    keystore://{{keypath "2"}}
 Testing your password against all of them...
 Fatal: None of the listed files could be unlocked.
-`, b))
+`)
 	geth.ExpectExit()
 }
