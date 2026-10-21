@@ -39,6 +39,7 @@ import (
 	"github.com/ethereum/go-ethereum/p2p/enr"
 	"github.com/ethereum/go-ethereum/p2p/nat"
 	"github.com/ethereum/go-ethereum/p2p/netutil"
+	"github.com/ethereum/go-ethereum/p2p/qsconn"
 	"golang.org/x/exp/slices"
 )
 
@@ -75,6 +76,14 @@ var (
 type Config struct {
 	// This field must be set to a valid secp256k1 private key.
 	PrivateKey *ecdsa.PrivateKey `toml:"-"`
+
+	// Identity is the node's quantum-safe identity. When it is set, every
+	// connection, dialled and accepted, runs on the quantum-safe transport
+	// of package p2p/qsconn, the node ID is the hash of its public key, and
+	// PrivateKey is not used for connections. Static and trusted nodes are
+	// then named by that ID (enode://<64 hex chars>@host:port), and the
+	// server finds no peers by itself: it dials only the static nodes.
+	Identity *qsconn.Identity `toml:"-"`
 
 	// MaxPeers is the maximum number of peers that can be
 	// connected. It must be greater than zero.
@@ -396,6 +405,9 @@ func (srv *Server) Self() *enode.Node {
 	srv.lock.Unlock()
 
 	if ln == nil {
+		if srv.Identity != nil {
+			return enode.NewQuantumSafe(enode.ID(srv.Identity.ID()), net.ParseIP("0.0.0.0"), 0)
+		}
 		return enode.NewV4(&srv.PrivateKey.PublicKey, net.ParseIP("0.0.0.0"), 0, 0)
 	}
 	return ln.Node()
@@ -476,8 +488,8 @@ func (srv *Server) Start() (err error) {
 	}
 
 	// static fields
-	if srv.PrivateKey == nil {
-		return errors.New("Server.PrivateKey must be set to a non-nil key")
+	if srv.PrivateKey == nil && srv.Identity == nil {
+		return errors.New("Server.PrivateKey or Server.Identity must be set to a non-nil key")
 	}
 	if srv.newTransport == nil {
 		srv.newTransport = newRLPX
@@ -515,9 +527,16 @@ func (srv *Server) Start() (err error) {
 }
 
 func (srv *Server) setupLocalNode() error {
-	// Create the devp2p handshake.
-	pubkey := crypto.FromECDSAPub(&srv.PrivateKey.PublicKey)
-	srv.ourHandshake = &protoHandshake{Version: baseProtocolVersion, Name: srv.Name, ID: pubkey[1:]}
+	// Create the devp2p handshake. With a quantum-safe identity, its ID is
+	// the 32-byte node ID.
+	srv.ourHandshake = &protoHandshake{Version: baseProtocolVersion, Name: srv.Name}
+	if srv.Identity != nil {
+		id := srv.Identity.ID()
+		srv.ourHandshake.ID = id[:]
+	} else {
+		pubkey := crypto.FromECDSAPub(&srv.PrivateKey.PublicKey)
+		srv.ourHandshake.ID = pubkey[1:]
+	}
 	for _, p := range srv.Protocols {
 		srv.ourHandshake.Caps = append(srv.ourHandshake.Caps, p.cap())
 	}
@@ -529,7 +548,11 @@ func (srv *Server) setupLocalNode() error {
 		return err
 	}
 	srv.nodedb = db
-	srv.localnode = enode.NewLocalNode(db, srv.PrivateKey)
+	if srv.Identity != nil {
+		srv.localnode = enode.NewLocalNodeQuantumSafe(db, enode.ID(srv.Identity.ID()))
+	} else {
+		srv.localnode = enode.NewLocalNode(db, srv.PrivateKey)
+	}
 	srv.localnode.SetFallbackIP(net.IP{127, 0, 0, 1})
 	// TODO: check conflicts
 	for _, p := range srv.Protocols {
@@ -543,8 +566,11 @@ func (srv *Server) setupLocalNode() error {
 func (srv *Server) setupDiscovery() error {
 	srv.discmix = enode.NewFairMix(discmixTimeout)
 
-	// Don't listen on UDP endpoint if DHT is disabled.
-	if srv.NoDiscovery {
+	// Don't listen on UDP endpoint if DHT is disabled. A server with a
+	// quantum-safe identity only knows the static and trusted nodes: the
+	// UDP protocols and the protocols' candidate sources name secp256k1
+	// nodes, which it cannot identify.
+	if srv.NoDiscovery || srv.Identity != nil {
 		return nil
 	}
 	conn, err := srv.setupUDPListening()
@@ -986,7 +1012,9 @@ func (srv *Server) checkInboundConn(remoteIP netip.Addr) error {
 // or the handshakes have failed.
 func (srv *Server) SetupConn(fd net.Conn, flags connFlag, dialDest *enode.Node) error {
 	c := &conn{fd: fd, flags: flags, cont: make(chan error)}
-	if dialDest == nil {
+	if srv.Identity != nil {
+		c.transport = newQSConn(fd, srv.Identity, dialDest)
+	} else if dialDest == nil {
 		c.transport = srv.newTransport(fd, nil)
 	} else {
 		c.transport = srv.newTransport(fd, dialDest.Pubkey())
@@ -1011,29 +1039,36 @@ func (srv *Server) setupConn(c *conn, dialDest *enode.Node) error {
 		return errServerStopped
 	}
 
-	// If dialing, figure out the remote public key.
-	if dialDest != nil {
-		dialPubkey := new(ecdsa.PublicKey)
-		if err := dialDest.Load((*enode.Secp256k1)(dialPubkey)); err != nil {
-			err = fmt.Errorf("%w: dial destination doesn't have a secp256k1 public key", errEncHandshakeError)
-			srv.log.Trace("Setting up connection failed", "addr", c.fd.RemoteAddr(), "conn", c.flags, "err", err)
-			return err
+	if srv.Identity != nil {
+		if err := srv.setupQSConn(c, dialDest); err != nil {
+			srv.log.Trace("Failed quantum-safe handshake", "addr", c.fd.RemoteAddr(), "conn", c.flags, "err", err)
+			return fmt.Errorf("%w: %v", errEncHandshakeError, err)
+		}
+	} else {
+		// If dialing, figure out the remote public key.
+		if dialDest != nil {
+			dialPubkey := new(ecdsa.PublicKey)
+			if err := dialDest.Load((*enode.Secp256k1)(dialPubkey)); err != nil {
+				err = fmt.Errorf("%w: dial destination doesn't have a secp256k1 public key", errEncHandshakeError)
+				srv.log.Trace("Setting up connection failed", "addr", c.fd.RemoteAddr(), "conn", c.flags, "err", err)
+				return err
+			}
+		}
+
+		// Run the RLPx handshake.
+		remotePubkey, err := c.doEncHandshake(srv.PrivateKey)
+		if err != nil {
+			srv.log.Trace("Failed RLPx handshake", "addr", c.fd.RemoteAddr(), "conn", c.flags, "err", err)
+			return fmt.Errorf("%w: %v", errEncHandshakeError, err)
+		}
+		if dialDest != nil {
+			c.node = dialDest
+		} else {
+			c.node = nodeFromConn(remotePubkey, c.fd)
 		}
 	}
-
-	// Run the RLPx handshake.
-	remotePubkey, err := c.doEncHandshake(srv.PrivateKey)
-	if err != nil {
-		srv.log.Trace("Failed RLPx handshake", "addr", c.fd.RemoteAddr(), "conn", c.flags, "err", err)
-		return fmt.Errorf("%w: %v", errEncHandshakeError, err)
-	}
-	if dialDest != nil {
-		c.node = dialDest
-	} else {
-		c.node = nodeFromConn(remotePubkey, c.fd)
-	}
 	clog := srv.log.New("id", c.node.ID(), "addr", c.fd.RemoteAddr(), "conn", c.flags)
-	err = srv.checkpoint(c, srv.checkpointPostHandshake)
+	err := srv.checkpoint(c, srv.checkpointPostHandshake)
 	if err != nil {
 		clog.Trace("Rejected peer", "err", err)
 		return err
@@ -1045,7 +1080,8 @@ func (srv *Server) setupConn(c *conn, dialDest *enode.Node) error {
 		clog.Trace("Failed p2p handshake", "err", err)
 		return fmt.Errorf("%w: %v", errProtoHandshakeError, err)
 	}
-	if id := c.node.ID(); !bytes.Equal(crypto.Keccak256(phs.ID), id[:]) {
+	if id := c.node.ID(); srv.Identity != nil && !bytes.Equal(phs.ID, id[:]) ||
+		srv.Identity == nil && !bytes.Equal(crypto.Keccak256(phs.ID), id[:]) {
 		clog.Trace("Wrong devp2p handshake identity", "phsid", hex.EncodeToString(phs.ID))
 		return DiscUnexpectedIdentity
 	}
@@ -1056,6 +1092,33 @@ func (srv *Server) setupConn(c *conn, dialDest *enode.Node) error {
 		return err
 	}
 
+	return nil
+}
+
+// setupQSConn runs the quantum-safe handshake and sets c.node. The node ID is
+// the one the handshake authenticated; when dialling, it must be the dialled
+// ID. Anything else closes the connection: there is no other transport.
+func (srv *Server) setupQSConn(c *conn, dialDest *enode.Node) error {
+	qs, ok := c.transport.(qsHandshaker)
+	if !ok {
+		return errors.New("transport has no quantum-safe handshake")
+	}
+	remote, err := qs.doQSHandshake()
+	if err != nil {
+		return err
+	}
+	if remote == nil || remote.Scheme != qsconn.SchemeMLDSA44 || qsconn.NodeIDOf(remote.Scheme, remote.PublicKey) != remote.ID {
+		return errors.New("remote identity not established")
+	}
+	id := enode.ID(remote.ID)
+	if dialDest != nil {
+		if dialDest.ID() != id {
+			return fmt.Errorf("remote node ID %v is not the dialled %v", id, dialDest.ID())
+		}
+		c.node = dialDest
+	} else {
+		c.node = quantumSafeNodeFromConn(id, c.fd)
+	}
 	return nil
 }
 

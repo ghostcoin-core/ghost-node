@@ -152,7 +152,19 @@ func (t *rlpxTransport) doProtoHandshake(our *protoHandshake) (their *protoHands
 	return their, nil
 }
 
+// doEncHandshake is never used: the quantum-safe transport runs its own
+// handshake (doQSHandshake) and has no other one to fall back to.
+func (t *qsconnTransport) doEncHandshake(*ecdsa.PrivateKey) (*ecdsa.PublicKey, error) {
+	return nil, errQSConnOnly
+}
+
 func readProtocolHandshake(rw MsgReader) (*protoHandshake, error) {
+	return readProtocolHandshakeID(rw, 64)
+}
+
+// readProtocolHandshakeID reads the protocol handshake, whose ID must be
+// idLen bytes: 64 for a secp256k1 public key, 32 for a quantum-safe node ID.
+func readProtocolHandshakeID(rw MsgReader, idLen int) (*protoHandshake, error) {
 	msg, err := rw.ReadMsg()
 	if err != nil {
 		return nil, err
@@ -176,7 +188,7 @@ func readProtocolHandshake(rw MsgReader) (*protoHandshake, error) {
 	if err := msg.Decode(&hs); err != nil {
 		return nil, err
 	}
-	if len(hs.ID) != 64 || !bitutil.TestBytes(hs.ID) {
+	if len(hs.ID) != idLen || !bitutil.TestBytes(hs.ID) {
 		return nil, DiscInvalidIdentity
 	}
 	return &hs, nil

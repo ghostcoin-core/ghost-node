@@ -238,6 +238,9 @@ func (n *Node) String() string {
 	if isNewV4(n) {
 		return n.URLv4() // backwards-compatibility glue for NewV4 nodes
 	}
+	if n.isQuantumSafe() && n.ip.IsValid() && n.tcp != 0 {
+		return n.URLQuantumSafe() // parses back with ParseQuantumSafe
+	}
 	enc, _ := rlp.EncodeToBytes(&n.r) // always succeeds because record is valid
 	b64 := base64.RawURLEncoding.EncodeToString(enc)
 	return "enr:" + b64
