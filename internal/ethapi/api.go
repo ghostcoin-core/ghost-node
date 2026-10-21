@@ -1538,11 +1538,13 @@ func blockSigner(ctx context.Context, b Backend, number *big.Int, blockTime uint
 	return accountSigner(ctx, b, types.MakeSigner(b.ChainConfig(), number, blockTime))
 }
 
-// rpcSender returns the sender of tx. A reveal has no sender, so it is the
-// zero address; for any other transaction a sender that cannot be derived is
-// an error, never the zero address.
+// rpcSender returns the sender of tx. A reveal, and a transaction other than
+// an account one that carries no signature at all (as in a pending block
+// assembled locally), has no sender, so it is the zero address; for any other
+// transaction a sender that cannot be derived is an error, never the zero
+// address.
 func rpcSender(signer types.Signer, tx *types.Transaction) (common.Address, error) {
-	if tx.IsGhostReveal() {
+	if tx.IsGhostReveal() || unsignedTx(tx) {
 		return common.Address{}, nil
 	}
 	sender, err := types.Sender(signer, tx)
@@ -1550,6 +1552,16 @@ func rpcSender(signer types.Signer, tx *types.Transaction) (common.Address, erro
 		return common.Address{}, fmt.Errorf("transaction %#x: %w", tx.Hash(), err)
 	}
 	return sender, nil
+}
+
+// unsignedTx reports whether tx, other than an account transaction, carries
+// no signature: its v, r and s values are all zero.
+func unsignedTx(tx *types.Transaction) bool {
+	if tx.Type() == types.GhostAccountTxType {
+		return false
+	}
+	v, r, s := tx.RawSignatureValues()
+	return (v == nil || v.Sign() == 0) && (r == nil || r.Sign() == 0) && (s == nil || s.Sign() == 0)
 }
 
 // newSignedRPCTransaction is newRPCTransaction with the sender derived by
