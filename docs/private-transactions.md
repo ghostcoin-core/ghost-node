@@ -30,7 +30,20 @@ with the transaction-format specification in a constants-only change.
 ## Commit
 
 A commit is any transaction type the node already accepts, sent top level to
-the commit entry address with value `v` and data of exactly 190 bytes:
+the commit entry address with value `v` and salted commit data of exactly 206
+bytes, version 2:
+
+| Offset | Length | Field |
+|---|---|---|
+| 0 | 2 | version, `0x0002` |
+| 2 | 32 | `F` |
+| 34 | 16 | salt |
+| 50 | 156 | note |
+
+The salt is the coin's 16-byte per-coin salt, carried in the clear so that a
+wallet can read it back with the leaf and note. Version 1 data of exactly 190
+bytes, without a salt, is still accepted unchanged, because version 1
+commitments stay valid:
 
 | Offset | Length | Field |
 |---|---|---|
@@ -39,16 +52,18 @@ the commit entry address with value `v` and data of exactly 190 bytes:
 | 34 | 156 | note |
 
 The node computes the commitment itself,
-`C = K("ghost/coin-commitment/v1", COIN, F, v)`; the sender chooses neither the
-type nor the commitment. For `F = b44338ab…0c4d8b` and `v = 10^18` it is
+`C = K("ghost/coin-commitment/v1", COIN, F, v)`, from `F` and `v` only; the
+salt is already in `F` and the node never uses it. The sender chooses neither
+the type nor the commitment. For `F = b44338ab…0c4d8b` and `v = 10^18` it is
 `562d92a9…029458` (the test has the full values).
 
 The checks run in this order and stop at the first failure; each failure makes
 the transaction invalid, so a block carrying it is invalid:
 
 1. ordinary validity: nonce, sender without code, fee caps, intrinsic gas;
-2. data of exactly 190 bytes with version 1 (`ErrCommitData`); anything else,
-   an extra field included, is rejected;
+2. data of exactly 206 bytes with version 2, or of exactly 190 bytes with
+   version 1 (`ErrCommitData`); anything else, an extra field, another
+   version or a version with the other length included, is rejected;
 3. `F` not all zero (`ErrCommitZeroF`);
 4. `1 <= v <= V_MAX` (`ErrCommitAmount`);
 5. the sender's funds cover `v` plus the gas (`core.ErrInsufficientFunds`);
@@ -209,12 +224,17 @@ Both logs have the coin tree account as address.
 
 | Log | Topics | Data |
 |---|---|---|
-| commit | `K("ghost/commit-receipt/v1")` | tree index (4), position (4), leaf (32), `v` (32), note (156) |
+| commit, version 1 | `K("ghost/commit-receipt/v1")` | tree index (4), position (4), leaf (32), `v` (32), note (156): 228 bytes |
+| commit, salted | `K("ghost/commit-receipt/v1")` | tree index (4), position (4), leaf (32), `v` (32), note (156), salt (16): 244 bytes |
 | reveal | `K("ghost/reveal-receipt/v1")`, marker | tree index (4), position (4), remainder (32), note (156), recipient (20), out (32) |
 
-The layout is an internal-test value, changed with the transaction-format
-specification. An append whose tree index does not fit four bytes is
-rejected.
+The log of a salted commit is the version 1 log with the salt appended after
+the note; the logs of version 1 commits and of reveals do not change. The
+tree history reads both commit lengths and keeps the salt with the leaf and
+note ([trees and headers](trees-and-headers.md)); a reveal remainder has no
+salt there, its salt is in its note. The layout is an internal-test value,
+changed with the transaction-format specification. An append whose tree
+index does not fit four bytes is rejected.
 
 ## Exported API
 
@@ -222,7 +242,9 @@ For the wallet and the tests that build on this:
 
 - `ghostpriv.Reveal` with `MarshalBinary` (the envelope), `BindingDigest` and
   `BindingInput`; `ghostpriv.DecodeReveal` (checks 1 to 3);
-- `ghostpriv.CommitData(F, note)`, the 190 bytes of a commit;
+- `ghostpriv.SaltedCommitData(F, salt, note)`, the 206 bytes of a salted
+  commit (`SaltedCommitVersion`, `SaltedCommitDataSize`), and
+  `ghostpriv.CommitData(F, note)`, the 190 bytes of a version 1 commit;
 - `ghostpriv.Commitment(F, v)`;
 - `ghostpriv.WindowFee(b_ref)` and `ghostpriv.WindowStart(H)`;
 - `ghostpriv.CheckReveal` and `ghostpriv.ApplyReveal`, which block processing

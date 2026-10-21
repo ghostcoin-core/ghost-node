@@ -49,13 +49,20 @@ var (
 	ErrCorruptHistory = errors.New("corrupt tree history")
 )
 
-// Record is one leaf of the history with its note, where it was appended.
+// SaltBytes is the length of the per-coin salt that a salted commit carries
+// in the clear and the history keeps with its leaf.
+const SaltBytes = 16
+
+// Record is one leaf of the history with its note, where it was appended, and
+// the salt of a salted commit. Salt is nil for a leaf without one: a version 1
+// commit, a reveal remainder (whose salt is in its note) or a marker.
 type Record struct {
 	Kind      Kind
 	TreeIndex uint64
 	Position  uint32
 	Leaf      common.Hash
 	Note      [NoteBytes]byte
+	Salt      *[SaltBytes]byte
 }
 
 // History is the store of every leaf and note of every tree index of both
@@ -75,30 +82,48 @@ func NewHistory(db ethdb.Database) *History {
 	return &History{p: Release, db: db}
 }
 
-// stored is a record as kept in the database.
+// stored is a record as kept in the database: the block number, the leaf,
+// the note and, for a salted commit, the salt after the note.
 type stored struct {
 	number uint64
 	leaf   common.Hash
 	note   [NoteBytes]byte
+	salt   *[SaltBytes]byte
 }
 
-const storedSize = 8 + common.HashLength + NoteBytes
+const (
+	storedSize       = 8 + common.HashLength + NoteBytes
+	storedSaltedSize = storedSize + SaltBytes
+)
 
 func (s *stored) encode() []byte {
-	enc := make([]byte, storedSize)
+	size := storedSize
+	if s.salt != nil {
+		size = storedSaltedSize
+	}
+	enc := make([]byte, size)
 	binary.BigEndian.PutUint64(enc, s.number)
 	copy(enc[8:], s.leaf[:])
 	copy(enc[8+common.HashLength:], s.note[:])
+	if s.salt != nil {
+		copy(enc[storedSize:], s.salt[:])
+	}
 	return enc
 }
 
+// decodeStored decodes a stored record of either length: without a salt, or
+// with the salt after the note.
 func decodeStored(enc []byte) (*stored, error) {
-	if len(enc) != storedSize {
+	if len(enc) != storedSize && len(enc) != storedSaltedSize {
 		return nil, fmt.Errorf("%w: record of %d bytes", ErrCorruptHistory, len(enc))
 	}
 	s := &stored{number: binary.BigEndian.Uint64(enc)}
 	copy(s.leaf[:], enc[8:])
-	copy(s.note[:], enc[8+common.HashLength:])
+	copy(s.note[:], enc[8+common.HashLength:storedSize])
+	if len(enc) == storedSaltedSize {
+		s.salt = new([SaltBytes]byte)
+		copy(s.salt[:], enc[storedSize:])
+	}
 	return s, nil
 }
 
@@ -197,7 +222,7 @@ func (h *History) applyBlock(batch ethdb.KeyValueWriter, blockHash common.Hash, 
 					return err
 				}
 			}
-			r.TreeIndex, r.Position, r.Note = s.treeIndex, s.position, [NoteBytes]byte{}
+			r.TreeIndex, r.Position, r.Note, r.Salt = s.treeIndex, s.position, [NoteBytes]byte{}, nil
 			if s.position < h.lastPosition() {
 				nextMarker[r.Kind] = slot{r.Kind, s.treeIndex, s.position + 1}
 			} else if s.treeIndex < math.MaxUint64 {
@@ -232,6 +257,10 @@ func (h *History) applyBlock(batch ethdb.KeyValueWriter, blockHash common.Hash, 
 			}
 		}
 		rec := &stored{number: number, leaf: r.Leaf, note: r.Note}
+		if r.Salt != nil {
+			salt := *r.Salt
+			rec.salt = &salt
+		}
 		pending[s] = rec
 		slots = append(slots, s)
 		if err := rawdb.WriteGhostTreeLeaf(batch, uint8(r.Kind), r.TreeIndex, r.Position, rec.encode()); err != nil {

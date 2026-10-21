@@ -65,10 +65,13 @@ func (k *TreeKind) UnmarshalJSON(input []byte) error {
 	return fmt.Errorf("%w: %q", ghosttree.ErrUnknownKind, s)
 }
 
-// RPCPageEntry is one filled position of a page.
+// RPCPageEntry is one filled position of a page. Salt is the 16-byte salt of
+// a salted commit, left out for a leaf without one (a version 1 commit, or a
+// reveal remainder, whose salt is in its note).
 type RPCPageEntry struct {
 	Leaf common.Hash   `json:"leaf"`
 	Note hexutil.Bytes `json:"note"`
+	Salt hexutil.Bytes `json:"salt,omitempty"`
 }
 
 // RPCTreePage is one page of a tree as of an anchor.
@@ -93,8 +96,8 @@ var (
 )
 
 // GetTreePage returns one whole page as of the anchor block. For a tree kind
-// it is the filled positions of the page, each as leaf and note, and their
-// number (RPCTreePage); for a marker kind it is the markers spent at the
+// it is the filled positions of the page, each as leaf, note and salt (left
+// out for a leaf without one), and their number (RPCTreePage); for a marker kind it is the markers spent at the
 // page's positions and their number (RPCMarkerPage). A page past the last
 // filled one is empty.
 func (api *GhostAPI) GetTreePage(kind TreeKind, treeIndex hexutil.Uint64, page hexutil.Uint64, anchorHash common.Hash) (interface{}, error) {
@@ -124,6 +127,9 @@ func (api *GhostAPI) GetTreePage(kind TreeKind, treeIndex hexutil.Uint64, page h
 	}
 	for i, e := range p.Entries {
 		out.Entries[i] = RPCPageEntry{Leaf: e.Leaf, Note: append(hexutil.Bytes(nil), e.Note[:]...)}
+		if e.Salt != nil {
+			out.Entries[i].Salt = append(hexutil.Bytes(nil), e.Salt[:]...)
+		}
 	}
 	return out, nil
 }

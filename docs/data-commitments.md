@@ -45,8 +45,19 @@ those of [trees and headers](trees-and-headers.md).
 ## Data commit
 
 A data commit is any transaction type the node already accepts, sent top level
-to the data commit entry address with value exactly 0 and the 190 bytes of a
-coin commit (`ghostpriv.CommitData`):
+to the data commit entry address with value exactly 0 and the data of a coin
+commit: the 206 bytes of salted commit data, version 2
+(`ghostpriv.SaltedCommitData`):
+
+| Offset | Length | Field |
+|---|---|---|
+| 0 | 2 | version, `0x0002` |
+| 2 | 32 | `F_d` |
+| 34 | 16 | salt |
+| 50 | 156 | note |
+
+or the 190 bytes of version 1 data without a salt (`ghostpriv.CommitData`),
+still accepted unchanged because version 1 commitments stay valid:
 
 | Offset | Length | Field |
 |---|---|---|
@@ -54,16 +65,19 @@ coin commit (`ghostpriv.CommitData`):
 | 2 | 32 | `F_d` |
 | 34 | 156 | note |
 
-The node computes the commitment itself,
-`D = K("ghost/data-commitment/v1", DATA, F_d)` (`ghostpriv.DataCommitment`);
-it carries no amount and never equals a coin commitment.
+The salt is carried in the clear so that a wallet can read it back with the
+leaf and note. The node computes the commitment itself,
+`D = K("ghost/data-commitment/v1", DATA, F_d)` (`ghostpriv.DataCommitment`),
+from `F_d` only; the salt is already in `F_d` and the node never uses it. The
+commitment carries no amount and never equals a coin commitment.
 
 The checks run in this order and stop at the first failure; each failure makes
 the transaction invalid, so a block carrying it is invalid:
 
 1. ordinary validity: nonce, sender without code, fee caps, intrinsic gas;
-2. data of exactly 190 bytes with version 1 (`ErrCommitData`); anything else,
-   an extra field included, is rejected;
+2. data of exactly 206 bytes with version 2, or of exactly 190 bytes with
+   version 1 (`ErrCommitData`); anything else, an extra field, another
+   version or a version with the other length included, is rejected;
 3. `F_d` not all zero (`ErrCommitZeroF`);
 4. value exactly 0 (`ErrDataCommitValue`);
 5. the sender's funds cover the gas (`core.ErrInsufficientFunds`);
@@ -197,10 +211,14 @@ Both logs have the data tree account as address.
 
 | Log | Topics | Data |
 |---|---|---|
-| data commit | `K("ghost/data-commit-receipt/v1")` | tree index (4), position (4), leaf (32), note (156) |
+| data commit, version 1 | `K("ghost/data-commit-receipt/v1")` | tree index (4), position (4), leaf (32), note (156): 196 bytes |
+| data commit, salted | `K("ghost/data-commit-receipt/v1")` | tree index (4), position (4), leaf (32), note (156), salt (16): 212 bytes |
 | data reveal | `K("ghost/data-reveal-receipt/v1")`, marker | purpose (1), verifier-or-recipient field (20) |
 
-The layout is an internal-test value, changed with the transaction-format
+The log of a salted data commit is the version 1 log with the salt appended
+after the note; the logs of version 1 data commits and of data reveals do not
+change. The tree history reads both lengths and keeps the salt with the leaf
+and note. The layout is an internal-test value, changed with the transaction-format
 specification. An append whose tree index does not fit four bytes is
 rejected.
 
@@ -208,6 +226,7 @@ rejected.
 
 - `ghostpriv.DataCommitment(F_d)`, `ghostpriv.ParseDataCommit` and
   `ghostpriv.ApplyDataCommit`; a data commit's data is
+  `ghostpriv.SaltedCommitData(F_d, salt, note)`, or for version 1
   `ghostpriv.CommitData(F_d, note)`;
 - `ghostpriv.DataReveal` with `MarshalBinary` (the envelope), `BindingDigest`
   and `BindingInput`; `ghostpriv.DecodeDataReveal` (checks 1 to 3);
