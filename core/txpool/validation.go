@@ -223,6 +223,11 @@ type ValidationOptionsWithState struct {
 	// ExistingCost is a mandatory callback to retrieve an already pooled
 	// transaction's cost with the given nonce to check for overdrafts.
 	ExistingCost func(addr common.Address, nonce uint64) *big.Int
+
+	// SkipAccountSignature runs every check of an account transaction but the
+	// signature's, for a pool that verifies the signature afterwards, on its
+	// SigVerifier.
+	SkipAccountSignature bool
 }
 
 // ValidateTransactionWithState is a helper method to check whether a transaction
@@ -297,9 +302,9 @@ func ValidateTransactionWithState(tx *types.Transaction, signer types.Signer, op
 	}
 	// Verify the signature of an account transaction last, the most
 	// expensive check. The sender is cached in the transaction.
-	if tx.Type() == types.GhostAccountTxType {
+	if tx.Type() == types.GhostAccountTxType && !opts.SkipAccountSignature {
 		if _, err := types.Sender(signer, tx); err != nil {
-			return fmt.Errorf("%w: %w", ErrInvalidSender, err)
+			return fmt.Errorf("%w: %w", ErrSignatureFailed, err)
 		}
 	}
 	return nil

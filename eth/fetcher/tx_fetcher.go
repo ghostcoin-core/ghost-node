@@ -188,11 +188,11 @@ type TxFetcher struct {
 	alternates map[common.Hash]map[string]struct{} // In-flight transaction alternate origins if retrieval fails
 
 	// Callbacks
-	hasTx      func(common.Hash) bool             // Retrieves a tx from the local txpool
-	filterType func(byte) bool                    // Reports whether the local txpool takes a tx type (nil takes all)
-	addTxs     func([]*types.Transaction) []error // Insert a batch of transactions into local txpool
-	fetchTxs   func(string, []common.Hash) error  // Retrieves a set of txs from a remote peer
-	dropPeer   func(string)                       // Drops a peer in case of announcement violation
+	hasTx      func(common.Hash) bool                     // Retrieves a tx from the local txpool
+	filterType func(byte) bool                            // Reports whether the local txpool takes a tx type (nil takes all)
+	addTxs     func(string, []*types.Transaction) []error // Insert a batch of transactions from a peer into local txpool
+	fetchTxs   func(string, []common.Hash) error          // Retrieves a set of txs from a remote peer
+	dropPeer   func(string)                               // Drops a peer in case of announcement violation
 
 	step  chan struct{} // Notification channel when the fetcher loop iterates
 	clock mclock.Clock  // Time wrapper to simulate in tests
@@ -202,13 +202,20 @@ type TxFetcher struct {
 // NewTxFetcher creates a transaction fetcher to retrieve transaction
 // based on hash announcements.
 func NewTxFetcher(hasTx func(common.Hash) bool, addTxs func([]*types.Transaction) []error, fetchTxs func(string, []common.Hash) error, dropPeer func(string)) *TxFetcher {
-	return newTxFetcher(hasTx, nil, addTxs, fetchTxs, dropPeer, mclock.System{}, nil)
+	return newTxFetcher(hasTx, nil, withoutPeer(addTxs), fetchTxs, dropPeer, mclock.System{}, nil)
 }
 
 // NewTxFetcherWithTypeFilter creates a transaction fetcher that also ignores
-// the announcements of transaction types the local txpool does not take.
-func NewTxFetcherWithTypeFilter(hasTx func(common.Hash) bool, filterType func(byte) bool, addTxs func([]*types.Transaction) []error, fetchTxs func(string, []common.Hash) error, dropPeer func(string)) *TxFetcher {
+// the announcements of transaction types the local txpool does not take, and
+// inserts the transactions it receives with the peer they came from, so that
+// the peer's signature budget applies.
+func NewTxFetcherWithTypeFilter(hasTx func(common.Hash) bool, filterType func(byte) bool, addTxs func(string, []*types.Transaction) []error, fetchTxs func(string, []common.Hash) error, dropPeer func(string)) *TxFetcher {
 	return newTxFetcher(hasTx, filterType, addTxs, fetchTxs, dropPeer, mclock.System{}, nil)
+}
+
+// withoutPeer adapts an insertion callback that takes no peer.
+func withoutPeer(addTxs func([]*types.Transaction) []error) func(string, []*types.Transaction) []error {
+	return func(_ string, txs []*types.Transaction) []error { return addTxs(txs) }
 }
 
 // NewTxFetcherForTests is a testing method to mock out the realtime clock with
@@ -216,11 +223,11 @@ func NewTxFetcherWithTypeFilter(hasTx func(common.Hash) bool, filterType func(by
 func NewTxFetcherForTests(
 	hasTx func(common.Hash) bool, addTxs func([]*types.Transaction) []error, fetchTxs func(string, []common.Hash) error, dropPeer func(string),
 	clock mclock.Clock, rand *mrand.Rand) *TxFetcher {
-	return newTxFetcher(hasTx, nil, addTxs, fetchTxs, dropPeer, clock, rand)
+	return newTxFetcher(hasTx, nil, withoutPeer(addTxs), fetchTxs, dropPeer, clock, rand)
 }
 
 func newTxFetcher(
-	hasTx func(common.Hash) bool, filterType func(byte) bool, addTxs func([]*types.Transaction) []error, fetchTxs func(string, []common.Hash) error, dropPeer func(string),
+	hasTx func(common.Hash) bool, filterType func(byte) bool, addTxs func(string, []*types.Transaction) []error, fetchTxs func(string, []common.Hash) error, dropPeer func(string),
 	clock mclock.Clock, rand *mrand.Rand) *TxFetcher {
 	return &TxFetcher{
 		notify:      make(chan *txAnnounce),
@@ -347,7 +354,7 @@ func (f *TxFetcher) Enqueue(peer string, txs []*types.Transaction, direct bool) 
 		)
 		batch := txs[i:end]
 
-		for j, err := range f.addTxs(batch) {
+		for j, err := range f.addTxs(peer, batch) {
 			// Track the transaction hash if the price is too low for us.
 			// Avoid re-request this transaction when we receive another
 			// announcement.

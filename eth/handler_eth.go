@@ -70,6 +70,7 @@ func (h *ethHandler) Handle(peer *eth.Peer, packet eth.Packet) error {
 
 	case *eth.NewPooledTransactionHashesPacket:
 		kinds, sizes, hashes := h.filterRevealAnnounces(peer.ID(), packet.Types, packet.Sizes, packet.Hashes)
+		kinds, sizes, hashes = h.filterAccountAnnounces(peer.ID(), kinds, sizes, hashes)
 		return h.txFetcher.Notify(peer.ID(), kinds, sizes, hashes)
 
 	case *eth.TransactionsPacket:
@@ -140,6 +141,39 @@ func (h *ethHandler) filterRevealAnnounces(peer string, kinds []byte, sizes []ui
 			fsizes = append(fsizes, sizes[i])
 			fhashes = append(fhashes, hash)
 		}
+	}
+	return fkinds, fsizes, fhashes
+}
+
+// filterAccountAnnounces keeps of an announcement only as many unknown
+// account transactions as the peer's signature budget has left, so that the
+// fetcher requests no more than the peer may have verified. An announcement
+// without types counts every unknown hash against the budget. Other
+// transactions pass unchanged.
+func (h *ethHandler) filterAccountAnnounces(peer string, kinds []byte, sizes []uint32, hashes []common.Hash) ([]byte, []uint32, []common.Hash) {
+	typed := kinds != nil && len(kinds) == len(hashes) && len(sizes) == len(hashes)
+	var (
+		left    = h.sigBudgets.Get(peer).Available()
+		fkinds  []byte
+		fsizes  []uint32
+		fhashes = make([]common.Hash, 0, len(hashes))
+	)
+	if typed {
+		fkinds = make([]byte, 0, len(hashes))
+		fsizes = make([]uint32, 0, len(hashes))
+	}
+	for i, hash := range hashes {
+		if (!typed || kinds[i] == types.GhostAccountTxType) && !h.txpool.Has(hash) {
+			if left == 0 {
+				continue
+			}
+			left--
+		}
+		if typed {
+			fkinds = append(fkinds, kinds[i])
+			fsizes = append(fsizes, sizes[i])
+		}
+		fhashes = append(fhashes, hash)
 	}
 	return fkinds, fsizes, fhashes
 }

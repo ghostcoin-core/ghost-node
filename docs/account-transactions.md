@@ -144,8 +144,94 @@ intrinsic gas. The signature is verified last, in
 `txpool.ValidateTransactionWithState`, and the sender is then cached in the
 transaction.
 
+## Bounded signature checks
+
+A signature check costs far more than any other check of a transaction, so
+the node bounds them (spec 09, sections 8.3 and 8.4): a peer or an RPC client
+sending transactions with invalid signatures cannot make the node verify more
+than it can afford.
+
+### Order of the checks
+
+The cheap checks of the pool, above, run first: the stateless ones in
+`txpool.ValidateTransaction`, then the state checks under the pool lock. A
+transaction that fails one is refused before it takes a slot of the
+signature queue, and its signature is never verified. Only then is the
+signature verified, on the verifier's workers and outside the pool lock; the
+sender is cached in the transaction, so adding it to the pool afterwards does
+not verify it again.
+
+### The verifier
+
+`txpool.SigVerifier` (`core/txpool/sigcheck.go`) verifies the signatures of
+the legacy pool on a fixed number of workers, from a bounded queue. The queue
+is split: 3 slots in 4 are for transactions from peers, 1 in 4 for
+transactions submitted locally by RPC (the pool's local transactions). A
+slot is held while the check waits or runs. When a transaction finds its
+share full:
+
+- from a peer, it is dropped unverified;
+- from RPC, the submission fails with the error `signature queue busy`,
+  JSON-RPC code `-32005`.
+
+A batch that already has checks of its own in the queue waits for one of them
+to free a slot instead; it drops a transaction only when the share is full
+without it.
+
+A signature that fails is kept in a bounded cache of recent failures, keyed
+by the signature hash and the public key, and the signature itself: the same
+failing transaction is refused from the cache, not verified again. The
+signature is part of the key because ML-DSA signatures are hedged: another
+signature of the same key over the same hash may be valid, and is verified.
+
+### Budgets
+
+Each peer has a budget of account transactions it may have verified per
+second, a token bucket refilled every second (`eth/handler.go`). A
+transaction beyond it is dropped unverified, and an announcement is fetched
+only for as many unknown account transactions as the budget has left. A
+transaction already in the pool costs nothing. A transaction from a peer the
+node cannot identify is dropped before it takes a slot.
+
+RPC has two budgets, token buckets refilled every second as well
+(`internal/ethapi/api.go`): one for each connection, told apart by its remote
+address (`rpc.PeerInfoFromContext`), and one for all connections together.
+A submission beyond either fails with the error `signature budget exceeded`,
+JSON-RPC code `-32005`, before it reaches the pool.
+
+### Peers
+
+A peer that sends a transaction whose signature fails, verified or found in
+the failure cache, is disconnected. A transaction refused by the state, a
+stale nonce or a balance already spent, is not held against the peer.
+
+### The bounds and their measurement
+
+The bounds are node settings, not consensus constants, in
+`params/ghost/accounttx.go`. None is zero (`TestSignatureLimitsAreSet`).
+They are derived from the measurement of ML-DSA-44 verification recorded
+above for `VERIFY_GAS` (`BenchmarkGhostAccountTxVerifySlowest`: 2,000
+verifications on the linux/arm64 machine of 16 CPUs; median 0.0454 ms,
+slowest 0.2865 ms), taking the slowest verification as the cost of every
+one:
+
+| Constant | Value | Derivation |
+|---|---|---|
+| `SigVerifyWorkers` | 4 | a quarter of the 16 CPUs, leaving the rest to block processing and the network: 4 / 0.2865 ms = 13,961 verifications per second at worst, 88,105 at the median |
+| `SigVerifyQueue` | 256 | the last check of a full queue waits 256 × 0.2865 ms / 4 = 18.3 ms at worst, 2.9 ms at the median; 192 slots for peers, 64 for RPC |
+| `SigPeerBudget` | 200 per second | the peers' 3 quarters of the workers, 10,471 per second at worst, over the default 50 peers is 209, rounded down |
+| `SigRPCBudget` | 3,000 per second | the RPC quarter of the workers, 3,490 per second at worst, rounded down |
+| `SigRPCConnBudget` | 300 per second | a tenth of the RPC budget, so that one connection cannot take it all |
+| `SigFailureCacheSize` | 4,096 | entries of 96 bytes, well under 1 MiB; a peer that sends a failure is disconnected, so the cache serves the same failure sent again by other peers |
+
+The values should be measured again on the slowest machine Ghost means to
+support before launch, as `VERIFY_GAS` is. `TestSignatureFloodStaysWithinWorkers`
+floods the pool from 24 peers at once and checks that no more signatures are
+verified at once than there are workers, that a transaction beyond the
+peers' share is dropped unverified, and that none is verified twice.
+
 ## Not yet in this node
 
 Refusing the secp256k1 transaction types, the signature-verify contract,
-bounds on signature checks in the pool and on the wire, the node's own
-signing and RPC, and scheme `0x0002` are separate pieces of work.
+the bounds on the signatures of a block, the node's own signing and RPC, and
+scheme `0x0002` are separate pieces of work.

@@ -40,6 +40,7 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/metrics"
 	"github.com/ethereum/go-ethereum/p2p"
+	"github.com/ethereum/go-ethereum/params/ghost"
 	"github.com/ethereum/go-ethereum/params/types/ctypes"
 	"github.com/ethereum/go-ethereum/params/vars"
 	"github.com/ethereum/go-ethereum/triedb/pathdb"
@@ -54,6 +55,11 @@ const (
 	// All transactions with a higher size will be announced and need to be fetched
 	// by the peer.
 	txMaxBroadcastSize = 4096
+
+	// sigBudgetPeers bounds the number of peers whose signature budgets are
+	// kept, above any peer count. A budget is only made for a registered peer
+	// and is dropped when the peer leaves; the bound is a backstop.
+	sigBudgetPeers = 1024
 )
 
 var syncChallengeTimeout = 15 * time.Second // Time allowance for a node to reply to the sync progress challenge
@@ -146,6 +152,12 @@ type handler struct {
 
 	requiredBlocks map[uint64]common.Hash
 
+	// sigBudgets holds each peer's budget of account transaction signature
+	// checks per second; sigDropPeer disconnects a peer that sent a
+	// transaction whose signature fails.
+	sigBudgets  *txpool.SigBudgets
+	sigDropPeer func(id string)
+
 	// channels for fetcher, syncer, txsyncLoop
 	quitSync chan struct{}
 
@@ -176,7 +188,9 @@ func newHandler(config *handlerConfig) (*handler, error) {
 		quitSync:       make(chan struct{}),
 		handlerDoneCh:  make(chan struct{}),
 		handlerStartCh: make(chan struct{}),
+		sigBudgets:     txpool.NewSigBudgets(ghost.SigPeerBudget, sigBudgetPeers, nil),
 	}
+	h.sigDropPeer = h.removePeer
 	if config.Sync == downloader.FullSync {
 		// The database seems empty as the current block is the genesis. Yet the snap
 		// block is ahead, so snap sync was enabled for this node at a certain point.
@@ -316,12 +330,57 @@ func newHandler(config *handlerConfig) (*handler, error) {
 		}
 		return p.RequestTxs(hashes)
 	}
-	addTxs := func(txs []*types.Transaction) []error {
-		return h.txpool.Add(txs, false, false)
-	}
-	h.txFetcher = fetcher.NewTxFetcherWithTypeFilter(h.txpool.Has, h.txpool.FilterType, addTxs, fetchTx, h.removePeer)
+	h.txFetcher = fetcher.NewTxFetcherWithTypeFilter(h.txpool.Has, h.txpool.FilterType, h.addTxsFromPeer, fetchTx, h.removePeer)
 	h.chainSync = newChainSyncer(h)
 	return h, nil
+}
+
+// addTxsFromPeer adds the transactions a peer delivered to the pool. An
+// account transaction is dropped unverified when the peer cannot be
+// identified or has used its signature budget for the second; one already
+// in the pool costs nothing. A peer that sent a transaction whose signature
+// fails is disconnected; a transaction refused by the state (a stale nonce, a
+// spent balance) is not held against it.
+func (h *handler) addTxsFromPeer(peer string, txs []*types.Transaction) []error {
+	var (
+		errs   = make([]error, len(txs))
+		known  = h.peers.peer(peer) != nil
+		budget *txpool.SigBudget
+		index  = make([]int, 0, len(txs))
+		admit  = make([]*types.Transaction, 0, len(txs))
+	)
+	for i, tx := range txs {
+		if tx.Type() == types.GhostAccountTxType && !h.txpool.Has(tx.Hash()) {
+			if !known {
+				errs[i] = txpool.ErrSignaturePeerUnknown
+				continue
+			}
+			if budget == nil {
+				budget = h.sigBudgets.Get(peer)
+			}
+			if !budget.Take() {
+				errs[i] = txpool.ErrSignatureBudget
+				continue
+			}
+		}
+		index = append(index, i)
+		admit = append(admit, tx)
+	}
+	if len(admit) == 0 {
+		return errs
+	}
+	failed := false
+	for j, err := range h.txpool.Add(admit, false, false) {
+		errs[index[j]] = err
+		if errors.Is(err, txpool.ErrSignatureFailed) {
+			failed = true
+		}
+	}
+	if failed {
+		log.Debug("Dropping peer for a failed transaction signature", "peer", peer)
+		h.sigDropPeer(peer)
+	}
+	return errs
 }
 
 // protoTracker tracks the number of active protocol handlers.
@@ -595,6 +654,7 @@ func (h *handler) unregisterPeer(id string) {
 	}
 	h.downloader.UnregisterPeer(id)
 	h.txFetcher.Drop(id)
+	h.sigBudgets.Forget(id)
 	if h.ghostpool != nil {
 		h.ghostpool.DropPeer(id)
 	}
