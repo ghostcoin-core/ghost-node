@@ -17,11 +17,13 @@
 package legacypool
 
 import (
+	"bytes"
 	"errors"
 	"math/big"
 	"testing"
 
 	"github.com/cloudflare/circl/sign/mldsa/mldsa44"
+	"github.com/cloudflare/circl/sign/slhdsa"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/rawdb"
@@ -163,7 +165,7 @@ func TestGhostAccountTxPool(t *testing.T) {
 		want error
 	}{
 		{"unknown scheme", key, ghostPoolTx{nonce: 1, gas: txGas, badSig: true, scheme: 0x0003}, types.ErrGhostAccountScheme},
-		{"lengths of another scheme", key, ghostPoolTx{nonce: 1, gas: txGas, badSig: true, scheme: types.GhostSchemeHashBased}, types.ErrGhostAccountLength},
+		{"lengths of another scheme", key, ghostPoolTx{nonce: 1, gas: txGas, badSig: true, scheme: types.GhostSchemeSLHDSA}, types.ErrGhostAccountLength},
 		{"wrong chain ID", key, ghostPoolTx{nonce: 1, gas: txGas, badSig: true, chainID: big.NewInt(999)}, types.ErrInvalidChainId},
 		{"intrinsic gas too low", key, ghostPoolTx{nonce: 1, gas: txGas - 1, badSig: true}, core.ErrIntrinsicGas},
 		{"code at the sender", contract, ghostPoolTx{nonce: 0, gas: txGas, badSig: true}, core.ErrSenderNoEOA},
@@ -186,6 +188,140 @@ func TestGhostAccountTxPool(t *testing.T) {
 	}
 	if err := pool.addRemoteSync(makeGhostPoolTx(t, genesis, key, ghostPoolTx{nonce: 1, gas: txGas})); err != nil {
 		t.Errorf("next nonce: %v", err)
+	}
+	if err := validatePoolInternals(pool); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// withGhostAuth returns tx with its gas limit, scheme, public key and
+// signature replaced, without signing it again.
+func withGhostAuth(tx *types.Transaction, gas uint64, scheme uint16, pk, sig []byte) *types.Transaction {
+	return types.NewTx(&types.GhostAccountTx{
+		ChainID:   tx.ChainId(),
+		Nonce:     tx.Nonce(),
+		GasTipCap: tx.GasTipCap(),
+		GasFeeCap: tx.GasFeeCap(),
+		Gas:       gas,
+		To:        tx.To(),
+		Value:     tx.Value(),
+		Scheme:    types.GhostScheme(scheme),
+		PublicKey: common.CopyBytes(pk),
+		Signature: common.CopyBytes(sig),
+	})
+}
+
+// TestGhostPoolSLHDSA checks that the pool admits an SLH-DSA-SHAKE-128s
+// account transaction at its intrinsic gas, the type 0x02 intrinsic gas plus
+// 126,240 byte gas plus VERIFY_GAS[0x0002], well under the pool's size cap,
+// that it refuses a bad signature and a lower gas limit, and that a key or
+// signature of the other scheme is refused for its length and never reaches
+// the signature verifier (QS-4).
+func TestGhostPoolSLHDSA(t *testing.T) {
+	pool, genesis := setupGhostAccountPool(t)
+	defer pool.Close()
+	counter := newCountingVerify(true)
+	useVerifier(pool, counter, ghost.SigFailureCacheSize)
+
+	if ghost.AccountTxVerifyGasSLHDSA == 0 {
+		t.Fatal("the verification gas of SLH-DSA-SHAKE-128s is not set")
+	}
+	slhGas := vars.TxGas + 126_240 + ghost.AccountTxVerifyGasSLHDSA
+	if byteGas := ghost.AccountTxSigByteGas * (2 + types.GhostSLHDSAPublicKeySize + types.GhostSLHDSASignatureSize); byteGas != 126_240 {
+		t.Fatalf("byte gas %d, want 126,240", byteGas)
+	}
+
+	_, key, err := slhdsa.GenerateKey(bytes.NewReader(bytes.Repeat([]byte{0x52}, 48)), slhdsa.SHAKE_128s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, err := key.PublicKey().MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	from := types.GhostAccountAddressOf(types.GhostSchemeSLHDSA, pub)
+	testAddBalance(pool, from, big.NewInt(1_000_000_000_000_000_000))
+
+	chainID := params.TestChainConfig.GetChainID()
+	to := common.HexToAddress("0x00000000000000000000000000000000000000bb")
+	signer := types.NewGhostAccountSigner(types.LatestSignerForChainID(chainID), genesis)
+	valid, err := types.SignGhostAccountTxSLHDSA(signer, &key, &types.GhostAccountTx{
+		ChainID:   chainID,
+		GasTipCap: big.NewInt(1),
+		GasFeeCap: big.NewInt(1),
+		Gas:       slhGas,
+		To:        &to,
+		Value:     big.NewInt(100),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, sig, _ := valid.GhostAccountAuth()
+	if n := 2 + len(pub) + len(sig); n != 7890 {
+		t.Fatalf("scheme, key and signature of %d bytes, want 7,890", n)
+	}
+	if valid.Size() >= txMaxSize {
+		t.Fatalf("SLH-DSA transaction of %d bytes, the pool's cap is %d", valid.Size(), txMaxSize)
+	}
+
+	// Refused before the signature: a gas limit one below the intrinsic gas
+	// and the gas of an ML-DSA-44 transfer, each with a bad signature too.
+	badSig := common.CopyBytes(sig)
+	badSig[len(badSig)/2] ^= 0x01
+	for _, tc := range []struct {
+		name string
+		gas  uint64
+	}{
+		{"gas one below the intrinsic gas", slhGas - 1},
+		{"gas of an ML-DSA-44 transfer", txGas},
+	} {
+		tx := withGhostAuth(valid, tc.gas, types.GhostSchemeSLHDSA, pub, badSig)
+		if err := pool.addRemoteSync(tx); !errors.Is(err, core.ErrIntrinsicGas) || errors.Is(err, types.ErrInvalidSig) {
+			t.Errorf("%s: error %v, want %v", tc.name, err, core.ErrIntrinsicGas)
+		}
+	}
+	// QS-4: the keys and signatures of one scheme under the other.
+	mlKey, _, mlFrom := testAccount(1)
+	testAddBalance(pool, mlFrom, big.NewInt(1_000_000_000_000_000_000))
+	mlTx := makeGhostPoolTx(t, genesis, mlKey, ghostPoolTx{nonce: 0, gas: txGas})
+	_, mlPub, mlSig, _ := mlTx.GhostAccountAuth()
+	for _, tc := range []struct {
+		name   string
+		scheme uint16
+		pk     []byte
+		sig    []byte
+		gas    uint64
+	}{
+		{"ML-DSA-44 key and signature under 0x0002", types.GhostSchemeSLHDSA, mlPub, mlSig, slhGas},
+		{"ML-DSA-44 signature under 0x0002", types.GhostSchemeSLHDSA, pub, mlSig, slhGas},
+		{"SLH-DSA key and signature under 0x0001", types.GhostSchemeMLDSA44, pub, sig, slhGas},
+		{"SLH-DSA signature under 0x0001", types.GhostSchemeMLDSA44, mlPub, sig, slhGas},
+	} {
+		tx := withGhostAuth(valid, tc.gas, tc.scheme, tc.pk, tc.sig)
+		if err := pool.addRemoteSync(tx); !errors.Is(err, types.ErrGhostAccountLength) {
+			t.Errorf("%s: error %v, want %v", tc.name, err, types.ErrGhostAccountLength)
+		}
+	}
+	if calls, _, _ := counter.stats(); calls != 0 {
+		t.Fatalf("%d signatures verified for transactions refused by a cheap check, want none", calls)
+	}
+
+	// A bad signature is verified and refused; the valid transaction is
+	// admitted under the derived sender.
+	if err := pool.addRemoteSync(withGhostAuth(valid, slhGas, types.GhostSchemeSLHDSA, pub, badSig)); !errors.Is(err, types.ErrInvalidSig) {
+		t.Fatalf("bad signature: error %v, want %v", err, types.ErrInvalidSig)
+	}
+	if !pool.Filter(valid) {
+		t.Fatal("the pool does not take SLH-DSA account transactions")
+	}
+	if err := pool.addRemoteSync(valid); err != nil {
+		t.Fatalf("valid SLH-DSA transaction refused: %v", err)
+	}
+	if list := pool.pending[from]; list == nil || list.Len() != 1 || pool.Get(valid.Hash()) == nil {
+		t.Fatal("the SLH-DSA transaction is not pending under the derived sender")
+	}
+	if calls, _, _ := counter.stats(); calls != 2 {
+		t.Fatalf("%d signatures verified, want 2", calls)
 	}
 	if err := validatePoolInternals(pool); err != nil {
 		t.Fatal(err)

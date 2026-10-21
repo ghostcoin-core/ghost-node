@@ -10,7 +10,7 @@ require (
 	github.com/VictoriaMetrics/fastcache v1.12.1
 	github.com/btcsuite/btcd/btcec/v2 v2.2.0
 	github.com/cespare/cp v0.1.0
-	github.com/cloudflare/circl v1.6.1
+	github.com/cloudflare/circl v1.6.5
 	github.com/cockroachdb/pebble v0.0.0-20230928194634-aa077af62593
 	github.com/consensys/gnark-crypto v0.18.1
 	github.com/crate-crypto/go-ipa v0.0.0-20231025140028-3c0104f4b233
@@ -59,9 +59,9 @@ require (
 	github.com/tidwall/gjson v1.9.3
 	github.com/urfave/cli/v2 v2.25.7
 	go.uber.org/automaxprocs v1.5.2
-	golang.org/x/crypto v0.53.0
+	golang.org/x/crypto v0.54.0
 	golang.org/x/exp v0.0.0-20231110203233-9a3e6036ecaa
-	golang.org/x/sys v0.46.0
+	golang.org/x/sys v0.47.0
 	golang.org/x/tools v0.47.0
 	gonum.org/v1/gonum v0.14.0
 	gonum.org/v1/plot v0.14.0
@@ -127,8 +127,8 @@ require (
 	golang.org/x/image v0.11.0 // indirect
 	golang.org/x/mod v0.37.0 // indirect
 	golang.org/x/net v0.56.0 // indirect
-	golang.org/x/sync v0.21.0 // indirect
-	golang.org/x/text v0.39.0 // indirect
+	golang.org/x/sync v0.22.0 // indirect
+	golang.org/x/text v0.40.0 // indirect
 	golang.org/x/xerrors v0.0.0-20220517211312-f3a8303e98df // indirect
 	google.golang.org/protobuf v1.31.0 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect

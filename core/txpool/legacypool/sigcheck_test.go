@@ -123,6 +123,23 @@ func TestSignatureLimitsAreSet(t *testing.T) {
 	if ghost.SigRPCConnBudget > ghost.SigRPCBudget {
 		t.Errorf("the budget of one RPC connection %d is above the overall RPC budget %d", ghost.SigRPCConnBudget, ghost.SigRPCBudget)
 	}
+	// One check is paid at the dearest scheme: its VERIFY_GAS / 10,000 is at
+	// least its slowest verification in milliseconds. The default 50 peers
+	// at their budget fit in the peers' 3 quarters of the workers, and the
+	// RPC budget in the remaining quarter.
+	dearest := max(ghost.AccountTxVerifyGas(types.GhostSchemeMLDSA44), ghost.AccountTxVerifyGas(types.GhostSchemeSLHDSA))
+	perSecond := uint64(ghost.SigVerifyWorkers) * 1000 * ghost.AccountTxGasPerMs // times the gas of one check
+	if ghost.SigPeerBudget*50*dearest*4 > 3*perSecond {
+		t.Errorf("50 peers at %d checks per second exceed the peers' share of %d workers at %d gas a check", ghost.SigPeerBudget, ghost.SigVerifyWorkers, dearest)
+	}
+	if ghost.SigRPCBudget*dearest*4 > perSecond {
+		t.Errorf("RPC at %d checks per second exceeds its share of %d workers at %d gas a check", ghost.SigRPCBudget, ghost.SigVerifyWorkers, dearest)
+	}
+	// An SLH-DSA transaction, 7,890 bytes of scheme, key and signature, is
+	// well under the pool's size cap.
+	if 2+types.GhostSLHDSAPublicKeySize+types.GhostSLHDSASignatureSize >= txMaxSize/2 {
+		t.Errorf("the SLH-DSA key and signature take half the pool's size cap %d", txMaxSize)
+	}
 	v := txpool.NewSigVerifier(ghost.SigVerifyWorkers, ghost.SigVerifyQueue, ghost.SigFailureCacheSize, nil)
 	defer v.Close()
 	if peers, rpc := v.Share(txpool.SigFromPeer), v.Share(txpool.SigFromRPC); peers != ghost.SigVerifyQueue*3/4 || rpc != ghost.SigVerifyQueue/4 {
