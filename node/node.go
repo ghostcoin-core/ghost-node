@@ -133,7 +133,22 @@ func New(conf *Config) (*Node, error) {
 	node.accman = accounts.NewManager(&accounts.Config{InsecureUnlockAllowed: conf.InsecureUnlockAllowed})
 
 	// Initialize the p2p server. This creates the node key and discovery databases.
+	// Every peer connection runs on the quantum-safe transport. Only a
+	// secp256k1 key handed over in the configuration itself (P2P.PrivateKey,
+	// set by the old node key flags and by in-process simulations that name
+	// nodes by that key) keeps the old handshake, until both are removed.
+	legacyKey := conf.P2P.PrivateKey != nil && conf.P2P.Identity == nil
 	node.server.Config.PrivateKey = node.config.NodeKey()
+	if legacyKey {
+		node.log.Warn("A secp256k1 node key is configured: peer connections do not use the quantum-safe transport")
+	} else {
+		identity, err := node.config.NodeIdentity()
+		if err != nil {
+			node.closeDataDir()
+			return nil, err
+		}
+		node.server.Config.Identity = identity
+	}
 	node.server.Config.Name = node.config.NodeName()
 	node.server.Config.Logger = node.log
 	node.config.checkLegacyFiles()

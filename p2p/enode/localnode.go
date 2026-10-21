@@ -68,8 +68,19 @@ type lnEndpoint struct {
 
 // NewLocalNode creates a local node.
 func NewLocalNode(db *DB, key *ecdsa.PrivateKey) *LocalNode {
+	return newLocalNode(db, PubkeyToIDV4(&key.PublicKey), key)
+}
+
+// NewLocalNodeQuantumSafe creates a local node whose ID is a quantum-safe node
+// ID (see package p2p/qsconn). It holds no signing key: its record uses the
+// null identity scheme, like the nodes made by NewQuantumSafe.
+func NewLocalNodeQuantumSafe(db *DB, id ID) *LocalNode {
+	return newLocalNode(db, id, nil)
+}
+
+func newLocalNode(db *DB, id ID, key *ecdsa.PrivateKey) *LocalNode {
 	ln := &LocalNode{
-		id:      PubkeyToIDV4(&key.PublicKey),
+		id:      id,
 		db:      db,
 		key:     key,
 		entries: make(map[string]enr.Entry),
@@ -290,6 +301,12 @@ func (ln *LocalNode) sign() {
 	}
 	ln.bumpSeq()
 	r.SetSeq(ln.seq)
+	if ln.key == nil {
+		n := SignNull(&r, ln.id)
+		ln.cur.Store(n)
+		log.Info("New local node", "seq", ln.seq, "id", n.ID(), "ip", n.IPAddr(), "tcp", n.TCP())
+		return
+	}
 	if err := SignV4(&r, ln.key); err != nil {
 		panic(fmt.Errorf("enode: can't sign record: %v", err))
 	}

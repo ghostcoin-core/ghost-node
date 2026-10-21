@@ -18,7 +18,9 @@ package node
 
 import (
 	"crypto/ecdsa"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
@@ -29,6 +31,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/p2p"
+	"github.com/ethereum/go-ethereum/p2p/qsconn"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/params/vars"
 	"github.com/ethereum/go-ethereum/rpc"
@@ -36,6 +39,7 @@ import (
 
 const (
 	datadirPrivateKey      = "nodekey"            // Path within the datadir to the node's private key
+	datadirIdentity        = "nodeidentity"       // Path within the datadir to the node's quantum-safe identity
 	datadirJWTKey          = "jwtsecret"          // Path within the datadir to the node's jwt secret
 	datadirDefaultKeyStore = "keystore"           // Path within the datadir to the keystore
 	datadirStaticNodes     = "static-nodes.json"  // Path within the datadir to the static node list
@@ -384,6 +388,39 @@ func (c *Config) NodeKey() *ecdsa.PrivateKey {
 		log.Error(fmt.Sprintf("Failed to persist node key: %v", err))
 	}
 	return key
+}
+
+// NodeIdentity returns the node's quantum-safe identity: any configured one,
+// else the one stored in the data directory. On first start it is created and
+// stored there, readable by its owner only. Without a data directory it is
+// ephemeral. A stored file that cannot be loaded is an error: the node does
+// not replace it.
+func (c *Config) NodeIdentity() (*qsconn.Identity, error) {
+	if c.P2P.Identity != nil {
+		return c.P2P.Identity, nil
+	}
+	if c.DataDir == "" {
+		return qsconn.GenerateIdentity()
+	}
+	path := c.ResolvePath(datadirIdentity)
+	key, err := qsconn.LoadIdentity(path)
+	if err == nil {
+		return key, nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("node identity: %w", err)
+	}
+	key, err = qsconn.GenerateIdentity()
+	if err != nil {
+		return nil, fmt.Errorf("node identity: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return nil, fmt.Errorf("node identity: %w", err)
+	}
+	if err := key.Save(path); err != nil {
+		return nil, fmt.Errorf("node identity: %w", err)
+	}
+	return key, nil
 }
 
 // checkLegacyFiles inspects the datadir for signs of legacy static-nodes

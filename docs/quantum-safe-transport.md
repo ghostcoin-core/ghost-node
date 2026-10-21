@@ -4,8 +4,8 @@ Package `p2p/qsconn` is the node's quantum-safe peer transport: the node
 identity, the hybrid handshake and the encrypted frames of spec 09 of the
 Ghost repository, section 10 (`docs/spec/09-quantum-safe-accounts.md`). This
 document describes the package as built; the spec is the authority on the
-format. The package stands on its own here: the peer-to-peer layer of the
-node does not use it yet.
+format. The node's p2p server runs every peer connection on it; see "The
+p2p server" below.
 
 There is one identity scheme, one key exchange and one frame cipher. Nothing
 is negotiated, and the package has no other handshake to fall back to. Any
@@ -129,3 +129,57 @@ after a failed write, returns the same error. A failed handshake fails both.
 | Key exchange messages | exactly 1,216 and 1,120 bytes of body |
 | Authentication record | exactly 3,750 bytes of ciphertext |
 | Rekey | every 2^20 records per direction |
+
+## The p2p server
+
+`p2p.Config.Identity` holds a `*qsconn.Identity`. When it is set, every
+connection the server dials or accepts runs on `qsconn.Conn`, through the
+transport in `p2p/transport_qsconn.go`, and nothing else:
+
+- The node ID of the server (`Server.Self`, `Server.LocalNode`) is the
+  identity's node ID.
+- A dialled connection checks that the responder's public key hashes to the
+  node ID it dialled (inside `qsconn`, and again in the server). An accepted
+  connection takes the remote node ID from the handshake.
+- The protocol handshake that follows carries the 32-byte node ID, and it
+  must equal the one the handshake authenticated. Frames are not
+  compressed.
+- Any handshake failure, any mismatch between the dialled ID and the
+  responder's key hash, and any peer that cannot be identified closes the
+  connection. There is no retry on another transport; a peer that speaks
+  only the old secp256k1 handshake does not connect
+  (`TestServerQSConnRefusesLegacyPeer`).
+- The server connects only to its static and trusted nodes: it does not
+  open its UDP port or take candidates from the protocols.
+
+`Config.PrivateKey` is no longer needed when `Identity` is set.
+
+### Node URLs
+
+A node known by its ID, host and port is written
+
+```
+enode://<64 hex chars of the node ID>@host:port
+```
+
+The host is an IP address or a DNS name, the port the TCP port; there is no
+query part. `enode.ParseV4`, `enode.Parse` and the text form of
+`enode.Node` (used by `P2P.StaticNodes` and `P2P.TrustedNodes` in the node
+configuration) take this form when the ID has 64 hex chars, through
+`enode.ParseQuantumSafe`. The result is a node of the null identity scheme
+carrying the IP and TCP entries (`enode.NewQuantumSafe`); `URLv4` and
+`String` print it back in the same form. The URL carries only the hash of
+the public key: the full key travels in the handshake.
+
+### The node
+
+The node (`node.New`) always sets `Identity`. It is read from the file
+`nodeidentity` in the instance directory of the data directory
+(`Config.NodeIdentity`). On first start the file does not exist: a new
+identity is made with `GenerateIdentity` and written with `Save`, mode
+`0600`. Afterwards it is read with `LoadIdentity`, and a file that
+`LoadIdentity` refuses stops the node with that error; the file is not
+replaced. Without a data directory the identity is new on every start.
+
+Two nodes that know each other this way connect and sync over the eth
+protocol (`TestSyncOverQSConn` in `eth/`).

@@ -69,7 +69,13 @@ func MustParseV4(rawurl string) *Node {
 // and UDP discovery port 30301.
 //
 //	enode://<hex node id>@10.3.58.6:30303?discport=30301
+//
+// A node ID of 64 hex chars is a quantum-safe node ID, and the URL is parsed
+// by ParseQuantumSafe.
 func ParseV4(rawurl string) (*Node, error) {
+	if isQuantumSafeURL(rawurl) {
+		return ParseQuantumSafe(rawurl)
+	}
 	if m := incompleteNodeURL.FindStringSubmatch(rawurl); m != nil {
 		id, err := parsePubkey(m[1])
 		if err != nil {
@@ -167,6 +173,9 @@ func parsePubkey(in string) (*ecdsa.PublicKey, error) {
 }
 
 func (n *Node) URLv4() string {
+	if n.isQuantumSafe() {
+		return n.URLQuantumSafe()
+	}
 	var (
 		scheme enr.ID
 		nodeid string
