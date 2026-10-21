@@ -122,7 +122,7 @@ three key prefixes of its own (`core/rawdb/accessors_ghosttree_history.go`):
 
 | Prefix | Key | Value |
 |---|---|---|
-| `ghost-tree-leaf-` | kind, tree index, position | block number, leaf, note |
+| `ghost-tree-leaf-` | kind, tree index, position | block number, leaf, note, and the salt of a salted commit |
 | `ghost-tree-block-` | block hash | block number, positions the block wrote |
 | `ghost-tree-block-` | the zero hash | number and hash of the history's head |
 | `ghost-tree-page-` | kind, tree index, page | root of the full page |
@@ -133,6 +133,12 @@ tree: a marker is kept as the leaf of its record, with a zero note, and a list
 index holds as many markers as a tree index holds leaves before the next
 index starts. A marker list has no page roots and no header root. The head
 is the block whose ancestry the store holds; no block has the zero hash.
+
+A leaf record is 196 bytes: block number (8), leaf (32) and note (156). The
+record of a salted commit or salted data commit is 16 bytes longer, with the
+16-byte salt after the note; the 196-byte length still decodes, as a leaf
+without a salt. A version 1 commit, a reveal remainder (whose salt is in its
+note) and a marker have no salt.
 
 `ApplyBlock(hash, number, records)` adds the records of a block that became
 canonical, in the order the block appended them; `RevertBlock(hash)` removes
@@ -171,9 +177,9 @@ and data rules write from the tree accounts:
 
 | Receipt log | Records |
 |---|---|
-| commit | coin leaf at the logged tree index and position, with its note |
+| commit | coin leaf at the logged tree index and position, with its note, and with its salt when the log is the 244-byte log of a salted commit |
 | reveal | coin leaf of the remainder with its note, and the marker in the coin marker list |
-| data commit | data leaf at the logged tree index and position, with its note |
+| data commit | data leaf at the logged tree index and position, with its note, and with its salt when the log is the 212-byte log of a salted data commit |
 | data reveal (and revoke) | the marker in the data marker list |
 
 A log of a tree account that is none of these, a block without its body, or a
@@ -192,8 +198,8 @@ validation, and snap sync does not download it.
 ## Serving
 
 `History.Page(kind, treeIndex, page, anchor)` returns the filled positions of
-one whole page as of the anchor block, each as leaf and note, and their
-number. `History.PageRoots(kind, treeIndex, anchor)` returns the page roots of
+one whole page as of the anchor block, each as leaf, note and salt (none for a
+leaf without one), and their number. `History.PageRoots(kind, treeIndex, anchor)` returns the page roots of
 pages 0 to the last page with a leaf. Both:
 
 - require the anchor to be a known block on the canonical chain;
@@ -271,11 +277,12 @@ for both kinds:
 | `treeIndex` | hex quantity | as asked |
 | `page` | hex quantity | as asked |
 | `filled` | hex quantity | number of entries, 0 to 4096 |
-| `entries` | array of `{leaf, note}` | the filled positions from the first of the page, in order: `leaf` a 32-byte hex hash, `note` the 156-byte note as hex |
+| `entries` | array of `{leaf, note, salt}` | the filled positions from the first of the page, in order: `leaf` a 32-byte hex hash, `note` the 156-byte note as hex, `salt` the 16-byte salt of a salted commit as hex, left out when the leaf has none (a version 1 commit, or a reveal remainder, whose salt is in its note) |
 
 ```json
-{"kind": "coin", "treeIndex": "0x0", "page": "0x0", "filled": "0x1",
- "entries": [{"leaf": "0x…", "note": "0x…"}]}
+{"kind": "coin", "treeIndex": "0x0", "page": "0x0", "filled": "0x2",
+ "entries": [{"leaf": "0x…", "note": "0x…", "salt": "0x…"},
+             {"leaf": "0x…", "note": "0x…"}]}
 ```
 
 For `"coin-markers"` and `"data-markers"` the result is one page of up to

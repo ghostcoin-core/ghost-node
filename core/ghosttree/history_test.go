@@ -147,14 +147,14 @@ func (c *testChain) rewind(number uint64) {
 	}
 }
 
-// expected returns the leaves and notes of a tree up to and including block
-// number on the canonical chain.
+// expected returns the leaves, notes and salts of a tree up to and including
+// block number on the canonical chain.
 func (c *testChain) expected(kind Kind, treeIndex, number uint64) []PageEntry {
 	entries := []PageEntry{}
 	for _, b := range c.blocks[:number+1] {
 		for _, r := range b.records {
 			if r.Kind == kind && r.TreeIndex == treeIndex {
-				entries = append(entries, PageEntry{Leaf: r.Leaf, Note: r.Note})
+				entries = append(entries, PageEntry{Leaf: r.Leaf, Note: r.Note, Salt: r.Salt})
 			}
 		}
 	}
@@ -557,4 +557,139 @@ func TestHistoryServesFullTrees(t *testing.T) {
 	if err := h.RevertBlock(filled.Hash()); !errors.Is(err, ErrRevertOrder) {
 		t.Errorf("reverting the filling block: %v, want %v", err, ErrRevertOrder)
 	}
+}
+
+// testSalt is a synthetic salt that differs for every seed.
+func testSalt(seed byte) *[SaltBytes]byte {
+	var s [SaltBytes]byte
+	for i := range s {
+		s[i] = seed ^ byte(0x30+i)
+	}
+	return &s
+}
+
+// TestHistoryKeepsTheSaltWithTheLeaf applies a block whose salted commits
+// carry a salt beside leaves without one: each salted record is stored 16
+// bytes longer with the salt after the note, every other record keeps the old
+// length, and the pages serve each salt with its leaf and note. A marker
+// never keeps a salt, a record of the old length still decodes without one,
+// and reverting the block removes the salts with their leaves.
+func TestHistoryKeepsTheSaltWithTheLeaf(t *testing.T) {
+	c := newTestChain(t)
+	c.extend(1, 2, 1) // leaves without a salt: version 1 commits
+	before := historyContents(t, c.db)
+
+	// Block 2 appends coin positions 2 to 4 and data positions 1 and 2; coin
+	// 2, coin 4 and data 1 are salted commits.
+	salted := c.next(c.head(), 2, 3, 2)
+	salted.records[0].Salt = testSalt(1)
+	salted.records[2].Salt = testSalt(2)
+	salted.records[3].Salt = testSalt(3)
+	salted.records = append(salted.records, Record{Kind: CoinMarkers, Leaf: testLeaf(900), Salt: testSalt(4)})
+	c.insert(salted)
+
+	layout := []struct {
+		kind Kind
+		pos  uint32
+		salt *[SaltBytes]byte
+	}{
+		{Coin, 0, nil}, {Coin, 1, nil}, {Coin, 2, testSalt(1)}, {Coin, 3, nil}, {Coin, 4, testSalt(2)},
+		{Data, 0, nil}, {Data, 1, testSalt(3)}, {Data, 2, nil},
+		{CoinMarkers, 0, nil},
+	}
+	checkStored := func(when string) {
+		t.Helper()
+		for _, w := range layout {
+			enc, err := rawdb.ReadGhostTreeLeaf(c.db, uint8(w.kind), 0, w.pos)
+			if err != nil || enc == nil {
+				t.Fatalf("%s: %v position %d not stored: %v", when, w.kind, w.pos, err)
+			}
+			want := storedSize
+			if w.salt != nil {
+				want = storedSize + SaltBytes
+			}
+			if len(enc) != want {
+				t.Errorf("%s: %v position %d stored in %d bytes, want %d", when, w.kind, w.pos, len(enc), want)
+				continue
+			}
+			if w.salt != nil && !bytes.Equal(enc[storedSize:], w.salt[:]) {
+				t.Errorf("%s: %v position %d stored salt %x, want %x", when, w.kind, w.pos, enc[storedSize:], w.salt[:])
+			}
+		}
+	}
+	checkStored("applied")
+
+	// The pages serve each salt with its leaf and note, and none where the
+	// leaf has none.
+	c.checkServed()
+	for _, w := range layout[:8] {
+		page, err := c.h.Page(w.kind, 0, 0, salted.hash())
+		if err != nil {
+			t.Fatal(err)
+		}
+		e := page.Entries[w.pos]
+		if !reflect.DeepEqual(e.Salt, w.salt) {
+			t.Errorf("%v position %d served salt %v, want %v", w.kind, w.pos, e.Salt, w.salt)
+		}
+	}
+	if page, err := c.h.Page(Coin, 0, 0, salted.hash()); err != nil || page.Entries[2].Note != salted.records[0].Note || page.Entries[2].Leaf != salted.records[0].Leaf {
+		t.Fatalf("the salted leaf lost its leaf or note: %v", err)
+	}
+
+	// The old length decodes with no salt; the salted length with its salt;
+	// any other length is corrupt.
+	plain := stored{number: 7, leaf: testLeaf(5), note: testNote(testLeaf(5))}
+	dec, err := decodeStored(plain.encode())
+	if err != nil || dec.salt != nil || dec.leaf != plain.leaf || dec.note != plain.note || dec.number != 7 {
+		t.Fatalf("old-length record: %+v, %v", dec, err)
+	}
+	withSalt := plain
+	withSalt.salt = testSalt(6)
+	enc := withSalt.encode()
+	if len(enc) != len(plain.encode())+SaltBytes {
+		t.Fatalf("salted record of %d bytes", len(enc))
+	}
+	if dec, err := decodeStored(enc); err != nil || !reflect.DeepEqual(dec, &withSalt) {
+		t.Fatalf("salted record: %+v, %v", dec, err)
+	}
+	for _, n := range []int{storedSize - 1, storedSize + 1, storedSize + SaltBytes - 1, storedSize + SaltBytes + 1} {
+		if _, err := decodeStored(make([]byte, n)); !errors.Is(err, ErrCorruptHistory) {
+			t.Errorf("record of %d bytes: %v, want %v", n, err, ErrCorruptHistory)
+		}
+	}
+
+	// Reverting the block removes the salted records with the rest of it.
+	c.rewind(1)
+	if !reflect.DeepEqual(before, historyContents(t, c.db)) {
+		t.Fatal("reverting the salted block left something in the history")
+	}
+	for _, w := range layout[2:] {
+		if w.kind == Data && w.pos == 0 {
+			continue
+		}
+		if enc, err := rawdb.ReadGhostTreeLeaf(c.db, uint8(w.kind), 0, w.pos); err != nil || enc != nil {
+			t.Errorf("%v position %d still stored after the revert: %x, %v", w.kind, w.pos, enc, err)
+		}
+	}
+	c.checkServed()
+
+	// The same block applied again keeps its salts; a block of the other
+	// branch at the same positions has none.
+	c.insert(salted)
+	checkStored("applied again")
+	c.checkServed()
+	c.rewind(1)
+	other := c.extend(3, 3, 2)
+	for _, kind := range []Kind{Coin, Data} {
+		page, err := c.h.Page(kind, 0, 0, other.hash())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, e := range page.Entries {
+			if e.Salt != nil {
+				t.Errorf("%v position %d of the other branch served salt %x", kind, i, e.Salt[:])
+			}
+		}
+	}
+	c.checkServed()
 }

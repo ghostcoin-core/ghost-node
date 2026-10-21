@@ -240,6 +240,94 @@ func TestDataCommitAppendsToDataTree(t *testing.T) {
 	}
 }
 
+// TestSaltedDataCommitCarriesSaltToHistory data commits one file with
+// version 1 data and one with salted data in a block: both are accepted, the
+// salted one is recorded under the data commitment of F_d alone, its receipt
+// log is the version 1 log with the salt after the note (212 bytes), and the
+// tree history returns the salt with its leaf and note while the version 1
+// leaf has none. Salted data with a value is still refused.
+func TestSaltedDataCommitCarriesSaltToHistory(t *testing.T) {
+	f := newFixture(t, ghost.InternalNetGasLimit, nil)
+	var (
+		plain  = testDataFile("plain")
+		salted = testDataFile("salted")
+		salt   = testSalt(0x33)
+	)
+	saltedData, err := ghostpriv.SaltedCommitData(salted.f, salt, salted.note)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saltedTx := f.callTx(keyB, 0, ghost.DataCommitEntryAddress, new(big.Int), saltedData, 60_000)
+	blocks, _ := f.generate(1, func(i int, b *core.BlockGen) {
+		b.AddTx(f.dataCommitTx(keyA, 0, plain, new(big.Int)))
+		b.AddTx(saltedTx)
+	})
+	chain, history := f.historyChain()
+
+	// With a value the salted data commit is refused like any other.
+	env, st := nextEnv(t, chain, chain.CurrentBlock(), common.Address{0xcb})
+	valued := f.callTx(keyB, 0, ghost.DataCommitEntryAddress, big.NewInt(1), saltedData, 60_000)
+	if _, err := applyTx(chain, st.Copy(), env.Header, valued); !errors.Is(err, ghostpriv.ErrDataCommitValue) {
+		t.Fatalf("salted data commit with a value: %v, want %v", err, ghostpriv.ErrDataCommitValue)
+	}
+
+	f.insert(chain, blocks)
+	block := blocks[0]
+	receipts := chain.GetReceiptsByHash(block.Hash())
+	if len(receipts) != 2 {
+		t.Fatalf("%d receipts", len(receipts))
+	}
+	for i, r := range receipts {
+		if r.Status != types.ReceiptStatusSuccessful || len(r.Logs) != 1 {
+			t.Fatalf("data commit %d: status %d, %d logs", i, r.Status, len(r.Logs))
+		}
+	}
+	leaves := []common.Hash{plain.commitment(), salted.commitment()}
+	wantRoot := ghosttree.RootFromPageRoots(ghosttree.Data, []common.Hash{ghosttree.PageRoot(ghosttree.Data, leaves)})
+	if root := block.Header().DataTreeRoot; root == nil || *root != wantRoot {
+		t.Fatalf("header data root %v, want %x", root, wantRoot)
+	}
+	if root := block.Header().CoinTreeRoot; root == nil || *root != *f.genesis.Header().CoinTreeRoot {
+		t.Fatal("a salted data commit changed the coin tree root")
+	}
+
+	// The logs: version 1 unchanged, salted with the salt after the note.
+	if got, want := receipts[0].Logs[0].Data, dataCommitLog(0, 0, plain); !bytes.Equal(got, want) || len(got) != 196 {
+		t.Errorf("version 1 log of %d bytes\n%x\nwant\n%x", len(got), got, want)
+	}
+	if got, want := receipts[1].Logs[0].Data, append(dataCommitLog(0, 1, salted), salt...); !bytes.Equal(got, want) || len(got) != 212 {
+		t.Errorf("salted log of %d bytes\n%x\nwant\n%x", len(got), got, want)
+	}
+
+	// The history records and the page carry the salt with the leaf and note.
+	records, err := ghostpriv.HistoryRecords(receipts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 2 || records[0].Kind != ghosttree.Data || records[1].Kind != ghosttree.Data || records[1].Leaf != leaves[1] {
+		t.Fatalf("history records %+v", records)
+	}
+	checkSalt(t, "version 1 record", records[0].Salt, nil)
+	checkSalt(t, "salted record", records[1].Salt, salt)
+	page, err := history.Page(ghosttree.Data, 0, 0, block.Hash())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Filled != 2 {
+		t.Fatalf("page of %d entries", page.Filled)
+	}
+	for i, d := range []dataFile{plain, salted} {
+		if e := page.Entries[i]; e.Leaf != d.commitment() || !bytes.Equal(e.Note[:], d.note) {
+			t.Errorf("entry %d: leaf %x note %x", i, e.Leaf, e.Note[:])
+		}
+	}
+	checkSalt(t, "version 1 entry", page.Entries[0].Salt, nil)
+	checkSalt(t, "salted entry", page.Entries[1].Salt, salt)
+	if coin, err := history.Page(ghosttree.Coin, 0, 0, block.Hash()); err != nil || coin.Filled != 0 {
+		t.Errorf("coin page after data commits: %+v, %v", coin, err)
+	}
+}
+
 // TestDataCommitRejectsValueAndWrongLength sends data commits with a value,
 // with data of every wrong length and version and with a zero F, and calls
 // the data commit entry address from contracts: each is rejected and nothing

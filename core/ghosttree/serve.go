@@ -54,10 +54,12 @@ var (
 	ErrRootMismatch = errors.New("tree history does not match the header root")
 )
 
-// PageEntry is one filled position of a page.
+// PageEntry is one filled position of a page: the leaf, its note and, for a
+// salted commit, its salt (nil for a leaf without one).
 type PageEntry struct {
 	Leaf common.Hash
 	Note [NoteBytes]byte
+	Salt *[SaltBytes]byte
 }
 
 // TreePage is one page as of an anchor: the filled positions in order from
@@ -140,7 +142,7 @@ type treeView struct {
 }
 
 // Page returns the filled positions of one page of a tree as of the anchor
-// block, each as leaf and note. A page past the last filled one is empty.
+// block, each as leaf, note and salt. A page past the last filled one is empty.
 func (h *History) Page(kind Kind, treeIndex uint64, page uint32, anchor common.Hash) (*TreePage, error) {
 	if err := h.p.pageable(); err != nil {
 		return nil, err
@@ -167,7 +169,7 @@ func (h *History) Page(kind Kind, treeIndex uint64, page uint32, anchor common.H
 		if err != nil {
 			return nil, err
 		}
-		out.Entries = append(out.Entries, PageEntry{Leaf: rec.leaf, Note: rec.note})
+		out.Entries = append(out.Entries, PageEntry{Leaf: rec.leaf, Note: rec.note, Salt: rec.salt})
 		leaves = append(leaves, rec.leaf)
 	}
 	if PageRoot(kind, leaves) != v.roots[page] {

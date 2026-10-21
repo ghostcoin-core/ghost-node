@@ -62,9 +62,17 @@ const (
 	// leaf.
 	NoteSize = ghosttree.NoteBytes
 
-	// Version is the only version of the commit data and of the reveal
-	// payload.
+	// SaltSize is the length of the per-coin salt a salted commit carries in
+	// the clear.
+	SaltSize = ghosttree.SaltBytes
+
+	// Version is the only version of the reveal payload and the version of
+	// commit data without a salt.
 	Version uint16 = 0x0001
+
+	// SaltedCommitVersion is the version of salted commit data, which carries
+	// the salt between F and the note.
+	SaltedCommitVersion uint16 = 0x0002
 
 	// GasPriv is G_PRIV, the gas of every reveal.
 	GasPriv = types.GhostRevealGas

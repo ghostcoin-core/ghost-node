@@ -181,6 +181,114 @@ func TestWholePagesOnly(t *testing.T) {
 	}
 }
 
+// TestPageOverRPCReturnsTheSalt serves a page whose salted commits carry a
+// salt beside leaves without one: each entry of a salted commit has its salt
+// as `salt`, 16 bytes, and an entry without one leaves the field out.
+func TestPageOverRPCReturnsTheSalt(t *testing.T) {
+	db := rawdb.NewMemoryDatabase()
+	history := ghosttree.NewHistory(db)
+	st, err := state.New(types.EmptyRootHash, state.NewDatabase(rawdb.NewMemoryDatabase()), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	salt := func(seed byte) *[ghosttree.SaltBytes]byte {
+		var s [ghosttree.SaltBytes]byte
+		for i := range s {
+			s[i] = seed + byte(i)
+		}
+		return &s
+	}
+	// Coin positions 0 and 2 and data position 0 are salted commits; coin
+	// position 1 and data position 1 are not.
+	salts := map[ghosttree.Kind][]*[ghosttree.SaltBytes]byte{
+		ghosttree.Coin: {salt(0x10), nil, salt(0x20)},
+		ghosttree.Data: {salt(0x30), nil},
+	}
+	var (
+		parent common.Hash
+		head   *types.Header
+	)
+	for number := uint64(0); number < 2; number++ {
+		var records []ghosttree.Record
+		if number == 1 {
+			for i, kind := range []ghosttree.Kind{ghosttree.Coin, ghosttree.Coin, ghosttree.Coin, ghosttree.Data, ghosttree.Data} {
+				res, err := ghosttree.Append(st, kind, number, rpcLeaf(100+i))
+				if err != nil {
+					t.Fatal(err)
+				}
+				r := ghosttree.Record{Kind: res.Kind, TreeIndex: res.TreeIndex, Position: res.Position, Leaf: res.Leaf, Salt: salts[kind][res.Position]}
+				r.Note[0] = byte(i + 1)
+				records = append(records, r)
+			}
+		}
+		coin, _ := ghosttree.Root(st, ghosttree.Coin)
+		data, _ := ghosttree.Root(st, ghosttree.Data)
+		head = &types.Header{ParentHash: parent, Number: new(big.Int).SetUint64(number), Difficulty: big.NewInt(1), BaseFee: big.NewInt(1), CoinTreeRoot: &coin, DataTreeRoot: &data}
+		rawdb.WriteHeader(db, head)
+		rawdb.WriteCanonicalHash(db, head.Hash(), number)
+		if err := history.ApplyBlock(head.Hash(), number, records); err != nil {
+			t.Fatal(err)
+		}
+		parent = head.Hash()
+	}
+	server := rpc.NewServer()
+	if err := server.RegisterName("ghost", ethapi.NewGhostAPI(history)); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(server.Stop)
+	client := rpc.DialInProc(server)
+	t.Cleanup(client.Close)
+
+	for _, kind := range []ghosttree.Kind{ghosttree.Coin, ghosttree.Data} {
+		var raw struct {
+			Entries []map[string]json.RawMessage `json:"entries"`
+		}
+		if err := client.Call(&raw, "ghost_getTreePage", kind.String(), "0x0", "0x0", head.Hash()); err != nil {
+			t.Fatalf("%v page: %v", kind, err)
+		}
+		want := salts[kind]
+		if len(raw.Entries) != len(want) {
+			t.Fatalf("%v page: %d entries, want %d", kind, len(raw.Entries), len(want))
+		}
+		for i, e := range raw.Entries {
+			if e["leaf"] == nil || e["note"] == nil {
+				t.Errorf("%v position %d: fields %v, want leaf and note", kind, i, e)
+			}
+			got, ok := e["salt"]
+			if want[i] == nil {
+				if ok {
+					t.Errorf("%v position %d has no salt but served salt %s", kind, i, got)
+				}
+				continue
+			}
+			var s hexutil.Bytes
+			if !ok {
+				t.Errorf("%v position %d: salt left out", kind, i)
+				continue
+			}
+			if err := json.Unmarshal(got, &s); err != nil {
+				t.Fatal(err)
+			}
+			if len(s) != ghosttree.SaltBytes || !slices.Equal([]byte(s), want[i][:]) {
+				t.Errorf("%v position %d: salt %x, want %x", kind, i, []byte(s), want[i][:])
+			}
+		}
+		// The typed page carries the same salts beside the leaf and note.
+		var page ethapi.RPCTreePage
+		if err := client.Call(&page, "ghost_getTreePage", kind.String(), "0x0", "0x0", head.Hash()); err != nil {
+			t.Fatal(err)
+		}
+		for i, e := range page.Entries {
+			if len(e.Note) != ghosttree.NoteBytes || e.Note[0] == 0 {
+				t.Errorf("%v position %d: note %x", kind, i, []byte(e.Note))
+			}
+			if want[i] == nil && e.Salt != nil || want[i] != nil && !slices.Equal([]byte(e.Salt), want[i][:]) {
+				t.Errorf("%v position %d: typed salt %x", kind, i, []byte(e.Salt))
+			}
+		}
+	}
+}
+
 // TestMarkerPagesOverRPC serves the spent markers of a chain the history was
 // synced to as {count, markers}, the same for both marker kinds.
 func TestMarkerPagesOverRPC(t *testing.T) {
