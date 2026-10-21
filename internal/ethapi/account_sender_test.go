@@ -82,6 +82,11 @@ func (b accountSenderBackend) TxPoolContentFrom(addr common.Address) ([]*types.T
 	return []*types.Transaction{b.pendingTx}, nil
 }
 
+// callError returns the error of an API call, whatever its result.
+func callError(result interface{}, err error) error {
+	return err
+}
+
 // TestAccountSenderRPCFrom checks that the from of a block's, a receipt's and
 // a pending account transaction is its account, and that a sender that
 // cannot be derived is an error, never the zero address.
@@ -128,10 +133,10 @@ func TestAccountSenderRPCFrom(t *testing.T) {
 	chainAPI := NewBlockChainAPI(backend)
 	txAPI := NewTransactionAPI(backend, new(AddrLocker))
 	poolAPI := NewTxPoolAPI(backend)
-	check := func(name string, from interface{}) {
+	check := func(name string, got interface{}) {
 		t.Helper()
-		if from != addr {
-			t.Errorf("%s: from %v, want the account %x", name, from, addr)
+		if got != addr {
+			t.Errorf("%s: from %v, want the account %x", name, got, addr)
 		}
 	}
 
@@ -199,32 +204,25 @@ func TestAccountSenderRPCFrom(t *testing.T) {
 	chainAPI, txAPI, poolAPI = NewBlockChainAPI(other), NewTransactionAPI(other, new(AddrLocker)), NewTxPoolAPI(other)
 	for name, call := range map[string]func() error{
 		"block": func() error {
-			_, err := chainAPI.GetBlockByNumber(ctx, 1, true)
-			return err
+			return callError(chainAPI.GetBlockByNumber(ctx, 1, true))
 		},
 		"transaction by hash": func() error {
-			_, err := txAPI.GetTransactionByHash(ctx, mined.Hash())
-			return err
+			return callError(txAPI.GetTransactionByHash(ctx, mined.Hash()))
 		},
 		"receipt": func() error {
-			_, err := txAPI.GetTransactionReceipt(ctx, mined.Hash())
-			return err
+			return callError(txAPI.GetTransactionReceipt(ctx, mined.Hash()))
 		},
 		"block receipts": func() error {
-			_, err := chainAPI.GetBlockReceipts(ctx, rpc.BlockNumberOrHashWithNumber(1))
-			return err
+			return callError(chainAPI.GetBlockReceipts(ctx, rpc.BlockNumberOrHashWithNumber(1)))
 		},
 		"pending transaction": func() error {
-			_, err := txAPI.GetTransactionByHash(ctx, backend.pendingTx.Hash())
-			return err
+			return callError(txAPI.GetTransactionByHash(ctx, backend.pendingTx.Hash()))
 		},
 		"pool content": func() error {
-			_, err := poolAPI.Content(ctx)
-			return err
+			return callError(poolAPI.Content(ctx))
 		},
 		"pending transactions": func() error {
-			_, err := txAPI.PendingTransactions(ctx)
-			return err
+			return callError(txAPI.PendingTransactions(ctx))
 		},
 	} {
 		if err := call(); !errors.Is(err, types.ErrInvalidSig) {

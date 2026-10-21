@@ -167,11 +167,11 @@ func (api *API) signer(ctx context.Context, block *types.Block) (types.Signer, e
 // txMessage returns the message of tx in block, and an error when its sender
 // cannot be derived: a trace never runs from the zero address in its place.
 func txMessage(tx *types.Transaction, signer types.Signer, block *types.Block) (*core.Message, error) {
-	msg, err := core.TransactionToMessage(tx, signer, block.BaseFee())
+	message, err := core.TransactionToMessage(tx, signer, block.BaseFee())
 	if err != nil {
 		return nil, fmt.Errorf("transaction %#x: %w", tx.Hash(), err)
 	}
-	return msg, nil
+	return message, nil
 }
 
 // TraceConfig holds extra parameters to trace functions.
@@ -312,9 +312,9 @@ func (api *API) traceChain(start, end *types.Block, config *TraceConfig, closed 
 				// Trace all the transactions contained within
 				for i, tx := range task.block.Transactions() {
 					err := signerErr
-					var msg *core.Message
+					var message *core.Message
 					if err == nil {
-						msg, err = txMessage(tx, signer, task.block)
+						message, err = txMessage(tx, signer, task.block)
 					}
 					var res interface{}
 					if err == nil {
@@ -324,7 +324,7 @@ func (api *API) traceChain(start, end *types.Block, config *TraceConfig, closed 
 							TxIndex:     i,
 							TxHash:      tx.Hash(),
 						}
-						res, err = api.traceTx(ctx, msg, txctx, blockCtx, task.statedb, config)
+						res, err = api.traceTx(ctx, message, txctx, blockCtx, task.statedb, config)
 					}
 					if err != nil {
 						task.results[i] = &txTraceResult{TxHash: tx.Hash(), Error: err.Error()}
@@ -581,10 +581,11 @@ func (api *API) IntermediateRoots(ctx context.Context, hash common.Hash, config 
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		msg, err := txMessage(tx, signer, block)
+		message, err := txMessage(tx, signer, block)
 		if err != nil {
 			return nil, err
 		}
+		msg := message
 		var (
 			txContext = core.NewEVMTxContext(msg)
 			vmenv     = vm.NewEVM(vmctx, txContext, statedb, chainConfig, vm.Config{})
@@ -663,7 +664,7 @@ func (api *API) traceBlock(ctx context.Context, block *types.Block, config *Trac
 	)
 	for i, tx := range txs {
 		// Generate the next state snapshot fast without tracing
-		msg, err := txMessage(tx, signer, block)
+		message, err := txMessage(tx, signer, block)
 		if err != nil {
 			return nil, err
 		}
@@ -673,7 +674,7 @@ func (api *API) traceBlock(ctx context.Context, block *types.Block, config *Trac
 			TxIndex:     i,
 			TxHash:      tx.Hash(),
 		}
-		res, err := api.traceTx(ctx, msg, txctx, blockCtx, statedb, config)
+		res, err := api.traceTx(ctx, message, txctx, blockCtx, statedb, config)
 		if err != nil {
 			return nil, err
 		}
@@ -712,7 +713,7 @@ func (api *API) traceBlockParallel(ctx context.Context, block *types.Block, stat
 			defer pend.Done()
 			// Fetch and execute the next transaction trace tasks
 			for task := range jobs {
-				msg, err := txMessage(txs[task.index], signer, block)
+				message, err := txMessage(txs[task.index], signer, block)
 				if err != nil {
 					results[task.index] = &txTraceResult{TxHash: txs[task.index].Hash(), Error: err.Error()}
 					continue
@@ -723,7 +724,7 @@ func (api *API) traceBlockParallel(ctx context.Context, block *types.Block, stat
 					TxIndex:     task.index,
 					TxHash:      txs[task.index].Hash(),
 				}
-				res, err := api.traceTx(ctx, msg, txctx, blockCtx, task.statedb, config)
+				res, err := api.traceTx(ctx, message, txctx, blockCtx, task.statedb, config)
 				if err != nil {
 					results[task.index] = &txTraceResult{TxHash: txs[task.index].Hash(), Error: err.Error()}
 					continue
@@ -747,11 +748,12 @@ txloop:
 		}
 
 		// Generate the next state snapshot fast without tracing
-		msg, err := txMessage(tx, signer, block)
+		message, err := txMessage(tx, signer, block)
 		if err != nil {
 			failed = err
 			break txloop
 		}
+		msg := message
 		statedb.SetTxContext(tx.Hash(), i)
 		vmenv := vm.NewEVM(blockCtx, core.NewEVMTxContext(msg), statedb, api.backend.ChainConfig(), vm.Config{})
 		if _, err := core.ApplyMessage(vmenv, msg, new(core.GasPool).AddGas(msg.GasLimit)); err != nil {
@@ -833,10 +835,11 @@ func (api *API) standardTraceBlockToFile(ctx context.Context, block *types.Block
 	}
 	for i, tx := range block.Transactions() {
 		// Prepare the transaction for un-traced execution
-		msg, err := txMessage(tx, signer, block)
+		message, err := txMessage(tx, signer, block)
 		if err != nil {
 			return dumps, err
 		}
+		msg := message
 		var (
 			txContext = core.NewEVMTxContext(msg)
 			vmConf    vm.Config
@@ -932,15 +935,18 @@ func (api *API) TraceTransaction(ctx context.Context, hash common.Hash, config *
 	}
 	// The message is derived here rather than taken from the backend, so the
 	// trace runs from the sender this API derives, or not at all.
-	msg, err := txMessage(block.Transactions()[index], signer, block)
+	message, err := txMessage(block.Transactions()[index], signer, block)
 	if err != nil {
 		return nil, err
 	}
-	_, vmctx, statedb, release, err := api.backend.StateAtTransaction(ctx, block, int(index), reexec)
+	replayed, vmctx, statedb, release, err := api.backend.StateAtTransaction(ctx, block, int(index), reexec)
 	if err != nil {
 		return nil, err
 	}
 	defer release()
+	if replayed == nil {
+		return nil, fmt.Errorf("transaction %#x not reached by the replay of block %#x", hash, blockHash)
+	}
 
 	txctx := &Context{
 		BlockHash:   blockHash,
@@ -948,7 +954,7 @@ func (api *API) TraceTransaction(ctx context.Context, hash common.Hash, config *
 		TxIndex:     int(index),
 		TxHash:      hash,
 	}
-	return api.traceTx(ctx, msg, txctx, vmctx, statedb, config)
+	return api.traceTx(ctx, message, txctx, vmctx, statedb, config)
 }
 
 // TraceCall lets you trace a given eth_call. It collects the structured logs

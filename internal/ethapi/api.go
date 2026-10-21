@@ -221,12 +221,12 @@ func (s *TxPoolAPI) ContentFrom(ctx context.Context, addr common.Address) (map[s
 // senders derived by signer.
 func (s *TxPoolAPI) dump(signer types.Signer, txs []*types.Transaction, curHeader *types.Header) (map[string]*RPCTransaction, error) {
 	dump := make(map[string]*RPCTransaction, len(txs))
-	for _, tx := range txs {
-		rpcTx, err := newSignedRPCPendingTransaction(signer, tx, curHeader, s.b.ChainConfig())
+	for i := range txs {
+		rpcTx, err := newSignedRPCPendingTransaction(signer, txs[i], curHeader, s.b.ChainConfig())
 		if err != nil {
 			return nil, err
 		}
-		dump[fmt.Sprintf("%d", tx.Nonce())] = rpcTx
+		dump[fmt.Sprintf("%d", txs[i].Nonce())] = rpcTx
 	}
 	return dump, nil
 }
@@ -1516,7 +1516,7 @@ type RPCTransaction struct {
 func newRPCTransaction(tx *types.Transaction, blockHash common.Hash, blockNumber uint64, blockTime uint64, index uint64, baseFee *big.Int, config ctypes.ChainConfigurator) *RPCTransaction {
 	signer := types.MakeSigner(config, new(big.Int).SetUint64(blockNumber), blockTime)
 	from, _ := types.Sender(signer, tx)
-	return newRPCTransactionFrom(tx, from, blockHash, blockNumber, index, baseFee)
+	return newRPCTransactionFrom(tx, blockHash, blockNumber, index, baseFee, from)
 }
 
 // accountSigner wraps base so that it also derives the sender of an account
@@ -1545,26 +1545,26 @@ func rpcSender(signer types.Signer, tx *types.Transaction) (common.Address, erro
 	if tx.IsGhostReveal() {
 		return common.Address{}, nil
 	}
-	from, err := types.Sender(signer, tx)
+	sender, err := types.Sender(signer, tx)
 	if err != nil {
 		return common.Address{}, fmt.Errorf("transaction %#x: %w", tx.Hash(), err)
 	}
-	return from, nil
+	return sender, nil
 }
 
 // newSignedRPCTransaction is newRPCTransaction with the sender derived by
 // signer, and an error when it cannot be derived.
 func newSignedRPCTransaction(signer types.Signer, tx *types.Transaction, blockHash common.Hash, blockNumber uint64, index uint64, baseFee *big.Int) (*RPCTransaction, error) {
-	from, err := rpcSender(signer, tx)
+	sender, err := rpcSender(signer, tx)
 	if err != nil {
 		return nil, err
 	}
-	return newRPCTransactionFrom(tx, from, blockHash, blockNumber, index, baseFee), nil
+	return newRPCTransactionFrom(tx, blockHash, blockNumber, index, baseFee, sender), nil
 }
 
-// newRPCTransactionFrom returns the RPC representation of tx sent by from,
-// with the given location metadata set (if available).
-func newRPCTransactionFrom(tx *types.Transaction, from common.Address, blockHash common.Hash, blockNumber uint64, index uint64, baseFee *big.Int) *RPCTransaction {
+// newRPCTransactionFrom returns the RPC representation of tx with the given
+// location metadata set (if available), its sender being from.
+func newRPCTransactionFrom(tx *types.Transaction, blockHash common.Hash, blockNumber uint64, index uint64, baseFee *big.Int, from common.Address) *RPCTransaction {
 	v, r, s := tx.RawSignatureValues()
 	result := &RPCTransaction{
 		Type:     hexutil.Uint64(tx.Type()),
@@ -1686,21 +1686,21 @@ func pendingSigner(ctx context.Context, b Backend, current *types.Header) (types
 // newSignedRPCPendingTransaction is NewRPCPendingTransaction with the sender
 // derived by signer, and an error when it cannot be derived.
 func newSignedRPCPendingTransaction(signer types.Signer, tx *types.Transaction, current *types.Header, config ctypes.ChainConfigurator) (*RPCTransaction, error) {
-	from, err := rpcSender(signer, tx)
+	sender, err := rpcSender(signer, tx)
 	if err != nil {
 		return nil, err
 	}
-	return newRPCPendingTransactionFrom(tx, from, current, config), nil
+	return newRPCPendingTransactionFrom(tx, current, config, sender), nil
 }
 
 // newRPCPendingTransactionFrom returns the RPC representation of a pending
-// transaction sent by from.
-func newRPCPendingTransactionFrom(tx *types.Transaction, from common.Address, current *types.Header, config ctypes.ChainConfigurator) *RPCTransaction {
+// transaction, its sender being from.
+func newRPCPendingTransactionFrom(tx *types.Transaction, current *types.Header, config ctypes.ChainConfigurator, from common.Address) *RPCTransaction {
 	var baseFee *big.Int
 	if current != nil {
 		baseFee = eip1559.CalcBaseFee(config, current)
 	}
-	return newRPCTransactionFrom(tx, from, common.Hash{}, 0, 0, baseFee)
+	return newRPCTransactionFrom(tx, common.Hash{}, 0, 0, baseFee, from)
 }
 
 // newRPCTransactionFromBlockIndex returns a transaction that will serialize to the RPC representation.
@@ -1994,7 +1994,7 @@ func (s *TransactionAPI) GetTransactionReceipt(ctx context.Context, hash common.
 // marshalReceipt marshals a transaction receipt into a JSON object, and
 // returns an error when the sender of tx cannot be derived.
 func marshalReceipt(receipt *types.Receipt, blockHash common.Hash, blockNumber uint64, signer types.Signer, tx *types.Transaction, txIndex int) (map[string]interface{}, error) {
-	from, err := rpcSender(signer, tx)
+	sender, err := rpcSender(signer, tx)
 	if err != nil {
 		return nil, err
 	}
@@ -2004,7 +2004,7 @@ func marshalReceipt(receipt *types.Receipt, blockHash common.Hash, blockNumber u
 		"blockNumber":       hexutil.Uint64(blockNumber),
 		"transactionHash":   tx.Hash(),
 		"transactionIndex":  hexutil.Uint64(txIndex),
-		"from":              from,
+		"from":              sender,
 		"to":                tx.To(),
 		"gasUsed":           hexutil.Uint64(receipt.GasUsed),
 		"cumulativeGasUsed": hexutil.Uint64(receipt.CumulativeGasUsed),
@@ -2278,10 +2278,10 @@ func (s *TransactionAPI) PendingTransactions(ctx context.Context) ([]*RPCTransac
 	if err != nil {
 		return nil, err
 	}
-	accounts := make(map[common.Address]struct{})
+	accounts := make(map[common.Address]bool)
 	for _, wallet := range s.b.AccountManager().Wallets() {
 		for _, account := range wallet.Accounts() {
-			accounts[account.Address] = struct{}{}
+			accounts[account.Address] = true
 		}
 	}
 	signer, err := accountSigner(ctx, s.b, s.signer)
@@ -2291,12 +2291,12 @@ func (s *TransactionAPI) PendingTransactions(ctx context.Context) ([]*RPCTransac
 	curHeader := s.b.CurrentHeader()
 	transactions := make([]*RPCTransaction, 0, len(pending))
 	for _, tx := range pending {
-		from, err := rpcSender(signer, tx)
+		sender, err := rpcSender(signer, tx)
 		if err != nil {
 			return nil, err
 		}
-		if _, exists := accounts[from]; exists {
-			transactions = append(transactions, newRPCPendingTransactionFrom(tx, from, curHeader, s.b.ChainConfig()))
+		if accounts[sender] {
+			transactions = append(transactions, newRPCPendingTransactionFrom(tx, curHeader, s.b.ChainConfig(), sender))
 		}
 	}
 	return transactions, nil
