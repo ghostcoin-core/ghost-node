@@ -243,11 +243,12 @@ func (eth *Ethereum) stateAtTransaction(ctx context.Context, block *types.Block,
 	for idx, tx := range block.Transactions() {
 		// Assemble the transaction call message and return if the requested offset.
 		// A sender that cannot be derived is an error, never the zero address.
-		msg, err := core.TransactionToMessage(tx, signer, block.BaseFee())
+		message, err := core.TransactionToMessage(tx, signer, block.BaseFee())
 		if err != nil {
 			release()
 			return nil, vm.BlockContext{}, nil, nil, fmt.Errorf("transaction %#x: %w", tx.Hash(), err)
 		}
+		msg := message
 		txContext := core.NewEVMTxContext(msg)
 		context := core.NewEVMBlockContext(block.Header(), eth.blockchain, nil)
 		if idx == txIndex {

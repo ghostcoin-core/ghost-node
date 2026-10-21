@@ -72,10 +72,14 @@ func TestAccountSenderStateAtTransaction(t *testing.T) {
 		return tx
 	}
 	engine := ethash.NewFaker()
-	_, blocks, _ := core.GenerateChainWithGenesis(gspec, engine, 1, func(i int, b *core.BlockGen) {
+	genDb, blocks, receipts := core.GenerateChainWithGenesis(gspec, engine, 1, func(i int, b *core.BlockGen) {
 		b.AddTx(sign(0, b.BaseFee(), signer))
 		b.AddTx(sign(1, b.BaseFee(), signer))
 	})
+	defer genDb.Close()
+	if len(receipts) != 1 || len(receipts[0]) != 2 {
+		t.Fatalf("generated block 1 without its two account transactions")
+	}
 	db := rawdb.NewMemoryDatabase()
 	cacheConfig := &core.CacheConfig{
 		TrieCleanLimit:    256,
@@ -100,14 +104,17 @@ func TestAccountSenderStateAtTransaction(t *testing.T) {
 	// The second transaction runs after the first one is replayed from the
 	// account: from the zero address the replay fails.
 	for i := 0; i < 2; i++ {
-		msg, _, statedb, release, err := eth.stateAtTransaction(context.Background(), block, i, 0)
+		message, blockCtx, statedb, release, err := eth.stateAtTransaction(context.Background(), block, i, 0)
 		if err != nil {
 			t.Fatalf("transaction %d: %v", i, err)
 		}
-		if msg.From != addr {
-			t.Errorf("transaction %d: from %x, want the account %x", i, msg.From, addr)
+		if message.From != addr {
+			t.Errorf("transaction %d: from %x, want the account %x", i, message.From, addr)
 		}
-		if msg.ExtraIntrinsicGas == 0 {
+		if blockCtx.BlockNumber == nil || blockCtx.BlockNumber.Cmp(block.Number()) != 0 {
+			t.Errorf("transaction %d: block context of block %v, want %v", i, blockCtx.BlockNumber, block.Number())
+		}
+		if message.ExtraIntrinsicGas == 0 {
 			t.Errorf("transaction %d: no signature gas in the message", i)
 		}
 		if nonce := statedb.GetNonce(addr); nonce != uint64(i) {
@@ -127,7 +134,11 @@ func TestAccountSenderStateAtTransaction(t *testing.T) {
 		BaseFee:    block.BaseFee(),
 		Difficulty: big.NewInt(1),
 	}).WithBody([]*types.Transaction{sign(2, block.BaseFee(), other)}, nil)
-	if _, _, _, _, err := eth.stateAtTransaction(context.Background(), bad, 0, 0); !errors.Is(err, types.ErrInvalidSig) {
+	message, blockCtx, statedb, release, err := eth.stateAtTransaction(context.Background(), bad, 0, 0)
+	if !errors.Is(err, types.ErrInvalidSig) {
 		t.Fatalf("underivable sender: error %v, want %v", err, types.ErrInvalidSig)
+	}
+	if message != nil || blockCtx.BlockNumber != nil || statedb != nil || release != nil {
+		t.Fatalf("underivable sender: an execution environment returned with the error")
 	}
 }

@@ -47,7 +47,7 @@ func init() {
 // senderTracer records the sender and the gas, intrinsic gas included, of the
 // traced transaction.
 type senderTracer struct {
-	from     common.Address
+	sender   common.Address
 	gasLimit uint64
 	gasUsed  uint64
 }
@@ -61,7 +61,7 @@ type senderTrace struct {
 func (t *senderTracer) CaptureTxStart(gasLimit uint64) { t.gasLimit = gasLimit }
 func (t *senderTracer) CaptureTxEnd(restGas uint64)    { t.gasUsed = t.gasLimit - restGas }
 func (t *senderTracer) CaptureStart(env *vm.EVM, from common.Address, to common.Address, create bool, input []byte, gas uint64, value *big.Int) {
-	t.from = from
+	t.sender = from
 }
 func (t *senderTracer) CaptureEnd(output []byte, gasUsed uint64, err error) {}
 func (t *senderTracer) CaptureEnter(typ vm.OpCode, from common.Address, to common.Address, input []byte, gas uint64, value *big.Int) {
@@ -73,7 +73,7 @@ func (t *senderTracer) CaptureFault(pc uint64, op vm.OpCode, gas, cost uint64, s
 }
 func (t *senderTracer) Stop(err error) {}
 func (t *senderTracer) GetResult() (json.RawMessage, error) {
-	return json.Marshal(senderTrace{From: t.from, GasUsed: t.gasUsed})
+	return json.Marshal(senderTrace{From: t.sender, GasUsed: t.gasUsed})
 }
 
 // accountSenderGas is the gas of an account transfer signed with ML-DSA-44.
@@ -158,7 +158,7 @@ func TestAccountSenderTraceTransaction(t *testing.T) {
 	defer backend.teardown()
 
 	tracer := accountSenderTracerName
-	for _, number := range []uint64{1, 2} {
+	for number := uint64(1); number <= 2; number++ {
 		tx := backend.chain.GetBlockByNumber(number).Transactions()[0]
 		result, err := NewAPI(backend).TraceTransaction(context.Background(), tx.Hash(), &TraceConfig{Tracer: &tracer})
 		if err != nil {
@@ -190,8 +190,8 @@ func TestAccountSenderTraceTransaction(t *testing.T) {
 	// Bound to another genesis hash, the signature does not verify.
 	tx := backend.chain.GetBlockByNumber(1).Transactions()[0]
 	other := NewAPI(otherGenesisBackend{backend})
-	if _, err := other.TraceTransaction(context.Background(), tx.Hash(), &TraceConfig{Tracer: &tracer}); !errors.Is(err, types.ErrInvalidSig) {
-		t.Fatalf("underivable sender: error %v, want %v", err, types.ErrInvalidSig)
+	if result, err := other.TraceTransaction(context.Background(), tx.Hash(), &TraceConfig{Tracer: &tracer}); !errors.Is(err, types.ErrInvalidSig) {
+		t.Fatalf("underivable sender: result %s, error %v, want %v", result, err, types.ErrInvalidSig)
 	}
 }
 
@@ -233,10 +233,10 @@ func TestAccountSenderTraceBlock(t *testing.T) {
 
 	// Bound to another genesis hash, the signatures do not verify.
 	other := NewAPI(otherGenesisBackend{backend})
-	if _, err := other.TraceBlockByNumber(context.Background(), rpc.BlockNumber(2), &TraceConfig{Tracer: &tracer}); !errors.Is(err, types.ErrInvalidSig) {
-		t.Fatalf("underivable sender: error %v, want %v", err, types.ErrInvalidSig)
+	if results, err := other.TraceBlockByNumber(context.Background(), rpc.BlockNumber(2), &TraceConfig{Tracer: &tracer}); !errors.Is(err, types.ErrInvalidSig) {
+		t.Fatalf("underivable sender: %d results, error %v, want %v", len(results), err, types.ErrInvalidSig)
 	}
-	if _, err := other.IntermediateRoots(context.Background(), block.Hash(), nil); !errors.Is(err, types.ErrInvalidSig) {
-		t.Fatalf("underivable sender, intermediate roots: error %v, want %v", err, types.ErrInvalidSig)
+	if roots, err := other.IntermediateRoots(context.Background(), block.Hash(), nil); !errors.Is(err, types.ErrInvalidSig) {
+		t.Fatalf("underivable sender, intermediate roots: %d roots, error %v, want %v", len(roots), err, types.ErrInvalidSig)
 	}
 }

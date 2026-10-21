@@ -93,13 +93,11 @@ func (b *accountSenderBackend) SubscribeChainHeadEvent(ch chan<- core.ChainHeadE
 func TestAccountSenderGasPrice(t *testing.T) {
 	coinbaseKey, coinbasePub, coinbase := testAccount(0x51)
 	userKey, userPub, user := testAccount(0x52)
-	for _, a := range []struct {
-		pub  []byte
-		addr common.Address
-	}{{coinbasePub, coinbase}, {userPub, user}} {
-		if want := types.GhostAccountAddressOf(types.GhostSchemeMLDSA44, a.pub); a.addr != want {
-			t.Fatalf("account address %x, want %x", a.addr, want)
-		}
+	if want := types.GhostAccountAddressOf(types.GhostSchemeMLDSA44, coinbasePub); coinbase != want {
+		t.Fatalf("coinbase account address %x, want %x", coinbase, want)
+	}
+	if want := types.GhostAccountAddressOf(types.GhostSchemeMLDSA44, userPub); user != want {
+		t.Fatalf("user account address %x, want %x", user, want)
 	}
 	var (
 		coinbaseTip = big.NewInt(50 * vars.GWei)
@@ -116,13 +114,15 @@ func TestAccountSenderGasPrice(t *testing.T) {
 	}
 	signer := types.NewGhostAccountSigner(types.LatestSigner(gspec.Config), core.GenesisToBlock(gspec, nil).Hash())
 	engine := ethash.NewFaker()
-	_, blocks, _ := core.GenerateChainWithGenesis(gspec, engine, 4, func(i int, b *core.BlockGen) {
+	senders := []struct {
+		key  *mldsa44.PrivateKey
+		addr common.Address
+		tip  *big.Int
+	}{{coinbaseKey, coinbase, coinbaseTip}, {userKey, user, userTip}}
+	genDb, blocks, receipts := core.GenerateChainWithGenesis(gspec, engine, 4, func(i int, b *core.BlockGen) {
 		b.SetCoinbase(coinbase)
-		for _, sender := range []struct {
-			key  *mldsa44.PrivateKey
-			addr common.Address
-			tip  *big.Int
-		}{{coinbaseKey, coinbase, coinbaseTip}, {userKey, user, userTip}} {
+		for n := range senders {
+			sender := senders[n]
 			txdata := &types.GhostAccountTx{
 				ChainID:   gspec.Config.GetChainID(),
 				Nonce:     b.TxNonce(sender.addr),
@@ -139,6 +139,10 @@ func TestAccountSenderGasPrice(t *testing.T) {
 			b.AddTx(tx)
 		}
 	})
+	defer genDb.Close()
+	if len(receipts) != 4 {
+		t.Fatalf("generated %d blocks of receipts, want 4", len(receipts))
+	}
 	chain, err := core.NewBlockChain(rawdb.NewMemoryDatabase(), &core.CacheConfig{TrieCleanNoPrefetch: true}, gspec, nil, engine, vm.Config{}, nil, nil)
 	if err != nil {
 		t.Fatalf("create chain: %v", err)
@@ -172,7 +176,7 @@ func TestAccountSenderGasPrice(t *testing.T) {
 	// Bound to another genesis hash, the signatures do not verify.
 	other := &types.Header{Number: new(big.Int), Extra: []byte("another chain")}
 	oracle = NewOracle(&accountSenderBackend{chain: chain, genesis: other}, config)
-	if _, err := oracle.SuggestTipCap(context.Background()); !errors.Is(err, types.ErrInvalidSig) {
-		t.Fatalf("underivable sender: error %v, want %v", err, types.ErrInvalidSig)
+	if tip, err := oracle.SuggestTipCap(context.Background()); !errors.Is(err, types.ErrInvalidSig) {
+		t.Fatalf("underivable sender: tip cap %v, error %v, want %v", tip, err, types.ErrInvalidSig)
 	}
 }
