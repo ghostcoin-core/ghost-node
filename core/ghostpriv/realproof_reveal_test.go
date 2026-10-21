@@ -50,12 +50,17 @@ func decodedInputs(r *ghostpriv.Reveal, chainID uint64, genesis common.Hash) *gh
 }
 
 // TestRealProofRevealRoundTrip puts the known-answer proof of the pinned
-// prover into a reveal's proof field: the envelope holds it, decodes back to
-// the same fields and the full proof field, padding included, and the
-// default verifier accepts what it decodes to. One flipped proof byte in the
-// envelope is rejected.
+// prover, of each commitment format, into a reveal's proof field: the
+// envelope holds it, decodes back to the same fields and the full proof
+// field, padding included, and the default verifier accepts what it decodes
+// to. One flipped proof byte in the envelope is rejected.
 func TestRealProofRevealRoundTrip(t *testing.T) {
-	ka := loadKnownAnswer(t)
+	for _, f := range knownAnswerFiles {
+		t.Run(f.name, func(t *testing.T) { testRealProofRevealRoundTrip(t, loadKnownAnswerFile(t, f.file)) })
+	}
+}
+
+func testRealProofRevealRoundTrip(t *testing.T, ka knownAnswer) {
 	in := ka.inputs(t)
 	if len(ka.proof) > ghostpriv.ProofSize {
 		t.Fatalf("proof of %d bytes, the field holds %d", len(ka.proof), ghostpriv.ProofSize)
