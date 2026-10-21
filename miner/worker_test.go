@@ -18,6 +18,7 @@ package miner
 
 import (
 	"crypto/rand"
+	"errors"
 	"math/big"
 	"sync/atomic"
 	"testing"
@@ -33,6 +34,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/ghostpriv/ghostprivtest"
 	"github.com/ethereum/go-ethereum/core/ghosttree"
 	"github.com/ethereum/go-ethereum/core/rawdb"
+	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/txpool"
 	"github.com/ethereum/go-ethereum/core/txpool/ghostpool"
 	"github.com/ethereum/go-ethereum/core/txpool/legacypool"
@@ -115,6 +117,7 @@ func newTestWorkerBackend(t *testing.T, chainConfig ctypes.ChainConfigurator, en
 			return crypto.Sign(crypto.Keccak256(data), testBankKey)
 		})
 	case *ethash.Ethash:
+	case *noUncleEngine:
 	default:
 		t.Fatalf("unexpected consensus engine type: %T", engine)
 	}
@@ -419,6 +422,87 @@ func TestStreamUncleBlock(t *testing.T) {
 	case <-taskCh:
 	case <-time.NewTimer(time.Second).C:
 		t.Error("new task timeout")
+	}
+}
+
+// noUncleEngine is the test ethash faker refusing any block with uncles, as
+// RandomX does.
+type noUncleEngine struct {
+	*ethash.Ethash
+}
+
+var errTestUnclesRefused = errors.New("uncles refused")
+
+func (e *noUncleEngine) VerifyUncles(chain consensus.ChainReader, block *types.Block) error {
+	if len(block.Uncles()) > 0 {
+		return errTestUnclesRefused
+	}
+	return nil
+}
+
+func (e *noUncleEngine) FinalizeAndAssemble(chain consensus.ChainHeaderReader, header *types.Header, state *state.StateDB, txs []*types.Transaction, uncles []*types.Header, receipts []*types.Receipt, withdrawals []*types.Withdrawal) (*types.Block, error) {
+	if len(uncles) > 0 {
+		return nil, errTestUnclesRefused
+	}
+	return e.Ethash.FinalizeAndAssemble(chain, header, state, txs, uncles, receipts, withdrawals)
+}
+
+// TestSideBlockDoesNotStallRandomXStyleMining checks that a side block kept as
+// a possible uncle does not stop an engine refusing uncles from mining: the
+// worker must keep the uncle out and still hand the next block to the sealer.
+func TestSideBlockDoesNotStallRandomXStyleMining(t *testing.T) {
+	engine := &noUncleEngine{ethash.NewFaker()}
+	defer engine.Close()
+
+	w, b := newTestWorker(t, ethashChainConfig, engine, rawdb.NewMemoryDatabase(), 1)
+	defer w.close()
+
+	taskCh := make(chan *types.Block, 16)
+	w.newTaskHook = func(task *task) {
+		select {
+		case taskCh <- task.block:
+		default:
+		}
+	}
+	w.skipSealHook = func(task *task) bool { return true }
+	w.start()
+
+	// waitTask waits for a sealing task for the given block number.
+	waitTask := func(number uint64) *types.Block {
+		t.Helper()
+		timeout := time.NewTimer(5 * time.Second)
+		defer timeout.Stop()
+		for {
+			select {
+			case block := <-taskCh:
+				if block.NumberU64() == number {
+					return block
+				}
+			case <-timeout.C:
+				t.Fatalf("no sealing task for block %d", number)
+				return nil
+			}
+		}
+	}
+	waitTask(2)
+
+	// A side block at height 1, a possible uncle for blocks 2 and 3.
+	w.postSideBlock(core.ChainSideEvent{Block: b.newRandomUncle()})
+
+	// A new head at height 2: the worker must build block 3.
+	head := b.chain.GetBlockByHash(b.chain.CurrentBlock().Hash())
+	blocks, _ := core.GenerateChain(b.chain.Config(), head, engine, b.db, 1, func(i int, gen *core.BlockGen) {
+		gen.SetCoinbase(testUserAddress)
+	})
+	if _, err := b.chain.InsertChain(blocks); err != nil {
+		t.Fatalf("failed to insert the new head: %v", err)
+	}
+	block := waitTask(3)
+	if n := len(block.Uncles()); n != 0 {
+		t.Fatalf("sealing task for block 3 carries %d uncles, want none", n)
+	}
+	if block.ParentHash() != blocks[0].Hash() {
+		t.Fatalf("sealing task for block 3 has parent %x, want %x", block.ParentHash(), blocks[0].Hash())
 	}
 }
 
