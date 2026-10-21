@@ -57,6 +57,8 @@ func TestBlockchain(t *testing.T) {
 
 	// Ghost removes the elliptic-curve precompiles.
 	skipRemovedPrecompiles(bt)
+	// Expects 0x0a cold before Cancun; on Ghost the removed precompile is warm in every fork.
+	bt.skipLoad(`.*bcValidBlockTest/reentrencySuicide\.json`)
 
 	bt.walk(t, blockTestDir, func(t *testing.T, name string, test *BlockTest) {
 		if runtime.GOARCH == "386" && runtime.GOOS == "windows" && rand.Int63()%2 == 0 {

@@ -150,6 +150,15 @@ func TestFlatCallTracerNative(t *testing.T) {
 	testFlatCallTracer("flatCallTracer", "call_tracer_flat", t)
 }
 
+// removedPrecompileFixtures are the call_tracer_flat and call_tracer_parity
+// fixtures that record a working ECRECOVER (0x01), which always fails on
+// Ghost. They are skipped by name; their files stay as they are.
+var removedPrecompileFixtures = map[string]string{
+	"callcode_precompiled_oog.json": "records a working ECRECOVER (0x01), which always fails on Ghost",
+	"gas.json":                      "records a working ECRECOVER (0x01), which always fails on Ghost",
+	"staticcall_precompiled.json":   "records a working ECRECOVER (0x01), which always fails on Ghost",
+}
+
 func testFlatCallTracer(tracerName string, dirPath string, t *testing.T) {
 	files, err := os.ReadDir(filepath.Join("testdata", dirPath))
 	if err != nil {
@@ -160,6 +169,9 @@ func testFlatCallTracer(tracerName string, dirPath string, t *testing.T) {
 			continue
 		}
 		t.Run(camel(strings.TrimSuffix(file.Name(), ".json")), func(t *testing.T) {
+			if reason, ok := removedPrecompileFixtures[file.Name()]; ok {
+				t.Skip(reason)
+			}
 			t.Parallel()
 
 			err := flatCallTracerTestRunner(tracerName, file.Name(), dirPath, t)
