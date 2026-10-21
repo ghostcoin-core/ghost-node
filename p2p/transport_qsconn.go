@@ -18,7 +18,6 @@ package p2p
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -31,16 +30,8 @@ import (
 	"github.com/ethereum/go-ethereum/rlp"
 )
 
-var errQSConnOnly = errors.New("quantum-safe transport: no secp256k1 handshake")
-
-// qsHandshaker is the encryption handshake of the quantum-safe transport. It
-// returns the remote identity the handshake authenticated.
-type qsHandshaker interface {
-	doQSHandshake() (*qsconn.RemoteIdentity, error)
-}
-
-// qsconnTransport is the transport of a server with Config.Identity set. It
-// wraps a qsconn connection with locks and read/write deadlines.
+// qsconnTransport is the transport of every peer connection. It wraps a
+// qsconn connection with locks and read/write deadlines.
 type qsconnTransport struct {
 	rmu, wmu sync.Mutex
 	wbuf     bytes.Buffer
@@ -62,7 +53,9 @@ func newQSConn(fd net.Conn, key *qsconn.Identity, dialDest *enode.Node) transpor
 	}
 }
 
-func (t *qsconnTransport) doQSHandshake() (*qsconn.RemoteIdentity, error) {
+// doEncHandshake runs the quantum-safe handshake and returns the remote
+// identity it authenticated.
+func (t *qsconnTransport) doEncHandshake() (*qsconn.RemoteIdentity, error) {
 	return t.conn.Handshake(t.key)
 }
 
@@ -128,9 +121,13 @@ func (t *qsconnTransport) close(err error) {
 // doProtoHandshake exchanges the protocol handshake. The ID field carries the
 // 32-byte node ID; frames are not compressed.
 func (t *qsconnTransport) doProtoHandshake(our *protoHandshake) (their *protoHandshake, err error) {
+	// Writing our handshake happens concurrently, we prefer
+	// returning the handshake read error. If the remote side
+	// disconnects us early with a valid reason, we should return it
+	// as the error so it can be tracked elsewhere.
 	werr := make(chan error, 1)
 	go func() { werr <- Send(t, handshakeMsg, our) }()
-	if their, err = readProtocolHandshakeID(t, len(enode.ID{})); err != nil {
+	if their, err = readProtocolHandshake(t); err != nil {
 		<-werr // make sure the write terminates too
 		return nil, err
 	}
@@ -140,9 +137,9 @@ func (t *qsconnTransport) doProtoHandshake(our *protoHandshake) (their *protoHan
 	return their, nil
 }
 
-// quantumSafeNodeFromConn is the node of an accepted connection: its node ID
-// from the handshake and the remote address.
-func quantumSafeNodeFromConn(id enode.ID, conn net.Conn) *enode.Node {
+// nodeFromConn is the node of an accepted connection: its node ID from the
+// handshake and the remote address.
+func nodeFromConn(id enode.ID, conn net.Conn) *enode.Node {
 	var ip net.IP
 	var port int
 	if tcp, ok := conn.RemoteAddr().(*net.TCPAddr); ok {

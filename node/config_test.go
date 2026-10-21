@@ -17,14 +17,13 @@
 package node
 
 import (
-	"bytes"
 	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
 
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/p2p"
+	"github.com/ethereum/go-ethereum/p2p/qsconn"
 )
 
 // Tests that datadirs can be successfully created, be them manually configured
@@ -100,54 +99,37 @@ func TestIPCPathResolution(t *testing.T) {
 	}
 }
 
-// Tests that node keys can be correctly created, persisted, loaded and/or made
-// ephemeral.
-func TestNodeKeyPersistency(t *testing.T) {
-	// Create a temporary folder and make sure no key is present
+// Tests that a configured node identity is used as it is and not persisted
+// to the data directory, and that the node runs its p2p server with it.
+func TestConfiguredNodeIdentity(t *testing.T) {
 	dir := t.TempDir()
+	path := filepath.Join(dir, "unit-test", datadirIdentity)
 
-	keyfile := filepath.Join(dir, "unit-test", datadirPrivateKey)
-
-	// Configure a node with a preset key and ensure it's not persisted
-	key, err := crypto.GenerateKey()
+	key, err := qsconn.GenerateIdentity()
 	if err != nil {
-		t.Fatalf("failed to generate one-shot node key: %v", err)
+		t.Fatal(err)
 	}
-	config := &Config{Name: "unit-test", DataDir: dir, P2P: p2p.Config{PrivateKey: key}}
-	config.NodeKey()
-	if _, err := os.Stat(keyfile); err == nil {
-		t.Fatalf("one-shot node key persisted to data directory")
-	}
-
-	// Configure a node with no preset key and ensure it is persisted this time
-	config = &Config{Name: "unit-test", DataDir: dir}
-	config.NodeKey()
-	if _, err := os.Stat(keyfile); err != nil {
-		t.Fatalf("node key not persisted to data directory: %v", err)
-	}
-	if _, err = crypto.LoadECDSA(keyfile); err != nil {
-		t.Fatalf("failed to load freshly persisted node key: %v", err)
-	}
-	blob1, err := os.ReadFile(keyfile)
+	config := &Config{Name: "unit-test", DataDir: dir, P2P: p2p.Config{Identity: key}}
+	got, err := config.NodeIdentity()
 	if err != nil {
-		t.Fatalf("failed to read freshly persisted node key: %v", err)
+		t.Fatal(err)
+	}
+	if got != key {
+		t.Fatal("configured identity not used")
+	}
+	if _, err := os.Stat(path); err == nil {
+		t.Fatal("configured identity persisted to data directory")
 	}
 
-	// Configure a new node and ensure the previously persisted key is loaded
-	config = &Config{Name: "unit-test", DataDir: dir}
-	config.NodeKey()
-	blob2, err := os.ReadFile(keyfile)
+	stack, err := New(config)
 	if err != nil {
-		t.Fatalf("failed to read previously persisted node key: %v", err)
+		t.Fatal(err)
 	}
-	if !bytes.Equal(blob1, blob2) {
-		t.Fatalf("persisted node key mismatch: have %x, want %x", blob2, blob1)
+	defer stack.Close()
+	if stack.server.Config.Identity != key {
+		t.Fatal("p2p server does not use the configured identity")
 	}
-
-	// Configure ephemeral node and ensure no key is dumped locally
-	config = &Config{Name: "unit-test", DataDir: ""}
-	config.NodeKey()
-	if _, err := os.Stat(filepath.Join(".", "unit-test", datadirPrivateKey)); err == nil {
-		t.Fatalf("ephemeral node key persisted to disk")
+	if _, err := os.Stat(path); err == nil {
+		t.Fatal("node persisted the configured identity")
 	}
 }

@@ -105,12 +105,12 @@ directory. Node instance A opens the database "db", node instance B opens the da
 
 	data-directory/
 		A/
-			nodekey            -- devp2p node key of instance A
+			nodeidentity       -- quantum-safe node identity of instance A
 			nodes/             -- devp2p discovery knowledge database of instance A
 			db/                -- LevelDB content for "db"
 		A.ipc                  -- JSON-RPC UNIX domain socket endpoint of instance A
 		B/
-			nodekey            -- devp2p node key of node B
+			nodeidentity       -- quantum-safe node identity of node B
 			nodes/             -- devp2p discovery knowledge database of instance B
 			static-nodes.json  -- devp2p static node list of instance B
 			db/                -- LevelDB content for "db"

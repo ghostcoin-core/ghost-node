@@ -33,7 +33,7 @@ func TestServerPortMapping(t *testing.T) {
 	mockNAT := &mockNAT{mappedPort: 30000}
 	srv := Server{
 		Config: Config{
-			PrivateKey: newkey(),
+			Identity:   newkey(),
 			NoDial:     true,
 			ListenAddr: ":0",
 			NAT:        mockNAT,
@@ -52,7 +52,7 @@ func TestServerPortMapping(t *testing.T) {
 	// also advance the virtual clock by 1 second. Waiting stops when the NAT interface
 	// has received some requests, or when the clock reaches a timeout.
 	deadline := clock.Now().Add(portMapRefreshInterval)
-	for clock.Now() < deadline && mockNAT.mapRequests.Load() < 2 {
+	for clock.Now() < deadline && mockNAT.mapRequests.Load() < 1 {
 		time.Sleep(10 * time.Millisecond)
 		clock.Run(1 * time.Second)
 	}
@@ -60,8 +60,9 @@ func TestServerPortMapping(t *testing.T) {
 	if mockNAT.ipRequests.Load() == 0 {
 		t.Fatal("external IP was never requested")
 	}
+	// Only the TCP port is mapped: the server opens no UDP port.
 	reqCount := mockNAT.mapRequests.Load()
-	if reqCount != 2 {
+	if reqCount != 1 {
 		t.Error("wrong request count:", reqCount)
 	}
 	enr := srv.LocalNode().Node()
@@ -71,8 +72,8 @@ func TestServerPortMapping(t *testing.T) {
 	if enr.TCP() != 30000 {
 		t.Error("wrong TCP port in ENR:", enr.TCP())
 	}
-	if enr.UDP() != 30000 {
-		t.Error("wrong UDP port in ENR:", enr.UDP())
+	if enr.UDP() != 0 {
+		t.Error("UDP port in the local node:", enr.UDP())
 	}
 }
 

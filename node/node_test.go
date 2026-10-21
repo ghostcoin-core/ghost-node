@@ -26,22 +26,22 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/p2p"
+	"github.com/ethereum/go-ethereum/p2p/qsconn"
 	"github.com/ethereum/go-ethereum/rpc"
 
 	"github.com/stretchr/testify/assert"
 )
 
 var (
-	testNodeKey, _ = crypto.GenerateKey()
+	testNodeKey, _ = qsconn.GenerateIdentity()
 )
 
 func testNodeConfig() *Config {
 	return &Config{
 		Name: "test node",
-		P2P:  p2p.Config{PrivateKey: testNodeKey},
+		P2P:  p2p.Config{Identity: testNodeKey},
 	}
 }
 
@@ -380,7 +380,7 @@ func TestLifecycleTerminationGuarantee(t *testing.T) {
 	}
 
 	stack.server = &p2p.Server{}
-	stack.server.PrivateKey = testNodeKey
+	stack.server.Identity = testNodeKey
 }
 
 // Tests whether a handler can be successfully mounted on the canonical HTTP server

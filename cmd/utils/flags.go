@@ -19,7 +19,6 @@ package utils
 
 import (
 	"context"
-	"crypto/ecdsa"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -42,7 +41,6 @@ import (
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/txpool/legacypool"
 	"github.com/ethereum/go-ethereum/core/vm"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/crypto/kzg4844"
 	"github.com/ethereum/go-ethereum/eth"
 	"github.com/ethereum/go-ethereum/eth/downloader"
@@ -65,6 +63,7 @@ import (
 	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/ethereum/go-ethereum/p2p/nat"
 	"github.com/ethereum/go-ethereum/p2p/netutil"
+	"github.com/ethereum/go-ethereum/p2p/qsconn"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/params/ghost"
 	"github.com/ethereum/go-ethereum/params/types/genesisT"
@@ -779,12 +778,12 @@ var (
 	}
 	NodeKeyFileFlag = &cli.StringFlag{
 		Name:     "nodekey",
-		Usage:    "P2P node key file",
+		Usage:    "P2P node identity file (hex of the ML-DSA-44 private key, mode 0600)",
 		Category: flags.NetworkingCategory,
 	}
 	NodeKeyHexFlag = &cli.StringFlag{
 		Name:     "nodekeyhex",
-		Usage:    "P2P node key as hex (for testing)",
+		Usage:    "P2P node identity as the hex text of an identity file (for testing)",
 		Category: flags.NetworkingCategory,
 	}
 	NATFlag = &cli.StringFlag{
@@ -996,29 +995,31 @@ func MakeDataDir(ctx *cli.Context) string {
 	return ""
 }
 
-// setNodeKey creates a node key from set command line flags, either loading it
-// from a file or as a specified hex value. If neither flags were provided, this
-// method returns nil and an ephemeral key is to be generated.
+// setNodeKey sets the node's quantum-safe identity from the command line
+// flags, either loading it from an identity file (as written by
+// qsconn.Identity.Save) or parsing that file's hex text. A value that cannot
+// be loaded stops the node. If neither flag is given, the identity stays nil
+// and the node uses the one in its data directory.
 func setNodeKey(ctx *cli.Context, cfg *p2p.Config) {
 	var (
 		hex  = ctx.String(NodeKeyHexFlag.Name)
 		file = ctx.String(NodeKeyFileFlag.Name)
-		key  *ecdsa.PrivateKey
+		key  *qsconn.Identity
 		err  error
 	)
 	switch {
 	case file != "" && hex != "":
 		Fatalf("Options %q and %q are mutually exclusive", NodeKeyFileFlag.Name, NodeKeyHexFlag.Name)
 	case file != "":
-		if key, err = crypto.LoadECDSA(file); err != nil {
+		if key, err = qsconn.LoadIdentity(file); err != nil {
 			Fatalf("Option %q: %v", NodeKeyFileFlag.Name, err)
 		}
-		cfg.PrivateKey = key
+		cfg.Identity = key
 	case hex != "":
-		if key, err = crypto.HexToECDSA(hex); err != nil {
+		if key, err = qsconn.ParseIdentityHex(hex); err != nil {
 			Fatalf("Option %q: %v", NodeKeyHexFlag.Name, err)
 		}
-		cfg.PrivateKey = key
+		cfg.Identity = key
 	}
 }
 

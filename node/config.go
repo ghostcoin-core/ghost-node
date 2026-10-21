@@ -17,7 +17,6 @@
 package node
 
 import (
-	"crypto/ecdsa"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -28,7 +27,6 @@ import (
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/p2p"
 	"github.com/ethereum/go-ethereum/p2p/qsconn"
@@ -38,7 +36,6 @@ import (
 )
 
 const (
-	datadirPrivateKey      = "nodekey"            // Path within the datadir to the node's private key
 	datadirIdentity        = "nodeidentity"       // Path within the datadir to the node's quantum-safe identity
 	datadirJWTKey          = "jwtsecret"          // Path within the datadir to the node's jwt secret
 	datadirDefaultKeyStore = "keystore"           // Path within the datadir to the keystore
@@ -314,7 +311,6 @@ func (c *Config) name() string {
 var isOldGethResource = map[string]bool{
 	"chaindata":          true,
 	"nodes":              true,
-	"nodekey":            true,
 	"static-nodes.json":  false, // no warning for these because they have their
 	"trusted-nodes.json": false, // own separate warning.
 }
@@ -352,46 +348,9 @@ func (c *Config) instanceDir() string {
 	return filepath.Join(c.DataDir, c.name())
 }
 
-// NodeKey retrieves the currently configured private key of the node, checking
-// first any manually set key, falling back to the one found in the configured
-// data folder. If no key can be found, a new one is generated.
-func (c *Config) NodeKey() *ecdsa.PrivateKey {
-	// Use any specifically configured key.
-	if c.P2P.PrivateKey != nil {
-		return c.P2P.PrivateKey
-	}
-	// Generate ephemeral key if no datadir is being used.
-	if c.DataDir == "" {
-		key, err := crypto.GenerateKey()
-		if err != nil {
-			log.Crit(fmt.Sprintf("Failed to generate ephemeral node key: %v", err))
-		}
-		return key
-	}
-
-	keyfile := c.ResolvePath(datadirPrivateKey)
-	if key, err := crypto.LoadECDSA(keyfile); err == nil {
-		return key
-	}
-	// No persistent key found, generate and store a new one.
-	key, err := crypto.GenerateKey()
-	if err != nil {
-		log.Crit(fmt.Sprintf("Failed to generate node key: %v", err))
-	}
-	instanceDir := filepath.Join(c.DataDir, c.name())
-	if err := os.MkdirAll(instanceDir, 0700); err != nil {
-		log.Error(fmt.Sprintf("Failed to persist node key: %v", err))
-		return key
-	}
-	keyfile = filepath.Join(instanceDir, datadirPrivateKey)
-	if err := crypto.SaveECDSA(keyfile, key); err != nil {
-		log.Error(fmt.Sprintf("Failed to persist node key: %v", err))
-	}
-	return key
-}
-
-// NodeIdentity returns the node's quantum-safe identity: any configured one,
-// else the one stored in the data directory. On first start it is created and
+// NodeIdentity returns the node's quantum-safe identity: any configured one
+// (P2P.Identity, set by the --nodekey and --nodekeyhex flags), else the one
+// stored in the data directory. On first start it is created and
 // stored there, readable by its owner only. Without a data directory it is
 // ephemeral. A stored file that cannot be loaded is an error: the node does
 // not replace it.

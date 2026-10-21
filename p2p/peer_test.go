@@ -89,8 +89,8 @@ func testPeer(protos []Protocol) (func(), *conn, *Peer, <-chan error) {
 	var (
 		fd1, fd2   = net.Pipe()
 		key1, key2 = newkey(), newkey()
-		t1         = newTestTransport(&key2.PublicKey, fd1, nil)
-		t2         = newTestTransport(&key1.PublicKey, fd2, &key1.PublicKey)
+		t1         = newTestTransport(key2, fd1)
+		t2         = newTestTransport(key1, fd2)
 	)
 
 	c1 := &conn{fd: fd1, node: newNode(uintID(1), ""), transport: t1}

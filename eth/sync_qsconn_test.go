@@ -29,8 +29,8 @@ import (
 	"github.com/ethereum/go-ethereum/p2p/qsconn"
 )
 
-// startQSConnServer runs the eth protocol of h on a p2p server that has only
-// a quantum-safe identity: no secp256k1 key.
+// startQSConnServer runs the eth protocol of h on a p2p server with a new
+// quantum-safe identity.
 func startQSConnServer(t *testing.T, name string, h *testHandler, static ...*enode.Node) (*p2p.Server, *qsconn.Identity) {
 	t.Helper()
 	key, err := qsconn.GenerateIdentity()
@@ -64,9 +64,6 @@ func TestSyncOverQSConn(t *testing.T) {
 	defer empty.close()
 
 	fullSrv, fullKey := startQSConnServer(t, "full", full)
-	if fullSrv.PrivateKey != nil {
-		t.Fatal("server has a secp256k1 key")
-	}
 	// The empty node knows the full one only by its 64 hex chars URL.
 	fullNode, err := enode.ParseV4(fullSrv.Self().URLv4())
 	if err != nil {

@@ -17,25 +17,26 @@
 package p2p
 
 import (
+	"bytes"
 	"errors"
 	"reflect"
 	"sync"
 	"testing"
 
 	"github.com/davecgh/go-spew/spew"
-	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/ethereum/go-ethereum/p2p/simulations/pipes"
 )
 
 func TestProtocolHandshake(t *testing.T) {
 	var (
-		prv0, _ = crypto.GenerateKey()
-		pub0    = crypto.FromECDSAPub(&prv0.PublicKey)[1:]
-		hs0     = &protoHandshake{Version: 3, ID: pub0, Caps: []Cap{{"a", 0}, {"b", 2}}}
+		key0 = newkey()
+		id0  = key0.ID()
+		hs0  = &protoHandshake{Version: 3, ID: id0[:], Caps: []Cap{{"a", 0}, {"b", 2}}}
 
-		prv1, _ = crypto.GenerateKey()
-		pub1    = crypto.FromECDSAPub(&prv1.PublicKey)[1:]
-		hs1     = &protoHandshake{Version: 3, ID: pub1, Caps: []Cap{{"c", 1}, {"d", 3}}}
+		key1 = newkey()
+		id1  = key1.ID()
+		hs1  = &protoHandshake{Version: 3, ID: id1[:], Caps: []Cap{{"c", 1}, {"d", 3}}}
 
 		wg sync.WaitGroup
 	)
@@ -49,14 +50,14 @@ func TestProtocolHandshake(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		defer fd0.Close()
-		frame := newRLPX(fd0, &prv1.PublicKey)
-		rpubkey, err := frame.doEncHandshake(prv0)
+		frame := newQSConn(fd0, key0, enode.NewQuantumSafe(enode.ID(id1), nil, 0))
+		remote, err := frame.doEncHandshake()
 		if err != nil {
 			t.Errorf("dial side enc handshake failed: %v", err)
 			return
 		}
-		if !reflect.DeepEqual(rpubkey, &prv1.PublicKey) {
-			t.Errorf("dial side remote pubkey mismatch: got %v, want %v", rpubkey, &prv1.PublicKey)
+		if !reflect.DeepEqual(remote, remoteIdentity(key1)) {
+			t.Errorf("dial side remote identity mismatch: got %v, want %v", remote.ID, id1)
 			return
 		}
 
@@ -75,18 +76,18 @@ func TestProtocolHandshake(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		defer fd1.Close()
-		rlpx := newRLPX(fd1, nil)
-		rpubkey, err := rlpx.doEncHandshake(prv1)
+		frame := newQSConn(fd1, key1, nil)
+		remote, err := frame.doEncHandshake()
 		if err != nil {
 			t.Errorf("listen side enc handshake failed: %v", err)
 			return
 		}
-		if !reflect.DeepEqual(rpubkey, &prv0.PublicKey) {
-			t.Errorf("listen side remote pubkey mismatch: got %v, want %v", rpubkey, &prv0.PublicKey)
+		if !reflect.DeepEqual(remote, remoteIdentity(key0)) {
+			t.Errorf("listen side remote identity mismatch: got %v, want %v", remote.ID, id0)
 			return
 		}
 
-		phs, err := rlpx.doProtoHandshake(hs1)
+		phs, err := frame.doProtoHandshake(hs1)
 		if err != nil {
 			t.Errorf("listen side proto handshake error: %v", err)
 			return
@@ -97,7 +98,7 @@ func TestProtocolHandshake(t *testing.T) {
 			return
 		}
 
-		if err := ExpectMsg(rlpx, discMsg, []DiscReason{DiscQuitting}); err != nil {
+		if err := ExpectMsg(frame, discMsg, []DiscReason{DiscQuitting}); err != nil {
 			t.Errorf("error receiving disconnect: %v", err)
 		}
 	}()
@@ -133,6 +134,12 @@ func TestProtocolHandshakeErrors(t *testing.T) {
 		{
 			code: handshakeMsg,
 			msg:  &protoHandshake{Version: 3},
+			err:  DiscInvalidIdentity,
+		},
+		{
+			// a 64-byte secp256k1 public key is not a node ID
+			code: handshakeMsg,
+			msg:  &protoHandshake{Version: 3, ID: bytes.Repeat([]byte{1}, 64)},
 			err:  DiscInvalidIdentity,
 		},
 	}
