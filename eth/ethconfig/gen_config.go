@@ -23,8 +23,6 @@ func (c Config) MarshalTOML() (interface{}, error) {
 		NetworkId               uint64
 		ProtocolVersions        []uint
 		SyncMode                downloader.SyncMode
-		EthDiscoveryURLs        []string
-		SnapDiscoveryURLs       []string
 		NoPruning               bool
 		NoPrefetch              bool
 		TxLookupLimit           uint64                 `toml:",omitempty"`
@@ -73,8 +71,6 @@ func (c Config) MarshalTOML() (interface{}, error) {
 	enc.NetworkId = c.NetworkId
 	enc.ProtocolVersions = c.ProtocolVersions
 	enc.SyncMode = c.SyncMode
-	enc.EthDiscoveryURLs = c.EthDiscoveryURLs
-	enc.SnapDiscoveryURLs = c.SnapDiscoveryURLs
 	enc.NoPruning = c.NoPruning
 	enc.NoPrefetch = c.NoPrefetch
 	enc.TxLookupLimit = c.TxLookupLimit
@@ -127,8 +123,6 @@ func (c *Config) UnmarshalTOML(unmarshal func(interface{}) error) error {
 		NetworkId               *uint64
 		ProtocolVersions        []uint
 		SyncMode                *downloader.SyncMode
-		EthDiscoveryURLs        []string
-		SnapDiscoveryURLs       []string
 		NoPruning               *bool
 		NoPrefetch              *bool
 		TxLookupLimit           *uint64                `toml:",omitempty"`
@@ -187,12 +181,6 @@ func (c *Config) UnmarshalTOML(unmarshal func(interface{}) error) error {
 	}
 	if dec.SyncMode != nil {
 		c.SyncMode = *dec.SyncMode
-	}
-	if dec.EthDiscoveryURLs != nil {
-		c.EthDiscoveryURLs = dec.EthDiscoveryURLs
-	}
-	if dec.SnapDiscoveryURLs != nil {
-		c.SnapDiscoveryURLs = dec.SnapDiscoveryURLs
 	}
 	if dec.NoPruning != nil {
 		c.NoPruning = *dec.NoPruning

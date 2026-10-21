@@ -802,27 +802,9 @@ var (
 		Usage:    "Disables the peer discovery mechanism (manual peer addition)",
 		Category: flags.NetworkingCategory,
 	}
-	DiscoveryV4Flag = &cli.BoolFlag{
-		Name:     "discovery.v4",
-		Aliases:  []string{"discv4"},
-		Usage:    "Enables the V4 discovery mechanism",
-		Category: flags.NetworkingCategory,
-		Value:    true,
-	}
-	DiscoveryV5Flag = &cli.BoolFlag{
-		Name:     "discovery.v5",
-		Aliases:  []string{"discv5"},
-		Usage:    "Enables the experimental RLPx V5 (Topic Discovery) mechanism",
-		Category: flags.NetworkingCategory,
-	}
 	NetrestrictFlag = &cli.StringFlag{
 		Name:     "netrestrict",
 		Usage:    "Restricts network communication to the given IP networks (CIDR masks)",
-		Category: flags.NetworkingCategory,
-	}
-	DNSDiscoveryFlag = &cli.StringFlag{
-		Name:     "discovery.dns",
-		Usage:    "Sets DNS discovery entry points (use \"\" to disable DNS)",
 		Category: flags.NetworkingCategory,
 	}
 	DiscoveryPortFlag = &cli.IntFlag{
@@ -1063,27 +1045,6 @@ func mustParseBootnodes(urls []string) []*enode.Node {
 		}
 	}
 	return nodes
-}
-
-// setBootstrapNodesV5 creates a list of discovery v5 bootstrap nodes from the
-// command line flags or the config file. There are no defaults.
-func setBootstrapNodesV5(ctx *cli.Context, cfg *p2p.Config) {
-	if !ctx.IsSet(BootnodesFlag.Name) {
-		return // Keep what the config file set, if anything.
-	}
-	urls := SplitAndTrim(ctx.String(BootnodesFlag.Name))
-
-	cfg.BootstrapNodesV5 = make([]*enode.Node, 0, len(urls))
-	for _, url := range urls {
-		if url != "" {
-			node, err := enode.Parse(enode.ValidSchemes, url)
-			if err != nil {
-				log.Error("Bootstrap URL invalid", "enode", url, "err", err)
-				continue
-			}
-			cfg.BootstrapNodesV5 = append(cfg.BootstrapNodesV5, node)
-		}
-	}
 }
 
 // setListenAddress creates TCP/UDP listening address strings from set command
@@ -1343,7 +1304,6 @@ func SetP2PConfig(ctx *cli.Context, cfg *p2p.Config) {
 	setNAT(ctx, cfg)
 	setListenAddress(ctx, cfg)
 	setBootstrapNodes(ctx, cfg)
-	setBootstrapNodesV5(ctx, cfg)
 
 	if ctx.IsSet(MaxPeersFlag.Name) {
 		cfg.MaxPeers = ctx.Int(MaxPeersFlag.Name)
@@ -1357,11 +1317,6 @@ func SetP2PConfig(ctx *cli.Context, cfg *p2p.Config) {
 	if ctx.IsSet(NoDiscoverFlag.Name) {
 		cfg.NoDiscovery = true
 	}
-
-	CheckExclusive(ctx, DiscoveryV4Flag, NoDiscoverFlag)
-	CheckExclusive(ctx, DiscoveryV5Flag, NoDiscoverFlag)
-	cfg.DiscoveryV4 = ctx.Bool(DiscoveryV4Flag.Name)
-	cfg.DiscoveryV5 = ctx.Bool(DiscoveryV5Flag.Name)
 
 	if netrestrict := ctx.String(NetrestrictFlag.Name); netrestrict != "" {
 		list, err := netutil.ParseNetlist(netrestrict)
@@ -1377,7 +1332,6 @@ func SetP2PConfig(ctx *cli.Context, cfg *p2p.Config) {
 		cfg.ListenAddr = ""
 		cfg.NoDial = true
 		cfg.NoDiscovery = true
-		cfg.DiscoveryV5 = false
 	}
 }
 
@@ -1774,17 +1728,6 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 	if ctx.IsSet(RPCGlobalTxFeeCapFlag.Name) {
 		cfg.RPCTxFeeCap = ctx.Float64(RPCGlobalTxFeeCapFlag.Name)
 	}
-	if ctx.IsSet(NoDiscoverFlag.Name) {
-		cfg.EthDiscoveryURLs, cfg.SnapDiscoveryURLs = []string{}, []string{}
-	} else if ctx.IsSet(DNSDiscoveryFlag.Name) {
-		urls := ctx.String(DNSDiscoveryFlag.Name)
-		if urls == "" {
-			cfg.EthDiscoveryURLs = []string{}
-		} else {
-			cfg.EthDiscoveryURLs = SplitAndTrim(urls)
-		}
-	}
-
 	// Establish NetworkID.
 	// If dev-mode is used, then NetworkID will be overridden.
 	if ctx.IsSet(NetworkIdFlag.Name) {

@@ -37,6 +37,7 @@ import (
 	"github.com/ethereum/go-ethereum/p2p/nat"
 	"github.com/ethereum/go-ethereum/p2p/netutil"
 	"github.com/ethereum/go-ethereum/p2p/qsconn"
+	"github.com/ethereum/go-ethereum/p2p/qsdisc"
 	"golang.org/x/exp/slices"
 )
 
@@ -74,9 +75,9 @@ type Config struct {
 	// Identity is the node's quantum-safe identity and must be set. Every
 	// connection, dialled and accepted, runs on the quantum-safe transport
 	// of package p2p/qsconn, and the node ID is the hash of its public key.
-	// Static and trusted nodes are named by that ID
-	// (enode://<64 hex chars>@host:port), and the server finds no peers by
-	// itself: it dials only the static nodes.
+	// Static, trusted and bootstrap nodes are named by that ID
+	// (enode://<64 hex chars>@host:port), and the server finds other peers
+	// with the quantum-safe discovery of package p2p/qsdisc.
 	Identity *qsconn.Identity `toml:"-"`
 
 	// MaxPeers is the maximum number of peers that can be
@@ -93,32 +94,18 @@ type Config struct {
 	// Setting DialRatio to zero defaults it to 3.
 	DialRatio int `toml:",omitempty"`
 
-	// NoDiscovery can be used to disable the peer discovery mechanism.
-	// Disabling is useful for protocol debugging (manual topology).
-	//
-	// NoDiscovery, DiscoveryV4, DiscoveryV5, the bootstrap nodes and DiscAddr
-	// are kept in the configuration but not used for now: the server opens
-	// no UDP port and only dials its static nodes.
+	// NoDiscovery disables the peer discovery of package p2p/qsdisc: the
+	// server opens no UDP port, answers no record request and dials only
+	// its static nodes. Disabling is useful for protocol debugging (manual
+	// topology). There is no other discovery to fall back to.
 	NoDiscovery bool
-
-	// DiscoveryV4 specifies whether V4 discovery should be started.
-	DiscoveryV4 bool `toml:",omitempty"`
-
-	// DiscoveryV5 specifies whether the new topic-discovery based V5 discovery
-	// protocol should be started or not.
-	DiscoveryV5 bool `toml:",omitempty"`
 
 	// Name sets the node name of this server.
 	Name string `toml:"-"`
 
-	// BootstrapNodes are used to establish connectivity
-	// with the rest of the network.
+	// BootstrapNodes are the nodes discovery starts from. Their UDP
+	// endpoint is their IP and TCP port.
 	BootstrapNodes []*enode.Node
-
-	// BootstrapNodesV5 are used to establish connectivity
-	// with the rest of the network using the V5 discovery
-	// protocol.
-	BootstrapNodesV5 []*enode.Node `toml:",omitempty"`
 
 	// Static nodes are used as pre-configured connections which are always
 	// maintained and re-connected on disconnects.
@@ -151,7 +138,9 @@ type Config struct {
 	ListenAddr string
 
 	// If DiscAddr is set to a non-nil value, the server will use ListenAddr
-	// for TCP and DiscAddr for the UDP discovery protocol.
+	// for TCP and DiscAddr for the UDP discovery protocol. When it is empty,
+	// the UDP socket is opened on the TCP listener's address and port, the
+	// port at which other nodes fetch the node's record.
 	DiscAddr string
 
 	// If set to a non-nil value, the given NAT port mapper
@@ -200,6 +189,13 @@ type Server struct {
 	localnode *enode.LocalNode
 	discmix   *enode.FairMix
 	dialsched *dialScheduler
+
+	// Discovery, nil when NoDiscovery is set.
+	disc         *qsdisc.UDP
+	discPort     uint16 // UDP port of disc
+	records      *enode.QSRecordCache
+	recordServer *qsRecordServer
+	recordMu     sync.Mutex // serializes signing the local record
 
 	// This is read by the NAT port mapping loop.
 	portMappingRegister chan *portMapping
@@ -476,7 +472,9 @@ func (srv *Server) Start() (err error) {
 			return err
 		}
 	}
-	srv.setupDiscovery()
+	if err := srv.setupDiscovery(); err != nil {
+		return err
+	}
 	srv.setupDialScheduler()
 
 	srv.loopWG.Add(1)
@@ -510,12 +508,18 @@ func (srv *Server) setupLocalNode() error {
 	return nil
 }
 
-// setupDiscovery creates the source of dial candidates. It has no sources:
-// the server only knows its static and trusted nodes. It opens no UDP port,
-// whatever NoDiscovery, DiscoveryV4 and DiscoveryV5 say, and does not take
-// candidates from the protocols, which name nodes it cannot identify.
-func (srv *Server) setupDiscovery() {
+// setupDiscovery creates the source of dial candidates. Unless NoDiscovery
+// is set, it starts the quantum-safe discovery of p2p/qsdisc from the
+// bootstrap nodes and feeds the nodes it finds and verifies to the dial
+// scheduler; with NoDiscovery the server opens no UDP port and only knows
+// its static and trusted nodes. It does not take candidates from the
+// protocols, which name nodes it cannot identify.
+func (srv *Server) setupDiscovery() error {
 	srv.discmix = enode.NewFairMix(discmixTimeout)
+	if srv.NoDiscovery {
+		return nil
+	}
+	return srv.startQSDiscovery()
 }
 
 func (srv *Server) setupDialScheduler() {
@@ -597,6 +601,9 @@ func (srv *Server) run() {
 	srv.log.Info("Started P2P networking", "self", srv.localnode.Node().URLv4())
 	defer srv.loopWG.Done()
 	defer srv.nodedb.Close()
+	if srv.disc != nil {
+		defer srv.disc.Close()
+	}
 	defer srv.discmix.Close()
 	defer srv.dialsched.stop()
 
@@ -887,6 +894,23 @@ func (srv *Server) setupConn(c *conn, dialDest *enode.Node) error {
 		return fmt.Errorf("%w: %v", errEncHandshakeError, err)
 	}
 	clog := srv.log.New("id", c.node.ID(), "addr", c.fd.RemoteAddr(), "conn", c.flags)
+	if c.is(inboundConn) && srv.recordServer != nil {
+		if p, ok := c.transport.(msgPeeker); ok {
+			// The first message of an accepted connection is either the
+			// remote protocol handshake or a record request, answered
+			// once before the connection closes. It never becomes a peer.
+			msg, err := p.peekMsg()
+			if err != nil {
+				clog.Trace("Failed reading the first message", "err", err)
+				return fmt.Errorf("%w: %v", errProtoHandshakeError, err)
+			}
+			if msg.Code == qsRecordRequestMsg {
+				err := srv.recordServer.serve(c.transport, msg, netutil.AddrAddr(c.fd.RemoteAddr()))
+				clog.Trace("Node record request", "err", err)
+				return err
+			}
+		}
+	}
 	err := srv.checkpoint(c, srv.checkpointPostHandshake)
 	if err != nil {
 		clog.Trace("Rejected peer", "err", err)
@@ -1022,7 +1046,7 @@ func (srv *Server) NodeInfo() *NodeInfo {
 		ListenAddr: srv.ListenAddr,
 		Protocols:  make(map[string]interface{}),
 	}
-	info.Ports.Discovery = node.UDP()
+	info.Ports.Discovery = int(srv.discPort)
 	info.Ports.Listener = node.TCP()
 	info.ENR = node.String()
 

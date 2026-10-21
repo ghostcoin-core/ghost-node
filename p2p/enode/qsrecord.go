@@ -42,6 +42,20 @@ const (
 	// QSRecordVerifyRate is the number of record signatures a node verifies
 	// per second, over all sources together.
 	QSRecordVerifyRate = 100
+
+	// QSRecordFetchRate and QSRecordFetchBurst bound the record requests a
+	// node answers over qsconn for one source IP address: a token bucket of
+	// QSRecordFetchBurst requests refilled at QSRecordFetchRate a second.
+	QSRecordFetchRate  = 1
+	QSRecordFetchBurst = 5
+
+	// QSRecordFetchSources is the number of source IP addresses whose
+	// record requests a node tracks, the least recently seen dropped first.
+	QSRecordFetchSources = 1024
+
+	// QSRecordFetchPerConn is the number of record requests a node answers
+	// on one connection: the first message, and nothing after it.
+	QSRecordFetchPerConn = 1
 )
 
 var (

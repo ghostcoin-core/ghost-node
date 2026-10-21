@@ -56,6 +56,11 @@ const (
 	discMsg      = 0x01
 	pingMsg      = 0x02
 	pongMsg      = 0x03
+
+	// The node record fetch (qsrecordfetch.go): the request is the first
+	// and only message of a qsconn connection, and is never sent to a peer.
+	qsRecordRequestMsg = 0x04
+	qsRecordAnswerMsg  = 0x05
 )
 
 // protoHandshake is the RLP structure of the protocol handshake.
