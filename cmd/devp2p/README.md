@@ -103,38 +103,6 @@ Now get the ENR of your node and store it in the `NODE` environment variable.
 
 Start the test by running `devp2p discv5 test -listen1 127.0.0.1 -listen2 127.0.0.2 $NODE`.
 
-### Eth Protocol Test Suite
-
-The Eth Protocol test suite is a conformance test suite for the [eth protocol][eth].
-
-To run the eth protocol test suite against your implementation, the node needs to be initialized
-with our test chain. The chain files are located in `./cmd/devp2p/internal/ethtest/testdata`.
-
-1. initialize the geth node with the `genesis.json` file
-2. import blocks from `chain.rlp`
-3. run the client using the resulting database. For geth, use a command like the one below:
-
-    geth \
-        --datadir <datadir>            \
-        --nodiscover                   \
-        --nat=none                     \
-        --networkid 3503995874084926   \
-        --verbosity 5                  \
-        --authrpc.jwtsecret 0x7365637265747365637265747365637265747365637265747365637265747365
-
-Note that the tests also require access to the engine API.
-The test suite can now be executed using the devp2p tool.
-
-    devp2p rlpx eth-test \
-        --chain internal/ethtest/testdata   \
-        --node enode://....                 \
-        --engineapi http://127.0.0.1:8551   \
-        --jwtsecret 0x7365637265747365637265747365637265747365637265747365637265747365
-
-Repeat the above process (re-initialising the node) in order to run the Eth Protocol test suite again.
-
-
-[eth]: https://github.com/ethereum/devp2p/blob/master/caps/eth.md
 [dns-tutorial]: https://geth.ethereum.org/docs/developers/geth-developer/dns-discovery-setup
 [discv4]: https://github.com/ethereum/devp2p/tree/master/discv4.md
 [discv5]: https://github.com/ethereum/devp2p/tree/master/discv5/discv5.md

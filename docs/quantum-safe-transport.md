@@ -136,8 +136,10 @@ after a failed write, returns the same error. A failed handshake fails both.
 does not start (`TestServerRequiresIdentity`). Every connection the server
 dials or accepts runs on `qsconn.Conn`, through the transport in
 `p2p/transport_qsconn.go`, and nothing else. The old RLPx handshake and the
-secp256k1 node key (`Config.PrivateKey`) are gone from the server; the
-package `p2p/rlpx` itself remains for now, but the server does not use it.
+secp256k1 node key (`Config.PrivateKey`) are gone from the server, and the
+package `p2p/rlpx`, which held the RLPx handshake and frame code, is gone
+from the repository, together with the RLPx commands and the eth protocol test suite
+of `cmd/devp2p`.
 
 - The node ID of the server (`Server.Self`, `Server.LocalNode`) is the
   identity's node ID.

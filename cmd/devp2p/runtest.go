@@ -38,29 +38,6 @@ var (
 		Category: flags.TestingCategory,
 	}
 
-	// for eth/snap tests
-	testChainDirFlag = &cli.StringFlag{
-		Name:     "chain",
-		Usage:    "Test chain directory (required)",
-		Category: flags.TestingCategory,
-	}
-	testNodeFlag = &cli.StringFlag{
-		Name:     "node",
-		Usage:    "Peer-to-Peer endpoint (ENR) of the test node (required)",
-		Category: flags.TestingCategory,
-	}
-	testNodeJWTFlag = &cli.StringFlag{
-		Name:     "jwtsecret",
-		Usage:    "JWT secret for the engine API of the test node (required)",
-		Category: flags.TestingCategory,
-		Value:    "0x7365637265747365637265747365637265747365637265747365637265747365",
-	}
-	testNodeEngineFlag = &cli.StringFlag{
-		Name:     "engineapi",
-		Usage:    "Engine API endpoint of the test node (required)",
-		Category: flags.TestingCategory,
-	}
-
 	// These two are specific to the discovery tests.
 	testListen1Flag = &cli.StringFlag{
 		Name:     "listen1",
