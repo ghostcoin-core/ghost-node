@@ -53,9 +53,23 @@ type knownAnswer struct {
 	params, statement, proof []byte
 }
 
+// knownAnswerFiles are the known-answer fixtures by commitment format: a
+// version 1 coin and a salted (version 2) coin. The statement layout is the
+// same for both; the verifier tells them apart by the proof alone.
+var knownAnswerFiles = []struct{ name, file string }{
+	{"version 1", "coin_reveal.bin.gz"},
+	{"salted version 2", "salted_coin_reveal.bin.gz"},
+}
+
+// loadKnownAnswer loads the version 1 fixture.
 func loadKnownAnswer(t *testing.T) knownAnswer {
 	t.Helper()
-	f, err := os.Open(filepath.Join("testdata", "coin_reveal.bin.gz"))
+	return loadKnownAnswerFile(t, "coin_reveal.bin.gz")
+}
+
+func loadKnownAnswerFile(t *testing.T, name string) knownAnswer {
+	t.Helper()
+	f, err := os.Open(filepath.Join("testdata", name))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,11 +191,16 @@ func TestGhostDataVerifier(t *testing.T) {
 }
 
 // TestGhostVerifierKnownAnswer checks the linked proof verifier against a
-// real proof: it accepts the proof for its own statement, followed by zeros
-// or not, and rejects a changed proof, every changed statement field and
-// chain parameter, and every data reveal.
+// real proof of each commitment format: it accepts the proof for its own
+// statement, followed by zeros or not, and rejects a changed proof, every
+// changed statement field and chain parameter, and every data reveal.
 func TestGhostVerifierKnownAnswer(t *testing.T) {
-	ka := loadKnownAnswer(t)
+	for _, f := range knownAnswerFiles {
+		t.Run(f.name, func(t *testing.T) { testGhostVerifierKnownAnswer(t, loadKnownAnswerFile(t, f.file)) })
+	}
+}
+
+func testGhostVerifierKnownAnswer(t *testing.T, ka knownAnswer) {
 	base := ka.inputs(t)
 	// The example's chain: id 1234 and a genesis hash of 0x47 bytes.
 	if base.ChainID != 1234 || base.Domain != common.BytesToHash(bytes.Repeat([]byte{0x47}, 32)) {
