@@ -401,8 +401,139 @@ cached (`TestQSRecordCacheBounds`). The limits are node settings in
 
 Measured on the linux/arm64 machine of 16 CPUs used for the signature bounds
 above; they should be measured again on the slowest machine Ghost means to
-support before launch. The discovery that sends and asks for records is
-separate work.
+support before launch.
+
+## Peer discovery
+
+`p2p/qsdisc` finds peers by node ID over UDP (spec 09, section 10.3). It is
+built on `qsconn.NodeID` and `enode.QSRecord` alone, with no secp256k1 key
+and nothing of the old discovery. Four packets, one type byte and an RLP
+body: ping and pong, findnode and neighbors. A ping and a findnode each
+carry a random 16-byte token that the pong or neighbors answer echoes. They
+carry node IDs and UDP endpoints only, never a record or a
+signature, so nothing in them is trusted on its own:
+
+- A packet over 1,280 bytes is dropped before it is decoded, and a neighbors
+  packet of more than 16 entries is refused.
+- An endpoint is proven when it answers a ping we sent with a pong carrying
+  our token, from the same address; a pong is accepted only for a pending
+  ping to that address with that token. A node answers a findnode only from
+  a proven endpoint, and sends an unproven one nothing larger than its
+  request: a ping gets a pong of the same size, and a ping back to prove it.
+- Every pong carries a 16-byte cookie for the endpoint and node ID of the
+  ping it answers: a keyed hash of the endpoint, the ID and a 6-hour period
+  under a secret of the node. It is accepted in its period and the next, so
+  it expires at most 12 hours after it was given, with the proof, and the
+  requester fetches a new one after 3 hours. The endpoint puts it in its
+  later pings and findnodes to the node. A pong gives a cookie only when it
+  answers our ping with our token, and it is kept with the endpoint and
+  with the table node.
+- A findnode is answered only when it carries the cookie the node gave that
+  endpoint and ID and the cookie has not expired; any other findnode is
+  dropped before it is charged or answered. A proven endpoint alone is not
+  enough: a findnode forged from a proven peer's address cannot carry the
+  peer's cookie, so it cannot make the node send the peer neighbors packets
+  it did not ask for. A neighbors answer is also never larger than twice
+  the findnode it answers (`MaxAmplification`); it holds fewer nodes when a
+  full one would be larger. A findnode is padded to 640 bytes
+  (`FindnodeSize`) so that a full answer of 16 IPv6 endpoints, 921 bytes,
+  fits.
+- Every ping and findnode of a source IP is charged to its one token bucket,
+  whatever its port and cookie, so one source IP gets at most 10 requests a
+  second with a burst of 20 however it mixes them. The last 10 packets of
+  the bucket (`CookieReserve`) are taken only by a request with the right
+  cookie, which packets forged from the address do not carry, so they
+  cannot use up the allowance of the peer's live checks of the node and so
+  cannot make the peer evict it.
+- A neighbors answer completes a lookup's findnode only when it echoes that
+  findnode's token and comes from the endpoint asked; a forged answer,
+  empty or not, is ignored and the findnode stays pending for the real one.
+- A node trusts an endpoint for an ID only after it has proven the endpoint
+  (its pong names that ID) and the `RecordVerifier` has fetched the ID's
+  record from it and verified it. The record is accepted only when it is of
+  the ID asked for and its IP and UDP port are the endpoint that answered;
+  anything else is refused, never guessed at. A ping from an unknown ID and
+  every entry of a neighbors answer go through this before they enter the
+  table, a lookup result or an answer. The real verifier fetches the record
+  over qsconn and passes it through `enode.QSRecordCache`, so the signature
+  budget is still the 100 verifications a second of `QSRecordVerifyRate`.
+- A verification in progress, the one-minute wait between two
+  verifications and a failed verification are all kept per node ID and
+  endpoint, not per ID alone. Anyone can claim any ID at their own
+  endpoint, so a peer that claims an honest ID there and fails cannot hold
+  up, or get refused, the honest node at its own endpoint. This does not
+  widen the budget: each start still takes one of the at most 8 running
+  verifications and one of the at most 1,024 starts a minute, over all IDs
+  and endpoints, and the record cache still verifies at most 100
+  signatures a second.
+- A verification a peer triggers while all 8 slots are busy is queued, at
+  most 64 queued with the oldest dropped first, and started once a slot is
+  free under the same budgets.
+
+The table holds verified nodes in 17 buckets by log distance, checks the
+node checked longest ago every second when it was last checked over 10
+seconds ago, and replaces a node that does not answer with the newest of the
+bucket's replacement candidates. A node is removed when the pong to its live
+check named another ID, or when 3 live checks in a row were sent and no pong
+came: one lost pong does not evict a live node. A check that could
+not be sent, for example because no ping slot was free, removes nothing and
+is tried again. Of the 512 pending pings at most 448 can be pings that a
+peer triggered (a ping back to an unproven endpoint, or the ping of a
+verification it caused) and at most 32 can be challenge pings, so the
+rest are always free for the node's own live checks and lookups. A table
+node's endpoint proof can be pushed out of the 1,024 endpoints a node
+keeps by pings from new sources; when that node pings again, the node
+sends it one challenge ping, and answers its findnodes only once the
+pong with that ping's token has proven the endpoint again. Challenge
+pings have their own 32 slots, so a flood filling the 448 cannot stop
+them, and at most one is pending for an endpoint. A lookup asks the closest verified nodes a
+few at a time, verifies every node they name and returns verified nodes
+only (`TestQSDiscovery`).
+
+Everything a remote peer can make a node hold or do is bounded, by node
+settings in `p2p/qsdisc/limits.go` (`TestQSDiscoveryLimitsAreSet`):
+
+| Constant | Value | What it bounds |
+|---|---|---|
+| `MaxPacketSize` | 1,280 bytes | a packet; the largest a node sends, a neighbors packet of 16 IPv6 endpoints, is 921 bytes |
+| `MaxNeighbors` | 16 | entries in a neighbors packet, the bucket size |
+| `MaxAmplification`, `FindnodeSize` | 2 times, 640 bytes | a neighbors answer is at most twice the bytes of its findnode; a findnode is padded to 640 bytes so that a full answer fits |
+| `NumBuckets`, `BucketSize` | 17 buckets of 16 nodes | the table, as in the old table |
+| `MaxReplacements` | 10 per bucket | replacement candidates |
+| `BucketIPLimit`, `TableIPLimit` | 2 per /24 in a bucket, 10 in the table | addresses of one subnet, LAN addresses not counted, as in the old table |
+| `ProvenTime` | 12 hours | how long an endpoint stays proven |
+| `PingTimeout` | 5 seconds | how long a ping waits for its pong |
+| `MaxPendingPings` | 512 | pings waiting for a pong |
+| `MaxRemotePings` | 448 | of those, pings a peer can trigger |
+| `MaxChallengePings` | 32 | of those, challenge pings that prove again the endpoint of a table node whose proof was pushed out; the other 32 stay for the node's own live checks and lookups |
+| `MaxVerifications` | 8 | record verifications running at once; one a peer triggers beyond it is queued for a retry |
+| `VerifyInterval` | 1 minute | the least time between two verifications started for one ID at one endpoint |
+| `MaxVerifyStarts` | 1,024 | starts remembered, and so the most that start in a minute over all IDs and endpoints |
+| `MaxVerifyRetries` | 64 | verifications a peer triggered queued for a free slot, the oldest dropped first |
+| `MaxFailed` | 1,024 | the memory of failed verifications, the oldest dropped first |
+| `SourceRate`, `SourceBurst` | 10 packets a second, burst 20 | pings and findnodes from one source IP, a token bucket; a packet over it is dropped without an answer. Every request of the source IP, with or without the cookie and from any port, is charged to that one bucket. A findnode without that cookie is dropped and charges nothing. A packet that does not decode is dropped and charges nothing, and a pong or neighbors packet is handled only when it answers a request we sent to that endpoint with its token, and charges nothing, so packets forged from a peer's address can neither stop its answers to our live checks and lookups nor its own live checks and lookups of us |
+| `CookieReserve` | 10 packets | the last packets of a source's bucket, taken only by requests carrying the cookie the node gave their endpoint and ID, so that packets forged from the address leave the peer's own live checks of the node an allowance |
+| `MaxRevalidateFails` | 3 | live checks in a row a table node may leave unanswered before it is removed |
+| `MaxSources` | 1,024 | source IPs with a token bucket and endpoints with a proof, each the least recently seen dropped first; a dropped bucket starts full again, so pushing one out never takes from its peer |
+| `LookupAlpha`, `LookupTimeout`, `LookupResults` | 3 at a time, 5 seconds each, 16 nodes | a lookup |
+
+Measured on the linux/arm64 machine of 16 CPUs used for the bounds above:
+
+- `BenchmarkTableMemory`: 3,084,248 bytes of heap (3.08 MB) for a node with
+  every bucket and replacement list full (442 nodes), each holding a record
+  of full size that nothing else references, 1,024 token buckets, 1,024
+  proven endpoints, 1,024 failures, 1,024 remembered starts, 64 queued
+  retries and 512 pending pings. A table node's record is the one the record cache holds, so in a
+  running node most of it is shared with the 18.0 MB of the cache.
+- `BenchmarkPacketDecode`: the largest packet, 921 bytes, decodes in
+  2.1 µs with 4,076 bytes in 30 allocations. A packet is decoded before it
+  is charged to its source, so decoding costs 2.1 µs a packet received, some
+  21 ms of one CPU a second for 10,000 packets a second, about the cost of
+  receiving them.
+
+They should be measured again on the slowest machine Ghost means to support
+before launch. Fetching a record over qsconn and starting discovery in the
+p2p server are separate work.
 
 ## Not yet in this node
 
