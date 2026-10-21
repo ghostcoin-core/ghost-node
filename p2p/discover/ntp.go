@@ -31,6 +31,8 @@ import (
 const (
 	ntpPool   = "pool.ntp.org" // ntpPool is the NTP server to query for the current time
 	ntpChecks = 3              // Number of measurements to do against the NTP server
+
+	driftThreshold = 10 * time.Second // Allowed clock drift before warning user
 )
 
 // checkClockDrift queries an NTP server for clock drifts and warns the user if

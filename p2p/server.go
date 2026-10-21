@@ -32,7 +32,6 @@ import (
 	"github.com/ethereum/go-ethereum/common/mclock"
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/log"
-	"github.com/ethereum/go-ethereum/p2p/discover"
 	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/ethereum/go-ethereum/p2p/enr"
 	"github.com/ethereum/go-ethereum/p2p/nat"
@@ -408,18 +407,6 @@ func (srv *Server) Self() *enode.Node {
 		return enode.NewQuantumSafe(enode.ID(srv.Identity.ID()), net.ParseIP("0.0.0.0"), 0)
 	}
 	return ln.Node()
-}
-
-// DiscoveryV4 returns the UDPv4 instance. The server opens no UDP port, so
-// it is nil.
-func (srv *Server) DiscoveryV4() *discover.UDPv4 {
-	return nil
-}
-
-// DiscoveryV5 returns the UDPv5 instance. The server opens no UDP port, so
-// it is nil.
-func (srv *Server) DiscoveryV5() *discover.UDPv5 {
-	return nil
 }
 
 // Stop terminates the server and all active peer connections.
