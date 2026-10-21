@@ -23,6 +23,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
+	"github.com/ethereum/go-ethereum/core/vm"
 )
 
 func TestBlockchain(t *testing.T) {
@@ -54,6 +55,9 @@ func TestBlockchain(t *testing.T) {
 	// using 4.6 TGas
 	bt.skipLoad(`.*randomStatetest94.json.*`)
 
+	// Ghost removes the elliptic-curve precompiles.
+	skipRemovedPrecompiles(bt)
+
 	bt.walk(t, blockTestDir, func(t *testing.T, name string, test *BlockTest) {
 		if runtime.GOARCH == "386" && runtime.GOOS == "windows" && rand.Int63()%2 == 0 {
 			t.Skip("test (randomly) skipped on 32-bit windows")
@@ -71,6 +75,7 @@ func TestExecutionSpecBlocktests(t *testing.T) {
 		t.Skipf("directory %s does not exist", executionSpecBlockchainTestDir)
 	}
 	bt := new(testMatcher)
+	skipRemovedPrecompiles(bt)
 
 	bt.walk(t, executionSpecBlockchainTestDir, func(t *testing.T, name string, test *BlockTest) {
 		execBlockTest(t, bt, test)
@@ -79,6 +84,10 @@ func TestExecutionSpecBlocktests(t *testing.T) {
 
 func execBlockTest(t *testing.T, bt *testMatcher, test *BlockTest) {
 	if err := bt.checkFailure(t, test.Run(false, rawdb.HashScheme, nil, nil)); err != nil {
+		// Ghost removes the elliptic-curve precompiles.
+		skipIfReachesRemovedPrecompile(t, func(tracer vm.EVMLogger) {
+			test.Run(false, rawdb.HashScheme, tracer, nil)
+		})
 		t.Errorf("test in hash mode without snapshotter failed: %v", err)
 		return
 	}

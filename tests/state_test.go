@@ -94,6 +94,9 @@ func initMatcher(st *testMatcher) {
 	// Broken tests:
 	// EOF is not part of cancun
 	st.skipLoad(`^stEOF/`)
+
+	// Ghost removes the elliptic-curve precompiles.
+	skipRemovedPrecompiles(st)
 }
 
 func TestState(t *testing.T) {
@@ -128,6 +131,7 @@ func TestExecutionSpecState(t *testing.T) {
 		t.Skipf("directory %s does not exist", executionSpecStateTestDir)
 	}
 	st := new(testMatcher)
+	skipRemovedPrecompiles(st)
 
 	st.walk(t, executionSpecStateTestDir, func(t *testing.T, name string, test *StateTest) {
 		execStateTest(t, st, test)
@@ -203,6 +207,12 @@ func withTrace(t *testing.T, gasLimit uint64, test func(vm.Config) error) {
 	if err == nil {
 		return
 	}
+	// Ghost removes the elliptic-curve precompiles.
+	skipIfReachesRemovedPrecompile(t, func(tracer vm.EVMLogger) {
+		traced := config
+		traced.Tracer = tracer
+		test(traced)
+	})
 
 	// Test failed, re-run with tracing enabled.
 	t.Error(err)

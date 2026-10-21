@@ -471,7 +471,8 @@ func checkPrecompiles(t *testing.T) {
 	listed := make(map[common.Address]bool)
 	for _, row := range profileTable(t, section, "| Address | Name | Status |") {
 		status := row[2]
-		if !checkStatus(t, section, row, status) {
+		// failing is a status of the precompiles Ghost removes only.
+		if status != "failing" && !checkStatus(t, section, row, status) {
 			continue
 		}
 		if !regexp.MustCompile(`^0x[0-9a-f]{2,40}$`).MatchString(row[0]) {
@@ -496,6 +497,28 @@ func checkPrecompiles(t *testing.T) {
 			if active[addr] || inCode[addr] {
 				t.Errorf("%s: %s (%s) is absent, but the node's EVM has it", section, row[0], row[1])
 			}
+		case "failing":
+			// The address stays a precompile in every configuration, so it
+			// is warm, and every call to it fails and uses all its gas.
+			for name, config := range map[string]ctypes.ChainConfigurator{"profile": profileConfig(), "frontier": frontierConfig(), "everything": everythingConfig(t)} {
+				statedb := newState(t)
+				evm := newEVM(config, statedb)
+				caller := common.HexToAddress("0xca11e5")
+				statedb.SetBalance(caller, uint256.NewInt(1000))
+				statedb.Prepare(true, true, caller, testCoinbase, nil, evm.ActivePrecompiles(), nil)
+				if !statedb.AddressInAccessList(addr) {
+					t.Errorf("%s: %s (%s) is failing, but it is not a warm precompile in the %s configuration", section, row[0], row[1], name)
+				}
+				for _, value := range []uint64{0, 1} {
+					_, left, err := evm.Call(vm.AccountRef(caller), addr, make([]byte, 192), 100_000, uint256.NewInt(value))
+					if !errors.Is(err, vm.ErrPrecompileRemoved) || left != 0 {
+						t.Errorf("%s: %s (%s) is failing, but a call with value %d in the %s configuration leaves %d gas with error %v", section, row[0], row[1], value, name, left, err)
+					}
+				}
+				if b := statedb.GetBalance(addr); !b.IsZero() {
+					t.Errorf("%s: %s (%s) is failing, but it received %v wei in the %s configuration", section, row[0], row[1], b, name)
+				}
+			}
 		}
 	}
 	for a := range inCode {
@@ -508,8 +531,11 @@ func checkPrecompiles(t *testing.T) {
 			t.Errorf("%s: the profile runs a precompile at %s that the table does not list", section, a)
 		}
 	}
-	if len(active) != 9 {
-		t.Errorf("%s: the profile runs %d precompiles, want 0x01 to 0x09", section, len(active))
+	if len(active) != 11 {
+		t.Errorf("%s: the profile has %d precompiles, want 0x01 to 0x0a and 0x51", section, len(active))
+	}
+	if !active[vm.SignatureVerifyAddress] || vm.SignatureVerifyAddress != common.HexToAddress("0x51") {
+		t.Errorf("%s: the signature-verify precompile is not at 0x51", section)
 	}
 }
 

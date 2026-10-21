@@ -169,6 +169,36 @@ On the same runs ML-DSA-44 verified with a median of 0.046 to 0.048 ms and a
 slowest of 0.24 to 0.32 ms, as recorded above: `VERIFY_GAS[0x0001]` stays
 3,000.
 
+### Measuring SIGVERIFY_WORD_GAS
+
+The signature-verify precompile at `0x51`
+([EVM profile](ghost-evm-profile.md#the-signature-verify-precompile)) charges
+`VERIFY_GAS[scheme]` plus `SIGVERIFY_WORD_GAS` for each 32-byte word of the
+message. `SIGVERIFY_WORD_GAS = ceil(t_ms * 10,000)`, and at least 1, where
+`t_ms` is the slowest of at least 1,000 measured costs of one extra word of
+message, of valid and invalid signatures, the same way as `VERIFY_GAS`.
+`BenchmarkSignatureVerifyWordGasSlowest` in `core/vm` is that measurement:
+for 1,000 valid signatures and 1,000 signatures with one bit changed, each
+over a different key, it times the verification of a one-word message and of
+a message 1,024 words longer; the cost of one extra word is the difference
+divided by 1,024.
+
+| | |
+|---|---|
+| Scheme | `0x0001`, ML-DSA-44 |
+| Machine | linux/arm64 virtual machine, 16 CPUs (the same machine as above) |
+| Go | go1.26.9 |
+| circl | v1.6.1 |
+| Measured costs | 2,000 (1,000 valid, 1,000 invalid) |
+| Median | 0.000047 ms per word |
+| Slowest, `t_ms` | 0.000398 ms per word |
+| `ceil(t_ms * 10,000)` | 4 |
+| `SIGVERIFY_WORD_GAS` | **4** |
+
+The value is in `params/ghost/accounttx.go` as `SigVerifyWordGas`, and a test
+there keeps it above zero. Like `VERIFY_GAS`, it should be measured again on
+the slowest machine Ghost means to support before launch.
+
 ## The transaction pool
 
 The legacy pool admits type `0x52` when its chain gives its genesis block
@@ -376,6 +406,6 @@ separate work.
 
 ## Not yet in this node
 
-Refusing the secp256k1 transaction types, the signature-verify contract,
-the node's own signing and its remote procedure calls, and signing with
-SLH-DSA keys outside tests are separate pieces of work.
+Refusing the secp256k1 transaction types, the node's own signing and its
+remote procedure calls, and signing with SLH-DSA keys outside tests are
+separate pieces of work.
