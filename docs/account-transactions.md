@@ -281,6 +281,52 @@ holds 2 MiB, so its largest reply is the largest item after just under
 2 MiB: the second bodies response above. Any larger block gas limit narrows
 the 905,729-byte margin by a quarter byte per gas.
 
+## Node records
+
+A quantum-safe node record (spec 09, section 10.3) is
+`rlp([seq, scheme, public_key, ip, tcp_port, udp_port, fork_id, signature])`,
+signed by the node's ML-DSA-44 key over
+`K("ghost/node-record/v1", rlp of the fields before the signature)`; its node
+ID is the `p2p/qsconn` node ID of its scheme and public key. The type, its
+decoding and its verification are `enode.QSRecord` (`p2p/enode/qsrecord.go`);
+the signing is `qsconn.Identity.SignRecord` (`p2p/qsconn/record.go`). It is
+a type of its own next to the secp256k1 ENR of `p2p/enr`, and neither turns
+into the other.
+
+A record over 4,096 bytes (`QSRecordMaxSize`) is dropped before it is
+decoded; one with an unknown scheme, a public key or signature of the wrong
+length, or an IP of neither 4 nor 16 bytes is dropped before its signature
+is verified; one whose signature fails is dropped (`TestQSRecordDropped`).
+
+`enode.QSRecordCache` holds verified records, one per node ID, the one of
+the highest `seq`, and is the only place records are handed out from, so a
+node never relays one that has not verified. A record is verified once
+(`TestQSRecordCacheVerifiesOnce`):
+
+- a record whose node ID and `seq` are cached is answered from the cache,
+  whatever its signature bytes; an older `seq` is dropped unverified;
+- copies of the same record that arrive while it is verified wait for that
+  verification;
+- a record whose signature failed is remembered by the hash of its encoding,
+  in a bounded memory as large as the cache, and refused without verifying
+  it again.
+
+The cache drops its least recently used record when full, and verifies a
+bounded number of records per second over all sources, a token bucket
+refilled every second; a record beyond it is dropped unverified and not
+cached (`TestQSRecordCacheBounds`). The limits are node settings in
+`p2p/enode/qsrecord.go` (`TestQSRecordCacheLimitsAreSet`):
+
+| Constant | Value | Derivation |
+|---|---|---|
+| `QSRecordCacheSize` | 4,096 records | 18.0 MB of heap measured for a full cache (`BenchmarkQSRecordCacheMemory`: 17,976,888 bytes, some 4,390 bytes for each record of 3,764 encoded bytes) |
+| `QSRecordVerifyRate` | 100 per second | one verification measured at 0.053 ms (`BenchmarkQSRecordVerify`); over 2,000 verifications the median was 0.049 ms and the slowest 0.565 ms, so the budget costs at most 57 ms of one CPU a second, under 6%, and 5 ms at the median |
+
+Measured on the linux/arm64 machine of 16 CPUs used for the signature bounds
+above; they should be measured again on the slowest machine Ghost means to
+support before launch. The discovery that sends and asks for records is
+separate work.
+
 ## Not yet in this node
 
 Refusing the secp256k1 transaction types, the signature-verify contract,
