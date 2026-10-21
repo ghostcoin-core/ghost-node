@@ -36,6 +36,7 @@ import (
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/metrics"
+	"github.com/ethereum/go-ethereum/params/ghost"
 	"github.com/ethereum/go-ethereum/params/types/ctypes"
 	"github.com/holiman/uint256"
 )
@@ -213,6 +214,10 @@ type LegacyPool struct {
 	// they are refused.
 	ghostAccounts bool
 
+	// sigVerifier verifies the signatures of account transactions, outside
+	// the pool lock, within its bounds.
+	sigVerifier *txpool.SigVerifier
+
 	currentHead   atomic.Pointer[types.Header] // Current head of the blockchain
 	currentState  *state.StateDB               // Current state in the blockchain head
 	pendingNonces *noncer                      // Pending state tracking virtual nonces
@@ -264,6 +269,7 @@ func New(config Config, chain BlockChain) *LegacyPool {
 		reorgDoneCh:     make(chan chan struct{}),
 		reorgShutdownCh: make(chan struct{}),
 		initDoneCh:      make(chan struct{}),
+		sigVerifier:     txpool.NewSigVerifier(ghost.SigVerifyWorkers, ghost.SigVerifyQueue, ghost.SigFailureCacheSize, nil),
 	}
 	// Account transactions are bound to the genesis hash: take them only from
 	// a chain that gives its genesis block.
@@ -419,6 +425,7 @@ func (pool *LegacyPool) Close() error {
 	// Terminate the pool reorger and return
 	close(pool.reorgShutdownCh)
 	pool.wg.Wait()
+	pool.sigVerifier.Close()
 
 	if pool.journal != nil {
 		pool.journal.close()
@@ -642,8 +649,18 @@ func (pool *LegacyPool) validateTxBasics(tx *types.Transaction, local bool) erro
 // validateTx checks whether a transaction is valid according to the consensus
 // rules and adheres to some heuristic limits of the local node (price and size).
 func (pool *LegacyPool) validateTx(tx *types.Transaction, local bool) error {
+	return pool.validateTxState(tx, true)
+}
+
+// validateTxState runs the state checks of validateTx. Without
+// verifySignature it leaves out the signature check of an account
+// transaction, the only expensive one.
+//
+// Note, this method assumes the pool lock is held!
+func (pool *LegacyPool) validateTxState(tx *types.Transaction, verifySignature bool) error {
 	opts := &txpool.ValidationOptionsWithState{
-		State: pool.currentState,
+		State:                pool.currentState,
+		SkipAccountSignature: !verifySignature,
 
 		FirstNonceGap: nil, // Pool allows arbitrary arrival order, don't invalidate nonce gaps
 		UsedAndLeftSlots: func(addr common.Address) (int, int) {
@@ -1002,13 +1019,20 @@ func (pool *LegacyPool) addRemoteSync(tx *types.Transaction) error {
 // If sync is set, the method will block until all internal maintenance related
 // to the add is finished. Only use this during tests for determinism!
 func (pool *LegacyPool) Add(txs []*types.Transaction, local, sync bool) []error {
+	// Transactions submitted locally take the RPC share of the signature
+	// queue, the others the share of the peers.
+	origin := txpool.SigFromPeer
+	if local {
+		origin = txpool.SigFromRPC
+	}
 	// Do not treat as local if local transactions have been disabled
 	local = local && !pool.config.NoLocals
 
 	// Filter out known ones without obtaining the pool lock or recovering signatures
 	var (
-		errs = make([]error, len(txs))
-		news = make([]*types.Transaction, 0, len(txs))
+		errs  = make([]error, len(txs))
+		news  = make([]*types.Transaction, 0, len(txs))
+		accts = false
 	)
 	for i, tx := range txs {
 		// If the transaction is known, pre-set the error slot
@@ -1026,8 +1050,20 @@ func (pool *LegacyPool) Add(txs []*types.Transaction, local, sync bool) []error 
 			invalidTxMeter.Mark(1)
 			continue
 		}
-		// Accumulate all unknown transactions for deeper processing
-		news = append(news, tx)
+		if tx.Type() == types.GhostAccountTxType {
+			accts = true
+		}
+	}
+	// Verify the signatures of the account transactions that pass the cheap
+	// checks, within the verifier's bounds and outside the pool lock.
+	if accts {
+		pool.verifyAccountTxs(origin, txs, errs)
+	}
+	// Accumulate all unknown transactions for deeper processing
+	for i, tx := range txs {
+		if errs[i] == nil {
+			news = append(news, tx)
+		}
 	}
 	if len(news) == 0 {
 		return errs
@@ -1052,6 +1088,43 @@ func (pool *LegacyPool) Add(txs []*types.Transaction, local, sync bool) []error 
 		<-done
 	}
 	return errs
+}
+
+// verifyAccountTxs verifies the signatures of the account transactions of txs
+// whose error slot is still empty, and sets the slot of each that fails. The
+// state checks run first, under the pool lock: a transaction that fails one
+// is refused before it takes a slot of the signature queue. The signatures
+// are then verified on the pool's SigVerifier, in the share of origin, and
+// the senders cached in the transactions, so that adding them later does not
+// verify them again.
+func (pool *LegacyPool) verifyAccountTxs(origin txpool.SigOrigin, txs []*types.Transaction, errs []error) {
+	var (
+		index []int
+		batch []*types.Transaction
+	)
+	pool.mu.Lock()
+	for i, tx := range txs {
+		if errs[i] != nil || tx.Type() != types.GhostAccountTxType {
+			continue
+		}
+		if err := pool.validateTxState(tx, false); err != nil {
+			errs[i] = err
+			log.Trace("Discarding invalid transaction", "hash", tx.Hash(), "err", err)
+			invalidTxMeter.Mark(1)
+			continue
+		}
+		index = append(index, i)
+		batch = append(batch, tx)
+	}
+	pool.mu.Unlock()
+
+	for j, err := range pool.sigVerifier.Verify(origin, pool.signer, batch) {
+		if err != nil {
+			errs[index[j]] = err
+			log.Trace("Discarding transaction", "hash", batch[j].Hash(), "err", err)
+			invalidTxMeter.Mark(1)
+		}
+	}
 }
 
 // addTxsLocked attempts to queue a batch of transactions if they are valid.

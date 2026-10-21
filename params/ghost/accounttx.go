@@ -34,6 +34,37 @@ const (
 	AccountTxVerifyGasMLDSA44 uint64 = 3_000
 )
 
+// The bounds on the signature checks of account transactions in the pool and
+// on the wire (spec 09, sections 8.3 and 8.4). They are node settings, not
+// consensus constants. Each is set from the measurement recorded in
+// docs/account-transactions.md, and none is zero.
+const (
+	// SigVerifyWorkers is the number of workers that verify the signatures of
+	// pool transactions. No more signatures are verified at once.
+	SigVerifyWorkers = 4
+
+	// SigVerifyQueue is the number of signature checks the workers take at
+	// once, waiting or running. Three slots in four are for transactions from
+	// peers, one in four for transactions from local RPC.
+	SigVerifyQueue = 256
+
+	// SigFailureCacheSize is the number of recent signature failures kept, so
+	// that the same failing transaction is not verified twice.
+	SigFailureCacheSize = 4096
+
+	// SigPeerBudget is the number of account transactions a peer may have
+	// verified per second, and announce for fetching.
+	SigPeerBudget = 200
+
+	// SigRPCConnBudget is the number of account transactions one RPC
+	// connection may submit per second.
+	SigRPCConnBudget = 300
+
+	// SigRPCBudget is the number of account transactions all RPC connections
+	// together may submit per second.
+	SigRPCBudget = 3000
+)
+
 // AccountTxVerifyGas returns VERIFY_GAS of a scheme, zero for a scheme whose
 // verification gas is not set. A transaction of a scheme with zero
 // verification gas is refused.

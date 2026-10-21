@@ -37,6 +37,7 @@ import (
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/p2p"
 	"github.com/ethereum/go-ethereum/p2p/enode"
+	"github.com/ethereum/go-ethereum/params/ghost"
 	"github.com/ethereum/go-ethereum/params/types/genesisT"
 	"github.com/ethereum/go-ethereum/params/types/goethereum"
 	"github.com/ethereum/go-ethereum/params/vars"
@@ -427,8 +428,10 @@ func testTransactionPropagation(t *testing.T, protocol uint) {
 		sub := sinks[i].txpool.SubscribeTransactions(txChs[i], false)
 		defer sub.Unsubscribe()
 	}
-	// Fill the source pool with transactions and wait for them at the sinks
-	txs := make([]*types.Transaction, 1024)
+	// Fill the source pool with transactions and wait for them at the sinks.
+	// Each sink takes no more account transactions from its one peer than
+	// the peer's signature budget per second.
+	txs := make([]*types.Transaction, ghost.SigPeerBudget/2)
 	for nonce := range txs {
 		txs[nonce] = signTestTx(source.chain, testKey, &types.GhostAccountTx{Nonce: uint64(nonce), Gas: 100000, To: &common.Address{}})
 	}

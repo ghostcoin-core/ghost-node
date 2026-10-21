@@ -37,6 +37,7 @@ import (
 	"github.com/ethereum/go-ethereum/consensus/misc/eip1559"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/state"
+	"github.com/ethereum/go-ethereum/core/txpool"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -44,6 +45,7 @@ import (
 	"github.com/ethereum/go-ethereum/eth/tracers/logger"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/p2p"
+	"github.com/ethereum/go-ethereum/params/ghost"
 	"github.com/ethereum/go-ethereum/params/types/ctypes"
 	"github.com/ethereum/go-ethereum/params/vars"
 	"github.com/ethereum/go-ethereum/rlp"
@@ -1903,6 +1905,34 @@ func (s *TransactionAPI) sign(addr common.Address, tx *types.Transaction) (*type
 	return wallet.SignTx(account, tx, s.b.ChainConfig().GetChainID())
 }
 
+// rpcSigConns bounds the number of RPC connections whose signature budgets
+// are kept. A connection not seen recently starts with a full budget; the
+// overall budget still holds.
+const rpcSigConns = 1024
+
+// sigBudgets are the RPC budgets of account transaction signature checks per
+// second: one for each connection, told apart by its remote address, and one
+// for all connections together.
+type sigBudgets struct {
+	conns *txpool.SigBudgets
+	all   *txpool.SigBudget
+}
+
+func newSigBudgets(perConn, overall uint64, now func() time.Time) *sigBudgets {
+	return &sigBudgets{
+		conns: txpool.NewSigBudgets(perConn, rpcSigConns, now),
+		all:   txpool.NewSigBudget(overall, now),
+	}
+}
+
+// take spends a check of a connection's budget and of the overall budget,
+// and reports false when either is used up.
+func (s *sigBudgets) take(conn string) bool {
+	return s.conns.Get(conn).Take() && s.all.Take()
+}
+
+var rpcSigBudgets = newSigBudgets(ghost.SigRPCConnBudget, ghost.SigRPCBudget, nil)
+
 // SubmitTransaction is a helper function that submits tx to txPool and logs a message.
 func SubmitTransaction(ctx context.Context, b Backend, tx *types.Transaction) (common.Hash, error) {
 	// If the transaction fee cap is already specified, ensure the
@@ -1914,7 +1944,16 @@ func SubmitTransaction(ctx context.Context, b Backend, tx *types.Transaction) (c
 		// Ensure only eip155 signed transactions are submitted if EIP155Required is set.
 		return common.Hash{}, errors.New("only replay-protected (EIP-155) transactions allowed over RPC")
 	}
+	// An account transaction takes a signature check of the connection's
+	// budget and of the overall RPC budget.
+	if tx.Type() == types.GhostAccountTxType && !rpcSigBudgets.take(rpc.PeerInfoFromContext(ctx).RemoteAddr) {
+		return common.Hash{}, txpool.ErrSignatureBudget
+	}
 	if err := b.SendTx(ctx, tx); err != nil {
+		// Keep the JSON-RPC code of a full signature queue.
+		if errors.Is(err, txpool.ErrSignatureQueueBusy) {
+			return common.Hash{}, txpool.ErrSignatureQueueBusy
+		}
 		return common.Hash{}, err
 	}
 	// A reveal has no sender, nonce or recipient account to log.
