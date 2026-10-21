@@ -1961,12 +1961,29 @@ func SubmitTransaction(ctx context.Context, b Backend, tx *types.Transaction) (c
 		log.Info("Submitted reveal", "hash", tx.Hash().Hex(), "type", tx.Type())
 		return tx.Hash(), nil
 	}
-	// Print a log with full tx details for manual investigations and interventions
+	// Print a log with full tx details for manual investigations and interventions.
+	// The pool has taken the transaction, so from here on nothing is an error.
 	head := b.CurrentBlock()
+	if head == nil {
+		log.Warn("Submitted transaction, sender not read: no current block", "hash", tx.Hash().Hex(), "type", tx.Type())
+		return tx.Hash(), nil
+	}
 	signer := types.MakeSigner(b.ChainConfig(), head.Number, head.Time)
-	from, err := types.Sender(signer, tx)
+	var (
+		from common.Address
+		err  error
+	)
+	if tx.Type() == types.GhostAccountTxType {
+		// The plain signer refuses account transactions; their sender is
+		// derived from the scheme and the public key, which needs only the
+		// chain ID. The pool has already verified the signature.
+		from, err = types.GhostAccountAddress(signer, tx)
+	} else {
+		from, err = types.Sender(signer, tx)
+	}
 	if err != nil {
-		return common.Hash{}, err
+		log.Warn("Submitted transaction, sender not read", "hash", tx.Hash().Hex(), "type", tx.Type(), "err", err)
+		return tx.Hash(), nil
 	}
 
 	if tx.To() == nil {
