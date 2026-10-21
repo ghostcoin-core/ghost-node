@@ -230,3 +230,26 @@ func TestAccountSenderRPCFrom(t *testing.T) {
 		}
 	}
 }
+
+// TestAccountSenderUnsignedTransaction checks that a transaction carrying no
+// signature at all has no sender, while one whose signature values are
+// invalid is an error, never the zero address.
+func TestAccountSenderUnsignedTransaction(t *testing.T) {
+	t.Parallel()
+
+	signer := types.NewGhostAccountSigner(types.LatestSigner(params.TestChainConfig), common.HexToHash("0x01"))
+	recipient := common.HexToAddress("0x5252525252525252525252525252525252525252")
+	unsigned := types.NewTx(&types.LegacyTx{Nonce: 1, GasPrice: big.NewInt(1), Gas: vars.TxGas, To: &recipient})
+	sender, err := rpcSender(signer, unsigned)
+	if err != nil {
+		t.Fatalf("unsigned transaction: %v", err)
+	}
+	if sender != (common.Address{}) {
+		t.Errorf("unsigned transaction: sender %x, want none", sender)
+	}
+
+	invalid := types.NewTx(&types.LegacyTx{Nonce: 1, GasPrice: big.NewInt(1), Gas: vars.TxGas, To: &recipient, V: big.NewInt(27), R: new(big.Int), S: new(big.Int)})
+	if sender, err := rpcSender(signer, invalid); !errors.Is(err, types.ErrInvalidSig) {
+		t.Errorf("invalid signature: sender %x, error %v, want %v", sender, err, types.ErrInvalidSig)
+	}
+}
