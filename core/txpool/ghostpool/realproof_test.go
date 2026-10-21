@@ -72,14 +72,17 @@ var (
 )
 
 // realProof is a fixture chain of the pool tests, the internal network's
-// genesis with the test account's alloc, whose block 1 commits one GHOST to
-// the fingerprint the pinned prover chose, and the honest reveal of that
-// coin in block 2 as the prover made it.
+// genesis with the pool tests' account's alloc, whose block 1 commits one
+// GHOST to the fingerprint the pinned prover chose, and the honest reveal of
+// that coin in block 2 as the prover made it.
 type realProof struct {
 	*fixture
 	commitF common.Hash
 	reveal  *ghostpriv.Reveal
 	fee     ghostpriv.Fee
+	// commitTx is block 1's commit once signed: ML-DSA signatures are
+	// randomized, so signing again would give another block 1.
+	commitTx *types.Transaction
 }
 
 // newRealProof loads the fixture for the chain of the pool tests. It fails
@@ -88,7 +91,7 @@ type realProof struct {
 func newRealProof(t *testing.T) *realProof {
 	t.Helper()
 	gspec := ghost.InternalNetGenesis()
-	gspec.Alloc = genesisT.GenesisAlloc{testAddr: {Balance: new(big.Int).Mul(oneGhost, big.NewInt(100))}}
+	gspec.Alloc = genesisT.GenesisAlloc{poolAddr: {Balance: new(big.Int).Mul(oneGhost, big.NewInt(100))}}
 	f := &fixture{t: t, gspec: gspec, genesis: core.GenesisToBlock(gspec, nil)}
 	if v := ghostpriv.ActiveVerifier(); v != ghostpriv.DefaultVerifier() {
 		t.Fatalf("active verifier %T, want the default", v)
@@ -195,24 +198,21 @@ func readRealFixture(t *testing.T) []byte {
 	return raw
 }
 
-// commit is block 1's commit of one GHOST to the fixture's fingerprint.
+// commit is block 1's commit of one GHOST to the fixture's fingerprint, an
+// account transaction of the pool tests' account, signed on first use.
 func (rp *realProof) commit() *types.Transaction {
 	rp.t.Helper()
+	if rp.commitTx != nil {
+		return rp.commitTx
+	}
 	data, err := ghostpriv.CommitData(rp.commitF, make([]byte, ghostpriv.NoteSize))
 	if err != nil {
 		rp.t.Fatal(err)
 	}
 	to := ghost.CommitEntryAddress
-	return types.MustSignNewTx(testKey, types.LatestSigner(rp.gspec.Config), &types.DynamicFeeTx{
-		ChainID:   rp.gspec.Config.GetChainID(),
-		Nonce:     0,
-		GasTipCap: big.NewInt(1_000_000_000),
-		GasFeeCap: big.NewInt(100_000_000_000),
-		Gas:       60_000,
-		To:        &to,
-		Value:     oneGhost,
-		Data:      data,
-	})
+	signer := types.NewGhostAccountSigner(types.LatestSigner(rp.gspec.Config), rp.genesis.Hash())
+	rp.commitTx = signAccountTransfer(signer, poolKey, 0, &to, oneGhost, big.NewInt(1_000_000_000), big.NewInt(100_000_000_000), 60_000+accountTxExtraGas, data)
+	return rp.commitTx
 }
 
 // revealTx is the envelope of r as a transaction.
