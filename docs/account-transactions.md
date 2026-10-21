@@ -403,6 +403,41 @@ Measured on the linux/arm64 machine of 16 CPUs used for the signature bounds
 above; they should be measured again on the slowest machine Ghost means to
 support before launch.
 
+A record is fetched over the authenticated TCP transport, `p2p/qsconn`, and
+never over UDP (`p2p/qsrecordfetch.go`). The fetching side dials the IP of
+the endpoint that answered its discovery ping at the same port number over
+TCP, runs the qsconn handshake for the node ID it asks about, and sends a
+record request naming that ID, the first and only message of the
+connection. The answering side answers it from `enode.QSRecordCache.Get`
+for the asked ID only: one encoded record, or an empty answer when the
+cache holds none, so it never hands out a record that has not verified
+(`TestQSRecordFetchAnswersFromCacheOnly`). Its own record is signed from
+the local node and put in the cache before it is answered. The connection
+then closes and never becomes a peer. A server opens its UDP socket on its
+TCP listener's port when `DiscAddr` is empty; a node that cannot be reached
+this way is not verified, and so not added.
+
+The fetching side accepts a record only when it decodes and verifies through
+the record cache, is of the node ID asked for, and its IP and UDP port are
+the endpoint that answered the ping (`TestQSRecordVerifierChecksIDAndEndpoint`);
+the ID and endpoint are checked before the signature, so a record of
+another node never enters the cache. The fetch is bounded by node settings
+in `p2p/enode/qsrecord.go`, beside the cache limits
+(`TestQSRecordFetchBoundsAnswerAndSource`):
+
+| Constant | Value | What it bounds |
+|---|---|---|
+| `QSRecordMaxSize` | 4,096 bytes | an answer; a larger frame is refused from its header, before it is read |
+| `QSRecordFetchRate`, `QSRecordFetchBurst` | 1 a second, burst 5 | record requests answered for one source IP address, a token bucket; a request over it is closed without an answer. An IPv4 address and its IPv4-mapped IPv6 form share one bucket |
+| `QSRecordFetchSources` | 1,024 | source addresses with a bucket, the least recently seen dropped first |
+| `QSRecordFetchPerConn` | 1 | record requests answered on one connection; the connection closes after the answer |
+
+An answer costs the answering side no record verification. The bucket is
+charged once the qsconn handshake is done, as the request is only known
+then; the handshake itself is bounded like that of any accepted connection,
+by the pending connection slots of the listener and, for an Internet
+address, the one connection per 30 seconds of the inbound throttle.
+
 ## Peer discovery
 
 `p2p/qsdisc` finds peers by node ID over UDP (spec 09, section 10.3). It is
@@ -532,8 +567,24 @@ Measured on the linux/arm64 machine of 16 CPUs used for the bounds above:
   receiving them.
 
 They should be measured again on the slowest machine Ghost means to support
-before launch. Fetching a record over qsconn and starting discovery in the
-p2p server are separate work.
+before launch.
+
+The p2p server starts `p2p/qsdisc` unless `NoDiscovery` is set, from its
+bootstrap nodes (whose UDP endpoint is their IP and TCP port), on `DiscAddr`
+or else the TCP listener's address, and feeds the nodes its lookups find and
+verify to the dial scheduler (`TestServerDiscoveryTwoNodesConnect`). With
+`NoDiscovery` it opens no UDP port and answers no record request
+(`TestServerNoDiscoveryOpensNoUDPPort`). There is no other discovery to fall
+back to: the `--discv4`, `--discv5` and `--discovery.dns` flags, the
+`DiscoveryV4`, `DiscoveryV5` and `BootstrapNodesV5` fields of `p2p.Config`,
+the `EthDiscoveryURLs` and `SnapDiscoveryURLs` fields of the eth
+configuration and the old `p2p/discover` table are gone
+(`TestConfigHasNoOldDiscoveryFields`, `TestOldDiscoveryFlagsRemoved`,
+`TestEthConfigHasNoDiscoveryURLs`). A node's record names the IP and TCP
+port of its local node and the port of its UDP socket, so a node behind NAT
+or listening on all addresses names its public IP with `--nat extip:<IP>`
+and forwards the one port number for both TCP and UDP; the UDP port is not
+mapped by NAT. Others cannot verify it otherwise.
 
 ## Not yet in this node
 

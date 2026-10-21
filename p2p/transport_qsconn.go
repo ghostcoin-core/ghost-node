@@ -37,6 +37,7 @@ type qsconnTransport struct {
 	wbuf     bytes.Buffer
 	conn     *qsconn.Conn
 	key      *qsconn.Identity
+	first    *Msg // read by peekMsg, returned by the next ReadMsg
 }
 
 // newQSConn wraps fd. dialDest is nil on the accepting side; on the dialling
@@ -63,8 +64,34 @@ func (t *qsconnTransport) ReadMsg() (Msg, error) {
 	t.rmu.Lock()
 	defer t.rmu.Unlock()
 
+	if t.first != nil {
+		msg := *t.first
+		t.first = nil
+		return msg, nil
+	}
+	return t.readMsg(frameReadTimeout)
+}
+
+// peekMsg reads the first message after the handshake, waiting at most
+// handshakeTimeout for it, and keeps it for the next ReadMsg.
+func (t *qsconnTransport) peekMsg() (Msg, error) {
+	t.rmu.Lock()
+	defer t.rmu.Unlock()
+
+	if t.first != nil {
+		return *t.first, nil
+	}
+	msg, err := t.readMsg(handshakeTimeout)
+	if err != nil {
+		return msg, err
+	}
+	t.first = &msg
+	return msg, nil
+}
+
+func (t *qsconnTransport) readMsg(timeout time.Duration) (Msg, error) {
 	var msg Msg
-	t.conn.SetReadDeadline(time.Now().Add(frameReadTimeout))
+	t.conn.SetReadDeadline(time.Now().Add(timeout))
 	code, data, wireSize, err := t.conn.Read()
 	if err == nil {
 		// qsconn returns a fresh buffer for every frame.
