@@ -37,13 +37,20 @@ import (
 )
 
 // dataFile is what a wallet keeps of a data commitment it made: F_d and the
-// note. The node never sees the file itself.
+// note, and the commitment format version of the data it was committed with
+// (0 for version 1). The node never sees the file itself.
 type dataFile struct {
-	f    common.Hash
-	note []byte
+	f       common.Hash
+	note    []byte
+	version uint16
 }
 
-func (d dataFile) commitment() common.Hash { return ghostpriv.DataCommitment(d.f) }
+func (d dataFile) commitment() common.Hash {
+	if d.version == 0 {
+		return ghostpriv.DataCommitment(d.f)
+	}
+	return ghostpriv.DataCommitmentVersion(d.version, d.f)
+}
 
 func testDataFile(name string) dataFile {
 	return dataFile{
@@ -83,9 +90,10 @@ func dataLeafCount(st *state.StateDB) uint64 {
 // that the coin tree, the totals and every balance but the gas are as they
 // were.
 func TestDataCommitAppendsToDataTree(t *testing.T) {
-	// The commitment is K over DATA and F_d, and never a coin commitment.
+	// The commitment is K over DATA at version 1 and F_d, and never a coin
+	// commitment.
 	known := testDataFile("known")
-	want := ghosttree.K("ghost/data-commitment/v1", []byte{0x02, 0x01}, known.f[:])
+	want := ghosttree.K("ghost/data-commitment/v1", []byte{0x01, 0x02}, known.f[:])
 	if known.commitment() != want {
 		t.Fatalf("data commitment %x, want %x", known.commitment(), want)
 	}
@@ -242,7 +250,7 @@ func TestDataCommitAppendsToDataTree(t *testing.T) {
 
 // TestSaltedDataCommitCarriesSaltToHistory data commits one file with
 // version 1 data and one with salted data in a block: both are accepted, the
-// salted one is recorded under the data commitment of F_d alone, its receipt
+// salted one is recorded under the version 2 data commitment of F_d, its receipt
 // log is the version 1 log with the salt after the note (212 bytes), and the
 // tree history returns the salt with its leaf and note while the version 1
 // leaf has none. Salted data with a value is still refused.
@@ -253,6 +261,7 @@ func TestSaltedDataCommitCarriesSaltToHistory(t *testing.T) {
 		salted = testDataFile("salted")
 		salt   = testSalt(0x33)
 	)
+	salted.version = ghostpriv.SaltedCommitVersion
 	saltedData, err := ghostpriv.SaltedCommitData(salted.f, salt, salted.note)
 	if err != nil {
 		t.Fatal(err)

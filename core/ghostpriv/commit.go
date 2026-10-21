@@ -68,9 +68,25 @@ type Commit struct {
 	Salt  *[SaltSize]byte
 }
 
-// Commitment is the commitment the node records for the commit. The salt is
-// not an input: it is already in F.
-func (c *Commit) Commitment() common.Hash { return Commitment(c.F, c.Value) }
+// CommitVersion is the commitment format version of the commit's data:
+// SaltedCommitVersion for salted data, Version for version 1 data.
+func (c *Commit) CommitVersion() uint16 { return commitVersion(c.Salt) }
+
+// Commitment is the commitment the node records for the commit, with the
+// COIN type of the commit data's version. The salt is not an input: it is
+// already in F.
+func (c *Commit) Commitment() common.Hash {
+	return CommitmentVersion(c.CommitVersion(), c.F, c.Value)
+}
+
+// commitVersion is the commitment format version of parsed commit data, told
+// by its salt: data with a salt is version 2, data without one version 1.
+func commitVersion(salt *[SaltSize]byte) uint16 {
+	if salt != nil {
+		return SaltedCommitVersion
+	}
+	return Version
+}
 
 // CommitData returns the data of a commit transaction: version 1, F and the
 // note, exactly CommitDataSize bytes.
@@ -214,9 +230,16 @@ type DataCommit struct {
 	Salt *[SaltSize]byte
 }
 
-// Commitment is the data commitment the node records for the data commit.
-// The salt is not an input: it is already in F_d.
-func (c *DataCommit) Commitment() common.Hash { return DataCommitment(c.F) }
+// CommitVersion is the commitment format version of the data commit's data:
+// SaltedCommitVersion for salted data, Version for version 1 data.
+func (c *DataCommit) CommitVersion() uint16 { return commitVersion(c.Salt) }
+
+// Commitment is the data commitment the node records for the data commit,
+// with the DATA type of the commit data's version. The salt is not an input:
+// it is already in F_d.
+func (c *DataCommit) Commitment() common.Hash {
+	return DataCommitmentVersion(c.CommitVersion(), c.F)
+}
 
 // ParseDataCommit checks the data and value of a top-level call to the data
 // commit entry address, in this order: exactly 190 bytes of version 1 or

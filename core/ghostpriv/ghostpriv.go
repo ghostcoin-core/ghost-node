@@ -78,13 +78,27 @@ const (
 	GasPriv = types.GhostRevealGas
 )
 
-// Coin is the type of a coin commitment, COIN. The node supplies it; a
-// sender cannot choose a type.
-var Coin = [2]byte{0x01, 0x01}
+// The types of a commitment, COIN and DATA, at each commitment format
+// version: the version byte, then 0x01 for a coin or 0x02 for data (spec 01).
+// The node supplies the type from the version of the commit data; a sender
+// cannot choose a type, and there are no application-defined data types.
+var (
+	// Coin is COIN at version 1, the type of a coin commitment of unsalted
+	// commit data.
+	Coin = [2]byte{0x01, 0x01}
 
-// Data is the type of a data commitment, DATA. The node supplies it; there
-// are no application-defined data types.
-var Data = [2]byte{0x02, 0x01}
+	// CoinV2 is COIN at version 2, the type of a coin commitment of salted
+	// commit data and of every reveal's remainder.
+	CoinV2 = [2]byte{0x02, 0x01}
+
+	// Data is DATA at version 1, the type of a data commitment of unsalted
+	// commit data.
+	Data = [2]byte{0x01, 0x02}
+
+	// DataV2 is DATA at version 2, the type of a data commitment of salted
+	// commit data.
+	DataV2 = [2]byte{0x02, 0x02}
+)
 
 // VMax is the largest amount, 2^96 - 1.
 var VMax = new(uint256.Int).Sub(new(uint256.Int).Lsh(uint256.NewInt(1), 96), uint256.NewInt(1))
@@ -134,16 +148,39 @@ func readAmount(w []byte) (*uint256.Int, error) {
 	return new(uint256.Int).SetBytes(w), nil
 }
 
-// Commitment returns the coin commitment of F and v,
-// K("ghost/coin-commitment/v1", COIN, F, v as a 32-byte word).
+// Commitment returns the version 1 coin commitment of F and v,
+// K("ghost/coin-commitment/v1", COIN version 1, F, v as a 32-byte word).
 func Commitment(f common.Hash, v *uint256.Int) common.Hash {
-	return ghosttree.K(TagCommitment, Coin[:], f[:], amountWord(v))
+	return CommitmentVersion(Version, f, v)
 }
 
-// DataCommitment returns the data commitment of F_d,
-// K("ghost/data-commitment/v1", DATA, F_d). It carries no amount.
+// CommitmentVersion returns the coin commitment of F and v at a commitment
+// format version, K("ghost/coin-commitment/v1", COIN, F, v as a 32-byte
+// word), with COIN of that version: CoinV2 for SaltedCommitVersion, Coin for
+// version 1.
+func CommitmentVersion(version uint16, f common.Hash, v *uint256.Int) common.Hash {
+	typ := Coin
+	if version == SaltedCommitVersion {
+		typ = CoinV2
+	}
+	return ghosttree.K(TagCommitment, typ[:], f[:], amountWord(v))
+}
+
+// DataCommitment returns the version 1 data commitment of F_d,
+// K("ghost/data-commitment/v1", DATA version 1, F_d). It carries no amount.
 func DataCommitment(f common.Hash) common.Hash {
-	return ghosttree.K(TagDataCommitment, Data[:], f[:])
+	return DataCommitmentVersion(Version, f)
+}
+
+// DataCommitmentVersion returns the data commitment of F_d at a commitment
+// format version, K("ghost/data-commitment/v1", DATA, F_d), with DATA of that
+// version: DataV2 for SaltedCommitVersion, Data for version 1.
+func DataCommitmentVersion(version uint16, f common.Hash) common.Hash {
+	typ := Data
+	if version == SaltedCommitVersion {
+		typ = DataV2
+	}
+	return ghosttree.K(TagDataCommitment, typ[:], f[:])
 }
 
 // Slots of the totals account.

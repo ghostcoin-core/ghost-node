@@ -46,9 +46,20 @@ func applyTx(chain *core.BlockChain, st *state.StateDB, header *types.Header, tx
 	return core.ApplyTransaction(chain.Config(), chain, &header.Coinbase, gp, st, header, tx, &used, vm.Config{})
 }
 
-// commitLog is the receipt log a commit writes.
+// commitLog is the receipt log a commit of version 1 data writes.
 func commitLog(index, position uint32, c coin) []byte {
-	leaf := c.commitment()
+	return commitLogOf(index, position, c.commitment(), c)
+}
+
+// saltedCommitment is the version 2 commitment of c, the leaf of a commit of
+// c with salted data.
+func saltedCommitment(c coin) common.Hash {
+	return ghostpriv.CommitmentVersion(ghostpriv.SaltedCommitVersion, c.f, c.value)
+}
+
+// commitLogOf is the receipt log of a commit of c recorded under leaf,
+// without the salt a salted commit's log carries after the note.
+func commitLogOf(index, position uint32, leaf common.Hash, c coin) []byte {
 	word := c.value.Bytes32()
 	data := binary.BigEndian.AppendUint32(nil, index)
 	data = binary.BigEndian.AppendUint32(data, position)
@@ -392,7 +403,7 @@ func checkSalt(t *testing.T, what string, got *[ghostpriv.SaltSize]byte, want []
 
 // TestSaltedCommitCarriesSaltToHistory commits one coin with version 1 data
 // and one with salted data in a block: both are accepted, the salted one is
-// recorded under the commitment of F and the value alone, its receipt log is
+// recorded under the version 2 commitment of F and the value, its receipt log is
 // the version 1 log with the salt after the note (244 bytes), and the tree
 // history returns the salt with its leaf and note while the version 1 leaf
 // has none.
@@ -424,13 +435,13 @@ func TestSaltedCommitCarriesSaltToHistory(t *testing.T) {
 		}
 	}
 
-	// The salted commit burned its value and is recorded under the
+	// The salted commit burned its value and is recorded under the version 2
 	// commitment of F and the value: the salt is no input of it.
 	gasCost := new(big.Int).Mul(new(big.Int).SetUint64(receipts[1].GasUsed), receipts[1].EffectiveGasPrice)
 	if got, want := st.GetBalance(addrB).ToBig(), new(big.Int).Sub(new(big.Int).Sub(startBal, salted.value.ToBig()), gasCost); got.Cmp(want) != 0 {
 		t.Errorf("salted sender balance %v, want %v", got, want)
 	}
-	leaves := []common.Hash{plain.commitment(), salted.commitment()}
+	leaves := []common.Hash{plain.commitment(), saltedCommitment(salted)}
 	wantRoot := ghosttree.RootFromPageRoots(ghosttree.Coin, []common.Hash{ghosttree.PageRoot(ghosttree.Coin, leaves)})
 	if root := block.Header().CoinTreeRoot; root == nil || *root != wantRoot {
 		t.Fatalf("header coin root %v, want %x", root, wantRoot)
@@ -443,11 +454,11 @@ func TestSaltedCommitCarriesSaltToHistory(t *testing.T) {
 	if got, want := receipts[0].Logs[0].Data, commitLog(0, 0, plain); !bytes.Equal(got, want) || len(got) != 228 {
 		t.Errorf("version 1 log of %d bytes\n%x\nwant\n%x", len(got), got, want)
 	}
-	if got, want := receipts[1].Logs[0].Data, append(commitLog(0, 1, salted), salt...); !bytes.Equal(got, want) || len(got) != 244 {
+	if got, want := receipts[1].Logs[0].Data, append(commitLogOf(0, 1, leaves[1], salted), salt...); !bytes.Equal(got, want) || len(got) != 244 {
 		t.Errorf("salted log of %d bytes\n%x\nwant\n%x", len(got), got, want)
 	}
-	if got := common.BytesToHash(receipts[1].Logs[0].Data[8:40]); got != salted.commitment() {
-		t.Errorf("salted leaf %x, want %x", got, salted.commitment())
+	if got := common.BytesToHash(receipts[1].Logs[0].Data[8:40]); got != leaves[1] {
+		t.Errorf("salted leaf %x, want %x", got, leaves[1])
 	}
 
 	// The history records and the page carry the salt with the leaf and note.
@@ -471,7 +482,7 @@ func TestSaltedCommitCarriesSaltToHistory(t *testing.T) {
 		t.Fatalf("page of %d entries", page.Filled)
 	}
 	for i, c := range []coin{plain, salted} {
-		if e := page.Entries[i]; e.Leaf != c.commitment() || !bytes.Equal(e.Note[:], c.note) {
+		if e := page.Entries[i]; e.Leaf != leaves[i] || !bytes.Equal(e.Note[:], c.note) {
 			t.Errorf("entry %d: leaf %x note %x", i, e.Leaf, e.Note[:])
 		}
 	}
@@ -512,13 +523,13 @@ func TestSaltedCommitDataLengthIsExact(t *testing.T) {
 		}
 	}
 
-	// Parsed, the salt and note come apart and the commitment is that of F
-	// and the value; version 1 data parses with no salt.
+	// Parsed, the salt and note come apart and the commitment is the version
+	// 2 commitment of F and the value; version 1 data parses with no salt.
 	c, err := ghostpriv.ParseCommit(data, oneGhost)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.F != good.f || !bytes.Equal(c.Note[:], good.note) || c.Commitment() != good.commitment() {
+	if c.F != good.f || !bytes.Equal(c.Note[:], good.note) || c.Commitment() != saltedCommitment(good) {
 		t.Fatalf("parsed salted commit %+v", c)
 	}
 	checkSalt(t, "parsed salted commit", c.Salt, salt)
@@ -526,7 +537,7 @@ func TestSaltedCommitDataLengthIsExact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if dc.F != good.f || !bytes.Equal(dc.Note[:], good.note) || dc.Commitment() != ghostpriv.DataCommitment(good.f) {
+	if dc.F != good.f || !bytes.Equal(dc.Note[:], good.note) || dc.Commitment() != ghostpriv.DataCommitmentVersion(ghostpriv.SaltedCommitVersion, good.f) {
 		t.Fatalf("parsed salted data commit %+v", dc)
 	}
 	checkSalt(t, "parsed salted data commit", dc.Salt, salt)
@@ -668,6 +679,185 @@ func TestCommitEntryNotCallableFromContract(t *testing.T) {
 	for i, r := range chain.GetReceiptsByHash(blocks[0].Hash()) {
 		if r.Status != types.ReceiptStatusSuccessful || len(r.Logs) != 0 {
 			t.Errorf("transaction %d: status %d, %d logs", i, r.Status, len(r.Logs))
+		}
+	}
+}
+
+// logState is a state that keeps the logs the coin and data rules write.
+type logState struct {
+	*state.StateDB
+	logs []*types.Log
+}
+
+func (s *logState) AddLog(l *types.Log) { s.logs = append(s.logs, l) }
+
+// TestCommitLeafTagFollowsVersion sends 190 bytes of version 1 data and 206
+// bytes of salted version 2 data through ParseCommit and ApplyCommit, and
+// through ParseDataCommit and ApplyDataCommit, and checks that the leaf the
+// tree takes and the receipt log carries has the type of the data's version:
+// K(tag, 0x01 0x01, F, v) and K(tag, 0x02 0x01, F, v) for a coin,
+// K(tag, 0x01 0x02, F_d) and K(tag, 0x02 0x02, F_d) for data (spec 01).
+func TestCommitLeafTagFollowsVersion(t *testing.T) {
+	if ghostpriv.Coin != [2]byte{0x01, 0x01} || ghostpriv.CoinV2 != [2]byte{0x02, 0x01} ||
+		ghostpriv.Data != [2]byte{0x01, 0x02} || ghostpriv.DataV2 != [2]byte{0x02, 0x02} {
+		t.Fatalf("types COIN %x and %x, DATA %x and %x", ghostpriv.Coin, ghostpriv.CoinV2, ghostpriv.Data, ghostpriv.DataV2)
+	}
+	f := newFixture(t, ghost.InternalNetGasLimit, nil)
+	chain := f.newChain()
+	env, st := nextEnv(t, chain, chain.CurrentBlock(), common.Address{0xcb})
+	height := env.Header.Number.Uint64()
+
+	c := testCoin("tagged", oneGhost)
+	v1, err := ghostpriv.CommitData(c.f, c.note)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v2, err := ghostpriv.SaltedCommitData(c.f, testSalt(0x44), c.note)
+	if err != nil {
+		t.Fatal(err)
+	}
+	word := c.value.Bytes32()
+	for _, tc := range []struct {
+		name     string
+		data     []byte
+		version  uint16
+		coinLeaf common.Hash
+		dataLeaf common.Hash
+	}{
+		{"190 bytes, version 1", v1, ghostpriv.Version,
+			ghosttree.K("ghost/coin-commitment/v1", []byte{0x01, 0x01}, c.f[:], word[:]),
+			ghosttree.K("ghost/data-commitment/v1", []byte{0x01, 0x02}, c.f[:])},
+		{"206 bytes, version 2", v2, ghostpriv.SaltedCommitVersion,
+			ghosttree.K("ghost/coin-commitment/v1", []byte{0x02, 0x01}, c.f[:], word[:]),
+			ghosttree.K("ghost/data-commitment/v1", []byte{0x02, 0x02}, c.f[:])},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The coin commit.
+			cc, err := ghostpriv.ParseCommit(tc.data, oneGhost)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cc.CommitVersion() != tc.version {
+				t.Fatalf("commit version %d, want %d", cc.CommitVersion(), tc.version)
+			}
+			ls := &logState{StateDB: st.Copy()}
+			if err := ghostpriv.ApplyCommit(ls, height, addrA, cc); err != nil {
+				t.Fatal(err)
+			}
+			checkAppended(t, "coin", ls, ghosttree.Coin, tc.coinLeaf)
+
+			// The data commit of the same data.
+			dc, err := ghostpriv.ParseDataCommit(tc.data, new(big.Int))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if dc.CommitVersion() != tc.version {
+				t.Fatalf("data commit version %d, want %d", dc.CommitVersion(), tc.version)
+			}
+			ls = &logState{StateDB: st.Copy()}
+			if err := ghostpriv.ApplyDataCommit(ls, height, dc); err != nil {
+				t.Fatal(err)
+			}
+			checkAppended(t, "data", ls, ghosttree.Data, tc.dataLeaf)
+		})
+	}
+}
+
+// checkAppended checks that the only leaf of the tree of kind in ls is want,
+// and that the one receipt log carries it.
+func checkAppended(t *testing.T, name string, ls *logState, kind ghosttree.Kind, want common.Hash) {
+	t.Helper()
+	root, err := ghosttree.Root(ls, kind)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wantRoot := ghosttree.RootFromPageRoots(kind, []common.Hash{ghosttree.PageRoot(kind, []common.Hash{want})}); root != wantRoot {
+		t.Errorf("%s tree root %x, want the root of the one leaf %x", name, root, want)
+	}
+	if len(ls.logs) != 1 || len(ls.logs[0].Data) < 40 {
+		t.Fatalf("%s: logs %v", name, ls.logs)
+	}
+	if got := common.BytesToHash(ls.logs[0].Data[8:40]); got != want {
+		t.Errorf("%s leaf %x, want %x", name, got, want)
+	}
+}
+
+// TestLeafMatchesProofCrateVectors checks the leaves the node computes for
+// fixed F, v and version against the commitment vectors of spec 01, the
+// values the ghost proofs crate computes and scripts/check_commitment_vectors.py
+// recomputes with its own Keccak in the ghost repository. A salted vector
+// goes through salted commit data, so the leaf is the one the node records.
+func TestLeafMatchesProofCrateVectors(t *testing.T) {
+	var (
+		commit    = uint256.NewInt(1_000_000_000_000_000_000)
+		remainder = uint256.NewInt(700_000_000_000_000_000)
+	)
+	coins := []struct {
+		name    string
+		version uint16
+		f       string
+		v       *uint256.Int
+		want    string
+	}{
+		{"coin-commit", 1, "b44338ab6f6dcb3d63772c457737afd38a841207725e1440d235c4f6be0c4d8b", commit, "562d92a92bb8f2b3b772b55220a5ee26f189bedc0f4bfa513205df1545029458"},
+		{"coin-remainder", 1, "06917a6f382fb7dabd47f6461319883f17f2bf3a8ebc1f00cbb1183b168389be", remainder, "93312061656298f41cd5a9f116d070b38b0acf5f8d968c58e32170f70e7aed15"},
+		{"coin-commit-salted", 2, "6f7edf086ae8451b86811fcc222a6c3b77e1010705b57d64fd336a9f114c11a3", commit, "72ab16e25e13d2101dbfad21972605641aa4f2ea369b7173edd4d3ba2678689d"},
+		{"coin-commit-salted-other", 2, "03c501af5675709301cff4e93da4140792f4ccfff3b2b2a16ff55b2bf1ecc5ab", commit, "be9a0db30dbd08f5af50b766ceafd3c15f3f843d9cf5122682e002448380bd74"},
+		{"coin-remainder-salted", 2, "8d8f86ffe5d0c251cfe7d8cfa9e49287e8e83fc6cb3dd3345213c812d67cf81a", remainder, "7b2269649fa191df18cf80dde1e81f5cf61bb00a7faf17f58aafc197251393ab"},
+		{"coin-remainder-salted-other", 2, "bdd18c032eef7bfc6aec7268f7fe4446beafefd12a6808c1b6e24687eee0acac", remainder, "c07b2ff99412387057a171046120ac0d57f63d9516a0bc612089a7cdf0200bf2"},
+	}
+	datas := []struct {
+		name    string
+		version uint16
+		f       string
+		want    string
+	}{
+		{"data-commit", 1, "a7450331b78ed2a6cf4864e6fdf58c1147e0cb4c8608e0dc0b37ec94f67e5b41", "39c4e1e8edca6f366db5125e1bc9484063fa9f35da539638207f03732d913b06"},
+		{"data-commit-salted", 2, "c5248f5ae13e74d2ecd2ee324068ae947012a76b5a44d66bf6f59830a366a7e2", "324c90dbad0fbecfd82331d087ea216b525e68b8dcb64891aa59322565ebb8b5"},
+		{"data-commit-salted-other", 2, "72ac806d9e8c49284e2cc0e10fff283fadeff8d0345954770960f68b1d0df358", "91e0e4460c6ffd42b5efcbd8a94e4fa91eb6a5e4aa17b1e8faf8eb38c6779f2f"},
+	}
+	// commitData is commit data of F at a version, as a wallet sends it.
+	commitData := func(t *testing.T, version uint16, f common.Hash) []byte {
+		t.Helper()
+		note := testNote(0x5a)
+		var (
+			data []byte
+			err  error
+		)
+		if version == ghostpriv.SaltedCommitVersion {
+			data, err = ghostpriv.SaltedCommitData(f, testSalt(0x66), note)
+		} else {
+			data, err = ghostpriv.CommitData(f, note)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	for _, v := range coins {
+		f, want := common.HexToHash(v.f), common.HexToHash(v.want)
+		if got := ghostpriv.CommitmentVersion(v.version, f, v.v); got != want {
+			t.Errorf("%s: commitment %x, want %x", v.name, got, want)
+		}
+		c, err := ghostpriv.ParseCommit(commitData(t, v.version, f), v.v.ToBig())
+		if err != nil {
+			t.Fatalf("%s: %v", v.name, err)
+		}
+		if got := c.Commitment(); got != want {
+			t.Errorf("%s: commit leaf %x, want %x", v.name, got, want)
+		}
+	}
+	for _, v := range datas {
+		f, want := common.HexToHash(v.f), common.HexToHash(v.want)
+		if got := ghostpriv.DataCommitmentVersion(v.version, f); got != want {
+			t.Errorf("%s: data commitment %x, want %x", v.name, got, want)
+		}
+		c, err := ghostpriv.ParseDataCommit(commitData(t, v.version, f), new(big.Int))
+		if err != nil {
+			t.Fatalf("%s: %v", v.name, err)
+		}
+		if got := c.Commitment(); got != want {
+			t.Errorf("%s: data commit leaf %x, want %x", v.name, got, want)
 		}
 	}
 }
