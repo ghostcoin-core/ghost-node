@@ -29,6 +29,9 @@ build/_vendor/pkg
 /build/static/
 /geth*.zip
 
+# cargo output of the proof verifier (CI builds it into build/cache)
+ghostverifier/target/
+
 # travis
 profile.tmp
 profile.cov
