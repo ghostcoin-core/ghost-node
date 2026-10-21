@@ -17,33 +17,52 @@
 package keystore
 
 import (
-	"bytes"
 	"crypto/ecdsa"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
+	"github.com/cloudflare/circl/sign/mldsa/mldsa44"
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/google/uuid"
 )
 
 const (
 	version = 3
+
+	// KeyScheme is the signature scheme of every account key of the
+	// keystore: ML-DSA-44 (scheme 0x0001). A key file names it in its
+	// scheme field.
+	KeyScheme = types.GhostSchemeMLDSA44
+
+	// SeedSize is the size of an account key seed, from which
+	// mldsa44.NewKeyFromSeed derives the key pair.
+	SeedSize = mldsa44.SeedSize
 )
 
+// ErrNotAccountKey is returned for a key file or a key that is not an
+// ML-DSA-44 account key: a file without the scheme field, of another scheme,
+// of the version 1 format or holding a secp256k1 key.
+var ErrNotAccountKey = errors.New("not an ML-DSA-44 account key (scheme 0x0001)")
+
+// Key is an account key: an ML-DSA-44 key pair, held as the seed it is
+// derived from. The address is types.GhostAccountAddressOf(scheme, public
+// key).
 type Key struct {
 	Id uuid.UUID // Version 4 "random" for unique id not derived from key data
 	// to simplify lookups we also store the address
 	Address common.Address
-	// we only store privkey as pubkey/address can be derived from it
-	// privkey in this struct is always in plaintext
+	// Seed is the ML-DSA-44 key seed, always in plaintext in this struct.
+	Seed [SeedSize]byte
+	// PrivateKey is always nil: the keystore holds no secp256k1 keys. The
+	// field is kept for callers built against the secp256k1 key API.
 	PrivateKey *ecdsa.PrivateKey
 }
 
@@ -57,10 +76,11 @@ type keyStore interface {
 }
 
 type plainKeyJSON struct {
-	Address    string `json:"address"`
-	PrivateKey string `json:"privatekey"`
-	Id         string `json:"id"`
-	Version    int    `json:"version"`
+	Address    string  `json:"address"`
+	PrivateKey string  `json:"privatekey"`
+	Id         string  `json:"id"`
+	Version    int     `json:"version"`
+	Scheme     *uint16 `json:"scheme,omitempty"`
 }
 
 type encryptedKeyJSONV3 struct {
@@ -68,13 +88,7 @@ type encryptedKeyJSONV3 struct {
 	Crypto  CryptoJSON `json:"crypto"`
 	Id      string     `json:"id"`
 	Version int        `json:"version"`
-}
-
-type encryptedKeyJSONV1 struct {
-	Address string     `json:"address"`
-	Crypto  CryptoJSON `json:"crypto"`
-	Id      string     `json:"id"`
-	Version string     `json:"version"`
+	Scheme  *uint16    `json:"scheme,omitempty"`
 }
 
 type CryptoJSON struct {
@@ -90,12 +104,39 @@ type cipherparamsJSON struct {
 	IV string `json:"iv"`
 }
 
+// checkScheme refuses a key file whose scheme field is missing or names
+// another scheme than ML-DSA-44.
+func checkScheme(scheme *uint16) error {
+	if scheme == nil {
+		return fmt.Errorf("%w: the key file has no scheme", ErrNotAccountKey)
+	}
+	if *scheme != KeyScheme {
+		return fmt.Errorf("%w: the key file is of scheme %#04x", ErrNotAccountKey, *scheme)
+	}
+	return nil
+}
+
+// PublicKey returns the ML-DSA-44 public key of the key.
+func (k *Key) PublicKey() []byte {
+	pub, _ := k.keyPair()
+	return pub.Bytes()
+}
+
+// keyPair derives the ML-DSA-44 key pair from the seed.
+func (k *Key) keyPair() (*mldsa44.PublicKey, *mldsa44.PrivateKey) {
+	seed := k.Seed
+	defer clear(seed[:])
+	return mldsa44.NewKeyFromSeed(&seed)
+}
+
 func (k *Key) MarshalJSON() (j []byte, err error) {
+	scheme := KeyScheme
 	jStruct := plainKeyJSON{
 		hex.EncodeToString(k.Address[:]),
-		hex.EncodeToString(crypto.FromECDSA(k.PrivateKey)),
+		hex.EncodeToString(k.Seed[:]),
 		k.Id.String(),
 		version,
+		&scheme,
 	}
 	j, err = json.Marshal(jStruct)
 	return j, err
@@ -107,68 +148,66 @@ func (k *Key) UnmarshalJSON(j []byte) (err error) {
 	if err != nil {
 		return err
 	}
-
-	u := new(uuid.UUID)
-	*u, err = uuid.Parse(keyJSON.Id)
+	if err := checkScheme(keyJSON.Scheme); err != nil {
+		return err
+	}
+	id, err := uuid.Parse(keyJSON.Id)
 	if err != nil {
 		return err
 	}
-	k.Id = *u
-	addr, err := hex.DecodeString(keyJSON.Address)
+	seed, err := hex.DecodeString(keyJSON.PrivateKey)
 	if err != nil {
 		return err
 	}
-	privkey, err := crypto.HexToECDSA(keyJSON.PrivateKey)
+	defer clear(seed)
+	key, err := newKeyFromSeed(seed, id)
 	if err != nil {
 		return err
 	}
-
-	k.Address = common.BytesToAddress(addr)
-	k.PrivateKey = privkey
-
+	if err := checkAddress(keyJSON.Address, key); err != nil {
+		zeroKey(key)
+		return err
+	}
+	*k = *key
+	zeroKey(key)
 	return nil
 }
 
-func newKeyFromECDSA(privateKeyECDSA *ecdsa.PrivateKey) *Key {
-	id, err := uuid.NewRandom()
+// checkAddress refuses a key file whose address is not the address of the
+// key it holds, as a secp256k1 key under a scheme field would be.
+func checkAddress(fileAddr string, key *Key) error {
+	addr, err := hex.DecodeString(fileAddr)
 	if err != nil {
-		panic(fmt.Sprintf("Could not create random uuid: %v", err))
+		return err
 	}
-	key := &Key{
-		Id:         id,
-		Address:    crypto.PubkeyToAddress(privateKeyECDSA.PublicKey),
-		PrivateKey: privateKeyECDSA,
+	if common.BytesToAddress(addr) != key.Address || len(addr) != common.AddressLength {
+		return fmt.Errorf("%w: the key file address %x is not the address of its key", ErrNotAccountKey, addr)
 	}
-	return key
+	return nil
 }
 
-// NewKeyForDirectICAP generates a key whose address fits into < 155 bits so it can fit
-// into the Direct ICAP spec. for simplicity and easier compatibility with other libs, we
-// retry until the first byte is 0.
-func NewKeyForDirectICAP(rand io.Reader) *Key {
-	randBytes := make([]byte, 64)
-	_, err := rand.Read(randBytes)
-	if err != nil {
-		panic("key generation: could not read from random source: " + err.Error())
+// newKeyFromSeed returns the account key of a 32-byte ML-DSA-44 seed.
+func newKeyFromSeed(seed []byte, id uuid.UUID) (*Key, error) {
+	if len(seed) != SeedSize {
+		return nil, fmt.Errorf("%w: a key seed is %d bytes, have %d", ErrNotAccountKey, SeedSize, len(seed))
 	}
-	reader := bytes.NewReader(randBytes)
-	privateKeyECDSA, err := ecdsa.GenerateKey(crypto.S256(), reader)
-	if err != nil {
-		panic("key generation: ecdsa.GenerateKey failed: " + err.Error())
-	}
-	key := newKeyFromECDSA(privateKeyECDSA)
-	if !strings.HasPrefix(key.Address.Hex(), "0x00") {
-		return NewKeyForDirectICAP(rand)
-	}
-	return key
+	key := &Key{Id: id}
+	copy(key.Seed[:], seed)
+	key.Address = types.GhostAccountAddressOf(KeyScheme, key.PublicKey())
+	return key, nil
 }
 
 func newKey(rand io.Reader) (*Key, error) {
-	privateKeyECDSA, err := ecdsa.GenerateKey(crypto.S256(), rand)
-	if err != nil {
+	var seed [SeedSize]byte
+	defer clear(seed[:])
+	if _, err := io.ReadFull(rand, seed[:]); err != nil {
 		return nil, err
 	}
-	return newKeyFromECDSA(privateKeyECDSA), nil
+	id, err := uuid.NewRandom()
+	if err != nil {
+		return nil, fmt.Errorf("could not create random uuid: %w", err)
+	}
+	return newKeyFromSeed(seed[:], id)
 }
 
 func storeNewKey(ks keyStore, rand io.Reader, auth string) (*Key, accounts.Account, error) {
@@ -181,7 +220,7 @@ func storeNewKey(ks keyStore, rand io.Reader, auth string) (*Key, accounts.Accou
 		URL:     accounts.URL{Scheme: KeyStoreScheme, Path: ks.JoinPath(keyFileName(key.Address))},
 	}
 	if err := ks.StoreKey(a.URL.Path, key, auth); err != nil {
-		zeroKey(key.PrivateKey)
+		zeroKey(key)
 		return nil, a, err
 	}
 	return key, a, err
