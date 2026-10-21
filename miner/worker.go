@@ -316,6 +316,9 @@ func newWorker(config *Config, chainConfig ctypes.ChainConfigurator, engine cons
 		resubmitIntervalCh: make(chan time.Duration),
 		resubmitAdjustCh:   make(chan *intervalAdjust, resubmitAdjustChanSize),
 	}
+	// Skip the empty pre-seal block from the start if the config asks for it.
+	worker.noempty.Store(config.DisablePreseal)
+
 	// Subscribe for transaction insertion events (whether from network or resurrects)
 	worker.txsSub = eth.TxPool().SubscribeTransactions(worker.txsCh, true)
 	// Subscribe events for blockchain

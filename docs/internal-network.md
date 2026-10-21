@@ -32,6 +32,8 @@ While it runs, the script prints the IPC path of the mining node, so you can
 attach a console (`geth attach <path>`). The miner account is unlocked there,
 so its mined funds can be sent with `eth.sendTransaction`.
 
+On a test network, `--miner.noempty` (default off) makes the miner skip the empty pre-seal block and seal only full blocks, so a transaction that is slow to verify is not beaten by an empty block on every head.
+
 ## The chain
 
 | | |
