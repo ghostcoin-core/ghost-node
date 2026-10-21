@@ -173,13 +173,19 @@ the public key: the full key travels in the handshake.
 
 ### The node
 
-The node (`node.New`) always sets `Identity`. It is read from the file
+The node (`node.New`) sets `Identity`. It is read from the file
 `nodeidentity` in the instance directory of the data directory
 (`Config.NodeIdentity`). On first start the file does not exist: a new
 identity is made with `GenerateIdentity` and written with `Save`, mode
 `0600`. Afterwards it is read with `LoadIdentity`, and a file that
 `LoadIdentity` refuses stops the node with that error; the file is not
 replaced. Without a data directory the identity is new on every start.
+
+One exception remains until the secp256k1 node key is removed: a key handed
+over in the node configuration itself (`P2P.PrivateKey`, set by the old node
+key flags and by the in-process simulation adapters, which name nodes by
+that key) keeps the old handshake, and the node logs a warning. A node
+started without one always runs on the quantum-safe transport.
 
 Two nodes that know each other this way connect and sync over the eth
 protocol (`TestSyncOverQSConn` in `eth/`).
