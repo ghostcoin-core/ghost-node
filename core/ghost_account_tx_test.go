@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/cloudflare/circl/sign/mldsa/mldsa44"
+	"github.com/cloudflare/circl/sign/slhdsa"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus/beacon"
 	"github.com/ethereum/go-ethereum/consensus/ethash"
@@ -72,6 +73,9 @@ func ghostBlockKey(seed byte) *mldsa44.PrivateKey {
 // on top of the type 0x02 intrinsic gas (spec 09, section 8.1).
 var ghostExtraGas uint64 = 16*(2+types.GhostMLDSA44PublicKeySize+types.GhostMLDSA44SignatureSize) + ghost.AccountTxVerifyGasMLDSA44
 
+// ghostSLHDSAExtraGas is the same for an SLH-DSA-SHAKE-128s transaction.
+var ghostSLHDSAExtraGas uint64 = 16*(2+types.GhostSLHDSAPublicKeySize+types.GhostSLHDSASignatureSize) + ghost.AccountTxVerifyGasSLHDSA
+
 // ghostInitCode deploys the one-byte contract 0x00.
 var ghostInitCode = []byte{
 	0x60, 0x00, // PUSH1 0
@@ -86,25 +90,45 @@ func TestGhostAccountTxVerifyGasSet(t *testing.T) {
 	if ghost.AccountTxVerifyGasMLDSA44 == 0 || ghost.AccountTxVerifyGas(types.GhostSchemeMLDSA44) == 0 {
 		t.Fatal("the verification gas of ML-DSA-44 is not set")
 	}
-	if ghost.AccountTxVerifyGasMLDSA44%1000 != 0 {
+	if ghost.AccountTxVerifyGasSLHDSA == 0 || ghost.AccountTxVerifyGas(types.GhostSchemeSLHDSA) != ghost.AccountTxVerifyGasSLHDSA {
+		t.Fatal("the verification gas of SLH-DSA-SHAKE-128s is not set")
+	}
+	if ghost.AccountTxVerifyGas(types.GhostSchemeMLDSA44) != ghost.AccountTxVerifyGasMLDSA44 {
+		t.Fatal("scheme 0x0001 does not take the verification gas of ML-DSA-44")
+	}
+	if ghost.AccountTxVerifyGasMLDSA44%1000 != 0 || ghost.AccountTxVerifyGasSLHDSA%1000 != 0 {
 		t.Fatal("the verification gas is not a multiple of 1,000")
 	}
-	for _, scheme := range []uint16{0x0000, types.GhostSchemeHashBased, 0x0003, 0xffff} {
+	for _, scheme := range []uint16{0x0000, 0x0003, 0xffff} {
 		if ghost.AccountTxVerifyGas(scheme) != 0 {
 			t.Errorf("scheme %#04x has verification gas", scheme)
 		}
 	}
-	tx := types.NewTx(&types.GhostAccountTx{
-		ChainID:   big.NewInt(1),
-		GasTipCap: new(big.Int),
-		GasFeeCap: new(big.Int),
-		Value:     new(big.Int),
-		Scheme:    types.GhostScheme(types.GhostSchemeMLDSA44),
-		PublicKey: make([]byte, types.GhostMLDSA44PublicKeySize),
-		Signature: make([]byte, types.GhostMLDSA44SignatureSize),
-	})
-	if got, err := GhostAccountExtraIntrinsicGas(tx); err != nil || got != ghostExtraGas {
-		t.Fatalf("extra intrinsic gas %d %v, want %d", got, err, ghostExtraGas)
+	// The byte gas of an SLH-DSA transaction: 16 * (2 + 32 + 7,856).
+	if ghostSLHDSAExtraGas-ghost.AccountTxVerifyGasSLHDSA != 126_240 {
+		t.Fatalf("SLH-DSA byte gas %d, want 126,240", ghostSLHDSAExtraGas-ghost.AccountTxVerifyGasSLHDSA)
+	}
+	for _, tc := range []struct {
+		scheme  uint16
+		pubKey  int
+		sig     int
+		wantGas uint64
+	}{
+		{types.GhostSchemeMLDSA44, types.GhostMLDSA44PublicKeySize, types.GhostMLDSA44SignatureSize, ghostExtraGas},
+		{types.GhostSchemeSLHDSA, types.GhostSLHDSAPublicKeySize, types.GhostSLHDSASignatureSize, ghostSLHDSAExtraGas},
+	} {
+		tx := types.NewTx(&types.GhostAccountTx{
+			ChainID:   big.NewInt(1),
+			GasTipCap: new(big.Int),
+			GasFeeCap: new(big.Int),
+			Value:     new(big.Int),
+			Scheme:    types.GhostScheme(tc.scheme),
+			PublicKey: make([]byte, tc.pubKey),
+			Signature: make([]byte, tc.sig),
+		})
+		if got, err := GhostAccountExtraIntrinsicGas(tx); err != nil || got != tc.wantGas {
+			t.Fatalf("scheme %#04x: extra intrinsic gas %d %v, want %d", tc.scheme, got, err, tc.wantGas)
+		}
 	}
 	if got, err := GhostAccountExtraIntrinsicGas(types.NewTx(&types.DynamicFeeTx{})); err != nil || got != 0 {
 		t.Fatalf("extra intrinsic gas of a type 0x02 transaction %d %v, want 0", got, err)
@@ -267,5 +291,88 @@ func TestGhostAccountTxBlock(t *testing.T) {
 	statedb3, _ := chain2.State()
 	if _, err := ApplyTransaction(config, nil, &header.Coinbase, new(GasPool).AddGas(blocks[0].GasLimit()), statedb3, header, signed, new(uint64), vm.Config{}); !errors.Is(err, types.ErrGhostAccountGenesis) {
 		t.Fatalf("applied without a genesis hash: %v", err)
+	}
+}
+
+// TestGhostAccountTxSLHDSABlock checks that an SLH-DSA-SHAKE-128s transfer
+// taking exactly its intrinsic gas, the type 0x02 intrinsic gas plus 126,240
+// byte gas plus VERIFY_GAS[0x0002], is valid in a block, and that one with a
+// gas limit one below it is not.
+func TestGhostAccountTxSLHDSABlock(t *testing.T) {
+	_, key, err := slhdsa.GenerateKey(bytes.NewReader(bytes.Repeat([]byte{7}, 48)), slhdsa.SHAKE_128s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, err := key.PublicKey().MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var (
+		config    = ghostAccountTestConfig()
+		from      = types.GhostAccountAddressOf(types.GhostSchemeSLHDSA, pub)
+		recipient = common.HexToAddress("0x00000000000000000000000000000000000000bb")
+		gspec     = &genesisT.Genesis{
+			Config: config,
+			Alloc: genesisT.GenesisAlloc{
+				from: {Balance: big.NewInt(1_000_000_000_000_000_000)},
+			},
+		}
+		engine     = beacon.New(ethash.NewFaker())
+		intrinsic  = vars.TxGas + ghostSLHDSAExtraGas
+		transferTx = func(genesis common.Hash, baseFee *big.Int, gas uint64) *types.Transaction {
+			signer := types.NewGhostAccountSigner(types.LatestSigner(config), genesis)
+			tx, err := types.SignGhostAccountTxSLHDSA(signer, &key, &types.GhostAccountTx{
+				ChainID:   config.ChainID,
+				GasTipCap: big.NewInt(1),
+				GasFeeCap: new(big.Int).Mul(baseFee, big.NewInt(2)),
+				Gas:       gas,
+				To:        &recipient,
+				Value:     big.NewInt(1000),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return tx
+		}
+	)
+	if intrinsic != vars.TxGas+126_240+ghost.AccountTxVerifyGasSLHDSA {
+		t.Fatalf("intrinsic gas %d", intrinsic)
+	}
+	var genesisHash common.Hash
+	_, blocks, receipts := GenerateChainWithGenesis(gspec, engine, 1, func(i int, b *BlockGen) {
+		b.SetPoS()
+		genesisHash = b.PrevBlock(-1).Hash()
+		b.AddTx(transferTx(genesisHash, b.BaseFee(), intrinsic))
+	})
+	if got := receipts[0][0].GasUsed; got != intrinsic {
+		t.Fatalf("transfer gas used %d, want %d", got, intrinsic)
+	}
+	chain, err := NewBlockChain(rawdb.NewMemoryDatabase(), nil, gspec, nil, engine, vm.Config{}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer chain.Stop()
+	if n, err := chain.InsertChain(blocks); err != nil {
+		t.Fatalf("block %d not imported: %v", n, err)
+	}
+	statedb, err := chain.State()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := statedb.GetBalance(recipient).Uint64(); got != 1000 {
+		t.Errorf("recipient balance %d, want 1000", got)
+	}
+	if got := statedb.GetNonce(from); got != 1 {
+		t.Errorf("sender nonce %d, want 1", got)
+	}
+
+	chain2, err := NewBlockChain(rawdb.NewMemoryDatabase(), nil, gspec, nil, engine, vm.Config{}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer chain2.Stop()
+	bad := GenerateBadBlock(chain2.Genesis(), engine, types.Transactions{transferTx(genesisHash, blocks[0].BaseFee(), intrinsic-1)}, config)
+	if _, err := chain2.InsertChain(types.Blocks{bad}); !errors.Is(err, ErrIntrinsicGas) {
+		t.Errorf("gas one below the intrinsic gas: import error %v, want %v", err, ErrIntrinsicGas)
 	}
 }

@@ -32,12 +32,18 @@ const (
 	// verifications, rounded up to a multiple of 1,000. The measurement is
 	// recorded in docs/account-transactions.md.
 	AccountTxVerifyGasMLDSA44 uint64 = 3_000
+
+	// AccountTxVerifyGasSLHDSA is VERIFY_GAS of scheme 0x0002,
+	// SLH-DSA-SHAKE-128s, measured by the same rule.
+	AccountTxVerifyGasSLHDSA uint64 = 12_000
 )
 
 // The bounds on the signature checks of account transactions in the pool and
 // on the wire (spec 09, sections 8.3 and 8.4). They are node settings, not
 // consensus constants. Each is set from the measurement recorded in
-// docs/account-transactions.md, and none is zero.
+// docs/account-transactions.md, taking the slowest verification of the
+// slower scheme, SLH-DSA-SHAKE-128s, as the cost of every one, and none is
+// zero.
 const (
 	// SigVerifyWorkers is the number of workers that verify the signatures of
 	// pool transactions. No more signatures are verified at once.
@@ -54,15 +60,15 @@ const (
 
 	// SigPeerBudget is the number of account transactions a peer may have
 	// verified per second, and announce for fetching.
-	SigPeerBudget = 200
+	SigPeerBudget = 50
 
 	// SigRPCConnBudget is the number of account transactions one RPC
 	// connection may submit per second.
-	SigRPCConnBudget = 300
+	SigRPCConnBudget = 80
 
 	// SigRPCBudget is the number of account transactions all RPC connections
 	// together may submit per second.
-	SigRPCBudget = 3000
+	SigRPCBudget = 800
 )
 
 // AccountTxVerifyGas returns VERIFY_GAS of a scheme, zero for a scheme whose
@@ -72,6 +78,8 @@ func AccountTxVerifyGas(scheme uint16) uint64 {
 	switch scheme {
 	case 0x0001:
 		return AccountTxVerifyGasMLDSA44
+	case 0x0002:
+		return AccountTxVerifyGasSLHDSA
 	}
 	return 0
 }

@@ -28,6 +28,8 @@ import (
 	"time"
 
 	"github.com/cloudflare/circl/sign/mldsa/mldsa44"
+	"github.com/cloudflare/circl/sign/slhdsa"
+	"github.com/cloudflare/circl/xof"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/rlp"
@@ -265,7 +267,7 @@ func TestGhostAccountTxStrictDecoding(t *testing.T) {
 		{"public key one byte long", set(10, mustRLP(t, append(common.CopyBytes(signed.PublicKey), 0))), nil},
 		{"signature one byte short", set(11, mustRLP(t, signed.Signature[:GhostMLDSA44SignatureSize-1])), nil},
 		{"signature one byte long", set(11, mustRLP(t, append(common.CopyBytes(signed.Signature), 0))), nil},
-		{"signature of the other scheme's length", set(11, mustRLP(t, make([]byte, GhostHashBasedSignatureSize))), nil},
+		{"signature of the other scheme's length", set(11, mustRLP(t, make([]byte, GhostSLHDSASignatureSize))), nil},
 	} {
 		items := ghostItems(t, signed)
 		if tc.edit != nil {
@@ -299,7 +301,7 @@ func TestGhostAccountTxSenderVectors(t *testing.T) {
 		"mldsa44-counting": {GhostSchemeMLDSA44, counting(GhostMLDSA44PublicKeySize)},
 		"mldsa44-zero":     {GhostSchemeMLDSA44, fill(GhostMLDSA44PublicKeySize, 0)},
 		"mldsa44-ones":     {GhostSchemeMLDSA44, fill(GhostMLDSA44PublicKeySize, 0xff)},
-		"scheme2-counting": {GhostSchemeHashBased, counting(GhostHashBasedPublicKeySize)},
+		"scheme2-counting": {GhostSchemeSLHDSA, counting(GhostSLHDSAPublicKeySize)},
 	}
 	sighashes := map[string][2]common.Hash{
 		"sighash-11-22": {common.BytesToHash(fill(32, 0x11)), common.BytesToHash(fill(32, 0x22))},
@@ -403,7 +405,7 @@ func TestGhostAccountTxSignatureBindsEveryField(t *testing.T) {
 
 	// The scheme is in the signed list: changing it changes the hash.
 	inner := signed.inner.copy().(*GhostAccountTx)
-	inner.Scheme = GhostScheme(GhostSchemeHashBased)
+	inner.Scheme = GhostScheme(GhostSchemeSLHDSA)
 	if signer.Hash(NewTx(inner)) == signer.Hash(signed) {
 		t.Error("the signature hash does not cover the scheme")
 	}
@@ -420,12 +422,12 @@ func TestGhostAccountTxRefusesUnknownScheme(t *testing.T) {
 		scheme     uint16
 		pubKeySize int
 		sigSize    int
-		decodes    bool // known by its lengths, refused by the signer
 	}{
-		{0x0000, GhostMLDSA44PublicKeySize, GhostMLDSA44SignatureSize, false},
-		{0x0002, GhostHashBasedPublicKeySize, GhostHashBasedSignatureSize, true},
-		{0x0003, GhostMLDSA44PublicKeySize, GhostMLDSA44SignatureSize, false},
-		{0xffff, GhostMLDSA44PublicKeySize, GhostMLDSA44SignatureSize, false},
+		{0x0000, GhostMLDSA44PublicKeySize, GhostMLDSA44SignatureSize},
+		{0x0000, GhostSLHDSAPublicKeySize, GhostSLHDSASignatureSize},
+		{0x0003, GhostMLDSA44PublicKeySize, GhostMLDSA44SignatureSize},
+		{0x0003, GhostSLHDSAPublicKeySize, GhostSLHDSASignatureSize},
+		{0xffff, GhostMLDSA44PublicKeySize, GhostMLDSA44SignatureSize},
 	} {
 		inner := ghostTestTxData(nil)
 		inner.Scheme = GhostScheme(tc.scheme)
@@ -438,18 +440,14 @@ func TestGhostAccountTxRefusesUnknownScheme(t *testing.T) {
 			t.Fatal(err)
 		}
 		var dec Transaction
-		err = dec.UnmarshalBinary(enc)
-		if tc.decodes && err != nil {
-			t.Errorf("scheme %#04x: not decoded: %v", tc.scheme, err)
-		}
-		if !tc.decodes && !errors.Is(err, ErrGhostAccountScheme) {
+		if err := dec.UnmarshalBinary(enc); !errors.Is(err, ErrGhostAccountScheme) {
 			t.Errorf("scheme %#04x: decoding error %v, want %v", tc.scheme, err, ErrGhostAccountScheme)
 		}
 		js, err := json.Marshal(tx)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := json.Unmarshal(js, &dec); !tc.decodes && !errors.Is(err, ErrGhostAccountScheme) {
+		if err := json.Unmarshal(js, &dec); !errors.Is(err, ErrGhostAccountScheme) {
 			t.Errorf("scheme %#04x: JSON decoding error %v, want %v", tc.scheme, err, ErrGhostAccountScheme)
 		}
 
@@ -520,6 +518,13 @@ func BenchmarkGhostAccountTxVerifySlowest(b *testing.B) {
 			}
 		}
 	}
+	ghostReportSlowest(b, times)
+}
+
+// ghostReportSlowest reports the slowest of the timed verifications, t_ms,
+// the median and the gas the slowest gives, ceil(t_ms * 10,000) rounded up to
+// a multiple of 1,000.
+func ghostReportSlowest(b *testing.B, times []time.Duration) {
 	sort.Slice(times, func(i, j int) bool { return times[i] < times[j] })
 	slowest := float64(times[len(times)-1].Nanoseconds()) / 1e6
 	gas := uint64(math.Ceil(slowest * 10_000))
@@ -528,6 +533,266 @@ func BenchmarkGhostAccountTxVerifySlowest(b *testing.B) {
 	b.ReportMetric(float64(times[len(times)/2].Nanoseconds())/1e6, "median-ms")
 	b.ReportMetric(float64(gas), "verify-gas")
 	b.Logf("%d verifications on %s/%s, %d CPUs, %s", len(times), runtime.GOOS, runtime.GOARCH, runtime.NumCPU(), runtime.Version())
+}
+
+// BenchmarkGhostAccountTxSLHDSAVerifySlowest is the measurement VERIFY_GAS of
+// SLH-DSA-SHAKE-128s is set from (spec 09, section 8.2): 1,000 verifications
+// of valid signatures and 1,000 of signatures with one bit changed, a
+// different bit each time, timed one by one. Signing is slow, so the
+// signatures are those of ghostSLHDSATimedKeys keys and transactions, each
+// verified in turn. Run it with
+//
+//	go test ./core/types/ -run '^$' -bench GhostAccountTxSLHDSAVerifySlowest -benchtime 1x
+func BenchmarkGhostAccountTxSLHDSAVerifySlowest(b *testing.B) {
+	var times []time.Duration
+	for n := 0; n < b.N; n++ {
+		times = append(times, ghostSLHDSAVerifyTimes(b, ghostSLHDSATimedKeys, 1000)...)
+	}
+	ghostReportSlowest(b, times)
+}
+
+// ghostSLHDSATimedKeys is the number of keys, and signed transactions, of
+// the SLH-DSA measurement.
+const ghostSLHDSATimedKeys = 10
+
+// ghostSLHDSAVerifyTimes signs one transaction with each of keys SLH-DSA keys
+// and times n verifications of valid signatures and n of invalid ones, one by
+// one, the public key decoding included.
+func ghostSLHDSAVerifyTimes(tb testing.TB, keys, n int) []time.Duration {
+	signer := ghostTestSigner()
+	ctx := []byte(GhostAccountTxContext)
+	txs := make([]*GhostAccountTx, keys)
+	for i := range txs {
+		data := ghostTestTxData(nil)
+		data.Nonce = uint64(i)
+		tx, err := SignGhostAccountTxSLHDSA(signer, ghostTestSLHDSAKey(tb, byte(i)), data)
+		if err != nil {
+			tb.Fatal(err)
+		}
+		txs[i] = tx.inner.(*GhostAccountTx)
+	}
+	times := make([]time.Duration, 0, 2*n)
+	for round := 0; round < 2; round++ {
+		for i := 0; i < n; i++ {
+			inner := txs[i%keys]
+			sig := inner.Signature
+			if round == 1 {
+				sig = common.CopyBytes(sig)
+				sig[(i*7919)%len(sig)] ^= 1 << (i % 8)
+			}
+			sighash := ghostAccountSigHash(ghostTestGenesis, inner.unsignedHash())
+			start := time.Now()
+			pk := slhdsa.PublicKey{ID: slhdsa.SHAKE_128s}
+			if err := pk.UnmarshalBinary(inner.PublicKey); err != nil {
+				tb.Fatal(err)
+			}
+			ok := slhdsa.Verify(&pk, slhdsa.NewMessage(sighash[:]), sig, ctx)
+			times = append(times, time.Since(start))
+			if ok != (round == 0) {
+				tb.Fatalf("round %d verification %d: unexpected result %v", round, i, ok)
+			}
+		}
+	}
+	return times
+}
+
+// ghostTestSLHDSAKey returns the SLH-DSA-SHAKE-128s key whose seeds are all
+// the byte seed.
+func ghostTestSLHDSAKey(tb testing.TB, seed byte) *slhdsa.PrivateKey {
+	tb.Helper()
+	_, sk, err := slhdsa.GenerateKey(bytes.NewReader(bytes.Repeat([]byte{seed}, 48)), slhdsa.SHAKE_128s)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return &sk
+}
+
+// TestGhostAccountTxSLHDSA checks scheme 0x0002, SLH-DSA-SHAKE-128s in pure
+// mode with the context ghost/tx/v1: a signed transaction verifies and keeps
+// its sender through the encodings, the signature binds the transaction, the
+// genesis and the context, and a key or signature of the other scheme is
+// refused by its length before any verification (QS-4).
+func TestGhostAccountTxSLHDSA(t *testing.T) {
+	if s := slhdsa.SHAKE_128s.Scheme(); s.PublicKeySize() != GhostSLHDSAPublicKeySize || s.SignatureSize() != GhostSLHDSASignatureSize {
+		t.Fatalf("SLH-DSA-SHAKE-128s has a %d-byte key and a %d-byte signature, scheme 0x0002 %d and %d",
+			s.PublicKeySize(), s.SignatureSize(), GhostSLHDSAPublicKeySize, GhostSLHDSASignatureSize)
+	}
+	signer := ghostTestSigner()
+	key := ghostTestSLHDSAKey(t, 1)
+	pub, err := key.PublicKey().MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	to := common.HexToAddress("0x00000000000000000000000000000000000000bb")
+	tx, err := SignGhostAccountTxSLHDSA(signer, key, ghostTestTxData(&to))
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheme, gotPub, sig, _ := tx.GhostAccountAuth()
+	if scheme != GhostSchemeSLHDSA || !bytes.Equal(gotPub, pub) || len(sig) != GhostSLHDSASignatureSize {
+		t.Fatalf("signed scheme %#04x, key %d bytes, signature %d bytes", scheme, len(gotPub), len(sig))
+	}
+	from, err := Sender(signer, tx)
+	if err != nil {
+		t.Fatalf("sender of the signed transaction: %v", err)
+	}
+	if want := GhostAccountAddressOf(GhostSchemeSLHDSA, pub); from != want {
+		t.Fatalf("sender %v, want %v", from, want)
+	}
+	if addr, err := GhostAccountAddress(signer, tx); err != nil || addr != from {
+		t.Fatalf("address %v %v, want %v", addr, err, from)
+	}
+
+	// The signature is pure SLH-DSA (FIPS 205, algorithm 24) over the
+	// signature hash with the context ghost/tx/v1, and with no other context.
+	sighash := signer.Hash(tx)
+	pk := slhdsa.PublicKey{ID: slhdsa.SHAKE_128s}
+	if err := pk.UnmarshalBinary(pub); err != nil {
+		t.Fatal(err)
+	}
+	if !slhdsa.Verify(&pk, slhdsa.NewMessage(sighash[:]), sig, []byte("ghost/tx/v1")) {
+		t.Fatal("the signature is not SLH-DSA over the signature hash with the context ghost/tx/v1")
+	}
+	if slhdsa.Verify(&pk, slhdsa.NewMessage(sighash[:]), sig, nil) {
+		t.Fatal("the signature verifies without its context")
+	}
+
+	// The encodings keep the transaction and its sender.
+	enc, err := tx.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dec Transaction
+	if err := dec.UnmarshalBinary(enc); err != nil {
+		t.Fatalf("decoding: %v", err)
+	}
+	if dec.Hash() != tx.Hash() {
+		t.Fatal("hash changed in the round trip")
+	}
+	if from2, err := Sender(signer, &dec); err != nil || from2 != from {
+		t.Fatalf("sender after decoding %v %v, want %v", from2, err, from)
+	}
+	js, err := json.Marshal(tx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]interface{}
+	if err := json.Unmarshal(js, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if fields["scheme"] != "0x2" || fields["publicKey"] != hexutil.Encode(pub) {
+		t.Fatalf("JSON scheme %v public key %v", fields["scheme"], fields["publicKey"])
+	}
+	var dec2 Transaction
+	if err := json.Unmarshal(js, &dec2); err != nil || dec2.Hash() != tx.Hash() {
+		t.Fatalf("JSON round trip: %v", err)
+	}
+
+	// The signature binds the transaction, the genesis and the context, and
+	// is not in prehash mode.
+	otherContext, err := slhdsa.SignRandomized(key, nil, slhdsa.NewMessage(sighash[:]), []byte("ghost/tx/v2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	preHash, err := slhdsa.NewPreHashWithXof(xof.SHAKE128)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preHash.Write(sighash[:])
+	preHashMsg, err := preHash.BuildMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	preHashSig, err := slhdsa.SignRandomized(key, nil, preHashMsg, []byte(GhostAccountTxContext))
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherKey, err := ghostTestSLHDSAKey(t, 2).PublicKey().MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		edit   func(tx *GhostAccountTx)
+		signer Signer
+	}{
+		{"nonce changed", func(tx *GhostAccountTx) { tx.Nonce++ }, nil},
+		{"value changed", func(tx *GhostAccountTx) { tx.Value = new(big.Int).Add(tx.Value, common.Big1) }, nil},
+		{"public key changed", func(tx *GhostAccountTx) { tx.PublicKey = common.CopyBytes(otherKey) }, nil},
+		{"first signature byte changed", func(tx *GhostAccountTx) {
+			tx.Signature = common.CopyBytes(tx.Signature)
+			tx.Signature[0] ^= 1
+		}, nil},
+		{"last signature byte changed", func(tx *GhostAccountTx) {
+			tx.Signature = common.CopyBytes(tx.Signature)
+			tx.Signature[GhostSLHDSASignatureSize-1] ^= 0x80
+		}, nil},
+		{"signed with another context", func(tx *GhostAccountTx) { tx.Signature = otherContext }, nil},
+		{"signed in prehash mode", func(tx *GhostAccountTx) { tx.Signature = preHashSig }, nil},
+		{"another genesis", func(tx *GhostAccountTx) {}, NewGhostAccountSigner(NewCancunSigner(ghostTestChainID), common.HexToHash("0x01"))},
+	} {
+		inner := tx.inner.copy().(*GhostAccountTx)
+		tc.edit(inner)
+		s := tc.signer
+		if s == nil {
+			s = signer
+		}
+		if _, err := s.Sender(NewTx(inner)); !errors.Is(err, ErrGhostAccountSignature) {
+			t.Errorf("%s: sender error %v, want %v", tc.name, err, ErrGhostAccountSignature)
+		}
+	}
+
+	// Only SLH-DSA-SHAKE-128s keys sign under scheme 0x0002.
+	_, fast, err := slhdsa.GenerateKey(bytes.NewReader(bytes.Repeat([]byte{1}, 48)), slhdsa.SHAKE_128f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SignGhostAccountTxSLHDSA(signer, &fast, ghostTestTxData(&to)); !errors.Is(err, ErrGhostAccountScheme) {
+		t.Errorf("signing with another SLH-DSA parameter set: %v, want %v", err, ErrGhostAccountScheme)
+	}
+
+	// QS-4: an ML-DSA-44 key or signature under scheme 0x0002, and an
+	// SLH-DSA key or signature under scheme 0x0001, is refused for its length
+	// before any verification, when decoded and by the signer.
+	mlTx := ghostTestSign(t, signer, ghostTestKey(1), ghostTestTxData(&to))
+	_, mlPub, mlSig, _ := mlTx.GhostAccountAuth()
+	for _, tc := range []struct {
+		name   string
+		scheme uint16
+		pub    []byte
+		sig    []byte
+	}{
+		{"ML-DSA-44 key and signature under 0x0002", GhostSchemeSLHDSA, mlPub, mlSig},
+		{"ML-DSA-44 signature under 0x0002", GhostSchemeSLHDSA, pub, mlSig},
+		{"ML-DSA-44 key under 0x0002", GhostSchemeSLHDSA, mlPub, sig},
+		{"SLH-DSA key and signature under 0x0001", GhostSchemeMLDSA44, pub, sig},
+		{"SLH-DSA signature under 0x0001", GhostSchemeMLDSA44, mlPub, sig},
+		{"SLH-DSA key under 0x0001", GhostSchemeMLDSA44, pub, mlSig},
+		{"0x0002 key one byte long", GhostSchemeSLHDSA, append(common.CopyBytes(pub), 0), sig},
+		{"0x0002 key one byte short", GhostSchemeSLHDSA, pub[:GhostSLHDSAPublicKeySize-1], sig},
+		{"0x0002 signature one byte long", GhostSchemeSLHDSA, pub, append(common.CopyBytes(sig), 0)},
+		{"0x0002 signature one byte short", GhostSchemeSLHDSA, pub, sig[:GhostSLHDSASignatureSize-1]},
+	} {
+		inner := tx.inner.copy().(*GhostAccountTx)
+		inner.Scheme = GhostScheme(tc.scheme)
+		inner.PublicKey = common.CopyBytes(tc.pub)
+		inner.Signature = common.CopyBytes(tc.sig)
+		bad := NewTx(inner)
+		if _, err := signer.Sender(bad); !errors.Is(err, ErrGhostAccountLength) || errors.Is(err, ErrInvalidSig) {
+			t.Errorf("%s: sender error %v, want %v", tc.name, err, ErrGhostAccountLength)
+		}
+		if _, err := GhostAccountAddress(signer, bad); !errors.Is(err, ErrGhostAccountLength) {
+			t.Errorf("%s: address error %v, want %v", tc.name, err, ErrGhostAccountLength)
+		}
+		enc, err := bad.MarshalBinary()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var dec Transaction
+		if err := dec.UnmarshalBinary(enc); !errors.Is(err, ErrGhostAccountLength) {
+			t.Errorf("%s: decoding error %v, want %v", tc.name, err, ErrGhostAccountLength)
+		}
+	}
 }
 
 // BenchmarkGhostAccountTxVerify measures one ML-DSA-44 verification of an

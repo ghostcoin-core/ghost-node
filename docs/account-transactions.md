@@ -46,14 +46,27 @@ a type `0x02` transaction, without `v`, `r` and `s`, and `scheme`,
 | Scheme | Algorithm | Public key | Signature | Accepted |
 |---|---|---|---|---|
 | `0x0001` | ML-DSA-44 (FIPS 204, pure mode) | 1,312 bytes | 2,420 bytes | yes |
-| `0x0002` | the hash-based scheme of spec 09 | 32 bytes | 7,856 bytes | no: decoded by its lengths, refused by the signer |
+| `0x0002` | SLH-DSA-SHAKE-128s (FIPS 205, pure mode) | 32 bytes | 7,856 bytes | yes |
 
 Scheme `0x0000` and every other value are refused when the transaction is
 decoded, before any signature is verified.
 
-The ML-DSA-44 verifier and signer are those of
-`github.com/cloudflare/circl` v1.6.1, package `sign/mldsa/mldsa44`, with the
-context string `ghost/tx/v1`. Signatures are hedged.
+The key and signature lengths are checked against the scheme before any
+signature is verified, when the transaction is decoded and again by the
+signer: an ML-DSA-44 key or signature under `0x0002`, or an SLH-DSA key or
+signature under `0x0001`, is refused with the length error and never reaches
+a verifier (QS-4, `TestGhostAccountTxSLHDSA` and `TestGhostPoolSLHDSA`).
+
+Both schemes come from `github.com/cloudflare/circl` v1.6.5, with the
+context string `ghost/tx/v1`:
+
+- ML-DSA-44: package `sign/mldsa/mldsa44`. Signatures are hedged.
+- SLH-DSA-SHAKE-128s: package `sign/slhdsa`, parameter set `SHAKE_128s`
+  only, pure mode: signing is FIPS 205 algorithm 22 and verification
+  algorithm 24, over the 32-byte `sighash` as the message. A signature in
+  prehash mode (HashSLH-DSA) or with any other context does not verify.
+  `types.SignGhostAccountTxSLHDSA` signs with randomized signatures, and
+  refuses a key of any other parameter set.
 
 ## Sender and signature
 
@@ -67,7 +80,7 @@ unsigned = rlp([chain_id, nonce, max_priority_fee_per_gas, max_fee_per_gas,
 sighash  = K("ghost/account-tx/v1", 0x52, genesis_hash, keccak256(unsigned))
 ```
 
-The signature is ML-DSA-44 over the 32-byte `sighash`. There is no key
+The signature is of the transaction's scheme over the 32-byte `sighash`. There is no key
 registry and no public key recovery: the sender is derived from the key the
 transaction carries. The vectors of `TestGhostAccountTxSenderVectors` are
 computed independently of the node by the pure Keccak-256 of
@@ -92,7 +105,9 @@ intrinsic_gas = type 0x02 intrinsic gas
 ```
 
 For ML-DSA-44 the extra part is 16 * 3,734 + 3,000 = 62,744 gas, so a plain
-transfer takes 83,744 gas. The extra part is carried as
+transfer takes 83,744 gas. For SLH-DSA-SHAKE-128s it is
+16 * (2 + 32 + 7,856) = 126,240 byte gas plus 12,000, 138,240 gas, so a
+plain transfer takes 159,240 gas. The extra part is carried as
 `core.Message.ExtraIntrinsicGas`, set by `core.TransactionToMessage` and
 added where the state transition adds the intrinsic gas. The constants are in
 `params/ghost/accounttx.go`.
@@ -128,6 +143,31 @@ or memory outlier of the machine, which the rule takes on purpose. The value
 should be measured again on the slowest machine Ghost means to support before
 launch; it is a consensus constant and changes only with a network upgrade.
 `BenchmarkGhostAccountTxVerify` measures the typical verification.
+
+`BenchmarkGhostAccountTxSLHDSAVerifySlowest`, beside it, is the same
+measurement for SLH-DSA-SHAKE-128s. Signing takes some 0.55 s, so it signs
+10 transactions with 10 keys and verifies them in turn: 1,000 verifications
+of valid signatures and 1,000 of signatures with one bit changed, a
+different bit each time, timed one by one, the public key decoding included.
+It was run three times; the table takes the slowest of the 6,000.
+
+| | |
+|---|---|
+| Scheme | `0x0002`, SLH-DSA-SHAKE-128s |
+| Machine | linux/arm64 virtual machine, 16 CPUs, implementer `0x61` (Apple silicon), the machine of the ML-DSA-44 measurement |
+| Go | go1.26.9 |
+| circl | v1.6.5 |
+| Verifications | 3 runs of 2,000 (1,000 valid, 1,000 invalid) |
+| Fastest | 0.4565 ms |
+| Median | 0.5359, 0.5390 and 0.5372 ms |
+| Slowest of each run | 0.9998, 1.1932 and 0.9968 ms |
+| Slowest, `t_ms` | 1.1932 ms |
+| `ceil(t_ms * 10,000)` | 11,932 |
+| `VERIFY_GAS[0x0002]` | **12,000** |
+
+On the same runs ML-DSA-44 verified with a median of 0.046 to 0.048 ms and a
+slowest of 0.24 to 0.32 ms, as recorded above: `VERIFY_GAS[0x0001]` stays
+3,000.
 
 ## The transaction pool
 
@@ -209,20 +249,27 @@ stale nonce or a balance already spent, is not held against the peer.
 
 The bounds are node settings, not consensus constants, in
 `params/ghost/accounttx.go`. None is zero (`TestSignatureLimitsAreSet`).
-They are derived from the measurement of ML-DSA-44 verification recorded
-above for `VERIFY_GAS` (`BenchmarkGhostAccountTxVerifySlowest`: 2,000
-verifications on the linux/arm64 machine of 16 CPUs; median 0.0454 ms,
-slowest 0.2865 ms), taking the slowest verification as the cost of every
-one:
+They are derived from the slower of the two schemes' slowest verification,
+recorded above for `VERIFY_GAS`: SLH-DSA-SHAKE-128s, slowest 1.1932 ms
+(`BenchmarkGhostAccountTxSLHDSAVerifySlowest`, 6,000 verifications on the
+linux/arm64 machine of 16 CPUs; median 0.537 ms), against 0.2865 ms for
+ML-DSA-44. Any transaction may carry the dearer scheme, so every slot of the
+queue is paid at that cost:
 
 | Constant | Value | Derivation |
 |---|---|---|
-| `SigVerifyWorkers` | 4 | a quarter of the 16 CPUs, leaving the rest to block processing and the network: 4 / 0.2865 ms = 13,961 verifications per second at worst, 88,105 at the median |
-| `SigVerifyQueue` | 256 | the last check of a full queue waits 256 × 0.2865 ms / 4 = 18.3 ms at worst, 2.9 ms at the median; 192 slots for peers, 64 for RPC |
-| `SigPeerBudget` | 200 per second | the peers' 3 quarters of the workers, 10,471 per second at worst, over the default 50 peers is 209, rounded down |
-| `SigRPCBudget` | 3,000 per second | the RPC quarter of the workers, 3,490 per second at worst, rounded down |
-| `SigRPCConnBudget` | 300 per second | a tenth of the RPC budget, so that one connection cannot take it all |
+| `SigVerifyWorkers` | 4 | a quarter of the 16 CPUs, leaving the rest to block processing and the network: 4 / 1.1932 ms = 3,352 verifications per second at worst, 7,449 at the SLH-DSA median, 88,105 at the ML-DSA-44 median |
+| `SigVerifyQueue` | 256 | the last check of a full queue waits 256 × 1.1932 ms / 4 = 76.4 ms at worst, 34.4 ms at the SLH-DSA median; 192 slots for peers, 64 for RPC |
+| `SigPeerBudget` | 50 per second | the peers' 3 quarters of the workers, 2,514 per second at worst, over the default 50 peers is 50.3, rounded down |
+| `SigRPCBudget` | 800 per second | the RPC quarter of the workers, 838 per second at worst, rounded down |
+| `SigRPCConnBudget` | 80 per second | a tenth of the RPC budget, so that one connection cannot take it all |
 | `SigFailureCacheSize` | 4,096 | entries of 96 bytes, well under 1 MiB; a peer that sends a failure is disconnected, so the cache serves the same failure sent again by other peers |
+
+`TestSignatureLimitsAreSet` checks the peer and RPC budgets against the
+dearest scheme's `VERIFY_GAS`, which bounds its slowest verification from
+above. An SLH-DSA transaction carries 7,890 bytes of scheme, key and
+signature; a plain transfer is some 8 KB, far under the pool's cap of
+128 KiB a transaction (`TestGhostPoolSLHDSA`).
 
 The values should be measured again on the slowest machine Ghost means to
 support before launch, as `VERIFY_GAS` is. `TestSignatureFloodStaysWithinWorkers`
@@ -330,5 +377,5 @@ separate work.
 ## Not yet in this node
 
 Refusing the secp256k1 transaction types, the signature-verify contract,
-the node's own signing and its remote procedure calls, and scheme `0x0002`
-are separate pieces of work.
+the node's own signing and its remote procedure calls, and signing with
+SLH-DSA keys outside tests are separate pieces of work.

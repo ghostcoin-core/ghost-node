@@ -23,6 +23,7 @@ import (
 	"math/big"
 
 	"github.com/cloudflare/circl/sign/mldsa/mldsa44"
+	"github.com/cloudflare/circl/sign/slhdsa"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/rlp"
@@ -41,16 +42,14 @@ const (
 	// GhostSchemeMLDSA44 is ML-DSA-44 (FIPS 204), pure mode.
 	GhostSchemeMLDSA44 uint16 = 0x0001
 
-	// GhostSchemeHashBased is the hash-based scheme of spec 09. It is known by
-	// its lengths, so that its transactions decode, but every one is refused
-	// until the node verifies it.
-	GhostSchemeHashBased uint16 = 0x0002
+	// GhostSchemeSLHDSA is SLH-DSA-SHAKE-128s (FIPS 205), pure mode.
+	GhostSchemeSLHDSA uint16 = 0x0002
 
 	// The key and signature lengths of each scheme.
-	GhostMLDSA44PublicKeySize   = 1312
-	GhostMLDSA44SignatureSize   = 2420
-	GhostHashBasedPublicKeySize = 32
-	GhostHashBasedSignatureSize = 7856
+	GhostMLDSA44PublicKeySize = 1312
+	GhostMLDSA44SignatureSize = 2420
+	GhostSLHDSAPublicKeySize  = 32
+	GhostSLHDSASignatureSize  = 7856
 
 	// GhostAccountAddressTag is the hash tag of the sender's address.
 	GhostAccountAddressTag = "ghost/account-address/v1"
@@ -58,9 +57,13 @@ const (
 	// GhostAccountTxTag is the hash tag of the signature hash.
 	GhostAccountTxTag = "ghost/account-tx/v1"
 
-	// GhostAccountTxContext is the ML-DSA context string of the signature.
+	// GhostAccountTxContext is the context string of the signature, for
+	// ML-DSA-44 and SLH-DSA alike.
 	GhostAccountTxContext = "ghost/tx/v1"
 )
+
+// ghostSLHDSAParams is the one SLH-DSA parameter set of scheme 0x0002.
+const ghostSLHDSAParams = slhdsa.SHAKE_128s
 
 var (
 	// ErrGhostAccountScheme is returned for a scheme the node does not know
@@ -117,10 +120,38 @@ func ghostSchemeSizes(id uint16) (pubKey, sig int, ok bool) {
 	switch id {
 	case GhostSchemeMLDSA44:
 		return GhostMLDSA44PublicKeySize, GhostMLDSA44SignatureSize, true
-	case GhostSchemeHashBased:
-		return GhostHashBasedPublicKeySize, GhostHashBasedSignatureSize, true
+	case GhostSchemeSLHDSA:
+		return GhostSLHDSAPublicKeySize, GhostSLHDSASignatureSize, true
 	}
 	return 0, 0, false
+}
+
+// ghostVerify verifies the signature of a sighash under a scheme. The scheme
+// and the lengths of the key and signature must have been checked: a key or
+// signature of another scheme never reaches a verifier.
+func ghostVerify(scheme uint16, publicKey []byte, sighash common.Hash, sig []byte) error {
+	ctx := []byte(GhostAccountTxContext)
+	switch scheme {
+	case GhostSchemeMLDSA44:
+		var pk mldsa44.PublicKey
+		if err := pk.UnmarshalBinary(publicKey); err != nil {
+			return fmt.Errorf("%w: %v", ErrGhostAccountLength, err)
+		}
+		if !mldsa44.Verify(&pk, sighash[:], ctx, sig) {
+			return ErrGhostAccountSignature
+		}
+		return nil
+	case GhostSchemeSLHDSA:
+		pk := slhdsa.PublicKey{ID: ghostSLHDSAParams}
+		if err := pk.UnmarshalBinary(publicKey); err != nil {
+			return fmt.Errorf("%w: %v", ErrGhostAccountLength, err)
+		}
+		if !slhdsa.Verify(&pk, slhdsa.NewMessage(sighash[:]), sig, ctx) {
+			return ErrGhostAccountSignature
+		}
+		return nil
+	}
+	return fmt.Errorf("%w: scheme %#04x", ErrGhostAccountScheme, scheme)
 }
 
 // checkShape checks what can be checked of the transaction alone: a known
@@ -140,17 +171,6 @@ func (tx *GhostAccountTx) checkShape() error {
 		if v == nil || v.Sign() < 0 || v.BitLen() > 256 {
 			return ErrGhostAccountField
 		}
-	}
-	return nil
-}
-
-// checkAccepted is checkShape, and the scheme is one the node verifies.
-func (tx *GhostAccountTx) checkAccepted() error {
-	if err := tx.checkShape(); err != nil {
-		return err
-	}
-	if id := tx.SchemeID(); id != GhostSchemeMLDSA44 {
-		return fmt.Errorf("%w: scheme %#04x is not accepted yet", ErrGhostAccountScheme, id)
 	}
 	return nil
 }
@@ -302,7 +322,7 @@ func GhostAccountAddress(signer Signer, tx *Transaction) (common.Address, error)
 	if !ok {
 		return common.Address{}, ErrTxTypeNotSupported
 	}
-	if err := inner.checkAccepted(); err != nil {
+	if err := inner.checkShape(); err != nil {
 		return common.Address{}, err
 	}
 	chainID := signer.ChainID()
@@ -341,13 +361,9 @@ func (s ghostAccountSigner) Sender(tx *Transaction) (common.Address, error) {
 		return common.Address{}, err
 	}
 	inner := tx.inner.(*GhostAccountTx)
-	var pk mldsa44.PublicKey
-	if err := pk.UnmarshalBinary(inner.PublicKey); err != nil {
-		return common.Address{}, fmt.Errorf("%w: %v", ErrGhostAccountLength, err)
-	}
 	sighash := ghostAccountSigHash(s.genesis, inner.unsignedHash())
-	if !mldsa44.Verify(&pk, sighash[:], []byte(GhostAccountTxContext), inner.Signature) {
-		return common.Address{}, ErrGhostAccountSignature
+	if err := ghostVerify(inner.SchemeID(), inner.PublicKey, sighash, inner.Signature); err != nil {
+		return common.Address{}, err
 	}
 	return from, nil
 }
@@ -384,6 +400,36 @@ func (s ghostAccountSigner) Equal(s2 Signer) bool {
 // signer, which must come from NewGhostAccountSigner. The scheme and public
 // key fields are set from the key; the signature is hedged (FIPS 204).
 func SignGhostAccountTx(signer Signer, key *mldsa44.PrivateKey, txdata *GhostAccountTx) (*Transaction, error) {
+	pub := key.Public().(*mldsa44.PublicKey).Bytes()
+	return signGhostAccountTx(signer, GhostSchemeMLDSA44, pub, txdata, func(sighash []byte) ([]byte, error) {
+		sig := make([]byte, mldsa44.SignatureSize)
+		if err := mldsa44.SignTo(key, sighash, []byte(GhostAccountTxContext), true, sig); err != nil {
+			return nil, err
+		}
+		return sig, nil
+	})
+}
+
+// SignGhostAccountTxSLHDSA signs txdata with an SLH-DSA-SHAKE-128s key for
+// the chain of signer, which must come from NewGhostAccountSigner. The scheme
+// and public key fields are set from the key; the signature is randomized
+// (FIPS 205, algorithm 22).
+func SignGhostAccountTxSLHDSA(signer Signer, key *slhdsa.PrivateKey, txdata *GhostAccountTx) (*Transaction, error) {
+	if key.ID != ghostSLHDSAParams {
+		return nil, fmt.Errorf("%w: SLH-DSA key of %v, want %v", ErrGhostAccountScheme, key.ID, ghostSLHDSAParams)
+	}
+	pub, err := key.PublicKey().MarshalBinary()
+	if err != nil {
+		return nil, err
+	}
+	return signGhostAccountTx(signer, GhostSchemeSLHDSA, pub, txdata, func(sighash []byte) ([]byte, error) {
+		return slhdsa.SignRandomized(key, nil, slhdsa.NewMessage(sighash), []byte(GhostAccountTxContext))
+	})
+}
+
+// signGhostAccountTx sets the scheme and public key of a copy of txdata and
+// signs its signature hash with sign.
+func signGhostAccountTx(signer Signer, scheme uint16, pub []byte, txdata *GhostAccountTx, sign func(sighash []byte) ([]byte, error)) (*Transaction, error) {
 	s, ok := signer.(ghostAccountSigner)
 	if !ok {
 		return nil, fmt.Errorf("%w: signer %T does not take account transactions", ErrTxTypeNotSupported, signer)
@@ -392,12 +438,12 @@ func SignGhostAccountTx(signer Signer, key *mldsa44.PrivateKey, txdata *GhostAcc
 		return nil, ErrGhostAccountGenesis
 	}
 	inner := txdata.copy().(*GhostAccountTx)
-	inner.Scheme = GhostScheme(GhostSchemeMLDSA44)
-	inner.PublicKey = key.Public().(*mldsa44.PublicKey).Bytes()
+	inner.Scheme = GhostScheme(scheme)
+	inner.PublicKey = pub
 	inner.Signature = nil
 	sighash := ghostAccountSigHash(s.genesis, inner.unsignedHash())
-	sig := make([]byte, mldsa44.SignatureSize)
-	if err := mldsa44.SignTo(key, sighash[:], []byte(GhostAccountTxContext), true, sig); err != nil {
+	sig, err := sign(sighash[:])
+	if err != nil {
 		return nil, err
 	}
 	inner.Signature = sig
