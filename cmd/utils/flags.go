@@ -540,6 +540,11 @@ var (
 		Usage:    "Disable remote sealing verification",
 		Category: flags.MinerCategory,
 	}
+	MinerNoEmptyFlag = &cli.BoolFlag{
+		Name:     "miner.noempty",
+		Usage:    "Skip the empty pre-seal block and seal only full blocks (for test networks)",
+		Category: flags.MinerCategory,
+	}
 	MinerNewPayloadTimeout = &cli.DurationFlag{
 		Name:     "miner.newpayload-timeout",
 		Usage:    "Specify the maximum time allowance for creating a new payload",
@@ -1546,6 +1551,9 @@ func setMiner(ctx *cli.Context, cfg *miner.Config) {
 	}
 	if ctx.IsSet(MinerNoVerifyFlag.Name) {
 		cfg.Noverify = ctx.Bool(MinerNoVerifyFlag.Name)
+	}
+	if ctx.IsSet(MinerNoEmptyFlag.Name) {
+		cfg.DisablePreseal = ctx.Bool(MinerNoEmptyFlag.Name)
 	}
 	if ctx.IsSet(MinerNewPayloadTimeout.Name) {
 		cfg.NewPayloadTimeout = ctx.Duration(MinerNewPayloadTimeout.Name)

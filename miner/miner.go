@@ -57,6 +57,8 @@ type Config struct {
 	Recommit   time.Duration  // The time interval for miner to re-create mining work.
 	Noverify   bool           // Disable remote mining solution verification(only useful in ethash).
 
+	DisablePreseal bool `toml:",omitempty"` // Skip the empty pre-seal block and seal only full blocks (test networks).
+
 	NewPayloadTimeout time.Duration // The maximum time allowance for creating a new payload
 }
 
