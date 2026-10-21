@@ -36,6 +36,13 @@ const (
 	// AccountTxVerifyGasSLHDSA is VERIFY_GAS of scheme 0x0002,
 	// SLH-DSA-SHAKE-128s, measured by the same rule.
 	AccountTxVerifyGasSLHDSA uint64 = 12_000
+
+	// SigVerifyWordGas is SIGVERIFY_WORD_GAS, the gas the signature-verify
+	// precompile (0x51) charges for each 32-byte word of the message, on top
+	// of the scheme's verification gas: ceil(t_ms * AccountTxGasPerMs), and at
+	// least 1, for the slowest of the measured costs of one extra word. The
+	// measurement is recorded in docs/account-transactions.md.
+	SigVerifyWordGas uint64 = 4
 )
 
 // The bounds on the signature checks of account transactions in the pool and

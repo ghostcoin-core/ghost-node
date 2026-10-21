@@ -12,7 +12,7 @@ these tables do not list. `tests/ghostprofile_test.go` reads the last table
 and checks that every fixture fork it names exists. When the launch genesis
 exists, the same tests are pointed at it.
 
-Every status is one of three words:
+Every status is one of these words:
 
 * `on`: the chain runs it from block 0.
 * `off`: the node has the code, as upstream does, but the chain configuration
@@ -20,12 +20,20 @@ Every status is one of three words:
   configuration that does.
 * `absent`: the node has no way to switch it on. For an opcode, the byte is an
   invalid opcode on a Ghost chain.
+* `failing`: only for a precompile Ghost removes. The address stays a
+  precompile in every configuration, so it is warm from the start of every
+  transaction, but every call to it fails and uses all the gas given to it,
+  and a call that sends value fails and moves nothing.
 
 ## Forks and EIPs
 
 A fork row stands for every execution change in that fork. The difficulty
 bomb delays and difficulty formulas of those forks do not apply: blocks are
-sealed with RandomX and its own difficulty rule. Shanghai and Cancun are only
+sealed with RandomX and its own difficulty rule. The BN254 precompiles that
+Byzantium adds (EIP-196 and EIP-197, transitions EIP-212 and EIP-213) and
+Istanbul reprices (EIP-1108) are not among them: on Ghost the addresses fail
+in every configuration, whatever those transitions say (see
+[Precompiles](#precompiles)). Shanghai and Cancun are only
 partly on, so they are listed EIP by EIP rather than as forks. The fixture
 fork is the execution-fixture configuration that exercises the row; see
 [Execution fixtures](#execution-fixtures).
@@ -55,7 +63,7 @@ fork is the execution-fixture configuration that exercises the row; see
 | EIP-4788 (beacon block root contract) | off | none |
 | EIP-7516 (BLOBBASEFEE) | off | none |
 | EIP-4399 (PREVRANDAO) | off | none |
-| EIP-2537 (BLS12-381 precompiles) | off | none |
+| EIP-2537 (BLS12-381 precompiles; the node has no code for them, so the transition switches nothing on) | off | none |
 | EIP-2315 (subroutines) | off | none |
 | EIP-7702 (set code for externally owned accounts) | absent | none |
 | EIP-2935 (historical block hashes in state) | absent | none |
@@ -106,27 +114,65 @@ in Frontier with the gas rules of the forks above.
 
 ## Precompiles
 
+Ghost removes the elliptic-curve precompiles, which a quantum computer
+breaks, and adds a quantum-safe signature-verify precompile (spec 09,
+section 7). The removed ones are `failing`, not absent: a call to them fails
+the same way in every configuration, and their addresses keep their warm
+status.
+
 | Address | Name | Status |
 |---|---|---|
-| 0x01 | ECRECOVER | on |
+| 0x01 | ECRECOVER | failing |
 | 0x02 | SHA256 | on |
 | 0x03 | RIPEMD160 | on |
 | 0x04 | IDENTITY | on |
 | 0x05 | MODEXP (EIP-2565 pricing) | on |
-| 0x06 | BN254 ADD | on |
-| 0x07 | BN254 MUL | on |
-| 0x08 | BN254 PAIRING | on |
+| 0x06 | BN254 ADD | failing |
+| 0x07 | BN254 MUL | failing |
+| 0x08 | BN254 PAIRING | failing |
 | 0x09 | BLAKE2F | on |
-| 0x0a | POINT EVALUATION (EIP-4844); the draft EIP-2537 code also uses this address | off |
-| 0x0b | BLS12-381 (EIP-2537 draft) | off |
-| 0x0c | BLS12-381 (EIP-2537 draft) | off |
-| 0x0d | BLS12-381 (EIP-2537 draft) | off |
-| 0x0e | BLS12-381 (EIP-2537 draft) | off |
-| 0x0f | BLS12-381 (EIP-2537 draft) | off |
-| 0x10 | BLS12-381 (EIP-2537 draft) | off |
-| 0x11 | BLS12-381 (EIP-2537 draft) | off |
-| 0x12 | BLS12-381 (EIP-2537 draft) | off |
+| 0x0a | POINT EVALUATION (EIP-4844) | failing |
+| 0x0b | BLS12-381 (EIP-2537) | absent |
+| 0x0c | BLS12-381 (EIP-2537) | absent |
+| 0x0d | BLS12-381 (EIP-2537) | absent |
+| 0x0e | BLS12-381 (EIP-2537) | absent |
+| 0x0f | BLS12-381 (EIP-2537) | absent |
+| 0x10 | BLS12-381 (EIP-2537) | absent |
+| 0x11 | BLS12-381 (EIP-2537) | absent |
+| 0x51 | SIGVERIFY (quantum-safe signature verify) | on |
 | 0x0100 | P256VERIFY (EIP-7951) | absent |
+
+### The signature-verify precompile
+
+The precompile at `0x0000000000000000000000000000000000000051` verifies a
+signature of one of the account transaction's schemes
+([account transactions](account-transactions.md)). Its input is
+
+```
+scheme (2 bytes, big-endian) || ctx_len (1 byte) || ctx || public_key || signature || message
+```
+
+The public key and the signature have the exact lengths of the scheme, and
+the message is the rest of the input. The output is 32 bytes: 1 for a valid
+signature, 0 for an invalid one.
+
+The call fails, and uses all the gas given to it, for a scheme that is not
+accepted, for an input too short for its header, context, key and signature,
+and for a context that begins with `ghost/tx/`, which is reserved for
+transaction signatures. Only scheme `0x0001`, ML-DSA-44, is accepted: the
+precompile takes the schemes and their verification gas from the account
+transaction, so the two accept the same schemes. Scheme `0x0002` fails until
+the node verifies it.
+
+The gas is charged before the signature is verified:
+
+```
+gas = VERIFY_GAS[scheme] + SIGVERIFY_WORD_GAS * ceil(len(message) / 32)
+```
+
+with `VERIFY_GAS[0x0001] = 3,000` and `SIGVERIFY_WORD_GAS = 4`, both in
+`params/ghost/accounttx.go` and measured as described in
+[account transactions](account-transactions.md).
 
 ## JSON-RPC
 
@@ -159,8 +205,12 @@ WebSocket serve only the namespaces named with `--http.api` and `--ws.api`.
   before the Merge. It is not randomness, and miners influence it. Contracts
   must not rely on `block.prevrandao` (or `block.difficulty`) for randomness.
 * **No blobs.** There are no blob transactions: `BLOBHASH` and `BLOBBASEFEE`
-  are invalid opcodes and the point-evaluation precompile is off.
-* **The precompile set** is exactly the one listed above: 0x01 to 0x09.
+  are invalid opcodes and the point-evaluation precompile fails.
+* **The precompile set** is exactly the one listed above: 0x01 to 0x0a and
+  0x51. Of these, ECRECOVER (0x01), the BN254 precompiles (0x06 to 0x08) and
+  point evaluation (0x0a) always fail, so contracts that recover secp256k1
+  signers or verify BN254 proofs do not work on Ghost. Signatures are checked
+  with the signature-verify precompile at 0x51 instead.
 * **No withdrawals and no beacon block root.** Blocks carry no withdrawals and
   there is no EIP-4788 contract.
 * **The commit entry address cannot be called.** Every `CALL`, `CALLCODE`,
