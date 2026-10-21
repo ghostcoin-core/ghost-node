@@ -14,7 +14,9 @@ in `core/ghostpriv`, with the hooks in `core/state_transition.go`,
 
 Hashes are `K(tag, inputs...)`, the tagged Keccak-256 of `core/ghosttree`.
 Amounts are 32-byte big-endian words, valid only below `2^96`
-(`V_MAX = 2^96 - 1`). `COIN` is the two bytes `0x01 0x01`.
+(`V_MAX = 2^96 - 1`). `COIN`, the type of a coin commitment, is two bytes
+that follow the commitment format version (spec 01): `0x02 0x01` at version 2
+(`ghostpriv.CoinV2`) and `0x01 0x01` at version 1 (`ghostpriv.Coin`).
 
 ## Reserved addresses
 
@@ -52,10 +54,14 @@ commitments stay valid:
 | 34 | 156 | note |
 
 The node computes the commitment itself,
-`C = K("ghost/coin-commitment/v1", COIN, F, v)`, from `F` and `v` only; the
-salt is already in `F` and the node never uses it. The sender chooses neither
-the type nor the commitment. For `F = b44338ab…0c4d8b` and `v = 10^18` it is
-`562d92a9…029458` (the test has the full values).
+`C = K("ghost/coin-commitment/v1", COIN, F, v)`, from `F` and `v` only, with
+the `COIN` of the data's version: `0x02 0x01` for the 206 bytes of version 2,
+`0x01 0x01` for the 190 bytes of version 1 (`ghostpriv.CommitmentVersion`).
+The salt is already in `F` and the node never uses it. The sender chooses
+neither the type nor the commitment. For `F = b44338ab…0c4d8b` and
+`v = 10^18` at version 1 it is `562d92a9…029458`; the salted vectors of spec 01
+are checked the same way (`TestLeafMatchesProofCrateVectors` has the full
+values).
 
 The checks run in this order and stop at the first failure; each failure makes
 the transaction invalid, so a block carrying it is invalid:
@@ -147,10 +153,14 @@ roots is left for later.
 
 `K("ghost/coin-reveal-binding/v1", fields)` over 415 bytes: chain id (8),
 version (2), domain (32, the genesis block hash), statement `0x01`, statement
-version `0x01`, type `COIN` (2), purpose `0x01`, root, marker and remainder
-(32 each), recipient (20), out and fee (32 each), rule (32 zero bytes) and the
-remainder's note (156). The node fills in the chain id, version, domain and
-rule itself; the proof field is not covered.
+version `0x01`, type `0x01 0x01` (2), purpose `0x01`, root, marker and
+remainder (32 each), recipient (20), out and fee (32 each), rule (32 zero
+bytes) and the remainder's note (156). The node fills in the chain id,
+version, domain and rule itself; the proof field is not covered. The binding's
+type field is part of the binding layout and does not change with the
+commitment format version. The remainder is the commitment the proof opens: a
+remainder is always version 2 (spec 03), `K("ghost/coin-commitment/v1",
+0x02 0x01, F, v)`, and the node appends it to the coin tree as given.
 
 ### Fee
 

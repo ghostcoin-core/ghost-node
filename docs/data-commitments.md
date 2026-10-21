@@ -18,9 +18,11 @@ The node never sees the file, its key, its digits, its plaintext or a
 fingerprint of its content, and nothing about them is stored, derived or
 checked on chain. A commit or a note carries no storage location.
 
-`DATA` is the two bytes `0x02 0x01`, the type of a data commitment; `COIN` is
-`0x01 0x01`. No tag of the data rules is shared with a coin rule, so no coin
-value can be used as a data value:
+`DATA`, the type of a data commitment, is two bytes that follow the
+commitment format version (spec 01): `0x02 0x02` at version 2
+(`ghostpriv.DataV2`) and `0x01 0x02` at version 1 (`ghostpriv.Data`); `COIN`
+is `0x02 0x01` and `0x01 0x01`. No tag of the data rules is shared with a coin
+rule, so no coin value can be used as a data value:
 
 | Tag | Use |
 |---|---|
@@ -67,8 +69,10 @@ still accepted unchanged because version 1 commitments stay valid:
 
 The salt is carried in the clear so that a wallet can read it back with the
 leaf and note. The node computes the commitment itself,
-`D = K("ghost/data-commitment/v1", DATA, F_d)` (`ghostpriv.DataCommitment`),
-from `F_d` only; the salt is already in `F_d` and the node never uses it. The
+`D = K("ghost/data-commitment/v1", DATA, F_d)`
+(`ghostpriv.DataCommitmentVersion`), from `F_d` only, with the `DATA` of the
+data's version: `0x02 0x02` for the 206 bytes of version 2, `0x01 0x02` for
+the 190 bytes of version 1. The salt is already in `F_d` and the node never uses it. The
 commitment carries no amount and never equals a coin commitment.
 
 The checks run in this order and stop at the first failure; each failure makes
@@ -175,7 +179,8 @@ balance and no running total changes.
 
 `K("ghost/data-reveal-binding/v1", fields)` over 164 bytes: chain id (8),
 version (2), domain (32, the genesis block hash), transaction type `0x51`,
-statement `0x02`, statement version `0x01`, type `DATA` (2), purpose (1), the
+statement `0x02`, statement version `0x01`, type field `0x02 0x01` (2, part
+of the binding layout, not a leaf type), purpose (1), the
 verifier-or-recipient field (20), root and marker (32 each) and fee (32). The
 node fills in the chain id, version, domain, transaction type, statement and
 type itself and never takes the digest from the sender; the proof field is not

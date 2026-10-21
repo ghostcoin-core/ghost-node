@@ -346,7 +346,10 @@ func ApplyReveal(st StateDB, env *BlockEnv, verifier Verifier, envelope []byte) 
 		st.RevertToSnapshot(snap)
 		return err
 	}
-	// Check 12: the coin tree takes the remainder, or nothing is written.
+	// Check 12: the coin tree takes the remainder, or nothing is written. The
+	// remainder is the commitment the proof opens: a remainder is always
+	// version 2 (spec 03), K(TagCommitment, CoinV2, F, v), and the node
+	// appends it as given.
 	res, err := ghosttree.Append(st, ghosttree.Coin, height, r.Remainder)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrRevealTree, err)
@@ -512,6 +515,12 @@ func (r *DataReveal) purpose() (byte, error) {
 	}
 }
 
+// dataBindingType is the type field of a data reveal's binding input. It is
+// part of the binding layout the data reveal statement fixes, not a leaf
+// type: it stays the two bytes the binding has always carried and does not
+// follow Data, the type of a version 1 data leaf.
+var dataBindingType = [2]byte{0x02, 0x01}
+
 // BindingDigest returns the binding digest a data reveal's proof must commit
 // to, K("ghost/data-reveal-binding/v1", fields) over the 164 bytes of
 // BindingInput. Its tag, statement and type differ from the coin reveal's,
@@ -523,7 +532,7 @@ func (r *DataReveal) BindingDigest(chainID uint64, genesis common.Hash) common.H
 // BindingInput returns the 164 bytes the data binding digest hashes: the
 // chain id (8), the version (2), the domain, which is the genesis hash (32),
 // the transaction type 0x51 (1), the statement 0x02 and its version (1
-// each), the type DATA (2), the purpose (1, the last byte of the purpose
+// each), the type field (2, dataBindingType), the purpose (1, the last byte of the purpose
 // field), the verifier-or-recipient field (20), the root and marker (32
 // each) and the fee (32). The node supplies the chain id, version, domain,
 // transaction type, statement and type; the proof is not covered.
@@ -537,7 +546,7 @@ func (r *DataReveal) BindingInput(chainID uint64, genesis common.Hash) []byte {
 	b = binary.BigEndian.AppendUint16(b, Version)
 	b = append(b, genesis[:]...)
 	b = append(b, types.GhostDataRevealTxType, statementDataReveal, statementVersion)
-	b = append(b, Data[:]...)
+	b = append(b, dataBindingType[:]...)
 	b = append(b, r.Purpose[31])
 	b = append(b, r.Verifier[:]...)
 	b = append(b, r.Root[:]...)
