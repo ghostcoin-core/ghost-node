@@ -178,13 +178,22 @@ func TestQSRecordDropped(t *testing.T) {
 	})
 
 	t.Run("malformed", func(t *testing.T) {
-		for name, enc := range map[string][]byte{
-			"short key":       func() []byte { r := *good; r.PublicKey = r.PublicKey[1:]; return r.Encode() }(),
-			"short signature": func() []byte { r := *good; r.Signature = r.Signature[1:]; return r.Encode() }(),
-			"bad ip":          func() []byte { r := *good; r.IP = net.IP{1, 2, 3}; return r.Encode() }(),
+		shortKey, shortSig, badIP := *good, *good, *good
+		shortKey.PublicKey = good.PublicKey[1:]
+		shortSig.Signature = good.Signature[1:]
+		badIP.IP = net.IP{1, 2, 3}
+		extra, err := rlp.EncodeToBytes([]interface{}{good.Seq, good.Scheme, good.PublicKey, good.IP, good.TCP, good.UDP, good.ForkID, good.Signature, uint(1)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cases := map[string][]byte{
+			"short key":       shortKey.Encode(),
+			"short signature": shortSig.Encode(),
+			"bad ip":          badIP.Encode(),
 			"trailing bytes":  append(good.Encode(), 0x80),
-			"extra field":     func() []byte { b, _ := rlp.EncodeToBytes([]interface{}{good.Seq, good.Scheme, good.PublicKey, good.IP, good.TCP, good.UDP, good.ForkID, good.Signature, uint(1)}); return b }(),
-		} {
+			"extra field":     extra,
+		}
+		for name, enc := range cases {
 			if _, err := DecodeQSRecord(enc); err == nil {
 				t.Errorf("%s: record decoded", name)
 			}
