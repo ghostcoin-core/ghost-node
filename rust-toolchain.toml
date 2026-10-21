@@ -1,0 +1,9 @@
+# The Rust toolchain that builds the reveal proof verifier (ghostverifier/),
+# which every release links. The verifier's bytes depend on the compiler, so
+# a build on any machine must use this exact release, never the one the host
+# happens to have: CI runners on two image versions (Rust 1.99.0 and 1.99.1)
+# built two different geth executables from the same commit. rustup reads
+# this file from the directory build/ci.go runs cargo in, the repository root.
+[toolchain]
+channel = "1.99.1"
+profile = "minimal"
