@@ -885,6 +885,13 @@ func (w *worker) commitUncle(env *environment, uncle *types.Header) error {
 	if env.family.Contains(hash) {
 		return errors.New("uncle already included")
 	}
+	// Ask the engine whether the block may carry the uncle: an engine that
+	// refuses uncles would refuse the whole block, and every block after it
+	// while the uncle is kept.
+	candidate := types.NewBlockWithHeader(env.header).WithBody(nil, append(env.unclelist(), uncle))
+	if err := w.engine.VerifyUncles(w.chain, candidate); err != nil {
+		return err
+	}
 	env.uncles[hash] = uncle
 	return nil
 }
@@ -1052,6 +1059,13 @@ func (w *worker) commitReveals(env *environment, reveals []*types.Transaction, i
 			continue
 		}
 		env.tcount++
+	}
+	// A new head may have come while the last reveal was applied: report it,
+	// so a build on the old head is discarded even with no transaction to add.
+	if interrupt != nil {
+		if signal := interrupt.Load(); signal != commitInterruptNone {
+			return signalToErr(signal)
+		}
 	}
 	return nil
 }
@@ -1440,7 +1454,9 @@ func (w *worker) commitWork(interrupt *atomic.Int32, noempty bool, timestamp int
 	// Create an empty block based on temporary copied state for
 	// sealing in advance without waiting block execution finished.
 	if !noempty && !w.noempty.Load() {
-		w.commit(work.copy(), nil, false, start)
+		if err := w.commit(work.copy(), nil, false, start); err != nil {
+			log.Warn("Failed to commit empty sealing block", "number", work.header.Number, "err", err)
+		}
 	}
 	// Fill pending transactions from the txpool into the block.
 	err = w.fillTransactions(interrupt, work)
@@ -1472,7 +1488,9 @@ func (w *worker) commitWork(interrupt *atomic.Int32, noempty bool, timestamp int
 		return
 	}
 	// Submit the generated block for consensus sealing.
-	w.commit(work.copy(), w.fullTaskHook, true, start)
+	if err := w.commit(work.copy(), w.fullTaskHook, true, start); err != nil {
+		log.Warn("Failed to commit sealing block", "number", work.header.Number, "err", err)
+	}
 
 	// Swap out the old work with the new one, terminating any leftover
 	// prefetcher processes in the mean time and starting a new one.
