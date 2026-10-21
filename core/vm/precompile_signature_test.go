@@ -135,11 +135,11 @@ func validSigInput(t testing.TB, ctx string, msg []byte) []byte {
 func callerCode(target common.Address, innerGas uint32) []byte {
 	code := []byte{
 		byte(CALLDATASIZE), byte(PUSH1), 0, byte(PUSH1), 0, byte(CALLDATACOPY),
-		byte(PUSH1), 0x20, // retSize
-		byte(PUSH1), 0x00, // retOffset
+		byte(PUSH1), 0x20,  // retSize
+		byte(PUSH1), 0x00,  // retOffset
 		byte(CALLDATASIZE), // argsSize
-		byte(PUSH1), 0x00, // argsOffset
-		byte(PUSH1), 0x00, // value
+		byte(PUSH1), 0x00,  // argsOffset
+		byte(PUSH1), 0x00,  // value
 		byte(PUSH20),
 	}
 	code = append(code, target.Bytes()...)
