@@ -22,12 +22,15 @@ import (
 	"errors"
 	"math/big"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/ghostpriv"
 	"github.com/ethereum/go-ethereum/core/ghosttree"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params/ghost"
 )
@@ -404,19 +407,50 @@ func TestDataLifecycleCRD6(t *testing.T) {
 	requireErr(t, v.verify(forged), errHoldProof, "a forged proof opening a coin leaf")
 }
 
-// raiseGasLimit mines until a block holds two data reveals.
-func raiseGasLimit(t *testing.T, s *scenario) {
-	t.Helper()
-	for i := 0; s.node(0).head().GasLimit < 2*types.GhostDataRevealGas; i++ {
-		if i == 500 {
-			t.Fatalf("gas limit %d after %d blocks", s.node(0).head().GasLimit, i)
-		}
-		s.net.mine(s.node(i), blockPlan{coinbase: address("gas filler"), gasTarget: 2*types.GhostDataRevealGas + 1_000_000})
+// withGasLimit is block with its gas limit set outright and sealed again,
+// which may be a limit no node accepts.
+func (n *node) withGasLimit(block *types.Block, gasLimit uint64) *types.Block {
+	n.t.Helper()
+	header := block.Header()
+	header.GasLimit = gasLimit
+	return n.seal(block.WithSeal(header))
+}
+
+// rejectAboveMaxGasLimit imports a block on the node's head, which must
+// refuse it for a gas limit above the consensus maximum, leaving the head
+// where it was.
+func (n *node) rejectAboveMaxGasLimit(block *types.Block) {
+	n.t.Helper()
+	head := n.head()
+	if block.GasLimit() <= ghost.MaxBlockGasLimit {
+		n.t.Fatalf("node %s: gas limit %d is not above the consensus maximum", n.name, block.GasLimit())
 	}
+	_, err := n.chain.InsertChain(types.Blocks{block})
+	if err == nil || !strings.Contains(err.Error(), "gas limit above the consensus maximum") {
+		n.t.Fatalf("node %s importing block %d: error %v, want the gas limit above the consensus maximum", n.name, block.NumberU64(), err)
+	}
+	if n.head().Hash() != head.Hash() {
+		n.t.Fatalf("node %s: the head moved to the rejected block", n.name)
+	}
+}
+
+// process runs the node's block processing over a block on its head, against
+// a copy of the head state, without the header checks.
+func (n *node) process(block *types.Block) error {
+	n.t.Helper()
+	parent := n.chain.GetHeader(block.ParentHash(), block.NumberU64()-1)
+	if parent == nil {
+		n.t.Fatalf("node %s: no parent for block %d", n.name, block.NumberU64())
+	}
+	_, _, _, err := core.NewStateProcessor(n.chain.Config(), n.chain, n.engine).Process(block, n.stateAt(parent).Copy(), vm.Config{})
+	return err
 }
 
 // TestDataLifecycleCRD7 refuses a second reveal and a revocation of a spent
 // marker, in a later block and in the same block, and the block carrying it.
+// A block holding two data reveals is above the consensus maximum gas limit,
+// so the same-block case is checked both at import, where the gas limit
+// refuses it, and by block processing alone, where the marker does.
 func TestDataLifecycleCRD7(t *testing.T) {
 	s := newScenario(t)
 	h := s.commitFile(s.node(0), "CR-D7", testFile("CR-D7"))
@@ -432,13 +466,20 @@ func TestDataLifecycleCRD7(t *testing.T) {
 
 	// In the same block as the first spend of a fresh marker.
 	h2 := s.commitFile(s.node(0), "CR-D7 same block", testFile("CR-D7 same block"))
-	raiseGasLimit(t, s)
+	if 2*types.GhostDataRevealGas <= ghost.MaxBlockGasLimit {
+		t.Fatalf("the consensus maximum %d holds two data reveals", ghost.MaxBlockGasLimit)
+	}
 	w2 := s.wallet(h2)
 	root = *miner.head().DataTreeRoot
 	first := dataRevealTx(t, w2.dataReveal(miner, root, ghostpriv.PurposeReveal, verifier))
 	for _, purpose := range []byte{ghostpriv.PurposeReveal, ghostpriv.PurposeRevoke} {
 		second := dataRevealTx(t, w2.dataReveal(miner, root, purpose, address("CR-D7 second")))
-		s.rejectTx(miner, ghostpriv.ErrDataRevealMarker, []*types.Transaction{first}, second)
+		block := miner.mine(blockPlan{coinbase: address("miner " + miner.name), txs: []*types.Transaction{first}, unchecked: []*types.Transaction{second}})
+		block = miner.withGasLimit(block, 2*types.GhostDataRevealGas+1_000_000)
+		for _, n := range s.net.nodes {
+			n.rejectAboveMaxGasLimit(block)
+			requireErr(t, n.process(block), ghostpriv.ErrDataRevealMarker, "node "+n.name+": processing the block holding both data reveals")
+		}
 	}
 	for _, n := range s.net.nodes {
 		if ghosttree.IsSpent(n.headState(), ghosttree.Data, w2.marker()) {

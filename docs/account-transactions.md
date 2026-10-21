@@ -230,8 +230,59 @@ floods the pool from 24 peers at once and checks that no more signatures are
 verified at once than there are workers, that a transaction beyond the
 peers' share is dropped unverified, and that none is verified twice.
 
+## Signatures in a block
+
+A block's signatures are checked only after its seal and header checks pass
+(spec 09, section 8.3, item 7). On import (`core/blockchain.go`), the sender
+recovery of a block, which verifies the signatures of its account
+transactions, starts only once the engine's result for the block's header,
+the seal check included, came back clean; a block whose header fails has
+none of its signatures verified. The signatures of a block are verified in
+parallel on the workers of `core.SenderCacher`, one per CPU, with the
+block's own signer bound to the chain's genesis, and the senders are cached
+in the transactions, so executing the block does not verify them again.
+`TestBlockSignaturesVerifiedOnlyAfterSeal` holds the header results back and
+checks that no signature is verified before a block's result, that the
+signatures of a block whose header passed are, and that none of a block
+whose seal failed is.
+
+## Block gas limit and message size
+
+The consensus maximum block gas limit is 30,000,000 gas, `MaxBlockGasLimit`
+in `params/ghost/gaslimit.go`. Spec 09, section 8.4, asks for a limit under
+41,943,040 (10 MiB at 4 gas per zero calldata byte) minus the header and RLP
+overhead; 30,000,000 is also the default gas limit of the internal network.
+
+- The Ghost engine (`consensus/randomx`) refuses a header whose gas limit is
+  above it (`TestGasLimitAboveConsensusMaximumRejected`), whatever the step
+  from its parent. The older engines keep their own rule.
+- The miner clamps its target gas ceiling to it when it prepares a block
+  (`miner/worker.go`), so a block it builds never votes the limit above it,
+  whatever `--miner.gaslimit` asks for (`TestMinerNeverVotesAboveMaxGasLimit`).
+
+QS-9 (`TestMaxBlockFitsMessageCap`, `eth/protocols/eth`) builds the block
+with the most bytes at that limit: a zero calldata byte costs 4 gas, less per
+byte than any other part of a transaction, and each transaction costs 83,744
+gas of overhead for some 3,800 bytes, so the most bytes come from one account
+transaction whose calldata is all zeros and fills the block. It checks every
+message that carries the block, and the pooled transactions reply, against
+the message cap of 10 MiB (10,485,760 bytes). Measured sizes:
+
+| Message | Bytes | Under the cap by |
+|---|---|---|
+| The block: 30,000,000 gas used, 7,479,064 calldata bytes | 7,483,375 | |
+| New block message, the largest total difficulty a peer accepts (100 bits) | 7,483,393 | 3,002,367 |
+| Block bodies response, the largest body alone | 7,482,880 | 3,002,880 |
+| Block bodies response, the largest body after one of 2 MiB less one byte | 9,580,031 | 905,729 |
+| Pooled transactions reply, transactions of 128 KiB, the largest the pool takes | 2,097,233 | 8,388,527 |
+
+The serving handler stops adding bodies or transactions to a reply once it
+holds 2 MiB, so its largest reply is the largest item after just under
+2 MiB: the second bodies response above. Any larger block gas limit narrows
+the 905,729-byte margin by a quarter byte per gas.
+
 ## Not yet in this node
 
 Refusing the secp256k1 transaction types, the signature-verify contract,
-the bounds on the signatures of a block, the node's own signing and RPC, and
-scheme `0x0002` are separate pieces of work.
+the node's own signing and its remote procedure calls, and scheme `0x0002`
+are separate pieces of work.

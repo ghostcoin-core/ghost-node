@@ -17,12 +17,15 @@
 package lifecycle
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/ghostpriv"
 	"github.com/ethereum/go-ethereum/core/ghosttree"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/core/vm"
+	"github.com/ethereum/go-ethereum/params/ghost"
 	"github.com/holiman/uint256"
 )
 
@@ -152,10 +155,50 @@ func TestBoundaryFeeUsesWholeBalance(t *testing.T) {
 	}
 }
 
+// withGasLimit is block with its gas limit set outright and sealed again,
+// which may be a limit no node accepts.
+func (n *node) withGasLimit(block *types.Block, gasLimit uint64) *types.Block {
+	n.t.Helper()
+	header := block.Header()
+	header.GasLimit = gasLimit
+	return n.seal(block.WithSeal(header))
+}
+
+// rejectAboveMaxGasLimit imports a block on the node's head, which must
+// refuse it for a gas limit above the consensus maximum, leaving the head
+// where it was.
+func (n *node) rejectAboveMaxGasLimit(block *types.Block) {
+	n.t.Helper()
+	head := n.head()
+	if block.GasLimit() <= ghost.MaxBlockGasLimit {
+		n.t.Fatalf("node %s: gas limit %d is not above the consensus maximum", n.name, block.GasLimit())
+	}
+	_, err := n.chain.InsertChain(types.Blocks{block})
+	if err == nil || !strings.Contains(err.Error(), "gas limit above the consensus maximum") {
+		n.t.Fatalf("node %s importing block %d: error %v, want the gas limit above the consensus maximum", n.name, block.NumberU64(), err)
+	}
+	if n.head().Hash() != head.Hash() {
+		n.t.Fatalf("node %s: the head moved to the rejected block", n.name)
+	}
+}
+
+// process runs the node's block processing over a block on its head, against
+// a copy of the head state, without the header checks.
+func (n *node) process(block *types.Block) error {
+	n.t.Helper()
+	parent := n.chain.GetHeader(block.ParentHash(), block.NumberU64()-1)
+	if parent == nil {
+		n.t.Fatalf("node %s: no parent for block %d", n.name, block.NumberU64())
+	}
+	_, _, _, err := core.NewStateProcessor(n.chain.Config(), n.chain, n.engine).Process(block, n.stateAt(parent).Copy(), vm.Config{})
+	return err
+}
+
 // TestBoundaryCompetingReveals reveals one marker twice: as two blocks on
-// two branches, each valid on its own; as one block holding both, which is
-// invalid; and as the second reveal in a later block, which is refused. The
-// network then settles on one branch, whose reveal alone stands.
+// two branches, each valid on its own; as one block holding both, which the
+// gas limit and the marker each make invalid; and as the second reveal in a
+// later block, which is refused. The network then settles on one branch,
+// whose reveal alone stands.
 func TestBoundaryCompetingReveals(t *testing.T) {
 	s := newScenario(t)
 	c := s.owner.coin(0, ghostAmount(5, 1))
@@ -184,23 +227,21 @@ func TestBoundaryCompetingReveals(t *testing.T) {
 		n.reject(both, core.ErrGasLimitReached)
 	}
 
-	// The miners raise the gas limit until two reveals fit: then the marker
-	// alone makes the block invalid.
-	for i := 0; third.head().GasLimit < 2*ghostpriv.GasPriv; i++ {
-		if i == 500 {
-			t.Fatalf("gas limit %d after %d blocks", third.head().GasLimit, i)
-		}
-		s.net.mine(s.node(i), blockPlan{coinbase: filler, gasTarget: 2*ghostpriv.GasPriv + 1_000_000})
-	}
+	// A gas limit that holds two reveals is above the consensus maximum, so
+	// every node refuses a block holding both on its header alone.
 	s.net.alignWindow(filler)
 	s.net.converged()
 	r1, r2 = pair()
-	both = third.mine(blockPlan{coinbase: filler, txs: []*types.Transaction{r1.tx}, unchecked: []*types.Transaction{r2.tx}})
-	if both.GasLimit() < 2*ghostpriv.GasPriv {
-		t.Fatalf("gas limit %d does not hold two reveals", both.GasLimit())
+	if 2*ghostpriv.GasPriv <= ghost.MaxBlockGasLimit {
+		t.Fatalf("the consensus maximum %d holds two reveals", ghost.MaxBlockGasLimit)
 	}
+	both = third.withGasLimit(third.mine(blockPlan{coinbase: filler, txs: []*types.Transaction{r1.tx}, unchecked: []*types.Transaction{r2.tx}}), 2*ghostpriv.GasPriv+1_000_000)
 	for _, n := range s.net.nodes {
-		n.reject(both, ghostpriv.ErrRevealMarker)
+		n.rejectAboveMaxGasLimit(both)
+	}
+	// Past the header check, the marker alone makes that block invalid.
+	for _, n := range s.net.nodes {
+		requireErr(t, n.process(both), ghostpriv.ErrRevealMarker, "node "+n.name+": processing the block holding both reveals")
 	}
 
 	// Two blocks on two branches, each valid on its own.

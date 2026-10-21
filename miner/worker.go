@@ -38,6 +38,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/params/ghost"
 	"github.com/ethereum/go-ethereum/params/mutations"
 	"github.com/ethereum/go-ethereum/params/types/ctypes"
 	"github.com/ethereum/go-ethereum/params/vars"
@@ -1209,11 +1210,15 @@ func (w *worker) prepareWork(genParams *generateParams) (*environment, error) {
 		}
 		timestamp = parent.Time + 1
 	}
+	// The target gas ceiling never exceeds the consensus maximum, so that a
+	// block built here never votes the gas limit above it.
+	gasCeil := min(w.config.GasCeil, ghost.MaxBlockGasLimit)
+
 	// Construct the sealing block header.
 	header := &types.Header{
 		ParentHash: parent.Hash(),
 		Number:     new(big.Int).Add(parent.Number, common.Big1),
-		GasLimit:   core.CalcGasLimit(parent.GasLimit, w.config.GasCeil),
+		GasLimit:   core.CalcGasLimit(parent.GasLimit, gasCeil),
 		Time:       timestamp,
 		Coinbase:   genParams.coinbase,
 	}
@@ -1230,7 +1235,7 @@ func (w *worker) prepareWork(genParams *generateParams) (*environment, error) {
 		header.BaseFee = eip1559.CalcBaseFee(w.chainConfig, parent)
 		if !w.chainConfig.IsEnabled(w.chainConfig.GetEIP1559Transition, parent.Number) {
 			parentGasLimit := parent.GasLimit * w.chainConfig.GetElasticityMultiplier()
-			header.GasLimit = core.CalcGasLimit(parentGasLimit, w.config.GasCeil)
+			header.GasLimit = core.CalcGasLimit(parentGasLimit, gasCeil)
 		}
 	}
 	// Apply EIP-4844.
