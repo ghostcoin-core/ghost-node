@@ -144,6 +144,9 @@ func testCallTracerParity(tracerName string, dirPath string, t *testing.T) {
 			continue
 		}
 		t.Run(camel(strings.TrimSuffix(file.Name(), ".json")), func(t *testing.T) {
+			if reason, ok := removedPrecompileFixtures[file.Name()]; ok {
+				t.Skip(reason)
+			}
 			t.Parallel()
 
 			err := callTracerParityTestRunner(tracerName, file.Name(), dirPath, t)
