@@ -21,8 +21,8 @@ the private key is encrypted and on disk uses another JSON encoding.
 
 The crypto is documented at https://github.com/ethereum/wiki/wiki/Web3-Secret-Storage-Definition
 
-The encrypted secret is the 32-byte ML-DSA-44 seed of the account key, and
-the file carries a scheme field set to 1 next to the fields of that layout.
+An ML-DSA-44 account key file keeps that layout around the 32-byte seed of
+the key and adds a scheme field set to 1.
 
 */
 
@@ -31,7 +31,6 @@ package keystore
 import (
 	"bytes"
 	"crypto/aes"
-	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -43,6 +42,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/math"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/google/uuid"
 	"golang.org/x/crypto/pbkdf2"
@@ -183,63 +183,71 @@ func EncryptDataV3(data, auth []byte, scryptN, scryptP int) (CryptoJSON, error) 
 }
 
 // EncryptKey encrypts a key using the specified scrypt parameters into a json
-// blob that can be decrypted later on. The blob holds the encrypted ML-DSA-44
-// seed and the scheme field set to 1.
+// blob that can be decrypted later on.
 func EncryptKey(key *Key, auth string, scryptN, scryptP int) ([]byte, error) {
-	cryptoStruct, err := EncryptDataV3(key.Seed[:], []byte(auth), scryptN, scryptP)
+	if key.isMLDSA() {
+		return encryptMLDSAKey(key, auth, scryptN, scryptP)
+	}
+	keyBytes := math.PaddedBigBytes(key.PrivateKey.D, 32)
+	cryptoStruct, err := EncryptDataV3(keyBytes, []byte(auth), scryptN, scryptP)
 	if err != nil {
 		return nil, err
 	}
-	scheme := KeyScheme
 	encryptedKeyJSONV3 := encryptedKeyJSONV3{
-		hex.EncodeToString(key.Address[:]),
-		cryptoStruct,
-		key.Id.String(),
-		version,
-		&scheme,
+		Address: hex.EncodeToString(key.Address[:]),
+		Crypto:  cryptoStruct,
+		Id:      key.Id.String(),
+		Version: version,
 	}
 	return json.Marshal(encryptedKeyJSONV3)
 }
 
-// DecryptKey decrypts an account key from a json blob, returning the key
-// itself. A blob without the scheme field, of another scheme, of the version 1
-// format, or whose address is not the address of the key it holds (a
-// secp256k1 key) is refused with ErrNotAccountKey.
+// DecryptKey decrypts a key from a json blob, returning the private key itself.
+// A blob with the scheme field holds an ML-DSA-44 account key.
 func DecryptKey(keyjson []byte, auth string) (*Key, error) {
 	// Parse the json into a simple map to fetch the key version
 	m := make(map[string]interface{})
 	if err := json.Unmarshal(keyjson, &m); err != nil {
 		return nil, err
 	}
+	// Depending on the version try to parse one way or another
+	var (
+		keyBytes, keyId []byte
+		err             error
+	)
 	if version, ok := m["version"].(string); ok && version == "1" {
-		return nil, fmt.Errorf("%w: version 1 key file", ErrNotAccountKey)
+		k := new(encryptedKeyJSONV1)
+		if err := json.Unmarshal(keyjson, k); err != nil {
+			return nil, err
+		}
+		keyBytes, keyId, err = decryptKeyV1(k, auth)
+	} else {
+		k := new(encryptedKeyJSONV3)
+		if err := json.Unmarshal(keyjson, k); err != nil {
+			return nil, err
+		}
+		if k.Scheme != nil {
+			return decryptMLDSAKey(k, auth)
+		}
+		keyBytes, keyId, err = decryptKeyV3(k, auth)
 	}
-	k := new(encryptedKeyJSONV3)
-	if err := json.Unmarshal(keyjson, k); err != nil {
-		return nil, err
-	}
-	// The scheme is checked before the password is tried.
-	if err := checkScheme(k.Scheme); err != nil {
-		return nil, err
-	}
-	seed, keyId, err := decryptKeyV3(k, auth)
+	// Handle any decryption errors and return the key
 	if err != nil {
 		return nil, err
 	}
-	defer clear(seed)
+	key, err := crypto.ToECDSA(keyBytes)
+	if err != nil {
+		return nil, fmt.Errorf("invalid key: %w", err)
+	}
 	id, err := uuid.FromBytes(keyId)
 	if err != nil {
 		return nil, fmt.Errorf("invalid UUID: %w", err)
 	}
-	key, err := newKeyFromSeed(seed, id)
-	if err != nil {
-		return nil, err
-	}
-	if err := checkAddress(k.Address, key); err != nil {
-		zeroKey(key)
-		return nil, err
-	}
-	return key, nil
+	return &Key{
+		Id:         id,
+		Address:    crypto.PubkeyToAddress(key.PublicKey),
+		PrivateKey: key,
+	}, nil
 }
 
 func DecryptDataV3(cryptoJson CryptoJSON, auth string) ([]byte, error) {
@@ -294,16 +302,42 @@ func decryptKeyV3(keyProtected *encryptedKeyJSONV3, auth string) (keyBytes []byt
 	return plainText, keyId, err
 }
 
-func aesCTRXOR(key, inText, iv []byte) ([]byte, error) {
-	// AES-128 is selected due to size of encryptKey.
-	aesBlock, err := aes.NewCipher(key)
+func decryptKeyV1(keyProtected *encryptedKeyJSONV1, auth string) (keyBytes []byte, keyId []byte, err error) {
+	keyUUID, err := uuid.Parse(keyProtected.Id)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	stream := cipher.NewCTR(aesBlock, iv)
-	outText := make([]byte, len(inText))
-	stream.XORKeyStream(outText, inText)
-	return outText, err
+	keyId = keyUUID[:]
+	mac, err := hex.DecodeString(keyProtected.Crypto.MAC)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	iv, err := hex.DecodeString(keyProtected.Crypto.CipherParams.IV)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	cipherText, err := hex.DecodeString(keyProtected.Crypto.CipherText)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	derivedKey, err := getKDFKey(keyProtected.Crypto, auth)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	calculatedMAC := crypto.Keccak256(derivedKey[16:32], cipherText)
+	if !bytes.Equal(calculatedMAC, mac) {
+		return nil, nil, ErrDecrypt
+	}
+
+	plainText, err := aesCBCDecrypt(crypto.Keccak256(derivedKey[:16])[:16], cipherText, iv)
+	if err != nil {
+		return nil, nil, err
+	}
+	return plainText, keyId, err
 }
 
 func getKDFKey(cryptoJSON CryptoJSON, auth string) ([]byte, error) {

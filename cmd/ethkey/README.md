@@ -1,10 +1,7 @@
 ethkey
 ======
 
-ethkey is a simple command-line tool for working with Ghost account keyfiles.
-An account key is an ML-DSA-44 key pair (scheme 0x0001), held in the keyfile
-as the 32-byte seed it is derived from, encrypted with a password; the keyfile
-carries a scheme field set to 1. Keyfiles that hold secp256k1 keys are refused.
+ethkey is a simple command-line tool for working with Ethereum keyfiles.
 
 
 # Usage
@@ -12,27 +9,36 @@ carries a scheme field set to 1. Keyfiles that hold secp256k1 keys are refused.
 ### `ethkey generate`
 
 Generate a new keyfile.
-If you want to use an existing key seed in the keyfile, it can be
-specified by setting `--seed` with the location of the file containing the
-32-byte seed in hex.
+If you want to use an existing private key to use in the keyfile, it can be 
+specified by setting `--privatekey` with the location of the file containing the 
+private key.
 
 
 ### `ethkey inspect <keyfile>`
 
-Print various information about the keyfile: the address, the scheme and the
-public key.
-The key seed can be printed by using the `--private` flag;
+Print various information about the keyfile.
+Private key information can be printed by using the `--private` flag;
 make sure to use this feature with great caution!
+
+
+### `ethkey signmessage <keyfile> <message/file>`
+
+Sign the message with a keyfile.
+It is possible to refer to a file containing the message.
+To sign a message contained in a file, use the `--msgfile` flag.
+
+
+### `ethkey verifymessage <address> <signature> <message/file>`
+
+Verify the signature of the message.
+It is possible to refer to a file containing the message.
+To sign a message contained in a file, use the --msgfile flag.
 
 
 ### `ethkey changepassword <keyfile>`
 
 Change the password of a keyfile.
 use the `--newpasswordfile` to point to the new password file.
-
-
-There are no message signing commands: they signed secp256k1 message
-signatures, and no quantum-safe message signature is specified.
 
 
 ## Passwords

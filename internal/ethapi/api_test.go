@@ -31,7 +31,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cloudflare/circl/sign/mldsa/mldsa44"
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/accounts/keystore"
@@ -418,35 +417,14 @@ func allBlobTxs(addr common.Address, config ctypes.ChainConfigurator) []txData {
 	}
 }
 
-// testAccountSeed is the ML-DSA-44 seed of the keystore account of the test
-// backend.
-var testAccountSeed = common.FromHex("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
-
-// testFundedAddress is the address the genesis of the test backend funds. It
-// is the address the backend's account had when it held a secp256k1 key,
-// which the expected block and receipt fixtures are built on; it is not in
-// the keystore.
-var testFundedAddress = func() common.Address {
-	key, _ := crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
-	return crypto.PubkeyToAddress(key.PublicKey)
-}()
-
-// testAccountAddress returns the address of the keystore account of the test
-// backend.
-func testAccountAddress() common.Address {
-	var seed [keystore.SeedSize]byte
-	copy(seed[:], testAccountSeed)
-	pub, _ := mldsa44.NewKeyFromSeed(&seed)
-	return types.GhostAccountAddressOf(types.GhostSchemeMLDSA44, pub.Bytes())
-}
-
 func newTestAccountManager(t *testing.T) (*accounts.Manager, accounts.Account) {
 	var (
-		dir = t.TempDir()
-		am  = accounts.NewManager(&accounts.Config{InsecureUnlockAllowed: true})
-		b   = keystore.NewKeyStore(dir, 2, 1)
+		dir        = t.TempDir()
+		am         = accounts.NewManager(&accounts.Config{InsecureUnlockAllowed: true})
+		b          = keystore.NewKeyStore(dir, 2, 1)
+		testKey, _ = crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
 	)
-	acc, err := b.ImportSeed(testAccountSeed, "")
+	acc, err := b.ImportECDSA(testKey, "")
 	if err != nil {
 		t.Fatalf("failed to create test account: %v", err)
 	}
@@ -462,8 +440,7 @@ type testBackend struct {
 	chain   *core.BlockChain
 	pending *types.Block
 	accman  *accounts.Manager
-	acc     accounts.Account // funded in the genesis, not in the keystore
-	qacc    accounts.Account // the unlocked ML-DSA-44 account of the keystore
+	acc     accounts.Account
 }
 
 func newTestBackend(t *testing.T, n int, gspec *genesisT.Genesis, engine consensus.Engine, generator func(i int, b *core.BlockGen)) *testBackend {
@@ -476,8 +453,7 @@ func newTestBackend(t *testing.T, n int, gspec *genesisT.Genesis, engine consens
 			TrieDirtyDisabled: true, // Archive mode
 		}
 	)
-	accman, qacc := newTestAccountManager(t)
-	acc := accounts.Account{Address: testFundedAddress}
+	accman, acc := newTestAccountManager(t)
 	gspec.Alloc[acc.Address] = genesisT.GenesisAccount{Balance: big.NewInt(vars.Ether)}
 	// Generate blocks for testing
 	db, blocks, _ := core.GenerateChainWithGenesis(gspec, engine, n, generator)
@@ -490,7 +466,7 @@ func newTestBackend(t *testing.T, n int, gspec *genesisT.Genesis, engine consens
 		t.Fatalf("block %d: failed to insert into chain: %v", n, err)
 	}
 
-	backend := &testBackend{db: db, chain: chain, accman: accman, acc: acc, qacc: qacc}
+	backend := &testBackend{db: db, chain: chain, accman: accman, acc: acc}
 	return backend
 }
 
@@ -1029,39 +1005,26 @@ func TestSignTransaction(t *testing.T) {
 		b.SetPoS()
 	})
 	api := NewTransactionAPI(b, nil)
-	var (
-		nonce  = hexutil.Uint64(0)
-		gas    = hexutil.Uint64(100000)
-		feeCap = (*hexutil.Big)(big.NewInt(0x684ee180))
-		tipCap = (*hexutil.Big)(big.NewInt(0))
-	)
-	res, err := api.SignTransaction(context.Background(), TransactionArgs{
-		From:                 &b.qacc.Address,
-		To:                   &to,
-		Value:                (*hexutil.Big)(big.NewInt(1)),
-		Nonce:                &nonce,
-		Gas:                  &gas,
-		MaxFeePerGas:         feeCap,
-		MaxPriorityFeePerGas: tipCap,
+	res, err := api.FillTransaction(context.Background(), TransactionArgs{
+		From:  &b.acc.Address,
+		To:    &to,
+		Value: (*hexutil.Big)(big.NewInt(1)),
 	})
+	if err != nil {
+		t.Fatalf("failed to fill tx defaults: %v\n", err)
+	}
+
+	res, err = api.SignTransaction(context.Background(), argsFromTransaction(res.Tx, b.acc.Address))
 	if err != nil {
 		t.Fatalf("failed to sign tx: %v\n", err)
 	}
-	// The node's account signs an account transaction of the chain.
-	tx := res.Tx
-	if tx.Type() != types.GhostAccountTxType {
-		t.Fatalf("signed transaction of type %#x, want %#x", tx.Type(), types.GhostAccountTxType)
+	tx, err := json.Marshal(res.Tx)
+	if err != nil {
+		t.Fatal(err)
 	}
-	signer := types.NewGhostAccountSigner(types.LatestSigner(b.ChainConfig()), b.chain.Genesis().Hash())
-	if from, err := types.Sender(signer, tx); err != nil || from != b.qacc.Address {
-		t.Fatalf("signed transaction has sender %x (error %v), want %x", from, err, b.qacc.Address)
-	}
-	if *tx.To() != to || tx.Value().Cmp(big.NewInt(1)) != 0 || tx.Gas() != 100000 || tx.GasFeeCap().Cmp(feeCap.ToInt()) != 0 || tx.ChainId().Cmp(big.NewInt(1)) != 0 {
-		t.Fatalf("signed transaction does not carry the given fields: %v", tx)
-	}
-	var raw types.Transaction
-	if err := raw.UnmarshalBinary(res.Raw); err != nil || raw.Hash() != tx.Hash() {
-		t.Fatalf("raw transaction decodes to %x (error %v), want %x", raw.Hash(), err, tx.Hash())
+	expect := `{"type":"0x2","chainId":"0x1","nonce":"0x0","to":"0x703c4b2bd70c169f5717101caee543299fc946c7","gas":"0x5208","gasPrice":null,"maxPriorityFeePerGas":"0x0","maxFeePerGas":"0x684ee180","value":"0x1","input":"0x","accessList":[],"v":"0x0","r":"0x8fabeb142d585dd9247f459f7e6fe77e2520c88d50ba5d220da1533cea8b34e1","s":"0x582dd68b21aef36ba23f34e49607329c20d981d30404daf749077f5606785ce7","yParity":"0x0","hash":"0x93927839207cfbec395da84b8a2bc38b7b65d2cb2819e9fef1f091f5b1d4cc8f"}`
+	if !bytes.Equal(tx, []byte(expect)) {
+		t.Errorf("result mismatch. Have:\n%s\nWant:\n%s\n", tx, expect)
 	}
 }
 
