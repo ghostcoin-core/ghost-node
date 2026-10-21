@@ -36,6 +36,9 @@ import (
 
 var nullNode *enode.Node
 
+// errTimeout is the error pingRecorder returns for a dead node.
+var errTimeout = errors.New("RPC timeout")
+
 func init() {
 	var r enr.Record
 	r.Set(enr.IP{0, 0, 0, 0})

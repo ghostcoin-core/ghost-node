@@ -158,6 +158,12 @@ of `cmd/devp2p`.
   open its UDP port or take candidates from the protocols.
   `Config.NoDiscovery`, `DiscoveryV4`, `DiscoveryV5` and their flags stay in
   the configuration and are ignored for now.
+- The secp256k1 discovery is gone: the discovery v4 and v5 UDP protocols
+  and their packet formats, the DNS discovery client and its signed trees,
+  the bootnode command, the discovery and DNS commands of devp2p, and the
+  `debug_discoveryV4Table` API. The eth and snap protocols take no dial
+  candidates of their own. The routing table and lookup of `p2p/discover`
+  stay for the node-ID discovery that replaces them.
 
 ### Admin API
 

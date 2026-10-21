@@ -17,9 +17,7 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
-	"fmt"
 	"os"
 	"time"
 
@@ -70,29 +68,6 @@ func writeNodesJSON(file string, nodes nodeSet) {
 	}
 }
 
-// nodes returns the node records contained in the set.
-func (ns nodeSet) nodes() []*enode.Node {
-	result := make([]*enode.Node, 0, len(ns))
-	for _, n := range ns {
-		result = append(result, n.N)
-	}
-	// Sort by ID.
-	slices.SortFunc(result, func(a, b *enode.Node) int {
-		return bytes.Compare(a.ID().Bytes(), b.ID().Bytes())
-	})
-	return result
-}
-
-// add ensures the given nodes are present in the set.
-func (ns nodeSet) add(nodes ...*enode.Node) {
-	for _, n := range nodes {
-		v := ns[n.ID()]
-		v.N = n
-		v.Seq = n.Seq()
-		ns[n.ID()] = v
-	}
-}
-
 // topN returns the top n nodes by score as a new set.
 func (ns nodeSet) topN(n int) nodeSet {
 	if n >= len(ns) {
@@ -117,17 +92,4 @@ func (ns nodeSet) topN(n int) nodeSet {
 		result[v.N.ID()] = v
 	}
 	return result
-}
-
-// verify performs integrity checks on the node set.
-func (ns nodeSet) verify() error {
-	for id, n := range ns {
-		if n.N.ID() != id {
-			return fmt.Errorf("invalid node %v: ID does not match ID %v in record", id, n.N.ID())
-		}
-		if n.N.Seq() != n.Seq {
-			return fmt.Errorf("invalid node %v: 'seq' does not match seq %d from record", id, n.N.Seq())
-		}
-	}
-	return nil
 }

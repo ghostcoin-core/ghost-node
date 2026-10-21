@@ -24,9 +24,20 @@ func TestNoRLPxCommand(t *testing.T) {
 	if app.Command("rlpx") != nil {
 		t.Fatal("devp2p still has the rlpx command")
 	}
-	for _, name := range []string{"enrdump", "key", "discv4", "discv5", "dns", "nodeset"} {
+	for _, name := range []string{"enrdump", "key", "nodeset"} {
 		if app.Command(name) == nil {
 			t.Errorf("devp2p lost the %s command", name)
+		}
+	}
+}
+
+// TestNoSecp256k1DiscoveryCommands checks that the tool no longer offers the
+// discovery v4 and v5 commands and the DNS discovery command, whose packets
+// and trees are signed with secp256k1.
+func TestNoSecp256k1DiscoveryCommands(t *testing.T) {
+	for _, name := range []string{"discv4", "discv5", "dns"} {
+		if app.Command(name) != nil {
+			t.Errorf("devp2p still has the %s command", name)
 		}
 	}
 }

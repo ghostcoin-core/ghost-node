@@ -24,6 +24,9 @@ import (
 	"github.com/ethereum/go-ethereum/p2p/enode"
 )
 
+// errClosed is returned by a lookup's queries once the transport is closed.
+var errClosed = errors.New("socket closed")
+
 // lookup performs a network search for nodes close to the given target. It approaches the
 // target by querying nodes that are closer to it on each iteration. The given target does
 // not need to be an actual node identifier.

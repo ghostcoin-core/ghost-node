@@ -1082,7 +1082,6 @@ var allRPCMethods = []string{
 	"debug_dbAncient",
 	"debug_dbAncients",
 	"debug_dbGet",
-	"debug_discoveryV4Table",
 	"debug_dumpBlock",
 	"debug_freeOSMemory",
 	"debug_gcStats",

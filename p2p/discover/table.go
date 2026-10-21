@@ -43,6 +43,8 @@ const (
 	bucketSize      = 16 // Kademlia bucket size
 	maxReplacements = 10 // Size of per-bucket replacement list
 
+	maxFindnodeFailures = 5 // nodes exceeding this limit are dropped
+
 	// We keep buckets for the upper 1/15 of distances because
 	// it's very unlikely we'll ever encounter a node that's closer.
 	hashBits          = len(common.Hash{}) * 8
