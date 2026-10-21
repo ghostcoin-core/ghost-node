@@ -252,7 +252,8 @@ func (ac *accountCache) scanAccounts() error {
 	var (
 		buf = new(bufio.Reader)
 		key struct {
-			Address string `json:"address"`
+			Address string  `json:"address"`
+			Scheme  *uint16 `json:"scheme"`
 		}
 	)
 	readAccount := func(path string) *accounts.Account {
@@ -263,8 +264,9 @@ func (ac *accountCache) scanAccounts() error {
 		}
 		defer fd.Close()
 		buf.Reset(fd)
-		// Parse the address.
-		key.Address = ""
+		// Parse the address and the scheme. A file without the scheme field
+		// or of another scheme holds no account key and is not listed.
+		key.Address, key.Scheme = "", nil
 		err = json.NewDecoder(buf).Decode(&key)
 		addr := common.HexToAddress(key.Address)
 		switch {
@@ -272,6 +274,8 @@ func (ac *accountCache) scanAccounts() error {
 			log.Debug("Failed to decode keystore key", "path", path, "err", err)
 		case addr == common.Address{}:
 			log.Debug("Failed to decode keystore key", "path", path, "err", "missing or zero address")
+		case checkScheme(key.Scheme) != nil:
+			log.Warn("Ignoring a key file that holds no ML-DSA-44 account key", "path", path, "err", checkScheme(key.Scheme))
 		default:
 			return &accounts.Account{
 				Address: addr,

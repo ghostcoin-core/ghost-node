@@ -14,16 +14,20 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
 
-// Package keystore implements encrypted storage of secp256k1 private keys.
+// Package keystore implements encrypted storage of ML-DSA-44 account keys
+// (scheme 0x0001).
 //
-// Keys are stored as encrypted JSON files according to the Web3 Secret Storage specification.
+// Keys are stored as encrypted JSON files according to the Web3 Secret Storage specification,
+// holding the 32-byte key seed and a scheme field set to 1.
 // See https://github.com/ethereum/wiki/wiki/Web3-Secret-Storage-Definition for more information.
+// No secp256k1 key can be created, imported or unlocked, and the keystore signs
+// only account transactions (type 0x52).
 package keystore
 
 import (
-	"crypto/ecdsa"
 	crand "crypto/rand"
 	"errors"
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -35,8 +39,8 @@ import (
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/event"
+	"github.com/google/uuid"
 )
 
 var (
@@ -47,6 +51,10 @@ var (
 	// ErrAccountAlreadyExists is returned if an account attempted to import is
 	// already present in the keystore.
 	ErrAccountAlreadyExists = errors.New("account already exists")
+
+	// ErrNotAccountTx is returned for a request to sign anything but an
+	// account transaction: a hash, a message or a secp256k1 transaction.
+	ErrNotAccountTx = fmt.Errorf("%w: the keystore signs only account transactions", accounts.ErrNotSupported)
 )
 
 // KeyStoreType is the reflect type of a keystore backend.
@@ -242,7 +250,7 @@ func (ks *KeyStore) Delete(a accounts.Account, passphrase string) error {
 	// immediately afterwards.
 	a, key, err := ks.getDecryptedKey(a, passphrase)
 	if key != nil {
-		zeroKey(key.PrivateKey)
+		zeroKey(key)
 	}
 	if err != nil {
 		return err
@@ -258,23 +266,28 @@ func (ks *KeyStore) Delete(a accounts.Account, passphrase string) error {
 	return err
 }
 
-// SignHash calculates a ECDSA signature for the given hash. The produced
-// signature is in the [R || S || V] format where V is 0 or 1.
+// SignHash refuses: an account key signs only account transactions, and no
+// quantum-safe signature of a bare hash or message is specified.
 func (ks *KeyStore) SignHash(a accounts.Account, hash []byte) ([]byte, error) {
-	// Look up the key to sign with and abort if it cannot be found
-	ks.mu.RLock()
-	defer ks.mu.RUnlock()
-
-	unlockedKey, found := ks.unlocked[a.Address]
-	if !found {
-		return nil, ErrLocked
-	}
-	// Sign the hash using plain ECDSA operations
-	return crypto.Sign(hash, unlockedKey.PrivateKey)
+	return nil, ErrNotAccountTx
 }
 
-// SignTx signs the given transaction with the requested account.
+// SignTx refuses: an account key signs only account transactions, which
+// SignAccountTx signs.
 func (ks *KeyStore) SignTx(a accounts.Account, tx *types.Transaction, chainID *big.Int) (*types.Transaction, error) {
+	return nil, ErrNotAccountTx
+}
+
+// SignTxWithPassphrase refuses, as SignTx does.
+func (ks *KeyStore) SignTxWithPassphrase(a accounts.Account, passphrase string, tx *types.Transaction, chainID *big.Int) (*types.Transaction, error) {
+	return nil, ErrNotAccountTx
+}
+
+// SignAccountTx signs an account transaction (type 0x52) with the unlocked
+// ML-DSA-44 key of the requested account, for the chain of signer, which must
+// come from types.NewGhostAccountSigner. The scheme and public key fields are
+// set from the key.
+func (ks *KeyStore) SignAccountTx(a accounts.Account, signer types.Signer, tx *types.GhostAccountTx) (*types.Transaction, error) {
 	// Look up the key to sign with and abort if it cannot be found
 	ks.mu.RLock()
 	defer ks.mu.RUnlock()
@@ -283,34 +296,24 @@ func (ks *KeyStore) SignTx(a accounts.Account, tx *types.Transaction, chainID *b
 	if !found {
 		return nil, ErrLocked
 	}
-	// Depending on the presence of the chain ID, sign with 2718 or homestead
-	signer := types.LatestSignerForChainID(chainID)
-	return types.SignTx(tx, signer, unlockedKey.PrivateKey)
+	return signAccountTx(unlockedKey.Key, signer, tx)
 }
 
-// SignHashWithPassphrase signs hash if the private key matching the given address
-// can be decrypted with the given passphrase. The produced signature is in the
-// [R || S || V] format where V is 0 or 1.
-func (ks *KeyStore) SignHashWithPassphrase(a accounts.Account, passphrase string, hash []byte) (signature []byte, err error) {
+// SignAccountTxWithPassphrase signs an account transaction if the key
+// matching the given address can be decrypted with the given passphrase.
+func (ks *KeyStore) SignAccountTxWithPassphrase(a accounts.Account, passphrase string, signer types.Signer, tx *types.GhostAccountTx) (*types.Transaction, error) {
 	_, key, err := ks.getDecryptedKey(a, passphrase)
 	if err != nil {
 		return nil, err
 	}
-	defer zeroKey(key.PrivateKey)
-	return crypto.Sign(hash, key.PrivateKey)
+	defer zeroKey(key)
+	return signAccountTx(key, signer, tx)
 }
 
-// SignTxWithPassphrase signs the transaction if the private key matching the
-// given address can be decrypted with the given passphrase.
-func (ks *KeyStore) SignTxWithPassphrase(a accounts.Account, passphrase string, tx *types.Transaction, chainID *big.Int) (*types.Transaction, error) {
-	_, key, err := ks.getDecryptedKey(a, passphrase)
-	if err != nil {
-		return nil, err
-	}
-	defer zeroKey(key.PrivateKey)
-	// Depending on the presence of the chain ID, sign with or without replay protection.
-	signer := types.LatestSignerForChainID(chainID)
-	return types.SignTx(tx, signer, key.PrivateKey)
+// signAccountTx signs tx with the ML-DSA-44 key pair derived from key.
+func signAccountTx(key *Key, signer types.Signer, tx *types.GhostAccountTx) (*types.Transaction, error) {
+	_, priv := key.keyPair()
+	return types.SignGhostAccountTx(signer, priv, tx)
 }
 
 // Unlock unlocks the given account indefinitely.
@@ -350,7 +353,7 @@ func (ks *KeyStore) TimedUnlock(a accounts.Account, passphrase string, timeout t
 		if u.abort == nil {
 			// The address was unlocked indefinitely, so unlocking
 			// it with a timeout would be confusing.
-			zeroKey(key.PrivateKey)
+			zeroKey(key)
 			return nil
 		}
 		// Terminate the expire goroutine and replace it below.
@@ -397,7 +400,7 @@ func (ks *KeyStore) expire(addr common.Address, u *unlocked, timeout time.Durati
 		// because the map stores a new pointer every time the key is
 		// unlocked.
 		if ks.unlocked[addr] == u {
-			zeroKey(u.PrivateKey)
+			zeroKey(u.Key)
 			delete(ks.unlocked, addr)
 		}
 		ks.mu.Unlock()
@@ -433,15 +436,14 @@ func (ks *KeyStore) Export(a accounts.Account, passphrase, newPassphrase string)
 	return EncryptKey(key, newPassphrase, N, P)
 }
 
-// Import stores the given encrypted JSON key into the key directory.
+// Import stores the given encrypted JSON key into the key directory. A key
+// file that holds no ML-DSA-44 account key is refused with ErrNotAccountKey.
 func (ks *KeyStore) Import(keyJSON []byte, passphrase, newPassphrase string) (accounts.Account, error) {
 	key, err := DecryptKey(keyJSON, passphrase)
-	if key != nil && key.PrivateKey != nil {
-		defer zeroKey(key.PrivateKey)
-	}
 	if err != nil {
 		return accounts.Account{}, err
 	}
+	defer zeroKey(key)
 	ks.importMu.Lock()
 	defer ks.importMu.Unlock()
 
@@ -453,12 +455,22 @@ func (ks *KeyStore) Import(keyJSON []byte, passphrase, newPassphrase string) (ac
 	return ks.importKey(key, newPassphrase)
 }
 
-// ImportECDSA stores the given key into the key directory, encrypting it with the passphrase.
-func (ks *KeyStore) ImportECDSA(priv *ecdsa.PrivateKey, passphrase string) (accounts.Account, error) {
+// ImportSeed stores the account key of the given 32-byte ML-DSA-44 seed into
+// the key directory, encrypting it with the passphrase.
+func (ks *KeyStore) ImportSeed(seed []byte, passphrase string) (accounts.Account, error) {
+	id, err := uuid.NewRandom()
+	if err != nil {
+		return accounts.Account{}, fmt.Errorf("could not create random uuid: %w", err)
+	}
+	key, err := newKeyFromSeed(seed, id)
+	if err != nil {
+		return accounts.Account{}, err
+	}
+	defer zeroKey(key)
+
 	ks.importMu.Lock()
 	defer ks.importMu.Unlock()
 
-	key := newKeyFromECDSA(priv)
 	if ks.cache.hasAddress(key.Address) {
 		return accounts.Account{
 			Address: key.Address,
@@ -486,18 +498,6 @@ func (ks *KeyStore) Update(a accounts.Account, passphrase, newPassphrase string)
 	return ks.storage.StoreKey(a.URL.Path, key, newPassphrase)
 }
 
-// ImportPreSaleKey decrypts the given Ethereum presale wallet and stores
-// a key file in the key directory. The key file is encrypted with the same passphrase.
-func (ks *KeyStore) ImportPreSaleKey(keyJSON []byte, passphrase string) (accounts.Account, error) {
-	a, _, err := importPreSaleKey(ks.storage, keyJSON, passphrase)
-	if err != nil {
-		return a, err
-	}
-	ks.cache.add(a)
-	ks.refreshWallets()
-	return a, nil
-}
-
 // isUpdating returns whether the event notification loop is running.
 // This method is mainly meant for tests.
 func (ks *KeyStore) isUpdating() bool {
@@ -506,10 +506,7 @@ func (ks *KeyStore) isUpdating() bool {
 	return ks.updating
 }
 
-// zeroKey zeroes a private key in memory.
-func zeroKey(k *ecdsa.PrivateKey) {
-	b := k.D.Bits()
-	for i := range b {
-		b[i] = 0
-	}
+// zeroKey zeroes the seed of a key in memory.
+func zeroKey(k *Key) {
+	clear(k.Seed[:])
 }

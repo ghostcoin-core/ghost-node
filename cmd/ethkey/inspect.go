@@ -23,20 +23,20 @@ import (
 
 	"github.com/ethereum/go-ethereum/accounts/keystore"
 	"github.com/ethereum/go-ethereum/cmd/utils"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/urfave/cli/v2"
 )
 
 type outputInspect struct {
-	Address    string
-	PublicKey  string
-	PrivateKey string
+	Address   string
+	Scheme    string
+	PublicKey string
+	Seed      string `json:",omitempty"`
 }
 
 var (
 	privateFlag = &cli.BoolFlag{
 		Name:  "private",
-		Usage: "include the private key in the output",
+		Usage: "include the key seed in the output",
 	}
 )
 
@@ -45,9 +45,9 @@ var commandInspect = &cli.Command{
 	Usage:     "inspect a keyfile",
 	ArgsUsage: "<keyfile>",
 	Description: `
-Print various information about the keyfile.
+Print various information about the keyfile of an ML-DSA-44 account key.
 
-Private key information can be printed by using the --private flag;
+The key seed can be printed by using the --private flag;
 make sure to use this feature with great caution!`,
 	Flags: []cli.Flag{
 		passphraseFlag,
@@ -73,21 +73,23 @@ make sure to use this feature with great caution!`,
 		// Output all relevant information we can retrieve.
 		showPrivate := ctx.Bool(privateFlag.Name)
 		out := outputInspect{
-			Address: key.Address.Hex(),
-			PublicKey: hex.EncodeToString(
-				crypto.FromECDSAPub(&key.PrivateKey.PublicKey)),
+			Address:   key.Address.Hex(),
+			Scheme:    fmt.Sprintf("%#04x", keystore.KeyScheme),
+			PublicKey: hex.EncodeToString(key.PublicKey()),
 		}
 		if showPrivate {
-			out.PrivateKey = hex.EncodeToString(crypto.FromECDSA(key.PrivateKey))
+			out.Seed = hex.EncodeToString(key.Seed[:])
 		}
+		clear(key.Seed[:])
 
 		if ctx.Bool(jsonFlag.Name) {
 			mustPrintJSON(out)
 		} else {
 			fmt.Println("Address:       ", out.Address)
+			fmt.Println("Scheme:        ", out.Scheme)
 			fmt.Println("Public key:    ", out.PublicKey)
 			if showPrivate {
-				fmt.Println("Private key:   ", out.PrivateKey)
+				fmt.Println("Key seed:      ", out.Seed)
 			}
 		}
 		return nil

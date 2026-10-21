@@ -404,8 +404,74 @@ above; they should be measured again on the slowest machine Ghost means to
 support before launch. The discovery that sends and asks for records is
 separate work.
 
+## The node's keystore and signing
+
+The node's keystore (`accounts/keystore`) holds ML-DSA-44 account keys
+(scheme `0x0001`) only (spec 09, section 9). A key file keeps the
+password-encrypted layout of the keystore (scrypt and AES-128-CTR, version 3)
+around the 32-byte ML-DSA-44 seed, from which `mldsa44.NewKeyFromSeed`
+derives the key pair, and adds a `scheme` field set to `1`:
+
+```
+{"address":"…","crypto":{…},"id":"…","version":3,"scheme":1}
+```
+
+The account's address is `types.GhostAccountAddressOf(scheme, public_key)`,
+the sender of its account transactions. No secp256k1 key can be created,
+imported or unlocked:
+
+- a key file without the `scheme` field, or of another scheme, is not
+  listed, and is refused when it is imported or unlocked
+  (`keystore.ErrNotAccountKey`), before its password is tried;
+- a key file of the version 1 format is refused;
+- a key file whose `address` is not the address of the key it holds, as a
+  secp256k1 key under an added `scheme` field would be, is refused when it
+  is decrypted. Such a file is listed, since only its password tells it
+  apart;
+- `ImportSeed` imports a 32-byte seed; there is no import of a secp256k1 key
+  or of a presale wallet.
+
+The keystore signs account transactions only (`SignAccountTx` and
+`SignAccountTxWithPassphrase` of the keystore and of `accounts.Wallet`),
+with hedged ML-DSA-44 signatures, for a signer from
+`types.NewGhostAccountSigner`. It refuses to sign a hash, a message or a
+transaction of any other type. `TestKeystoreCreatesMLDSA44Accounts` and
+`TestKeystoreRefusesECDSAKeys` cover it. `geth account import` and
+`ethkey generate --seed` take the seed in hex; `ethkey` has no message
+signing commands.
+
+## JSON-RPC
+
+The methods that sign with the node's accounts sign an account transaction
+(type `0x52`), for the chain's latest signer bound to its genesis hash:
+
+| Method | Signs with |
+|---|---|
+| `eth_sendTransaction`, `eth_signTransaction`, `eth_resend` | the unlocked key of `from` |
+| `personal_sendTransaction`, `personal_signTransaction` | the key of `from`, decrypted with the given password |
+
+A gas limit the node estimates for them includes the extra intrinsic gas of
+an ML-DSA-44 signature (62,744 gas). `personal_newAccount`,
+`personal_importRawKey` (the 32-byte seed in hex), `personal_listAccounts`,
+`personal_unlockAccount`, `personal_lockAccount` and `eth_accounts` stay.
+`eth_sign`, `personal_sign` and `personal_ecRecover` are not served: they sign
+or recover secp256k1 message signatures, and no quantum-safe message
+signature is specified (`TestRemovedSigningMethodsAreNotServed`).
+
+An account transaction in an RPC response (`eth_getTransactionByHash`, the
+transactions of a block, the pool's) carries `scheme`, its two bytes in hex
+(`"0x0001"`), `publicKey` and `signature`; its `from`, and the `from` of its
+receipt, are derived from the scheme and the public key; `v`, `r`, `s` and
+`yParity` are absent (`TestRPCTransactionShowsSchemeAndPublicKey`). The
+`tx` of a `signTransaction` result is the transaction's own JSON encoding,
+whose `scheme` is a quantity (`"0x1"`).
+
+`ethclient` decodes such a response and derives the sender from the scheme
+and the public key: `TransactionSender` answers without asking the server,
+and a response whose `from` is another address is refused
+(`TestEthclientFromDerivedFromPublicKey`).
+
 ## Not yet in this node
 
-Refusing the secp256k1 transaction types, the node's own signing and its
-remote procedure calls, and signing with SLH-DSA keys outside tests are
-separate pieces of work.
+Refusing the secp256k1 transaction types, and signing with keys of scheme
+`0x0002` outside tests, are separate pieces of work.

@@ -227,10 +227,53 @@ type txExtraInfo struct {
 }
 
 func (tx *rpcTransaction) UnmarshalJSON(msg []byte) error {
+	msg, err := normalizeAccountTxScheme(msg)
+	if err != nil {
+		return err
+	}
 	if err := json.Unmarshal(msg, &tx.tx); err != nil {
 		return err
 	}
-	return json.Unmarshal(msg, &tx.txExtraInfo)
+	if err := json.Unmarshal(msg, &tx.txExtraInfo); err != nil {
+		return err
+	}
+	// The sender of an account transaction is derived from its scheme and
+	// public key; a server that reports another one is not believed.
+	if scheme, publicKey, _, ok := tx.tx.GhostAccountAuth(); ok {
+		from := types.GhostAccountAddressOf(scheme, publicKey)
+		if tx.From != nil && *tx.From != from {
+			return fmt.Errorf("server reported sender %x for an account transaction of sender %x", *tx.From, from)
+		}
+		tx.From = &from
+	}
+	return nil
+}
+
+// normalizeAccountTxScheme rewrites the scheme of an account transaction in
+// an RPC response, two bytes in hex ("0x0001"), as the quantity the
+// transaction's JSON decoding takes ("0x1").
+func normalizeAccountTxScheme(msg []byte) ([]byte, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(msg, &fields); err != nil || fields == nil {
+		// Not an object; the transaction decoding reports it.
+		return msg, nil
+	}
+	raw, ok := fields["scheme"]
+	if !ok {
+		return msg, nil
+	}
+	var scheme hexutil.Bytes
+	if err := json.Unmarshal(raw, &scheme); err != nil || len(scheme) != 2 {
+		// A quantity already, or invalid; the transaction decoding
+		// checks it.
+		return msg, nil
+	}
+	quantity, err := json.Marshal(hexutil.Uint64(uint64(scheme[0])<<8 | uint64(scheme[1])))
+	if err != nil {
+		return nil, err
+	}
+	fields["scheme"] = quantity
+	return json.Marshal(fields)
 }
 
 // TransactionByHash returns the transaction with the given hash.
@@ -257,6 +300,11 @@ func (ec *Client) TransactionByHash(ctx context.Context, hash common.Hash) (tx *
 // There is a fast-path for transactions retrieved by TransactionByHash and
 // TransactionInBlock. Getting their sender address can be done without an RPC interaction.
 func (ec *Client) TransactionSender(ctx context.Context, tx *types.Transaction, block common.Hash, index uint) (common.Address, error) {
+	// The sender of an account transaction is derived from its scheme and
+	// public key.
+	if scheme, publicKey, _, ok := tx.GhostAccountAuth(); ok {
+		return types.GhostAccountAddressOf(scheme, publicKey), nil
+	}
 	// Try to load the address from the cache.
 	sender, err := types.Sender(&senderFromServer{blockhash: block}, tx)
 	if err == nil {

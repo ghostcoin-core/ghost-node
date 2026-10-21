@@ -17,58 +17,30 @@
 package main
 
 import (
+	"encoding/hex"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/accounts/keystore"
 	"github.com/ethereum/go-ethereum/cmd/utils"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/urfave/cli/v2"
 )
 
 var (
-	walletCommand = &cli.Command{
-		Name:      "wallet",
-		Usage:     "Manage Ethereum presale wallets",
-		ArgsUsage: "",
-		Description: `
-    geth wallet import /path/to/my/presale.wallet
-
-will prompt for your password and imports your ether presale account.
-It can be used non-interactively with the --password option taking a
-passwordfile as argument containing the wallet password in plaintext.`,
-		Subcommands: []*cli.Command{
-			{
-
-				Name:      "import",
-				Usage:     "Import Ethereum presale wallet",
-				ArgsUsage: "<keyFile>",
-				Action:    importWallet,
-				Flags: []cli.Flag{
-					utils.DataDirFlag,
-					utils.KeyStoreDirFlag,
-					utils.PasswordFileFlag,
-					utils.LightKDFFlag,
-				},
-				Description: `
-	geth wallet [options] /path/to/my/presale.wallet
-
-will prompt for your password and imports your ether presale account.
-It can be used non-interactively with the --password option taking a
-passwordfile as argument containing the wallet password in plaintext.`,
-			},
-		},
-	}
-
 	accountCommand = &cli.Command{
 		Name:  "account",
 		Usage: "Manage accounts",
 		Description: `
 
-Manage accounts, list all existing accounts, import a private key into a new
+Manage accounts, list all existing accounts, import a key seed into a new
 account, create a new account or update an existing account.
+
+An account key is an ML-DSA-44 key pair (scheme 0x0001), held as the 32-byte
+seed it is derived from; the address is derived from the scheme and the
+public key. Key files that hold secp256k1 keys are not listed or unlocked.
 
 It supports interactive mode, when you are prompted for password as well as
 non-interactive mode where passwords are supplied via a given password file.
@@ -153,7 +125,7 @@ changing your password is only possible interactively.
 			},
 			{
 				Name:   "import",
-				Usage:  "Import a private key into a new account",
+				Usage:  "Import a key seed into a new account",
 				Action: accountImport,
 				Flags: []cli.Flag{
 					utils.DataDirFlag,
@@ -165,10 +137,10 @@ changing your password is only possible interactively.
 				Description: `
     geth account import <keyfile>
 
-Imports an unencrypted private key from <keyfile> and creates a new account.
-Prints the address.
+Imports an unencrypted ML-DSA-44 key seed from <keyfile> and creates a new
+account. Prints the address.
 
-The keyfile is assumed to contain an unencrypted private key in hexadecimal format.
+The keyfile is assumed to contain the 32-byte key seed in hexadecimal format.
 
 The account is saved in encrypted format, you are prompted for a password.
 
@@ -332,30 +304,20 @@ func accountUpdate(ctx *cli.Context) error {
 	return nil
 }
 
-func importWallet(ctx *cli.Context) error {
-	if ctx.Args().Len() != 1 {
-		utils.Fatalf("keyfile must be given as the only argument")
-	}
-	keyfile := ctx.Args().First()
-	keyJSON, err := os.ReadFile(keyfile)
+// loadSeed reads the hex encoded 32-byte ML-DSA-44 key seed of a key file.
+func loadSeed(file string) ([]byte, error) {
+	content, err := os.ReadFile(file)
 	if err != nil {
-		utils.Fatalf("Could not read wallet file: %v", err)
+		return nil, err
 	}
-
-	am := makeAccountManager(ctx)
-	backends := am.Backends(keystore.KeyStoreType)
-	if len(backends) == 0 {
-		utils.Fatalf("Keystore is not available")
-	}
-	ks := backends[0].(*keystore.KeyStore)
-	passphrase := utils.GetPassPhraseWithList("", false, 0, utils.MakePasswordList(ctx))
-
-	acct, err := ks.ImportPreSaleKey(keyJSON, passphrase)
+	seed, err := hex.DecodeString(strings.TrimSpace(string(content)))
 	if err != nil {
-		utils.Fatalf("%v", err)
+		return nil, err
 	}
-	fmt.Printf("Address: {%x}\n", acct.Address)
-	return nil
+	if len(seed) != keystore.SeedSize {
+		return nil, fmt.Errorf("a key seed is %d bytes, have %d", keystore.SeedSize, len(seed))
+	}
+	return seed, nil
 }
 
 func accountImport(ctx *cli.Context) error {
@@ -363,10 +325,11 @@ func accountImport(ctx *cli.Context) error {
 		utils.Fatalf("keyfile must be given as the only argument")
 	}
 	keyfile := ctx.Args().First()
-	key, err := crypto.LoadECDSA(keyfile)
+	seed, err := loadSeed(keyfile)
 	if err != nil {
-		utils.Fatalf("Failed to load the private key: %v", err)
+		utils.Fatalf("Failed to load the key seed: %v", err)
 	}
+	defer clear(seed)
 	am := makeAccountManager(ctx)
 	backends := am.Backends(keystore.KeyStoreType)
 	if len(backends) == 0 {
@@ -375,7 +338,7 @@ func accountImport(ctx *cli.Context) error {
 	ks := backends[0].(*keystore.KeyStore)
 	passphrase := utils.GetPassPhraseWithList("Your new account is locked with a password. Please give a password. Do not forget this password.", true, 0, utils.MakePasswordList(ctx))
 
-	acct, err := ks.ImportECDSA(key, passphrase)
+	acct, err := ks.ImportSeed(seed, passphrase)
 	if err != nil {
 		utils.Fatalf("Could not create the account: %v", err)
 	}

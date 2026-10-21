@@ -17,6 +17,7 @@
 package keystore
 
 import (
+	"errors"
 	"math/rand"
 	"os"
 	"runtime"
@@ -28,12 +29,10 @@ import (
 
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/event"
 	"golang.org/x/exp/slices"
 )
-
-var testSigData = make([]byte, 32)
 
 func TestKeyStore(t *testing.T) {
 	t.Parallel()
@@ -82,7 +81,7 @@ func TestSign(t *testing.T) {
 	if err := ks.Unlock(a1, ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ks.SignHash(accounts.Account{Address: a1.Address}, testSigData); err != nil {
+	if _, err := testSign(ks, accounts.Account{Address: a1.Address}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -101,17 +100,20 @@ func TestSignWithPassphrase(t *testing.T) {
 		t.Fatal("expected account to be locked")
 	}
 
-	_, err = ks.SignHashWithPassphrase(acc, pass, testSigData)
+	tx, err := ks.SignAccountTxWithPassphrase(acc, pass, testSigner, testTxData())
 	if err != nil {
 		t.Fatal(err)
+	}
+	if from, err := types.Sender(testSigner, tx); err != nil || from != acc.Address {
+		t.Fatalf("signed transaction has sender %x (error %v), want %x", from, err, acc.Address)
 	}
 
 	if _, unlocked := ks.unlocked[acc.Address]; unlocked {
 		t.Fatal("expected account to be locked")
 	}
 
-	if _, err = ks.SignHashWithPassphrase(acc, "invalid passwd", testSigData); err == nil {
-		t.Fatal("expected SignHashWithPassphrase to fail with invalid password")
+	if _, err = ks.SignAccountTxWithPassphrase(acc, "invalid passwd", testSigner, testTxData()); err == nil {
+		t.Fatal("expected SignAccountTxWithPassphrase to fail with invalid password")
 	}
 }
 
@@ -126,7 +128,7 @@ func TestTimedUnlock(t *testing.T) {
 	}
 
 	// Signing without passphrase fails because account is locked
-	_, err = ks.SignHash(accounts.Account{Address: a1.Address}, testSigData)
+	_, err = testSign(ks, accounts.Account{Address: a1.Address})
 	if err != ErrLocked {
 		t.Fatal("Signing should've failed with ErrLocked before unlocking, got ", err)
 	}
@@ -137,14 +139,14 @@ func TestTimedUnlock(t *testing.T) {
 	}
 
 	// Signing without passphrase works because account is temp unlocked
-	_, err = ks.SignHash(accounts.Account{Address: a1.Address}, testSigData)
+	_, err = testSign(ks, accounts.Account{Address: a1.Address})
 	if err != nil {
 		t.Fatal("Signing shouldn't return an error after unlocking, got ", err)
 	}
 
 	// Signing fails again after automatic locking
 	time.Sleep(250 * time.Millisecond)
-	_, err = ks.SignHash(accounts.Account{Address: a1.Address}, testSigData)
+	_, err = testSign(ks, accounts.Account{Address: a1.Address})
 	if err != ErrLocked {
 		t.Fatal("Signing should've failed with ErrLocked timeout expired, got ", err)
 	}
@@ -166,7 +168,7 @@ func TestOverrideUnlock(t *testing.T) {
 	}
 
 	// Signing without passphrase works because account is temp unlocked
-	_, err = ks.SignHash(accounts.Account{Address: a1.Address}, testSigData)
+	_, err = testSign(ks, accounts.Account{Address: a1.Address})
 	if err != nil {
 		t.Fatal("Signing shouldn't return an error after unlocking, got ", err)
 	}
@@ -177,14 +179,14 @@ func TestOverrideUnlock(t *testing.T) {
 	}
 
 	// Signing without passphrase still works because account is temp unlocked
-	_, err = ks.SignHash(accounts.Account{Address: a1.Address}, testSigData)
+	_, err = testSign(ks, accounts.Account{Address: a1.Address})
 	if err != nil {
 		t.Fatal("Signing shouldn't return an error after unlocking, got ", err)
 	}
 
 	// Signing fails again after automatic locking
 	time.Sleep(250 * time.Millisecond)
-	_, err = ks.SignHash(accounts.Account{Address: a1.Address}, testSigData)
+	_, err = testSign(ks, accounts.Account{Address: a1.Address})
 	if err != ErrLocked {
 		t.Fatal("Signing should've failed with ErrLocked timeout expired, got ", err)
 	}
@@ -206,7 +208,7 @@ func TestSignRace(t *testing.T) {
 	}
 	end := time.Now().Add(500 * time.Millisecond)
 	for time.Now().Before(end) {
-		if _, err := ks.SignHash(accounts.Account{Address: a1.Address}, testSigData); err == ErrLocked {
+		if _, err := testSign(ks, accounts.Account{Address: a1.Address}); err == ErrLocked {
 			return
 		} else if err != nil {
 			t.Errorf("Sign error: %v", err)
@@ -343,26 +345,30 @@ func TestWalletNotifications(t *testing.T) {
 	checkEvents(t, wantEvents, events)
 }
 
-// TestImportExport tests the import functionality of a keystore.
-func TestImportECDSA(t *testing.T) {
+// TestImportSeed tests the import of an ML-DSA-44 key seed into a keystore.
+func TestImportSeed(t *testing.T) {
 	t.Parallel()
 	_, ks := tmpKeyStore(t, true)
-	key, err := crypto.GenerateKey()
+	seed := testSeed(0x21)
+	acc, err := ks.ImportSeed(seed, "old")
 	if err != nil {
-		t.Fatalf("failed to generate key: %v", key)
+		t.Fatalf("importing failed: %v", err)
 	}
-	if _, err = ks.ImportECDSA(key, "old"); err != nil {
-		t.Errorf("importing failed: %v", err)
+	if want := testKey(0x21).Address; acc.Address != want {
+		t.Errorf("imported account has address %x, want %x", acc.Address, want)
 	}
-	if _, err = ks.ImportECDSA(key, "old"); err == nil {
+	if _, err = ks.ImportSeed(seed, "old"); err == nil {
 		t.Errorf("importing same key twice succeeded")
 	}
-	if _, err = ks.ImportECDSA(key, "new"); err == nil {
+	if _, err = ks.ImportSeed(seed, "new"); err == nil {
 		t.Errorf("importing same key twice succeeded")
+	}
+	if _, err = ks.ImportSeed(seed[:31], "new"); !errors.Is(err, ErrNotAccountKey) {
+		t.Errorf("importing a 31-byte seed: error %v, want %v", err, ErrNotAccountKey)
 	}
 }
 
-// TestImportECDSA tests the import and export functionality of a keystore.
+// TestImportExport tests the import and export functionality of a keystore.
 func TestImportExport(t *testing.T) {
 	t.Parallel()
 	_, ks := tmpKeyStore(t, true)
