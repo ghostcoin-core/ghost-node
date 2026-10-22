@@ -18,7 +18,6 @@ package main
 
 import (
 	"context"
-	"crypto/ecdsa"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -28,32 +27,38 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cloudflare/circl/sign/mldsa/mldsa44"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/params/ghost"
 	"github.com/ethereum/go-ethereum/params/types/genesisT"
+	"github.com/ethereum/go-ethereum/params/vars"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/holiman/uint256"
 )
 
-// The internal network's accounts have fixed test keys, the same numbers as
-// in scripts/internal-net.sh. They are test keys only, never launch keys.
+// The miner test key of scripts/internal-net.sh. It is a test key only, never
+// a launch key.
+const minerKeyNumber = 6_777_971
+
+// The internal network's test accounts are accounts of ML-DSA-44 keys of
+// fixed seeds. They are test keys only, never launch keys.
 const (
-	minerKeyNumber    = 6_777_971
-	receiverKeyNumber = 6_777_972
+	minerAccountSeed    = 0xa1
+	receiverAccountSeed = 0xa2
 )
 
-func testKey(t *testing.T, n int64) *ecdsa.PrivateKey {
-	t.Helper()
-	key, err := crypto.ToECDSA(common.LeftPadBytes(big.NewInt(n).Bytes(), 32))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return key
+// accountTxGas is the gas of an account transfer signed with ML-DSA-44.
+var accountTxGas = vars.TxGas + ghost.AccountTxSigByteGas*(2+types.GhostMLDSA44PublicKeySize+types.GhostMLDSA44SignatureSize) + ghost.AccountTxVerifyGasMLDSA44
+
+// internalNetSigner returns the signer of the internal network's account
+// transactions.
+func internalNetSigner() types.Signer {
+	genesis := ghost.InternalNetGenesis()
+	return types.NewGhostAccountSigner(types.LatestSigner(genesis.Config), core.GenesisToBlock(genesis, nil).Hash())
 }
 
 // internalNode is one geth process of a test network.
@@ -148,7 +153,7 @@ func startInternalNode(t *testing.T, name, datadir string, extra ...string) *int
 // the miner account, and a peer that only syncs.
 func startInternalNet(t *testing.T) (miner, peer *internalNode, account common.Address) {
 	t.Helper()
-	account = crypto.PubkeyToAddress(testKey(t, minerKeyNumber).PublicKey)
+	_, _, account = testAccount(minerAccountSeed)
 	genesis := writeGenesis(t, ghost.InternalNetGenesis())
 	minerDir, peerDir := initDatadir(t, genesis), initDatadir(t, genesis)
 
@@ -259,21 +264,20 @@ func TestInternalNetMinesAndSyncs1000Blocks(t *testing.T) {
 	}
 }
 
-// TestInternalNetTransfers sends ordinary EVM transfers between two public
-// accounts, a dynamic-fee one through the syncing peer and a legacy one back
-// through the miner, and checks that both are mined and that the balances
-// change the same way on both nodes.
+// TestInternalNetTransfers sends account transfers between two accounts, one
+// with a tip through the syncing peer and one whose whole price is its tip
+// back through the miner, and checks that both are mined and that the
+// balances change the same way on both nodes.
 func TestInternalNetTransfers(t *testing.T) {
 	miner, peer, account := startInternalNet(t)
 	var (
-		ctx         = context.Background()
-		chainID     = big.NewInt(ghost.InternalNetChainID)
-		signer      = types.LatestSignerForChainID(chainID)
-		minerKey    = testKey(t, minerKeyNumber)
-		receiverKey = testKey(t, receiverKeyNumber)
-		receiver    = crypto.PubkeyToAddress(receiverKey.PublicKey)
-		ether       = big.NewInt(1_000_000_000_000_000_000)
-		gwei        = big.NewInt(1_000_000_000)
+		ctx                      = context.Background()
+		chainID                  = big.NewInt(ghost.InternalNetChainID)
+		signer                   = internalNetSigner()
+		minerKey, _, _           = testAccount(minerAccountSeed)
+		receiverKey, _, receiver = testAccount(receiverAccountSeed)
+		ether                    = big.NewInt(1_000_000_000_000_000_000)
+		gwei                     = big.NewInt(1_000_000_000)
 	)
 	// The peer must know the miner's funds before it takes the transfer.
 	waitFor(t, 5*time.Minute, "the peer to see mined funds", func() (bool, error) {
@@ -286,9 +290,9 @@ func TestInternalNetTransfers(t *testing.T) {
 		}
 	}
 
-	send := func(via *internalNode, key *ecdsa.PrivateKey, data types.TxData) common.Hash {
+	send := func(via *internalNode, key *mldsa44.PrivateKey, data *types.GhostAccountTx) common.Hash {
 		t.Helper()
-		tx, err := types.SignNewTx(key, signer, data)
+		tx, err := types.SignGhostAccountTx(signer, key, data)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -327,18 +331,18 @@ func TestInternalNetTransfers(t *testing.T) {
 		}
 	}
 
-	// A dynamic-fee transfer of one ether, given to the peer, which passes it
+	// A transfer of one ether with a tip, given to the peer, which passes it
 	// to the miner.
 	nonce, err := peer.eth.PendingNonceAt(ctx, account)
 	if err != nil {
 		t.Fatal(err)
 	}
-	mined(send(peer, minerKey, &types.DynamicFeeTx{
+	mined(send(peer, minerKey, &types.GhostAccountTx{
 		ChainID:   chainID,
 		Nonce:     nonce,
 		GasTipCap: new(big.Int).Mul(big.NewInt(2), gwei),
 		GasFeeCap: new(big.Int).Mul(big.NewInt(100), gwei),
-		Gas:       21_000,
+		Gas:       accountTxGas,
 		To:        &receiver,
 		Value:     ether,
 	}))
@@ -348,18 +352,21 @@ func TestInternalNetTransfers(t *testing.T) {
 		}
 	}
 
-	// A legacy transfer of a tenth of that back, from the receiver.
+	// A transfer of a tenth of that back, from the receiver. Its tip is its
+	// whole price, so it pays exactly that price per gas.
 	gasPrice := new(big.Int).Mul(big.NewInt(100), gwei)
 	tenth := new(big.Int).Div(ether, big.NewInt(10))
-	mined(send(miner, receiverKey, &types.LegacyTx{
-		Nonce:    0,
-		GasPrice: gasPrice,
-		Gas:      21_000,
-		To:       &account,
-		Value:    tenth,
+	mined(send(miner, receiverKey, &types.GhostAccountTx{
+		ChainID:   chainID,
+		Nonce:     0,
+		GasTipCap: gasPrice,
+		GasFeeCap: gasPrice,
+		Gas:       accountTxGas,
+		To:        &account,
+		Value:     tenth,
 	}))
 	want := new(big.Int).Sub(ether, tenth)
-	want.Sub(want, new(big.Int).Mul(gasPrice, big.NewInt(21_000)))
+	want.Sub(want, new(big.Int).Mul(gasPrice, new(big.Int).SetUint64(accountTxGas)))
 	for _, n := range []*internalNode{miner, peer} {
 		if got := n.balance(t, receiver, nil); got.Cmp(want) != 0 {
 			t.Errorf("%s: receiver has %v after sending, want %v", n.name, got, want)

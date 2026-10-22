@@ -35,6 +35,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params/ghost"
+	"github.com/ethereum/go-ethereum/params/vars"
 	"github.com/holiman/uint256"
 )
 
@@ -269,21 +270,20 @@ func addPeer(t *testing.T, from, to *internalNode) {
 // nodes answer for them.
 func TestGhostTreeRealNodePagesAndReorg(t *testing.T) {
 	var (
-		ctx      = context.Background()
-		key      = testKey(t, minerKeyNumber)
-		account  = crypto.PubkeyToAddress(key.PublicKey)
-		chainID  = big.NewInt(ghost.InternalNetChainID)
-		signer   = types.LatestSignerForChainID(chainID)
-		gwei     = big.NewInt(1_000_000_000)
-		value    = new(big.Int).Mul(big.NewInt(1_000_000), gwei)
-		genesis  = writeGenesis(t, ghost.InternalNetGenesis())
-		aDir     = initDatadir(t, genesis)
-		bDir     = initDatadir(t, genesis)
-		coinF    = crypto.Keccak256Hash([]byte("ghost tree real node test coin F"))
-		dataF    = crypto.Keccak256Hash([]byte("ghost tree real node test data F"))
-		coinNote = bytes.Repeat([]byte{0xc1}, ghostpriv.NoteSize)
-		dataNote = bytes.Repeat([]byte{0xd2}, ghostpriv.NoteSize)
-		mining   = []string{"--miner.threads", "1", "--miner.etherbase", account.Hex()}
+		ctx             = context.Background()
+		key, _, account = testAccount(minerAccountSeed)
+		chainID         = big.NewInt(ghost.InternalNetChainID)
+		signer          = internalNetSigner()
+		gwei            = big.NewInt(1_000_000_000)
+		value           = new(big.Int).Mul(big.NewInt(1_000_000), gwei)
+		genesis         = writeGenesis(t, ghost.InternalNetGenesis())
+		aDir            = initDatadir(t, genesis)
+		bDir            = initDatadir(t, genesis)
+		coinF           = crypto.Keccak256Hash([]byte("ghost tree real node test coin F"))
+		dataF           = crypto.Keccak256Hash([]byte("ghost tree real node test data F"))
+		coinNote        = bytes.Repeat([]byte{0xc1}, ghostpriv.NoteSize)
+		dataNote        = bytes.Repeat([]byte{0xd2}, ghostpriv.NoteSize)
+		mining          = []string{"--miner.threads", "1", "--miner.etherbase", account.Hex()}
 	)
 	a := startInternalNode(t, "a", aDir, append(append([]string{"--mine"}, mining...), ghostRPCFlags...)...)
 
@@ -301,12 +301,12 @@ func TestGhostTreeRealNodePagesAndReorg(t *testing.T) {
 	}
 	send := func(to common.Address, value *big.Int, data []byte) common.Hash {
 		t.Helper()
-		tx, err := types.SignNewTx(key, signer, &types.DynamicFeeTx{
+		tx, err := types.SignGhostAccountTx(signer, key, &types.GhostAccountTx{
 			ChainID:   chainID,
 			Nonce:     nonce,
 			GasTipCap: new(big.Int).Mul(big.NewInt(2), gwei),
 			GasFeeCap: new(big.Int).Mul(big.NewInt(100), gwei),
-			Gas:       60_000,
+			Gas:       60_000 + accountTxGas - vars.TxGas,
 			To:        &to,
 			Value:     value,
 			Data:      data,

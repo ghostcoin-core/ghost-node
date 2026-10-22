@@ -25,26 +25,29 @@ import (
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/eth/tracers/logger"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/params/types/genesisT"
+	"github.com/ethereum/go-ethereum/params/vars"
 	"github.com/ethereum/go-ethereum/tests"
 )
 
 func BenchmarkTransactionTrace(b *testing.B) {
-	key, _ := crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
-	from := crypto.PubkeyToAddress(key.PublicKey)
-	gas := uint64(1000000) // 1M gas
+	key, _, from := testAccount(0x42)
+	// 1M gas for the execution, on top of the signature gas of the account
+	// transaction.
+	gas := uint64(1000000) + accountSenderGas - vars.TxGas
 	to := common.HexToAddress("0x00000000000000000000000000000000deadbeef")
-	signer := types.LatestSignerForChainID(big.NewInt(1337))
-	tx, err := types.SignNewTx(key, signer,
-		&types.LegacyTx{
-			Nonce:    1,
-			GasPrice: big.NewInt(500),
-			Gas:      gas,
-			To:       &to,
-		})
+	signer := types.NewGhostAccountSigner(types.LatestSignerForChainID(big.NewInt(1337)), common.Hash{0x01})
+	tx, err := types.SignGhostAccountTx(signer, key, &types.GhostAccountTx{
+		ChainID:   big.NewInt(1337),
+		Nonce:     1,
+		GasTipCap: big.NewInt(500),
+		GasFeeCap: big.NewInt(500),
+		Gas:       gas,
+		To:        &to,
+		Value:     new(big.Int),
+	})
 	if err != nil {
 		b.Fatal(err)
 	}

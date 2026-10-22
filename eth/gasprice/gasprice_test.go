@@ -28,7 +28,6 @@ import (
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/params/types/ctypes"
@@ -124,14 +123,12 @@ func (b *testBackend) teardown() {
 // after use, otherwise the blockchain instance will mem-leak via goroutines.
 func newTestBackend(t *testing.T, londonBlock *big.Int, pending bool) *testBackend {
 	var (
-		key, _ = crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
-		addr   = crypto.PubkeyToAddress(key.PublicKey)
-		config = *params.TestChainConfig // needs copy because it is modified below
-		gspec  = &genesisT.Genesis{
+		key, _, addr = testAccount(0x53)
+		config       = *params.TestChainConfig // needs copy because it is modified below
+		gspec        = &genesisT.Genesis{
 			Config: &config,
 			Alloc:  genesisT.GenesisAlloc{addr: {Balance: big.NewInt(math.MaxInt64)}},
 		}
-		signer = types.LatestSigner(gspec.Config)
 	)
 
 	if londonBlock != nil {
@@ -153,33 +150,43 @@ func newTestBackend(t *testing.T, londonBlock *big.Int, pending bool) *testBacke
 	}
 
 	engine := ethash.NewFaker()
+	signer := types.NewGhostAccountSigner(types.LatestSigner(gspec.Config), core.GenesisToBlock(gspec, nil).Hash())
 
 	// Generate testing blocks
 	_, blocks, _ := core.GenerateChainWithGenesis(gspec, engine, testHead+1, func(i int, b *core.BlockGen) {
 		b.SetCoinbase(common.Address{1})
 
-		var txdata types.TxData
+		var txdata *types.GhostAccountTx
 		if londonBlock != nil && b.Number().Cmp(londonBlock) >= 0 {
-			txdata = &types.DynamicFeeTx{
+			txdata = &types.GhostAccountTx{
 				ChainID:   gspec.Config.GetChainID(),
 				Nonce:     b.TxNonce(addr),
 				To:        &common.Address{},
-				Gas:       30000,
+				Gas:       accountSenderGas + 9000,
 				GasFeeCap: big.NewInt(100 * vars.GWei),
 				GasTipCap: big.NewInt(int64(i+1) * vars.GWei),
+				Value:     new(big.Int),
 				Data:      []byte{},
 			}
 		} else {
-			txdata = &types.LegacyTx{
-				Nonce:    b.TxNonce(addr),
-				To:       &common.Address{},
-				Gas:      21000,
-				GasPrice: big.NewInt(int64(i+1) * vars.GWei),
-				Value:    big.NewInt(100),
-				Data:     []byte{},
+			// Before London the tip is the whole gas price.
+			price := big.NewInt(int64(i+1) * vars.GWei)
+			txdata = &types.GhostAccountTx{
+				ChainID:   gspec.Config.GetChainID(),
+				Nonce:     b.TxNonce(addr),
+				To:        &common.Address{},
+				Gas:       accountSenderGas,
+				GasFeeCap: price,
+				GasTipCap: price,
+				Value:     big.NewInt(100),
+				Data:      []byte{},
 			}
 		}
-		b.AddTx(types.MustSignNewTx(key, signer, txdata))
+		tx, err := types.SignGhostAccountTx(signer, key, txdata)
+		if err != nil {
+			t.Fatalf("sign account transaction %d: %v", i, err)
+		}
+		b.AddTx(tx)
 	})
 	// Construct testing chain
 	chain, err := core.NewBlockChain(rawdb.NewMemoryDatabase(), &core.CacheConfig{TrieCleanNoPrefetch: true}, gspec, nil, engine, vm.Config{}, nil, nil)
