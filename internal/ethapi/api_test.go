@@ -19,7 +19,6 @@ package ethapi
 import (
 	"bytes"
 	"context"
-	"crypto/ecdsa"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -29,8 +28,10 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"testing/cryptotest"
 	"time"
 
+	"github.com/cloudflare/circl/sign/mldsa/mldsa44"
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/accounts/keystore"
@@ -68,15 +69,23 @@ import (
 )
 
 func testTransactionMarshal(t *testing.T, tests []txData, config ctypes.ChainConfigurator) {
-	t.Parallel()
 	var (
-		signer = types.LatestSigner(config)
-		key, _ = crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
+		signer           = types.NewGhostAccountSigner(types.LatestSigner(config), common.Hash{0x01})
+		key, _           = crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
+		accountKey, _, _ = testAccount(0x66)
 	)
 
 	for i, tt := range tests {
-		var tx2 types.Transaction
-		tx, err := types.SignNewTx(key, signer, tt.Tx)
+		var (
+			tx2 types.Transaction
+			tx  *types.Transaction
+			err error
+		)
+		if txdata, ok := tt.Tx.(*types.GhostAccountTx); ok {
+			tx, err = types.SignGhostAccountTx(signer, accountKey, txdata)
+		} else {
+			tx, err = types.SignNewTx(key, signer, tt.Tx)
+		}
 		if err != nil {
 			t.Fatalf("test %d: signing failed: %v", i, err)
 		}
@@ -90,6 +99,24 @@ func testTransactionMarshal(t *testing.T, tests []txData, config ctypes.ChainCon
 		}
 
 		// rpcTransaction
+		if tx.Type() == types.GhostAccountTxType {
+			// The RPC form of an account transaction carries its sender and
+			// hash, but not its signature, so it does not decode back.
+			rpcTx, err := newSignedRPCTransaction(signer, tx, common.Hash{}, 0, 0, nil)
+			if err != nil {
+				t.Fatalf("test %d: rpc transaction: %v", i, err)
+			}
+			if rpcTx.Hash != tx.Hash() {
+				t.Fatalf("test %d: rpc hash %x, want %x", i, rpcTx.Hash, tx.Hash())
+			}
+			data, err := json.Marshal(rpcTx)
+			if err != nil {
+				t.Fatalf("test %d: marshalling failed; %v", i, err)
+			}
+			want, have := tt.Want, string(data)
+			require.JSONEqf(t, want, have, "test %d: rpc json not match, want %s have %s", i, want, have)
+			continue
+		}
 		rpcTx := newRPCTransaction(tx, common.Hash{}, 0, 0, 0, nil, config)
 		if data, err := json.Marshal(rpcTx); err != nil {
 			t.Fatalf("test %d: marshalling failed; %v", i, err)
@@ -105,6 +132,9 @@ func testTransactionMarshal(t *testing.T, tests []txData, config ctypes.ChainCon
 }
 
 func TestTransaction_RoundTripRpcJSON(t *testing.T) {
+	// The ML-DSA-44 signatures are hedged: a fixed random stream makes the
+	// recorded hashes reproducible.
+	cryptotest.SetGlobalRandom(t, 1)
 	var (
 		config = params.AllEthashProtocolChanges
 		tests  = allTransactionTypes(common.Address{0xde, 0xad}, config)
@@ -113,6 +143,7 @@ func TestTransaction_RoundTripRpcJSON(t *testing.T) {
 }
 
 func TestTransactionBlobTx(t *testing.T) {
+	t.Parallel()
 	config := *params.TestChainConfig
 	config.ShanghaiTime = new(uint64)
 	config.CancunTime = new(uint64)
@@ -129,160 +160,63 @@ type txData struct {
 func allTransactionTypes(addr common.Address, config ctypes.ChainConfigurator) []txData {
 	return []txData{
 		{
-			Tx: &types.LegacyTx{
-				Nonce:    5,
-				GasPrice: big.NewInt(6),
-				Gas:      7,
-				To:       &addr,
-				Value:    big.NewInt(8),
-				Data:     []byte{0, 1, 2, 3, 4},
-				V:        big.NewInt(9),
-				R:        big.NewInt(10),
-				S:        big.NewInt(11),
+			Tx: &types.GhostAccountTx{
+				ChainID:   config.GetChainID(),
+				Nonce:     5,
+				GasTipCap: big.NewInt(6),
+				GasFeeCap: big.NewInt(9),
+				Gas:       7,
+				To:        &addr,
+				Value:     big.NewInt(8),
+				Data:      []byte{0, 1, 2, 3, 4},
 			},
 			Want: `{
 				"blockHash": null,
 				"blockNumber": null,
-				"from": "0x71562b71999873db5b286df957af199ec94617f7",
+				"from": "0xdac2f10f2d3510a7441026e1eb55f12c2df5baa7",
 				"gas": "0x7",
-				"gasPrice": "0x6",
-				"hash": "0x5f3240454cd09a5d8b1c5d651eefae7a339262875bcd2d0e6676f3d989967008",
+				"gasPrice": "0x9",
+				"hash": "0x4dd06cff1765537474b6d6db74daf6885dd23ed0380bf8cd9c758d24f0fbd30f",
 				"input": "0x0001020304",
 				"nonce": "0x5",
 				"to": "0xdead000000000000000000000000000000000000",
 				"transactionIndex": null,
 				"value": "0x8",
-				"type": "0x0",
-				"chainId": "0x539",
-				"v": "0xa96",
-				"r": "0xbc85e96592b95f7160825d837abb407f009df9ebe8f1b9158a4b8dd093377f75",
-				"s": "0x1b55ea3af5574c536967b039ba6999ef6c89cf22fc04bcb296e0e8b0b9b576f5"
-			}`,
-		}, {
-			Tx: &types.LegacyTx{
-				Nonce:    5,
-				GasPrice: big.NewInt(6),
-				Gas:      7,
-				To:       nil,
-				Value:    big.NewInt(8),
-				Data:     []byte{0, 1, 2, 3, 4},
-				V:        big.NewInt(32),
-				R:        big.NewInt(10),
-				S:        big.NewInt(11),
-			},
-			Want: `{
-				"blockHash": null,
-				"blockNumber": null,
-				"from": "0x71562b71999873db5b286df957af199ec94617f7",
-				"gas": "0x7",
-				"gasPrice": "0x6",
-				"hash": "0x806e97f9d712b6cb7e781122001380a2837531b0fc1e5f5d78174ad4cb699873",
-				"input": "0x0001020304",
-				"nonce": "0x5",
-				"to": null,
-				"transactionIndex": null,
-				"value": "0x8",
-				"type": "0x0",
-				"chainId": "0x539",
-				"v": "0xa96",
-				"r": "0x9dc28b267b6ad4e4af6fe9289668f9305c2eb7a3241567860699e478af06835a",
-				"s": "0xa0b51a071aa9bed2cd70aedea859779dff039e3630ea38497d95202e9b1fec7"
-			}`,
-		},
-		{
-			Tx: &types.AccessListTx{
-				ChainID:  config.GetChainID(),
-				Nonce:    5,
-				GasPrice: big.NewInt(6),
-				Gas:      7,
-				To:       &addr,
-				Value:    big.NewInt(8),
-				Data:     []byte{0, 1, 2, 3, 4},
-				AccessList: types.AccessList{
-					types.AccessTuple{
-						Address:     common.Address{0x2},
-						StorageKeys: []common.Hash{types.EmptyRootHash},
-					},
-				},
-				V: big.NewInt(32),
-				R: big.NewInt(10),
-				S: big.NewInt(11),
-			},
-			Want: `{
-				"blockHash": null,
-				"blockNumber": null,
-				"from": "0x71562b71999873db5b286df957af199ec94617f7",
-				"gas": "0x7",
-				"gasPrice": "0x6",
-				"hash": "0x121347468ee5fe0a29f02b49b4ffd1c8342bc4255146bb686cd07117f79e7129",
-				"input": "0x0001020304",
-				"nonce": "0x5",
-				"to": "0xdead000000000000000000000000000000000000",
-				"transactionIndex": null,
-				"value": "0x8",
-				"type": "0x1",
-				"accessList": [
-					{
-						"address": "0x0200000000000000000000000000000000000000",
-						"storageKeys": [
-							"0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421"
-						]
-					}
-				],
-				"chainId": "0x539",
+				"type": "0x52",
 				"v": "0x0",
-				"r": "0xf372ad499239ae11d91d34c559ffc5dab4daffc0069e03afcabdcdf231a0c16b",
-				"s": "0x28573161d1f9472fa0fd4752533609e72f06414f7ab5588699a7141f65d2abf",
-				"yParity": "0x0"
+				"r": "0x0",
+				"s": "0x0"
 			}`,
 		}, {
-			Tx: &types.AccessListTx{
-				ChainID:  config.GetChainID(),
-				Nonce:    5,
-				GasPrice: big.NewInt(6),
-				Gas:      7,
-				To:       nil,
-				Value:    big.NewInt(8),
-				Data:     []byte{0, 1, 2, 3, 4},
-				AccessList: types.AccessList{
-					types.AccessTuple{
-						Address:     common.Address{0x2},
-						StorageKeys: []common.Hash{types.EmptyRootHash},
-					},
-				},
-				V: big.NewInt(32),
-				R: big.NewInt(10),
-				S: big.NewInt(11),
+			Tx: &types.GhostAccountTx{
+				ChainID:   config.GetChainID(),
+				Nonce:     5,
+				GasTipCap: big.NewInt(6),
+				GasFeeCap: big.NewInt(9),
+				Gas:       7,
+				To:        nil,
+				Value:     big.NewInt(8),
+				Data:      []byte{0, 1, 2, 3, 4},
 			},
 			Want: `{
 				"blockHash": null,
 				"blockNumber": null,
-				"from": "0x71562b71999873db5b286df957af199ec94617f7",
+				"from": "0xdac2f10f2d3510a7441026e1eb55f12c2df5baa7",
 				"gas": "0x7",
-				"gasPrice": "0x6",
-				"hash": "0x067c3baebede8027b0f828a9d933be545f7caaec623b00684ac0659726e2055b",
+				"gasPrice": "0x9",
+				"hash": "0xf31613e40b18bc7aa74fdde6b3355850e0d23298a5cba328a6f23ca07ab16ea0",
 				"input": "0x0001020304",
 				"nonce": "0x5",
 				"to": null,
 				"transactionIndex": null,
 				"value": "0x8",
-				"type": "0x1",
-				"accessList": [
-					{
-						"address": "0x0200000000000000000000000000000000000000",
-						"storageKeys": [
-							"0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421"
-						]
-					}
-				],
-				"chainId": "0x539",
-				"v": "0x1",
-				"r": "0x542981b5130d4613897fbab144796cb36d3cb3d7807d47d9c7f89ca7745b085c",
-				"s": "0x7425b9dd6c5deaa42e4ede35d0c4570c4624f68c28d812c10d806ffdf86ce63",
-				"yParity": "0x1"
+				"type": "0x52",
+				"v": "0x0",
+				"r": "0x0",
+				"s": "0x0"
 			}`,
 		}, {
-			Tx: &types.DynamicFeeTx{
+			Tx: &types.GhostAccountTx{
 				ChainID:   config.GetChainID(),
 				Nonce:     5,
 				GasTipCap: big.NewInt(6),
@@ -297,41 +231,26 @@ func allTransactionTypes(addr common.Address, config ctypes.ChainConfigurator) [
 						StorageKeys: []common.Hash{types.EmptyRootHash},
 					},
 				},
-				V: big.NewInt(32),
-				R: big.NewInt(10),
-				S: big.NewInt(11),
 			},
 			Want: `{
 				"blockHash": null,
 				"blockNumber": null,
-				"from": "0x71562b71999873db5b286df957af199ec94617f7",
+				"from": "0xdac2f10f2d3510a7441026e1eb55f12c2df5baa7",
 				"gas": "0x7",
 				"gasPrice": "0x9",
-				"maxFeePerGas": "0x9",
-				"maxPriorityFeePerGas": "0x6",
-				"hash": "0xb63e0b146b34c3e9cb7fbabb5b3c081254a7ded6f1b65324b5898cc0545d79ff",
+				"hash": "0xd45450c76443aa19518c47211322146a6f93fa08be60800b98bfc3b4452cc697",
 				"input": "0x0001020304",
 				"nonce": "0x5",
 				"to": "0xdead000000000000000000000000000000000000",
 				"transactionIndex": null,
 				"value": "0x8",
-				"type": "0x2",
-				"accessList": [
-					{
-						"address": "0x0200000000000000000000000000000000000000",
-						"storageKeys": [
-							"0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421"
-						]
-					}
-				],
-				"chainId": "0x539",
-				"v": "0x1",
-				"r": "0x3b167e05418a8932cd53d7578711fe1a76b9b96c48642402bb94978b7a107e80",
-				"s": "0x22f98a332d15ea2cc80386c1ebaa31b0afebfa79ebc7d039a1e0074418301fef",
-				"yParity": "0x1"
+				"type": "0x52",
+				"v": "0x0",
+				"r": "0x0",
+				"s": "0x0"
 			}`,
 		}, {
-			Tx: &types.DynamicFeeTx{
+			Tx: &types.GhostAccountTx{
 				ChainID:    config.GetChainID(),
 				Nonce:      5,
 				GasTipCap:  big.NewInt(6),
@@ -341,31 +260,23 @@ func allTransactionTypes(addr common.Address, config ctypes.ChainConfigurator) [
 				Value:      big.NewInt(8),
 				Data:       []byte{0, 1, 2, 3, 4},
 				AccessList: types.AccessList{},
-				V:          big.NewInt(32),
-				R:          big.NewInt(10),
-				S:          big.NewInt(11),
 			},
 			Want: `{
 				"blockHash": null,
 				"blockNumber": null,
-				"from": "0x71562b71999873db5b286df957af199ec94617f7",
+				"from": "0xdac2f10f2d3510a7441026e1eb55f12c2df5baa7",
 				"gas": "0x7",
 				"gasPrice": "0x9",
-				"maxFeePerGas": "0x9",
-				"maxPriorityFeePerGas": "0x6",
-				"hash": "0xcbab17ee031a9d5b5a09dff909f0a28aedb9b295ac0635d8710d11c7b806ec68",
+				"hash": "0x90622b381f7018a98965605193e8e2cb00103245886ddc57f3615f56e9f10ee0",
 				"input": "0x0001020304",
 				"nonce": "0x5",
 				"to": null,
 				"transactionIndex": null,
 				"value": "0x8",
-				"type": "0x2",
-				"accessList": [],
-				"chainId": "0x539",
+				"type": "0x52",
 				"v": "0x0",
-				"r": "0x6446b8a682db7e619fc6b4f6d1f708f6a17351a41c7fbd63665f469bc78b41b9",
-				"s": "0x7626abc15834f391a117c63450047309dbf84c5ce3e8e609b607062641e2de43",
-				"yParity": "0x0"
+				"r": "0x0",
+				"s": "0x0"
 			}`,
 		},
 	}
@@ -637,7 +548,7 @@ func TestEstimateGas(t *testing.T) {
 	t.Parallel()
 	// Initialize test accounts
 	var (
-		accounts = newAccounts(2)
+		accounts = newAccountsWithSender(2, 0x63)
 		genesis  = &genesisT.Genesis{
 			Config: params.TestChainConfig,
 			Alloc: genesisT.GenesisAlloc{
@@ -646,15 +557,13 @@ func TestEstimateGas(t *testing.T) {
 			},
 		}
 		genBlocks      = 10
-		signer         = types.HomesteadSigner{}
 		randomAccounts = newAccounts(2)
 	)
 	api := NewBlockChainAPI(newTestBackend(t, genBlocks, genesis, beacon.New(ethash.NewFaker()), func(i int, b *core.BlockGen) {
 		// Transfer from account[0] to account[1]
 		//    value: 1000 wei
 		//    fee:   0 wei
-		tx, _ := types.SignTx(types.NewTx(&types.LegacyTx{Nonce: uint64(i), To: &accounts[1].addr, Value: big.NewInt(1000), Gas: vars.TxGas, GasPrice: b.BaseFee(), Data: nil}), signer, accounts[0].key)
-		b.AddTx(tx)
+		b.AddTx(signAccountTransfer(t, b, accounts[0].key, uint64(i), accounts[1].addr))
 		if genesis.GetEthashTerminalTotalDifficultyPassed() {
 			b.SetPoS()
 		}
@@ -796,7 +705,7 @@ func TestCall(t *testing.T) {
 	t.Parallel()
 	// Initialize test accounts
 	var (
-		accounts = newAccounts(3)
+		accounts = newAccountsWithSender(3, 0x64)
 		genesis  = &genesisT.Genesis{
 			Config: params.MergedTestChainConfig,
 			Alloc: genesisT.GenesisAlloc{
@@ -806,14 +715,12 @@ func TestCall(t *testing.T) {
 			},
 		}
 		genBlocks = 10
-		signer    = types.HomesteadSigner{}
 	)
 	api := NewBlockChainAPI(newTestBackend(t, genBlocks, genesis, beacon.New(ethash.NewFaker()), func(i int, b *core.BlockGen) {
 		// Transfer from account[0] to account[1]
 		//    value: 1000 wei
 		//    fee:   0 wei
-		tx, _ := types.SignTx(types.NewTx(&types.LegacyTx{Nonce: uint64(i), To: &accounts[1].addr, Value: big.NewInt(1000), Gas: vars.TxGas, GasPrice: b.BaseFee(), Data: nil}), signer, accounts[0].key)
-		b.AddTx(tx)
+		b.AddTx(signAccountTransfer(t, b, accounts[0].key, uint64(i), accounts[1].addr))
 		if genesis.GetEthashTerminalTotalDifficultyPassed() {
 			b.SetPoS()
 		}
@@ -1308,18 +1215,59 @@ func argsFromTransaction(tx *types.Transaction, from common.Address) Transaction
 }
 
 type account struct {
-	key  *ecdsa.PrivateKey
+	key  *mldsa44.PrivateKey // nil for an account that sends nothing
 	addr common.Address
 }
 
+// newAccounts returns n accounts of random addresses, which send nothing.
 func newAccounts(n int) (accounts []account) {
 	for i := 0; i < n; i++ {
 		key, _ := crypto.GenerateKey()
-		addr := crypto.PubkeyToAddress(key.PublicKey)
-		accounts = append(accounts, account{key: key, addr: addr})
+		accounts = append(accounts, account{addr: crypto.PubkeyToAddress(key.PublicKey)})
 	}
 	slices.SortFunc(accounts, func(a, b account) int { return a.addr.Cmp(b.addr) })
 	return accounts
+}
+
+// newAccountsWithSender returns n accounts, the first of which is the account
+// of the ML-DSA-44 key of seed, which sends the test's transactions.
+func newAccountsWithSender(n int, seed byte) []account {
+	accounts := newAccounts(n)
+	key, _, addr := testAccount(seed)
+	accounts[0] = account{key: key, addr: addr}
+	return accounts
+}
+
+// accountSigGas is the gas an account transaction signed with ML-DSA-44 takes
+// on top of the gas of its execution.
+var accountSigGas = accountSenderGas - vars.TxGas
+
+// signAccountTx signs txdata with key for the chain b is generated on. A nil
+// chain ID is the chain's.
+func signAccountTx(t *testing.T, b *core.BlockGen, key *mldsa44.PrivateKey, txdata *types.GhostAccountTx) *types.Transaction {
+	t.Helper()
+	signer := types.NewGhostAccountSigner(b.Signer(), b.PrevBlock(-1).Hash())
+	if txdata.ChainID == nil {
+		txdata.ChainID = signer.ChainID()
+	}
+	tx, err := types.SignGhostAccountTx(signer, key, txdata)
+	if err != nil {
+		t.Fatalf("sign account transaction %d: %v", txdata.Nonce, err)
+	}
+	return tx
+}
+
+// signAccountTransfer returns an account transaction of key that sends 1000
+// wei to to at the base fee of the block b generates.
+func signAccountTransfer(t *testing.T, b *core.BlockGen, key *mldsa44.PrivateKey, nonce uint64, to common.Address) *types.Transaction {
+	t.Helper()
+	return signAccountTx(t, b, key, &types.GhostAccountTx{
+		Nonce:     nonce,
+		GasFeeCap: b.BaseFee(),
+		Gas:       accountSenderGas,
+		To:        &to,
+		Value:     big.NewInt(1000),
+	})
 }
 
 func newRPCBalance(balance *big.Int) **hexutil.Big {
@@ -1545,46 +1493,50 @@ func TestRPCMarshalBlock(t *testing.T) {
 }
 
 func TestRPCGetBlockOrHeader(t *testing.T) {
-	t.Parallel()
+	// The ML-DSA-44 signatures are hedged: a fixed random stream makes the
+	// recorded outputs reproducible.
+	cryptotest.SetGlobalRandom(t, 1)
 
 	// Initialize test accounts
 	var (
-		acc1Key, _ = crypto.HexToECDSA("8a1f9a8f95be41cd7ccb6168179afb4504aefe388d1e14474d32c45c72ce7b7a")
-		acc2Key, _ = crypto.HexToECDSA("49a7b37aa6f6645917e7b807e9d1c00d4fa71f18343b0d4122a4d2df64dd6fee")
-		acc1Addr   = crypto.PubkeyToAddress(acc1Key.PublicKey)
-		acc2Addr   = crypto.PubkeyToAddress(acc2Key.PublicKey)
-		genesis    = &genesisT.Genesis{
+		acc1Key, _, acc1Addr = testAccount(0x67)
+		_, _, acc2Addr       = testAccount(0x68)
+		genesis              = &genesisT.Genesis{
 			Config: params.TestChainConfig,
 			Alloc: genesisT.GenesisAlloc{
 				acc1Addr: {Balance: big.NewInt(vars.Ether)},
 				acc2Addr: {Balance: big.NewInt(vars.Ether)},
 			},
 		}
-		genBlocks = 10
-		signer    = types.HomesteadSigner{}
-		tx        = types.NewTx(&types.LegacyTx{
-			Nonce:    11,
-			GasPrice: big.NewInt(11111),
-			Gas:      1111,
-			To:       &acc2Addr,
-			Value:    big.NewInt(111),
-			Data:     []byte{0x11, 0x11, 0x11},
-		})
+		genBlocks  = 10
 		withdrawal = &types.Withdrawal{
 			Index:     0,
 			Validator: 1,
 			Address:   common.Address{0x12, 0x34},
 			Amount:    10,
 		}
-		pending = types.NewBlockWithWithdrawals(&types.Header{Number: big.NewInt(11), Time: 42}, []*types.Transaction{tx}, nil, nil, []*types.Withdrawal{withdrawal}, blocktest.NewHasher())
 	)
 	backend := newTestBackend(t, genBlocks, genesis, ethash.NewFaker(), func(i int, b *core.BlockGen) {
 		// Transfer from account[0] to account[1]
 		//    value: 1000 wei
 		//    fee:   0 wei
-		tx, _ := types.SignTx(types.NewTx(&types.LegacyTx{Nonce: uint64(i), To: &acc2Addr, Value: big.NewInt(1000), Gas: vars.TxGas, GasPrice: b.BaseFee(), Data: nil}), signer, acc1Key)
-		b.AddTx(tx)
+		b.AddTx(signAccountTransfer(t, b, acc1Key, uint64(i), acc2Addr))
 	})
+	signer := types.NewGhostAccountSigner(types.LatestSigner(genesis.Config), backend.chain.Genesis().Hash())
+	tx, err := types.SignGhostAccountTx(signer, acc1Key, &types.GhostAccountTx{
+		ChainID:   genesis.Config.GetChainID(),
+		Nonce:     11,
+		GasTipCap: big.NewInt(11111),
+		GasFeeCap: big.NewInt(11111),
+		Gas:       1111,
+		To:        &acc2Addr,
+		Value:     big.NewInt(111),
+		Data:      []byte{0x11, 0x11, 0x11},
+	})
+	if err != nil {
+		t.Fatalf("sign pending transaction: %v", err)
+	}
+	pending := types.NewBlockWithWithdrawals(&types.Header{Number: big.NewInt(11), Time: 42}, []*types.Transaction{tx}, nil, nil, []*types.Withdrawal{withdrawal}, blocktest.NewHasher())
 	backend.setPendingBlock(pending)
 	api := NewBlockChainAPI(backend)
 	blockHashes := make([]common.Hash, genBlocks+1)
@@ -1799,19 +1751,26 @@ func TestRPCGetBlockOrHeader(t *testing.T) {
 }
 
 func setupReceiptBackend(t *testing.T, genBlocks int) (*testBackend, []common.Hash) {
+	// The ML-DSA-44 signatures are hedged: a fixed random stream makes the
+	// recorded outputs reproducible.
+	cryptotest.SetGlobalRandom(t, 1)
 	config := *params.MergedTestChainConfig
 	var (
-		acc1Key, _ = crypto.HexToECDSA("8a1f9a8f95be41cd7ccb6168179afb4504aefe388d1e14474d32c45c72ce7b7a")
-		acc2Key, _ = crypto.HexToECDSA("49a7b37aa6f6645917e7b807e9d1c00d4fa71f18343b0d4122a4d2df64dd6fee")
-		acc1Addr   = crypto.PubkeyToAddress(acc1Key.PublicKey)
-		acc2Addr   = crypto.PubkeyToAddress(acc2Key.PublicKey)
-		contract   = common.HexToAddress("0000000000000000000000000000000000031ec7")
-		genesis    = &genesisT.Genesis{
+		// The account sends every transaction but the blob one, which the
+		// secp256k1 key of blobAddr sends.
+		accKey, _, accAddr = testAccount(0x69)
+		blobKey, _         = crypto.HexToECDSA("8a1f9a8f95be41cd7ccb6168179afb4504aefe388d1e14474d32c45c72ce7b7a")
+		acc2Key, _         = crypto.HexToECDSA("49a7b37aa6f6645917e7b807e9d1c00d4fa71f18343b0d4122a4d2df64dd6fee")
+		blobAddr           = crypto.PubkeyToAddress(blobKey.PublicKey)
+		acc2Addr           = crypto.PubkeyToAddress(acc2Key.PublicKey)
+		contract           = common.HexToAddress("0000000000000000000000000000000000031ec7")
+		genesis            = &genesisT.Genesis{
 			Config:        &config,
 			ExcessBlobGas: new(uint64),
 			BlobGasUsed:   new(uint64),
 			Alloc: genesisT.GenesisAlloc{
-				acc1Addr: {Balance: big.NewInt(vars.Ether)},
+				accAddr:  {Balance: big.NewInt(vars.Ether)},
+				blobAddr: {Balance: big.NewInt(vars.Ether)},
 				acc2Addr: {Balance: big.NewInt(vars.Ether)},
 				// // SPDX-License-Identifier: GPL-3.0
 				// pragma solidity >=0.7.0 <0.9.0;
@@ -1842,35 +1801,35 @@ func setupReceiptBackend(t *testing.T, genBlocks int) (*testBackend, []common.Ha
 		switch i {
 		case 0:
 			// transfer 1000wei
-			tx, err = types.SignTx(types.NewTx(&types.LegacyTx{Nonce: uint64(i), To: &acc2Addr, Value: big.NewInt(1000), Gas: vars.TxGas, GasPrice: b.BaseFee(), Data: nil}), types.HomesteadSigner{}, acc1Key)
+			tx = signAccountTransfer(t, b, accKey, uint64(i), acc2Addr)
 		case 1:
 			// create contract
-			tx, err = types.SignTx(types.NewTx(&types.LegacyTx{Nonce: uint64(i), To: nil, Gas: 53100, GasPrice: b.BaseFee(), Data: common.FromHex("0x60806040")}), signer, acc1Key)
+			tx = signAccountTx(t, b, accKey, &types.GhostAccountTx{Nonce: uint64(i), To: nil, Gas: 53100 + accountSigGas, GasFeeCap: b.BaseFee(), Data: common.FromHex("0x60806040")})
 		case 2:
 			// with logs
 			// transfer(address to, uint256 value)
 			data := fmt.Sprintf("0xa9059cbb%s%s", common.HexToHash(common.BigToAddress(big.NewInt(int64(i + 1))).Hex()).String()[2:], common.BytesToHash([]byte{byte(i + 11)}).String()[2:])
-			tx, err = types.SignTx(types.NewTx(&types.LegacyTx{Nonce: uint64(i), To: &contract, Gas: 60000, GasPrice: b.BaseFee(), Data: common.FromHex(data)}), signer, acc1Key)
+			tx = signAccountTx(t, b, accKey, &types.GhostAccountTx{Nonce: uint64(i), To: &contract, Gas: 60000 + accountSigGas, GasFeeCap: b.BaseFee(), Data: common.FromHex(data)})
 		case 3:
-			// dynamic fee with logs
+			// with a tip, with logs
 			// transfer(address to, uint256 value)
 			data := fmt.Sprintf("0xa9059cbb%s%s", common.HexToHash(common.BigToAddress(big.NewInt(int64(i + 1))).Hex()).String()[2:], common.BytesToHash([]byte{byte(i + 11)}).String()[2:])
 			fee := big.NewInt(500)
 			fee.Add(fee, b.BaseFee())
-			tx, err = types.SignTx(types.NewTx(&types.DynamicFeeTx{Nonce: uint64(i), To: &contract, Gas: 60000, Value: big.NewInt(1), GasTipCap: big.NewInt(500), GasFeeCap: fee, Data: common.FromHex(data)}), signer, acc1Key)
+			tx = signAccountTx(t, b, accKey, &types.GhostAccountTx{Nonce: uint64(i), To: &contract, Gas: 60000 + accountSigGas, Value: big.NewInt(1), GasTipCap: big.NewInt(500), GasFeeCap: fee, Data: common.FromHex(data)})
 		case 4:
 			// access list with contract create
 			accessList := types.AccessList{{
 				Address:     contract,
 				StorageKeys: []common.Hash{{0}},
 			}}
-			tx, err = types.SignTx(types.NewTx(&types.AccessListTx{Nonce: uint64(i), To: nil, Gas: 58100, GasPrice: b.BaseFee(), Data: common.FromHex("0x60806040"), AccessList: accessList}), signer, acc1Key)
+			tx = signAccountTx(t, b, accKey, &types.GhostAccountTx{Nonce: uint64(i), To: nil, Gas: 58100 + accountSigGas, GasFeeCap: b.BaseFee(), Data: common.FromHex("0x60806040"), AccessList: accessList})
 		case 5:
-			// blob tx
+			// blob tx, the first transaction of its sender
 			fee := big.NewInt(500)
 			fee.Add(fee, b.BaseFee())
 			tx, err = types.SignTx(types.NewTx(&types.BlobTx{
-				Nonce:      uint64(i),
+				Nonce:      0,
 				GasTipCap:  uint256.NewInt(1),
 				GasFeeCap:  uint256.MustFromBig(fee),
 				Gas:        vars.TxGas,
@@ -1878,7 +1837,7 @@ func setupReceiptBackend(t *testing.T, genBlocks int) (*testBackend, []common.Ha
 				BlobFeeCap: uint256.NewInt(1),
 				BlobHashes: []common.Hash{{1}},
 				Value:      new(uint256.Int),
-			}), signer, acc1Key)
+			}), signer, blobKey)
 		}
 		if err != nil {
 			t.Errorf("failed to sign tx: %v", err)
@@ -1892,8 +1851,6 @@ func setupReceiptBackend(t *testing.T, genBlocks int) (*testBackend, []common.Ha
 }
 
 func TestRPCGetTransactionReceipt(t *testing.T) {
-	t.Parallel()
-
 	var (
 		backend, txHashes = setupReceiptBackend(t, 6)
 		api               = NewTransactionAPI(backend, new(AddrLocker))
@@ -1918,10 +1875,10 @@ func TestRPCGetTransactionReceipt(t *testing.T) {
 			txHash: txHashes[2],
 			file:   "with-logs",
 		},
-		// 3. dynamic tx with logs success
+		// 3. account tx with a tip, with logs success
 		{
 			txHash: txHashes[3],
-			file:   `dynamic-tx-with-logs`,
+			file:   `account-tip-tx-with-logs`,
 		},
 		// 4. access list tx with create contract
 		{
@@ -1960,8 +1917,6 @@ func TestRPCGetTransactionReceipt(t *testing.T) {
 }
 
 func TestRPCGetBlockReceipts(t *testing.T) {
-	t.Parallel()
-
 	var (
 		genBlocks  = 6
 		backend, _ = setupReceiptBackend(t, genBlocks)
@@ -2001,25 +1956,25 @@ func TestRPCGetBlockReceipts(t *testing.T) {
 			test: rpc.BlockNumberOrHashWithNumber(rpc.LatestBlockNumber),
 			file: "tag-latest",
 		},
-		// 4. block with legacy transfer tx(hash)
+		// 4. block with account transfer tx(hash)
 		{
 			test: rpc.BlockNumberOrHashWithHash(blockHashes[1], false),
-			file: "block-with-legacy-transfer-tx",
+			file: "block-with-account-transfer-tx",
 		},
 		// 5. block with contract create tx(number)
 		{
 			test: rpc.BlockNumberOrHashWithNumber(rpc.BlockNumber(2)),
 			file: "block-with-contract-create-tx",
 		},
-		// 6. block with legacy contract call tx(hash)
+		// 6. block with account contract call tx(hash)
 		{
 			test: rpc.BlockNumberOrHashWithHash(blockHashes[3], false),
-			file: "block-with-legacy-contract-call-tx",
+			file: "block-with-account-contract-call-tx",
 		},
-		// 7. block with dynamic fee tx(number)
+		// 7. block with account tx with a tip(number)
 		{
 			test: rpc.BlockNumberOrHashWithNumber(rpc.BlockNumber(4)),
-			file: "block-with-dynamic-fee-tx",
+			file: "block-with-account-tip-tx",
 		},
 		// 8. block is empty
 		{
@@ -2091,12 +2046,10 @@ func TestSendRawRevealTransaction(t *testing.T) {
 	t.Cleanup(ghostpriv.SetVerifier(ghostprivtest.Verifier{}))
 
 	var (
-		key, _   = crypto.ToECDSA(crypto.Keccak256([]byte("ghost synthetic test account rpc")))
-		addr     = crypto.PubkeyToAddress(key.PublicKey)
-		oneGhost = new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
-		gspec    = ghost.InternalNetGenesis()
-		chainID  = gspec.Config.GetChainID()
-		signer   = types.LatestSigner(gspec.Config)
+		key, _, addr = testAccount(0x6a)
+		oneGhost     = new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+		gspec        = ghost.InternalNetGenesis()
+		chainID      = gspec.Config.GetChainID()
 	)
 	gspec.Alloc = genesisT.GenesisAlloc{addr: {Balance: new(big.Int).Mul(oneGhost, big.NewInt(100))}}
 	data, err := ghostpriv.CommitData(ghosttree.K("ghost/test-coin-f", []byte("rpc")), make([]byte, ghostpriv.NoteSize))
@@ -2104,18 +2057,17 @@ func TestSendRawRevealTransaction(t *testing.T) {
 		t.Fatal(err)
 	}
 	to := ghost.CommitEntryAddress
-	commit := types.MustSignNewTx(key, signer, &types.DynamicFeeTx{
-		ChainID:   chainID,
-		Nonce:     0,
-		GasTipCap: big.NewInt(vars.InitialBaseFee),
-		GasFeeCap: big.NewInt(100 * vars.InitialBaseFee),
-		Gas:       60_000,
-		To:        &to,
-		Value:     oneGhost,
-		Data:      data,
-	})
 	tb := newTestBackend(t, 1, gspec, ethash.NewFaker(), func(i int, b *core.BlockGen) {
-		b.AddTx(commit)
+		b.AddTx(signAccountTx(t, b, key, &types.GhostAccountTx{
+			ChainID:   chainID,
+			Nonce:     0,
+			GasTipCap: big.NewInt(vars.InitialBaseFee),
+			GasFeeCap: big.NewInt(100 * vars.InitialBaseFee),
+			Gas:       60_000 + accountSigGas,
+			To:        &to,
+			Value:     oneGhost,
+			Data:      data,
+		}))
 	})
 	defer tb.chain.Stop()
 	pool := ghostpool.New(tb.chain)

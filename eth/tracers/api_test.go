@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cloudflare/circl/sign/mldsa/mldsa44"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/consensus"
@@ -171,7 +172,7 @@ func (b *testBackend) StateAtTransaction(ctx context.Context, block *types.Block
 		return nil, vm.BlockContext{}, statedb, release, nil
 	}
 	// Recompute transactions up to the target index.
-	signer := types.MakeSigner(b.chainConfig, block.Number(), block.Time())
+	signer := types.NewGhostAccountSigner(types.MakeSigner(b.chainConfig, block.Number(), block.Time()), b.chain.Genesis().Hash())
 	for idx, tx := range block.Transactions() {
 		msg, _ := core.TransactionToMessage(tx, signer, block.BaseFee())
 		txContext := core.NewEVMTxContext(msg)
@@ -191,8 +192,10 @@ func (b *testBackend) StateAtTransaction(ctx context.Context, block *types.Block
 func TestTraceCall(t *testing.T) {
 	t.Parallel()
 
-	// Initialize test accounts
+	// Initialize test accounts; account[0] is an account of an ML-DSA-44 key.
 	accounts := newAccounts(3)
+	key, _, sender := testAccount(0x43)
+	accounts[0].addr = sender
 	genesis := &genesisT.Genesis{
 		Config: params.TestChainConfig,
 		Alloc: genesisT.GenesisAlloc{
@@ -202,46 +205,22 @@ func TestTraceCall(t *testing.T) {
 		},
 	}
 	genBlocks := 10
-	signer := types.HomesteadSigner{}
+	signer := newAccountSigner(genesis)
 	nonce := uint64(0)
 	backend := newTestBackend(t, genBlocks, genesis, func(i int, b *core.BlockGen) {
 		// Transfer from account[0] to account[1]
 		//    value: 1000 wei
 		//    fee:   0 wei
-		tx, _ := types.SignTx(types.NewTx(&types.LegacyTx{
-			Nonce:    nonce,
-			To:       &accounts[1].addr,
-			Value:    big.NewInt(1000),
-			Gas:      vars.TxGas,
-			GasPrice: b.BaseFee(),
-			Data:     nil}),
-			signer, accounts[0].key)
-		b.AddTx(tx)
+		b.AddTx(signAccountTransfer(t, signer, key, nonce, accounts[1].addr, b.BaseFee()))
 		nonce++
 
 		if i == genBlocks-2 {
 			// Transfer from account[0] to account[2]
-			tx, _ = types.SignTx(types.NewTx(&types.LegacyTx{
-				Nonce:    nonce,
-				To:       &accounts[2].addr,
-				Value:    big.NewInt(1000),
-				Gas:      vars.TxGas,
-				GasPrice: b.BaseFee(),
-				Data:     nil}),
-				signer, accounts[0].key)
-			b.AddTx(tx)
+			b.AddTx(signAccountTransfer(t, signer, key, nonce, accounts[2].addr, b.BaseFee()))
 			nonce++
 
 			// Transfer from account[0] to account[1] again
-			tx, _ = types.SignTx(types.NewTx(&types.LegacyTx{
-				Nonce:    nonce,
-				To:       &accounts[1].addr,
-				Value:    big.NewInt(1000),
-				Gas:      vars.TxGas,
-				GasPrice: b.BaseFee(),
-				Data:     nil}),
-				signer, accounts[0].key)
-			b.AddTx(tx)
+			b.AddTx(signAccountTransfer(t, signer, key, nonce, accounts[1].addr, b.BaseFee()))
 			nonce++
 		}
 	})
@@ -451,6 +430,8 @@ func TestTraceTransaction(t *testing.T) {
 
 	// Initialize test accounts
 	accounts := newAccounts(2)
+	key, _, sender := testAccount(0x44)
+	accounts[0].addr = sender
 	genesis := &genesisT.Genesis{
 		Config: params.TestChainConfig,
 		Alloc: genesisT.GenesisAlloc{
@@ -459,19 +440,12 @@ func TestTraceTransaction(t *testing.T) {
 		},
 	}
 	target := common.Hash{}
-	signer := types.HomesteadSigner{}
+	signer := newAccountSigner(genesis)
 	backend := newTestBackend(t, 1, genesis, func(i int, b *core.BlockGen) {
 		// Transfer from account[0] to account[1]
 		//    value: 1000 wei
 		//    fee:   0 wei
-		tx, _ := types.SignTx(types.NewTx(&types.LegacyTx{
-			Nonce:    uint64(i),
-			To:       &accounts[1].addr,
-			Value:    big.NewInt(1000),
-			Gas:      vars.TxGas,
-			GasPrice: b.BaseFee(),
-			Data:     nil}),
-			signer, accounts[0].key)
+		tx := signAccountTransfer(t, signer, key, uint64(i), accounts[1].addr, b.BaseFee())
 		b.AddTx(tx)
 		target = tx.Hash()
 	})
@@ -486,7 +460,7 @@ func TestTraceTransaction(t *testing.T) {
 		t.Errorf("failed to unmarshal result %v", err)
 	}
 	if !reflect.DeepEqual(have, &logger.ExecutionResult{
-		Gas:         vars.TxGas,
+		Gas:         accountSenderGas,
 		Failed:      false,
 		ReturnValue: "",
 		StructLogs:  []logger.StructLogRes{},
@@ -506,6 +480,8 @@ func TestTraceBlock(t *testing.T) {
 
 	// Initialize test accounts
 	accounts := newAccounts(3)
+	key, _, sender := testAccount(0x45)
+	accounts[0].addr = sender
 	genesis := &genesisT.Genesis{
 		Config: params.TestChainConfig,
 		Alloc: genesisT.GenesisAlloc{
@@ -515,20 +491,13 @@ func TestTraceBlock(t *testing.T) {
 		},
 	}
 	genBlocks := 10
-	signer := types.HomesteadSigner{}
+	signer := newAccountSigner(genesis)
 	var txHash common.Hash
 	backend := newTestBackend(t, genBlocks, genesis, func(i int, b *core.BlockGen) {
 		// Transfer from account[0] to account[1]
 		//    value: 1000 wei
 		//    fee:   0 wei
-		tx, _ := types.SignTx(types.NewTx(&types.LegacyTx{
-			Nonce:    uint64(i),
-			To:       &accounts[1].addr,
-			Value:    big.NewInt(1000),
-			Gas:      vars.TxGas,
-			GasPrice: b.BaseFee(),
-			Data:     nil}),
-			signer, accounts[0].key)
+		tx := signAccountTransfer(t, signer, key, uint64(i), accounts[1].addr, b.BaseFee())
 		b.AddTx(tx)
 		txHash = tx.Hash()
 	})
@@ -549,7 +518,7 @@ func TestTraceBlock(t *testing.T) {
 		// Trace head block
 		{
 			blockNumber: rpc.BlockNumber(genBlocks),
-			want:        fmt.Sprintf(`[{"txHash":"%v","result":{"gas":21000,"failed":false,"returnValue":"","structLogs":[]}}]`, txHash),
+			want:        fmt.Sprintf(`[{"txHash":"%v","result":{"gas":%d,"failed":false,"returnValue":"","structLogs":[]}}]`, txHash, accountSenderGas),
 		},
 		// Trace non-existent block
 		{
@@ -559,12 +528,12 @@ func TestTraceBlock(t *testing.T) {
 		// Trace latest block
 		{
 			blockNumber: rpc.LatestBlockNumber,
-			want:        fmt.Sprintf(`[{"txHash":"%v","result":{"gas":21000,"failed":false,"returnValue":"","structLogs":[]}}]`, txHash),
+			want:        fmt.Sprintf(`[{"txHash":"%v","result":{"gas":%d,"failed":false,"returnValue":"","structLogs":[]}}]`, txHash, accountSenderGas),
 		},
 		// Trace pending block
 		{
 			blockNumber: rpc.PendingBlockNumber,
-			want:        fmt.Sprintf(`[{"txHash":"%v","result":{"gas":21000,"failed":false,"returnValue":"","structLogs":[]}}]`, txHash),
+			want:        fmt.Sprintf(`[{"txHash":"%v","result":{"gas":%d,"failed":false,"returnValue":"","structLogs":[]}}]`, txHash, accountSenderGas),
 		},
 	}
 	for i, tc := range testSuite {
@@ -595,6 +564,8 @@ func TestTracingWithOverrides(t *testing.T) {
 	t.Parallel()
 	// Initialize test accounts
 	accounts := newAccounts(3)
+	key, _, sender := testAccount(0x46)
+	accounts[0].addr = sender
 	storageAccount := common.Address{0x13, 37}
 	genesis := &genesisT.Genesis{
 		Config: params.TestChainConfig,
@@ -613,20 +584,12 @@ func TestTracingWithOverrides(t *testing.T) {
 		},
 	}
 	genBlocks := 10
-	signer := types.HomesteadSigner{}
+	signer := newAccountSigner(genesis)
 	backend := newTestBackend(t, genBlocks, genesis, func(i int, b *core.BlockGen) {
 		// Transfer from account[0] to account[1]
 		//    value: 1000 wei
 		//    fee:   0 wei
-		tx, _ := types.SignTx(types.NewTx(&types.LegacyTx{
-			Nonce:    uint64(i),
-			To:       &accounts[1].addr,
-			Value:    big.NewInt(1000),
-			Gas:      vars.TxGas,
-			GasPrice: b.BaseFee(),
-			Data:     nil}),
-			signer, accounts[0].key)
-		b.AddTx(tx)
+		b.AddTx(signAccountTransfer(t, signer, key, uint64(i), accounts[1].addr, b.BaseFee()))
 	})
 	defer backend.chain.Stop()
 	api := NewAPI(backend)
@@ -941,6 +904,31 @@ func newAccounts(n int) (accounts []Account) {
 	return accounts
 }
 
+// newAccountSigner returns the signer of account transactions on the chain of
+// genesis.
+func newAccountSigner(genesis *genesisT.Genesis) types.Signer {
+	return types.NewGhostAccountSigner(types.LatestSigner(genesis.Config), core.GenesisToBlock(genesis, nil).Hash())
+}
+
+// signAccountTransfer returns an account transaction of key that sends 1000
+// wei to to, with the gas of a transfer and its signature.
+func signAccountTransfer(t *testing.T, signer types.Signer, key *mldsa44.PrivateKey, nonce uint64, to common.Address, baseFee *big.Int) *types.Transaction {
+	t.Helper()
+	tx, err := types.SignGhostAccountTx(signer, key, &types.GhostAccountTx{
+		ChainID:   signer.ChainID(),
+		Nonce:     nonce,
+		GasTipCap: new(big.Int),
+		GasFeeCap: baseFee,
+		Gas:       accountSenderGas,
+		To:        &to,
+		Value:     big.NewInt(1000),
+	})
+	if err != nil {
+		t.Fatalf("sign account transaction %d: %v", nonce, err)
+	}
+	return tx
+}
+
 func newRPCBalance(balance *big.Int) **hexutil.Big {
 	rpcBalance := (*hexutil.Big)(balance)
 	return &rpcBalance
@@ -965,16 +953,19 @@ func newStates(keys []common.Hash, vals []common.Hash) *map[common.Hash]common.H
 func TestTraceChain(t *testing.T) {
 	// Initialize test accounts
 	accounts := newAccounts(3)
+	key, _, sender := testAccount(0x47)
+	accounts[0].addr = sender
 	genesis := &genesisT.Genesis{
 		Config: params.TestChainConfig,
 		Alloc: genesisT.GenesisAlloc{
-			accounts[0].addr: {Balance: big.NewInt(vars.Ether)},
+			// The account pays the signature gas of 1275 transactions.
+			accounts[0].addr: {Balance: new(big.Int).Mul(big.NewInt(10), big.NewInt(vars.Ether))},
 			accounts[1].addr: {Balance: big.NewInt(vars.Ether)},
 			accounts[2].addr: {Balance: big.NewInt(vars.Ether)},
 		},
 	}
 	genBlocks := 50
-	signer := types.HomesteadSigner{}
+	signer := newAccountSigner(genesis)
 
 	var (
 		ref   atomic.Uint32 // total refs has made
@@ -986,8 +977,7 @@ func TestTraceChain(t *testing.T) {
 		//    value: 1000 wei
 		//    fee:   0 wei
 		for j := 0; j < i+1; j++ {
-			tx, _ := types.SignTx(types.NewTransaction(nonce, accounts[1].addr, big.NewInt(1000), vars.TxGas, b.BaseFee(), nil), signer, accounts[0].key)
-			b.AddTx(tx)
+			b.AddTx(signAccountTransfer(t, signer, key, nonce, accounts[1].addr, b.BaseFee()))
 			nonce += 1
 		}
 	})
@@ -995,7 +985,7 @@ func TestTraceChain(t *testing.T) {
 	backend.relHook = func() { rel.Add(1) }
 	api := NewAPI(backend)
 
-	single := `{"txHash":"0x0000000000000000000000000000000000000000000000000000000000000000","result":{"gas":21000,"failed":false,"returnValue":"","structLogs":[]}}`
+	single := fmt.Sprintf(`{"txHash":"0x0000000000000000000000000000000000000000000000000000000000000000","result":{"gas":%d,"failed":false,"returnValue":"","structLogs":[]}}`, accountSenderGas)
 	var cases = []struct {
 		start  uint64
 		end    uint64

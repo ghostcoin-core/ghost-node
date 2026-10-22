@@ -12,7 +12,6 @@ import (
 	"github.com/ethereum/go-ethereum/consensus/beacon"
 	"github.com/ethereum/go-ethereum/consensus/ethash"
 	"github.com/ethereum/go-ethereum/core"
-	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/params/types/genesisT"
@@ -24,7 +23,7 @@ func TestCall_CG(t *testing.T) {
 	t.Parallel()
 	// Initialize test accounts
 	var (
-		accounts = newAccounts(3)
+		accounts = newAccountsWithSender(3, 0x62)
 		genesis  = &genesisT.Genesis{
 			Config: params.TestChainConfig, // ! Use pre-MERGED chain config.
 			Alloc: genesisT.GenesisAlloc{
@@ -34,14 +33,12 @@ func TestCall_CG(t *testing.T) {
 			},
 		}
 		genBlocks = 10
-		signer    = types.HomesteadSigner{}
 	)
 	api := NewBlockChainAPI(newTestBackend(t, genBlocks, genesis, beacon.New(ethash.NewFaker()), func(i int, b *core.BlockGen) {
 		// Transfer from account[0] to account[1]
 		//    value: 1000 wei
 		//    fee:   0 wei
-		tx, _ := types.SignTx(types.NewTx(&types.LegacyTx{Nonce: uint64(i), To: &accounts[1].addr, Value: big.NewInt(1000), Gas: vars.TxGas, GasPrice: b.BaseFee(), Data: nil}), signer, accounts[0].key)
-		b.AddTx(tx)
+		b.AddTx(signAccountTransfer(t, b, accounts[0].key, uint64(i), accounts[1].addr))
 		if genesis.GetEthashTerminalTotalDifficultyPassed() {
 			b.SetPoS()
 		}

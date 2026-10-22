@@ -65,33 +65,59 @@ func TestAccountManagement(t *testing.T) {
 	if _, err := ks.Import(jsonAcc, "Export password", "Import password"); err != nil {
 		t.Fatalf("Failed to import account: %v", err)
 	}
-	// Create a new account to sign transactions with
-	signer, err := ks.NewAccount("Signer password")
-	if err != nil {
-		t.Fatalf("Failed to create signer account: %v", err)
+	// Import an ML-DSA-44 account key of a fixed seed to sign account
+	// transactions with
+	seed := make([]byte, keystore.SeedSize)
+	for i := range seed {
+		seed[i] = 0x71
 	}
-	tx := types.NewTransaction(0, common.Address{}, big.NewInt(0), 0, big.NewInt(0), nil)
-	chain := big.NewInt(1)
+	signer, err := ks.ImportSeed(seed, "Signer password")
+	if err != nil {
+		t.Fatalf("Failed to import signer account: %v", err)
+	}
+	tx := &types.GhostAccountTx{
+		ChainID:   big.NewInt(1),
+		GasTipCap: big.NewInt(0),
+		GasFeeCap: big.NewInt(0),
+		To:        &common.Address{},
+		Value:     big.NewInt(0),
+	}
+	// The signature of an account transaction is bound to the genesis hash of
+	// its chain.
+	chain := types.NewGhostAccountSigner(types.LatestSignerForChainID(big.NewInt(1)), common.HexToHash("0x01"))
+	checkSender := func(signed *types.Transaction) {
+		t.Helper()
+		if from, err := types.Sender(chain, signed); err != nil || from != signer.Address {
+			t.Fatalf("Signed transaction sender %x (%v), want %x", from, err, signer.Address)
+		}
+	}
 
 	// Sign a transaction with a single authorization
-	if _, err := ks.SignTxWithPassphrase(signer, "Signer password", tx, chain); err != nil {
+	signed, err := ks.SignAccountTxWithPassphrase(signer, "Signer password", chain, tx)
+	if err != nil {
 		t.Fatalf("Failed to sign with passphrase: %v", err)
 	}
+	checkSender(signed)
 	// Sign a transaction with multiple manually cancelled authorizations
 	if err := ks.Unlock(signer, "Signer password"); err != nil {
 		t.Fatalf("Failed to unlock account: %v", err)
 	}
-	if _, err := ks.SignTx(signer, tx, chain); err != nil {
+	if signed, err = ks.SignAccountTx(signer, chain, tx); err != nil {
 		t.Fatalf("Failed to sign with unlocked account: %v", err)
 	}
+	checkSender(signed)
 	if err := ks.Lock(signer.Address); err != nil {
 		t.Fatalf("Failed to lock account: %v", err)
+	}
+	if _, err := ks.SignAccountTx(signer, chain, tx); err != keystore.ErrLocked {
+		t.Fatalf("Signed with locked account: error %v, want %v", err, keystore.ErrLocked)
 	}
 	// Sign a transaction with multiple automatically cancelled authorizations
 	if err := ks.TimedUnlock(signer, "Signer password", time.Second); err != nil {
 		t.Fatalf("Failed to time unlock account: %v", err)
 	}
-	if _, err := ks.SignTx(signer, tx, chain); err != nil {
+	if signed, err = ks.SignAccountTx(signer, chain, tx); err != nil {
 		t.Fatalf("Failed to sign with time unlocked account: %v", err)
 	}
+	checkSender(signed)
 }
