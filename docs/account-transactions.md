@@ -586,8 +586,34 @@ or listening on all addresses names its public IP with `--nat extip:<IP>`
 and forwards the one port number for both TCP and UDP; the UDP port is not
 mapped by NAT. Others cannot verify it otherwise.
 
+## Signing in the node and RPC
+
+The node's keystore holds ML-DSA-44 account keys. `personal_newAccount`
+creates one, and `personal_importRawKey` takes the 32-byte key seed in hex.
+`personal_signTransaction`, `personal_sendTransaction`,
+`eth_signTransaction`, `eth_sendTransaction` and `eth_resend` build an
+account transaction and sign it with the account's ML-DSA-44 key
+(`internal/ethapi/account_tx.go`), using the signer
+`types.NewGhostAccountSigner(types.LatestSigner(config), genesisHash)` with
+the hash of block 0. They never sign a secp256k1 transaction. A gas price
+given is both the fee cap and the tip cap, and so is the new gas price of
+`eth_resend`. A gas limit that is estimated has the signature gas of an
+ML-DSA-44 transaction added (`16 * 3,734 + 3,000 = 62,744` gas), which a call
+does not take; a gas limit given is kept.
+
+`eth_sign`, `personal_sign` and `personal_ecRecover` are not served: no
+quantum-safe message format is specified.
+
+In an RPC response (a transaction, a block with full transactions, a pending
+transaction and a receipt), an account transaction has `scheme`, its 2 bytes
+in hex (`"0x0001"`), and `publicKey` in hex, and its `from` is derived from
+them; a transaction also has its `signature`. It has no `v`, `r`, `s` or
+`yParity`. The Go client (`ethclient`) decodes the 2-byte scheme, derives the
+sender from the scheme and the public key, and refuses a server `from` that
+disagrees, in `TransactionSender` as well.
+
 ## Not yet in this node
 
-Refusing the secp256k1 transaction types, the node's own signing and its
-remote procedure calls, and signing with SLH-DSA keys outside tests are
-separate pieces of work.
+Refusing the secp256k1 transaction types, removing the secp256k1 keys from
+the keystore and its command-line tools, and signing with keys of scheme
+`0x0002` outside tests are separate pieces of work.

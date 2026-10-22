@@ -375,13 +375,14 @@ func (s *PersonalAccountAPI) DeriveAccount(url string, path string, pin *bool) (
 	return wallet.Derive(derivPath, *pin)
 }
 
-// NewAccount will create a new account and returns the address for the new account.
+// NewAccount will create a new ML-DSA-44 account and returns the address for
+// the new account.
 func (s *PersonalAccountAPI) NewAccount(password string) (common.AddressEIP55, error) {
 	ks, err := fetchKeystore(s.am)
 	if err != nil {
 		return common.AddressEIP55{}, err
 	}
-	acc, err := ks.NewAccount(password)
+	acc, err := ks.NewMLDSAAccount(password)
 	if err == nil {
 		addrEIP55 := common.AddressEIP55(acc.Address)
 		log.Info("Your new key was generated", "address", addrEIP55.String())
@@ -400,18 +401,22 @@ func fetchKeystore(am *accounts.Manager) (*keystore.KeyStore, error) {
 	return nil, errors.New("local keystore not used")
 }
 
-// ImportRawKey stores the given hex encoded ECDSA key into the key directory,
-// encrypting it with the passphrase.
-func (s *PersonalAccountAPI) ImportRawKey(privkey string, password string) (common.Address, error) {
-	key, err := crypto.HexToECDSA(privkey)
+// ImportRawKey stores the ML-DSA-44 account key of the given hex encoded
+// 32-byte seed into the key directory, encrypting it with the passphrase.
+func (s *PersonalAccountAPI) ImportRawKey(seedHex string, password string) (common.Address, error) {
+	seed, err := hex.DecodeString(strings.TrimPrefix(seedHex, "0x"))
 	if err != nil {
-		return common.Address{}, err
+		return common.Address{}, errors.New("invalid hex seed")
+	}
+	defer clear(seed)
+	if len(seed) != keystore.SeedSize {
+		return common.Address{}, keystore.ErrSeedSize
 	}
 	ks, err := fetchKeystore(s.am)
 	if err != nil {
 		return common.Address{}, err
 	}
-	acc, err := ks.ImportECDSA(key, password)
+	acc, err := ks.ImportSeed(seed, password)
 	return acc.Address, err
 }
 
@@ -454,7 +459,8 @@ func (s *PersonalAccountAPI) LockAccount(addr common.Address) bool {
 	return false
 }
 
-// signTransaction sets defaults and signs the given transaction
+// signTransaction sets defaults, checks the fee and signs the account
+// transaction of args with the key passwd decrypts.
 // NOTE: the caller needs to ensure that the nonceLock is held, if applicable,
 // and release it after the transaction has been submitted to the tx pool
 func (s *PersonalAccountAPI) signTransaction(ctx context.Context, args *TransactionArgs, passwd string) (*types.Transaction, error) {
@@ -465,13 +471,16 @@ func (s *PersonalAccountAPI) signTransaction(ctx context.Context, args *Transact
 		return nil, err
 	}
 	// Set some sanity defaults and terminate on failure
-	if err := args.setDefaults(ctx, s.b, false); err != nil {
+	if err := args.setAccountTxDefaults(ctx, s.b); err != nil {
 		return nil, err
 	}
-	// Assemble the transaction and sign with the wallet
-	tx := args.toTransaction()
-
-	return wallet.SignTxWithPassphrase(account, passwd, tx, s.b.ChainConfig().GetChainID())
+	// Assemble the account transaction and, before signing it, ensure its
+	// fee is reasonable.
+	tx := args.toAccountTx()
+	if err := accountTxFeeCheck(s.b, tx); err != nil {
+		return nil, err
+	}
+	return signAccountTx(ctx, s.b, wallet, account, &passwd, tx)
 }
 
 // SendTransaction will create a transaction from the given arguments and
@@ -517,11 +526,6 @@ func (s *PersonalAccountAPI) SignTransaction(ctx context.Context, args Transacti
 	if args.Nonce == nil {
 		return nil, errors.New("nonce not specified")
 	}
-	// Before actually signing the transaction, ensure the transaction fee is reasonable.
-	tx := args.toTransaction()
-	if err := checkTxFee(tx.GasPrice(), tx.Gas(), s.b.RPCTxFeeCap()); err != nil {
-		return nil, err
-	}
 	signed, err := s.signTransaction(ctx, &args, passwd)
 	if err != nil {
 		log.Warn("Failed transaction sign attempt", "from", args.from(), "to", args.To, "value", args.Value.ToInt(), "err", err)
@@ -532,59 +536,6 @@ func (s *PersonalAccountAPI) SignTransaction(ctx context.Context, args Transacti
 		return nil, err
 	}
 	return &SignTransactionResult{data, signed}, nil
-}
-
-// Sign calculates an Ethereum ECDSA signature for:
-// keccak256("\x19Ethereum Signed Message:\n" + len(message) + message))
-//
-// Note, the produced signature conforms to the secp256k1 curve R, S and V values,
-// where the V value will be 27 or 28 for legacy reasons.
-//
-// The key used to calculate the signature is decrypted with the given password.
-//
-// https://geth.ethereum.org/docs/interacting-with-geth/rpc/ns-personal#personal-sign
-func (s *PersonalAccountAPI) Sign(ctx context.Context, data hexutil.Bytes, addr common.Address, passwd string) (hexutil.Bytes, error) {
-	// Look up the wallet containing the requested signer
-	account := accounts.Account{Address: addr}
-
-	wallet, err := s.b.AccountManager().Find(account)
-	if err != nil {
-		return nil, err
-	}
-	// Assemble sign the data with the wallet
-	signature, err := wallet.SignTextWithPassphrase(account, passwd, data)
-	if err != nil {
-		log.Warn("Failed data sign attempt", "address", addr, "err", err)
-		return nil, err
-	}
-	signature[crypto.RecoveryIDOffset] += 27 // Transform V from 0/1 to 27/28 according to the yellow paper
-	return signature, nil
-}
-
-// EcRecover returns the address for the account that was used to create the signature.
-// Note, this function is compatible with eth_sign and personal_sign. As such it recovers
-// the address of:
-// hash = keccak256("\x19Ethereum Signed Message:\n"${message length}${message})
-// addr = ecrecover(hash, signature)
-//
-// Note, the signature must conform to the secp256k1 curve R, S and V values, where
-// the V value must be 27 or 28 for legacy reasons.
-//
-// https://geth.ethereum.org/docs/interacting-with-geth/rpc/ns-personal#personal-ecrecover
-func (s *PersonalAccountAPI) EcRecover(ctx context.Context, data, sig hexutil.Bytes) (common.Address, error) {
-	if len(sig) != crypto.SignatureLength {
-		return common.Address{}, fmt.Errorf("signature must be %d bytes long", crypto.SignatureLength)
-	}
-	if sig[crypto.RecoveryIDOffset] != 27 && sig[crypto.RecoveryIDOffset] != 28 {
-		return common.Address{}, errors.New("invalid Ethereum signature (V is not 27 or 28)")
-	}
-	sig[crypto.RecoveryIDOffset] -= 27 // Transform yellow paper V from 27/28 to 0/1
-
-	rpk, err := crypto.SigToPub(accounts.TextHash(data), sig)
-	if err != nil {
-		return common.Address{}, err
-	}
-	return crypto.PubkeyToAddress(*rpk), nil
 }
 
 // InitializeWallet initializes a new wallet at the provided URL, by generating and returning a new private key.
@@ -1505,17 +1456,30 @@ type RPCTransaction struct {
 	Accesses            *types.AccessList `json:"accessList,omitempty"`
 	ChainID             *hexutil.Big      `json:"chainId,omitempty"`
 	BlobVersionedHashes []common.Hash     `json:"blobVersionedHashes,omitempty"`
-	V                   *hexutil.Big      `json:"v"`
-	R                   *hexutil.Big      `json:"r"`
-	S                   *hexutil.Big      `json:"s"`
+	V                   *hexutil.Big      `json:"v,omitempty"`
+	R                   *hexutil.Big      `json:"r,omitempty"`
+	S                   *hexutil.Big      `json:"s,omitempty"`
 	YParity             *hexutil.Uint64   `json:"yParity,omitempty"`
+
+	// An account transaction (type 0x52) has no v, r and s: its signature is
+	// the scheme (2 bytes), the public key and the signature bytes, and its
+	// from is derived from the scheme and the public key.
+	Scheme    *hexutil.Bytes `json:"scheme,omitempty"`
+	PublicKey *hexutil.Bytes `json:"publicKey,omitempty"`
+	Signature *hexutil.Bytes `json:"signature,omitempty"`
 }
 
 // newRPCTransaction returns a transaction that will serialize to the RPC
-// representation, with the given location metadata set (if available).
+// representation, with the given location metadata set (if available). The
+// from of an account transaction is derived from its scheme and public key.
 func newRPCTransaction(tx *types.Transaction, blockHash common.Hash, blockNumber uint64, blockTime uint64, index uint64, baseFee *big.Int, config ctypes.ChainConfigurator) *RPCTransaction {
-	signer := types.MakeSigner(config, new(big.Int).SetUint64(blockNumber), blockTime)
-	from, _ := types.Sender(signer, tx)
+	var from common.Address
+	if scheme, publicKey, _, ok := tx.GhostAccountAuth(); ok {
+		from = types.GhostAccountAddressOf(scheme, publicKey)
+	} else {
+		signer := types.MakeSigner(config, new(big.Int).SetUint64(blockNumber), blockTime)
+		from, _ = types.Sender(signer, tx)
+	}
 	return newRPCTransactionFrom(tx, blockHash, blockNumber, index, baseFee, from)
 }
 
@@ -1654,6 +1618,25 @@ func newRPCTransactionFrom(tx *types.Transaction, blockHash common.Hash, blockNu
 	case types.GhostDataRevealTxType:
 		result.Input = hexutil.Bytes(tx.GhostDataRevealEnvelope()[1:])
 		result.ChainID = (*hexutil.Big)(tx.ChainId())
+
+	case types.GhostAccountTxType:
+		scheme, publicKey, signature, _ := tx.GhostAccountAuth()
+		id := types.GhostScheme(scheme)
+		al := tx.AccessList()
+		result.V, result.R, result.S = nil, nil, nil
+		result.Scheme = (*hexutil.Bytes)(&[]byte{id[0], id[1]})
+		result.PublicKey = (*hexutil.Bytes)(&publicKey)
+		result.Signature = (*hexutil.Bytes)(&signature)
+		result.Accesses = &al
+		result.ChainID = (*hexutil.Big)(tx.ChainId())
+		result.GasFeeCap = (*hexutil.Big)(tx.GasFeeCap())
+		result.GasTipCap = (*hexutil.Big)(tx.GasTipCap())
+		// if the transaction has been mined, compute the effective gas price
+		if baseFee != nil && blockHash != (common.Hash{}) {
+			result.GasPrice = (*hexutil.Big)(effectiveGasPrice(tx, baseFee))
+		} else {
+			result.GasPrice = (*hexutil.Big)(tx.GasFeeCap())
+		}
 	}
 	return result
 }
@@ -2041,6 +2024,13 @@ func marshalReceipt(receipt *types.Receipt, blockHash common.Hash, blockNumber u
 		fields["blobGasUsed"] = hexutil.Uint64(receipt.BlobGasUsed)
 		fields["blobGasPrice"] = (*hexutil.Big)(receipt.BlobGasPrice)
 	}
+	// The from of an account transaction is derived from its scheme and
+	// public key, which the receipt shows.
+	if scheme, publicKey, _, ok := tx.GhostAccountAuth(); ok {
+		id := types.GhostScheme(scheme)
+		fields["scheme"] = hexutil.Bytes(id[:])
+		fields["publicKey"] = hexutil.Bytes(publicKey)
+	}
 
 	// If the ContractAddress is 20 0x0 bytes, assume it is not a contract creation
 	if receipt.ContractAddress != (common.Address{}) {
@@ -2049,8 +2039,9 @@ func marshalReceipt(receipt *types.Receipt, blockHash common.Hash, blockNumber u
 	return fields, nil
 }
 
-// sign is a helper function that signs a transaction with the private key of the given address.
-func (s *TransactionAPI) sign(addr common.Address, tx *types.Transaction) (*types.Transaction, error) {
+// sign is a helper function that signs an account transaction with the
+// unlocked ML-DSA-44 key of the given address.
+func (s *TransactionAPI) sign(ctx context.Context, addr common.Address, tx *types.GhostAccountTx) (*types.Transaction, error) {
 	// Look up the wallet containing the requested signer
 	account := accounts.Account{Address: addr}
 
@@ -2059,7 +2050,7 @@ func (s *TransactionAPI) sign(addr common.Address, tx *types.Transaction) (*type
 		return nil, err
 	}
 	// Request the wallet to sign the transaction
-	return wallet.SignTx(account, tx, s.b.ChainConfig().GetChainID())
+	return signAccountTx(ctx, s.b, wallet, account, nil, tx)
 }
 
 // rpcSigConns bounds the number of RPC connections whose signature budgets
@@ -2153,7 +2144,7 @@ func SubmitTransaction(ctx context.Context, b Backend, tx *types.Transaction) (c
 	return tx.Hash(), nil
 }
 
-// SendTransaction creates a transaction for the given argument, sign it and submit it to the
+// SendTransaction creates an account transaction for the given argument, sign it and submit it to the
 // transaction pool.
 func (s *TransactionAPI) SendTransaction(ctx context.Context, args TransactionArgs) (common.Hash, error) {
 	// Look up the wallet containing the requested signer
@@ -2175,13 +2166,11 @@ func (s *TransactionAPI) SendTransaction(ctx context.Context, args TransactionAr
 	}
 
 	// Set some sanity defaults and terminate on failure
-	if err := args.setDefaults(ctx, s.b, false); err != nil {
+	if err := args.setAccountTxDefaults(ctx, s.b); err != nil {
 		return common.Hash{}, err
 	}
-	// Assemble the transaction and sign with the wallet
-	tx := args.toTransaction()
-
-	signed, err := wallet.SignTx(account, tx, s.b.ChainConfig().GetChainID())
+	// Assemble the account transaction and sign with the wallet
+	signed, err := signAccountTx(ctx, s.b, wallet, account, nil, args.toAccountTx())
 	if err != nil {
 		return common.Hash{}, err
 	}
@@ -2217,31 +2206,6 @@ func (s *TransactionAPI) SendRawTransaction(ctx context.Context, input hexutil.B
 	return SubmitTransaction(ctx, s.b, tx)
 }
 
-// Sign calculates an ECDSA signature for:
-// keccak256("\x19Ethereum Signed Message:\n" + len(message) + message).
-//
-// Note, the produced signature conforms to the secp256k1 curve R, S and V values,
-// where the V value will be 27 or 28 for legacy reasons.
-//
-// The account associated with addr must be unlocked.
-//
-// https://github.com/ethereum/wiki/wiki/JSON-RPC#eth_sign
-func (s *TransactionAPI) Sign(addr common.Address, data hexutil.Bytes) (hexutil.Bytes, error) {
-	// Look up the wallet containing the requested signer
-	account := accounts.Account{Address: addr}
-
-	wallet, err := s.b.AccountManager().Find(account)
-	if err != nil {
-		return nil, err
-	}
-	// Sign the requested hash with the wallet
-	signature, err := wallet.SignText(account, data)
-	if err == nil {
-		signature[64] += 27 // Transform V from 0/1 to 27/28 according to the yellow paper
-	}
-	return signature, err
-}
-
 // SignTransactionResult represents a RLP encoded signed transaction.
 type SignTransactionResult struct {
 	Raw hexutil.Bytes      `json:"raw"`
@@ -2264,15 +2228,15 @@ func (s *TransactionAPI) SignTransaction(ctx context.Context, args TransactionAr
 	if args.Nonce == nil {
 		return nil, errors.New("nonce not specified")
 	}
-	if err := args.setDefaults(ctx, s.b, false); err != nil {
+	if err := args.setAccountTxDefaults(ctx, s.b); err != nil {
 		return nil, err
 	}
 	// Before actually sign the transaction, ensure the transaction fee is reasonable.
-	tx := args.toTransaction()
-	if err := checkTxFee(tx.GasPrice(), tx.Gas(), s.b.RPCTxFeeCap()); err != nil {
+	tx := args.toAccountTx()
+	if err := accountTxFeeCheck(s.b, tx); err != nil {
 		return nil, err
 	}
-	signed, err := s.sign(args.from(), tx)
+	signed, err := s.sign(ctx, args.from(), tx)
 	if err != nil {
 		return nil, err
 	}
@@ -2314,23 +2278,24 @@ func (s *TransactionAPI) PendingTransactions(ctx context.Context) ([]*RPCTransac
 	return transactions, nil
 }
 
-// Resend accepts an existing transaction and a new gas price and limit. It will remove
+// Resend accepts an existing account transaction and a new gas price and limit. It will remove
 // the given transaction from the pool and reinsert it with the new gas price and limit.
+// The new gas price is both the fee cap and the tip cap.
 func (s *TransactionAPI) Resend(ctx context.Context, sendArgs TransactionArgs, gasPrice *hexutil.Big, gasLimit *hexutil.Uint64) (common.Hash, error) {
 	if sendArgs.Nonce == nil {
 		return common.Hash{}, errors.New("missing transaction nonce in transaction spec")
 	}
-	if err := sendArgs.setDefaults(ctx, s.b, false); err != nil {
+	if err := sendArgs.setAccountTxDefaults(ctx, s.b); err != nil {
 		return common.Hash{}, err
 	}
-	matchTx := sendArgs.toTransaction()
+	matchTx := sendArgs.toAccountTx()
 
 	// Before replacing the old transaction, ensure the _new_ transaction fee is reasonable.
-	var price = matchTx.GasPrice()
+	var price = matchTx.GasFeeCap
 	if gasPrice != nil {
 		price = gasPrice.ToInt()
 	}
-	var gas = matchTx.Gas()
+	var gas = matchTx.Gas
 	if gasLimit != nil {
 		gas = uint64(*gasLimit)
 	}
@@ -2342,41 +2307,35 @@ func (s *TransactionAPI) Resend(ctx context.Context, sendArgs TransactionArgs, g
 	if err != nil {
 		return common.Hash{}, err
 	}
-	signer, err := accountSigner(ctx, s.b, s.signer)
+	signer, err := accountTxSigner(ctx, s.b)
 	if err != nil {
 		return common.Hash{}, err
 	}
-	wantSigHash := signer.Hash(matchTx)
+	account := accounts.Account{Address: sendArgs.from()}
 	for _, p := range pending {
-		// A reveal has no sender to match. The signature hash is compared
-		// first: it is cheap, and a sender is only derived for the
-		// transaction that may match.
-		if p.IsGhostReveal() || signer.Hash(p) != wantSigHash {
+		// Only an account transaction of the account matches; its signature
+		// hash, which needs no signature check, is compared.
+		if !sameAccountTx(signer, p, matchTx, account) {
 			continue
 		}
-		pFrom, err := rpcSender(signer, p)
+		// Match. Re-sign and send the transaction.
+		if gasPrice != nil && (*big.Int)(gasPrice).Sign() != 0 {
+			matchTx.GasFeeCap = new(big.Int).Set(gasPrice.ToInt())
+			matchTx.GasTipCap = new(big.Int).Set(gasPrice.ToInt())
+		}
+		if gasLimit != nil && *gasLimit != 0 {
+			matchTx.Gas = uint64(*gasLimit)
+		}
+		signedTx, err := s.sign(ctx, account.Address, matchTx)
 		if err != nil {
 			return common.Hash{}, err
 		}
-		if pFrom == sendArgs.from() {
-			// Match. Re-sign and send the transaction.
-			if gasPrice != nil && (*big.Int)(gasPrice).Sign() != 0 {
-				sendArgs.GasPrice = gasPrice
-			}
-			if gasLimit != nil && *gasLimit != 0 {
-				sendArgs.Gas = gasLimit
-			}
-			signedTx, err := s.sign(sendArgs.from(), sendArgs.toTransaction())
-			if err != nil {
-				return common.Hash{}, err
-			}
-			if err = s.b.SendTx(ctx, signedTx); err != nil {
-				return common.Hash{}, err
-			}
-			return signedTx.Hash(), nil
+		if err = s.b.SendTx(ctx, signedTx); err != nil {
+			return common.Hash{}, err
 		}
+		return signedTx.Hash(), nil
 	}
-	return common.Hash{}, fmt.Errorf("transaction %#x not found", matchTx.Hash())
+	return common.Hash{}, fmt.Errorf("account transaction of %v with nonce %d not found", account.Address, matchTx.Nonce)
 }
 
 // DebugAPI is the collection of Ethereum APIs exposed over the debugging
