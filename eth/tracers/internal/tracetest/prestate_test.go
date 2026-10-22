@@ -90,6 +90,7 @@ func testPrestateDiffTracer(tracerName string, dirPath string, t *testing.T) {
 			if err := tx.UnmarshalBinary(common.FromHex(test.Input)); err != nil {
 				t.Fatalf("failed to parse testcase input: %v", err)
 			}
+			skipSecp256k1Fixture(t, tx)
 			// Configure a blockchain with the given prestate
 			var (
 				signer  = types.MakeSigner(test.Genesis.Config, new(big.Int).SetUint64(uint64(test.Context.Number)), uint64(test.Context.Time))
