@@ -1504,12 +1504,16 @@ func blockSigner(ctx context.Context, b Backend, number *big.Int, blockTime uint
 // an account one that carries no signature at all (as in a pending block
 // assembled locally), has no sender, so it is the zero address; for any other
 // transaction a sender that cannot be derived is an error, never the zero
-// address.
+// address. A signed transaction of a refused secp256k1 type has no sender
+// either, so it is reported as an invalid signature.
 func rpcSender(signer types.Signer, tx *types.Transaction) (common.Address, error) {
 	if tx.IsGhostReveal() || unsignedTx(tx) {
 		return common.Address{}, nil
 	}
 	sender, err := types.Sender(signer, tx)
+	if errors.Is(err, types.ErrSecp256k1TxType) {
+		return common.Address{}, fmt.Errorf("transaction %#x: %w: %w", tx.Hash(), types.ErrInvalidSig, err)
+	}
 	if err != nil {
 		return common.Address{}, fmt.Errorf("transaction %#x: %w", tx.Hash(), err)
 	}
