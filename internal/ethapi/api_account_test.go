@@ -399,7 +399,7 @@ func TestRemovedSigningMethodsAreNotServed(t *testing.T) {
 
 // checkAccountTxJSON checks the JSON object of an account transaction or its
 // receipt: from is the account, the scheme is 2 bytes and the public key the
-// account's, and there are no v, r, s or yParity.
+// account's, and there are no v, r, s, yParity or signature.
 func checkAccountTxJSON(t *testing.T, name string, v interface{}, pub []byte, addr common.Address) {
 	t.Helper()
 	enc, err := json.Marshal(v)
@@ -419,7 +419,7 @@ func checkAccountTxJSON(t *testing.T, name string, v interface{}, pub []byte, ad
 	if from, _ := fields["from"].(string); !strings.EqualFold(from, addr.Hex()) {
 		t.Errorf("%s: from %v, want %v", name, fields["from"], addr)
 	}
-	for _, key := range []string{"v", "r", "s", "yParity"} {
+	for _, key := range []string{"v", "r", "s", "yParity", "signature"} {
 		if _, ok := fields[key]; ok {
 			t.Errorf("%s: has %s", name, key)
 		}
@@ -459,9 +459,6 @@ func TestRPCTransactionShowsSchemeAndPublicKey(t *testing.T) {
 		t.Fatalf("transaction by hash: %v, %v", rpcTx, err)
 	}
 	checkAccountTxJSON(t, "transaction", rpcTx, pub, addr)
-	if rpcTx.Signature == nil || len(*rpcTx.Signature) != types.GhostMLDSA44SignatureSize {
-		t.Error("transaction: no ML-DSA-44 signature")
-	}
 
 	block, err := chainAPI.GetBlockByNumber(ctx, 1, true)
 	if err != nil {

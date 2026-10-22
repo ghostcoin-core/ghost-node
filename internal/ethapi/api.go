@@ -1461,12 +1461,10 @@ type RPCTransaction struct {
 	S                   *hexutil.Big      `json:"s,omitempty"`
 	YParity             *hexutil.Uint64   `json:"yParity,omitempty"`
 
-	// An account transaction (type 0x52) has no v, r and s: its signature is
-	// the scheme (2 bytes), the public key and the signature bytes, and its
-	// from is derived from the scheme and the public key.
+	// An account transaction (type 0x52) has no v, r and s: it has the
+	// scheme (2 bytes) and the public key, and its from is derived from them.
 	Scheme    *hexutil.Bytes `json:"scheme,omitempty"`
 	PublicKey *hexutil.Bytes `json:"publicKey,omitempty"`
-	Signature *hexutil.Bytes `json:"signature,omitempty"`
 }
 
 // newRPCTransaction returns a transaction that will serialize to the RPC
@@ -1620,13 +1618,12 @@ func newRPCTransactionFrom(tx *types.Transaction, blockHash common.Hash, blockNu
 		result.ChainID = (*hexutil.Big)(tx.ChainId())
 
 	case types.GhostAccountTxType:
-		scheme, publicKey, signature, _ := tx.GhostAccountAuth()
+		scheme, publicKey, _, _ := tx.GhostAccountAuth()
 		id := types.GhostScheme(scheme)
 		al := tx.AccessList()
 		result.V, result.R, result.S = nil, nil, nil
 		result.Scheme = (*hexutil.Bytes)(&[]byte{id[0], id[1]})
 		result.PublicKey = (*hexutil.Bytes)(&publicKey)
-		result.Signature = (*hexutil.Bytes)(&signature)
 		result.Accesses = &al
 		result.ChainID = (*hexutil.Big)(tx.ChainId())
 		result.GasFeeCap = (*hexutil.Big)(tx.GasFeeCap())
