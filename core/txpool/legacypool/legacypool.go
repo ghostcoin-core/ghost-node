@@ -293,17 +293,11 @@ func New(config Config, chain BlockChain) *LegacyPool {
 }
 
 // Filter returns whether the given transaction can be consumed by the legacy
-// pool, specifically, whether it is a Legacy, AccessList or Dynamic transaction,
-// or an account transaction when the pool's chain gives its genesis block.
+// pool, specifically, whether it is an account transaction and the pool's
+// chain gives its genesis block. The secp256k1 types are refused on every
+// chain.
 func (pool *LegacyPool) Filter(tx *types.Transaction) bool {
-	switch tx.Type() {
-	case types.LegacyTxType, types.AccessListTxType, types.DynamicFeeTxType:
-		return true
-	case types.GhostAccountTxType:
-		return pool.ghostAccounts
-	default:
-		return false
-	}
+	return tx.Type() == types.GhostAccountTxType && pool.ghostAccounts
 }
 
 // Init sets the gas price needed to keep a transaction in the pool and the chain
@@ -628,11 +622,7 @@ func (pool *LegacyPool) local() map[common.Address]types.Transactions {
 // and does not require the pool mutex to be held.
 func (pool *LegacyPool) validateTxBasics(tx *types.Transaction, local bool) error {
 	opts := &txpool.ValidationOptions{
-		Config: pool.chainconfig,
-		Accept: 0 |
-			1<<types.LegacyTxType |
-			1<<types.AccessListTxType |
-			1<<types.DynamicFeeTxType,
+		Config:             pool.chainconfig,
 		AcceptGhostAccount: pool.ghostAccounts,
 		MaxSize:            txMaxSize,
 		MinTip:             pool.gasTip.Load().ToBig(),

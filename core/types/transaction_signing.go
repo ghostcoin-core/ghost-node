@@ -29,6 +29,30 @@ import (
 
 var ErrInvalidChainId = errors.New("invalid chain id for signer")
 
+// ErrSecp256k1TxType is returned for a transaction of a type signed with
+// secp256k1: legacy (0x00), EIP-2930 (0x01), EIP-1559 (0x02), EIP-4844 (0x03)
+// and EIP-7702 (0x04). Ghost refuses them from genesis, on every chain (spec
+// 09, sections 6 and 12, QS-1), and no signer recovers their sender.
+var ErrSecp256k1TxType = fmt.Errorf("%w: secp256k1 transaction types are refused", ErrTxTypeNotSupported)
+
+// setCodeTxType is the type byte of an EIP-7702 transaction, which this node
+// does not decode.
+const setCodeTxType = 0x04
+
+// CheckTxType refuses a transaction by its type byte alone, before any
+// signature work: the coin reveal (0x50), the data reveal (0x51) and the
+// account transaction (0x52) are the only types taken.
+func CheckTxType(tx *Transaction) error {
+	switch typ := tx.Type(); typ {
+	case GhostRevealTxType, GhostDataRevealTxType, GhostAccountTxType:
+		return nil
+	case LegacyTxType, AccessListTxType, DynamicFeeTxType, BlobTxType, setCodeTxType:
+		return fmt.Errorf("%w: type %#x", ErrSecp256k1TxType, typ)
+	default:
+		return fmt.Errorf("%w: type %#x", ErrTxTypeNotSupported, typ)
+	}
+}
+
 // sigCache is used to cache the derived sender and contains
 // the signer used to derive it.
 type sigCache struct {
@@ -127,9 +151,9 @@ func MustSignNewTx(prv *ecdsa.PrivateKey, s Signer, txdata TxData) *Transaction 
 	return tx
 }
 
-// Sender returns the address derived from the signature (V, R, S) using secp256k1
-// elliptic curve and an error if it failed deriving or upon an incorrect
-// signature.
+// Sender returns the sender of an account transaction, verified by the
+// signer, and an error for every other transaction: a reveal has no sender,
+// and no signer recovers the sender of a secp256k1 transaction type.
 //
 // Sender may cache the address, allowing it to be used regardless of
 // signing method. The cache is invalidated if the cached signer does
@@ -181,7 +205,12 @@ type Signer interface {
 	Equal(Signer) bool
 }
 
-// NewEIP4844Signer returns a signer that accepts
+// The secp256k1 signers below hash and sign the EIP-4844, EIP-1559, EIP-2930,
+// EIP-155 and Homestead transactions, but recover no sender: their Sender
+// refuses every transaction by its type byte (CheckTxType). Account
+// transactions are taken by the signer of NewGhostAccountSigner.
+
+// NewEIP4844Signer returns a signer that hashes and signs
 // - EIP-4844 blob transactions
 // - EIP-1559 dynamic fee transactions
 // - EIP-2930 access list transactions,
@@ -191,20 +220,6 @@ type eip4844Signer struct{ eip1559Signer }
 
 func NewCancunSigner(chainId *big.Int) Signer {
 	return eip4844Signer{eip1559Signer{eip2930Signer{NewEIP155Signer(chainId)}}}
-}
-
-func (s eip4844Signer) Sender(tx *Transaction) (common.Address, error) {
-	if tx.Type() != BlobTxType {
-		return s.eip1559Signer.Sender(tx)
-	}
-	V, R, S := tx.RawSignatureValues()
-	// Blob txs are defined to use 0 and 1 as their recovery
-	// id, add 27 to become equivalent to unprotected Homestead signatures.
-	V = new(big.Int).Add(V, big.NewInt(27))
-	if tx.ChainId().Cmp(s.chainId) != 0 {
-		return common.Address{}, fmt.Errorf("%w: have %d want %d", ErrInvalidChainId, tx.ChainId(), s.chainId)
-	}
-	return recoverPlain(s.Hash(tx), R, S, V, true)
 }
 
 func (s eip4844Signer) Equal(s2 Signer) bool {
@@ -252,27 +267,13 @@ func (s eip4844Signer) Hash(tx *Transaction) common.Hash {
 
 type eip1559Signer struct{ eip2930Signer }
 
-// NewEIP1559Signer returns a signer that accepts
+// NewEIP1559Signer returns a signer that hashes and signs
 // - EIP-1559 dynamic fee transactions
 // - EIP-2930 access list transactions,
 // - EIP-155 replay protected transactions, and
 // - legacy Homestead transactions.
 func NewEIP1559Signer(chainId *big.Int) Signer {
 	return eip1559Signer{eip2930Signer{NewEIP155Signer(chainId)}}
-}
-
-func (s eip1559Signer) Sender(tx *Transaction) (common.Address, error) {
-	if tx.Type() != DynamicFeeTxType {
-		return s.eip2930Signer.Sender(tx)
-	}
-	V, R, S := tx.RawSignatureValues()
-	// DynamicFee txs are defined to use 0 and 1 as their recovery
-	// id, add 27 to become equivalent to unprotected Homestead signatures.
-	V = new(big.Int).Add(V, big.NewInt(27))
-	if tx.ChainId().Cmp(s.chainId) != 0 {
-		return common.Address{}, fmt.Errorf("%w: have %d want %d", ErrInvalidChainId, tx.ChainId(), s.chainId)
-	}
-	return recoverPlain(s.Hash(tx), R, S, V, true)
 }
 
 func (s eip1559Signer) Equal(s2 Signer) bool {
@@ -318,8 +319,9 @@ func (s eip1559Signer) Hash(tx *Transaction) common.Hash {
 
 type eip2930Signer struct{ EIP155Signer }
 
-// NewEIP2930Signer returns a signer that accepts EIP-2930 access list transactions,
-// EIP-155 replay protected transactions, and legacy Homestead transactions.
+// NewEIP2930Signer returns a signer that hashes and signs EIP-2930 access list
+// transactions, EIP-155 replay protected transactions, and legacy Homestead
+// transactions.
 func NewEIP2930Signer(chainId *big.Int) Signer {
 	return eip2930Signer{NewEIP155Signer(chainId)}
 }
@@ -331,24 +333,6 @@ func (s eip2930Signer) ChainID() *big.Int {
 func (s eip2930Signer) Equal(s2 Signer) bool {
 	x, ok := s2.(eip2930Signer)
 	return ok && x.chainId.Cmp(s.chainId) == 0
-}
-
-func (s eip2930Signer) Sender(tx *Transaction) (common.Address, error) {
-	V, R, S := tx.RawSignatureValues()
-	switch tx.Type() {
-	case LegacyTxType:
-		return s.EIP155Signer.Sender(tx)
-	case AccessListTxType:
-		// AL txs are defined to use 0 and 1 as their recovery
-		// id, add 27 to become equivalent to unprotected Homestead signatures.
-		V = new(big.Int).Add(V, big.NewInt(27))
-	default:
-		return common.Address{}, ErrTxTypeNotSupported
-	}
-	if tx.ChainId().Cmp(s.chainId) != 0 {
-		return common.Address{}, fmt.Errorf("%w: have %d want %d", ErrInvalidChainId, tx.ChainId(), s.chainId)
-	}
-	return recoverPlain(s.Hash(tx), R, S, V, true)
 }
 
 func (s eip2930Signer) SignatureValues(tx *Transaction, sig []byte) (R, S, V *big.Int, err error) {
@@ -397,7 +381,7 @@ func (s eip2930Signer) Hash(tx *Transaction) common.Hash {
 	}
 }
 
-// EIP155Signer implements Signer using the EIP-155 rules. This accepts transactions which
+// EIP155Signer implements Signer using the EIP-155 rules. This signs transactions which
 // are replay-protected as well as unprotected homestead transactions.
 type EIP155Signer struct {
 	chainId, chainIdMul *big.Int
@@ -422,22 +406,10 @@ func (s EIP155Signer) Equal(s2 Signer) bool {
 	return ok && eip155.chainId.Cmp(s.chainId) == 0
 }
 
-var big8 = big.NewInt(8)
-
+// Sender refuses every transaction; the signers built on EIP155Signer take
+// this method.
 func (s EIP155Signer) Sender(tx *Transaction) (common.Address, error) {
-	if tx.Type() != LegacyTxType {
-		return common.Address{}, ErrTxTypeNotSupported
-	}
-	if !tx.Protected() {
-		return HomesteadSigner{}.Sender(tx)
-	}
-	if tx.ChainId().Cmp(s.chainId) != 0 {
-		return common.Address{}, fmt.Errorf("%w: have %d want %d", ErrInvalidChainId, tx.ChainId(), s.chainId)
-	}
-	V, R, S := tx.RawSignatureValues()
-	V = new(big.Int).Sub(V, s.chainIdMul)
-	V.Sub(V, big8)
-	return recoverPlain(s.Hash(tx), R, S, V, true)
+	return refuseSender(tx)
 }
 
 // SignatureValues returns signature values. This signature
@@ -487,14 +459,6 @@ func (hs HomesteadSigner) SignatureValues(tx *Transaction, sig []byte) (r, s, v 
 	return hs.FrontierSigner.SignatureValues(tx, sig)
 }
 
-func (hs HomesteadSigner) Sender(tx *Transaction) (common.Address, error) {
-	if tx.Type() != LegacyTxType {
-		return common.Address{}, ErrTxTypeNotSupported
-	}
-	v, r, s := tx.RawSignatureValues()
-	return recoverPlain(hs.Hash(tx), r, s, v, true)
-}
-
 // FrontierSigner implements Signer interface using the
 // frontier rules.
 type FrontierSigner struct{}
@@ -508,12 +472,20 @@ func (s FrontierSigner) Equal(s2 Signer) bool {
 	return ok
 }
 
+// Sender refuses every transaction; HomesteadSigner takes this method.
 func (fs FrontierSigner) Sender(tx *Transaction) (common.Address, error) {
-	if tx.Type() != LegacyTxType {
-		return common.Address{}, ErrTxTypeNotSupported
+	return refuseSender(tx)
+}
+
+// refuseSender is the Sender of the secp256k1 signers. It looks at the type
+// byte only: a secp256k1 type is refused with ErrSecp256k1TxType, and an
+// account transaction or a reveal, which these signers do not take, with
+// ErrTxTypeNotSupported.
+func refuseSender(tx *Transaction) (common.Address, error) {
+	if err := CheckTxType(tx); err != nil {
+		return common.Address{}, err
 	}
-	v, r, s := tx.RawSignatureValues()
-	return recoverPlain(fs.Hash(tx), r, s, v, false)
+	return common.Address{}, fmt.Errorf("%w: type %#x is not taken by a secp256k1 signer", ErrTxTypeNotSupported, tx.Type())
 }
 
 // SignatureValues returns signature values. This signature
@@ -547,33 +519,6 @@ func decodeSignature(sig []byte) (r, s, v *big.Int) {
 	s = new(big.Int).SetBytes(sig[32:64])
 	v = new(big.Int).SetBytes([]byte{sig[64] + 27})
 	return r, s, v
-}
-
-func recoverPlain(sighash common.Hash, R, S, Vb *big.Int, homestead bool) (common.Address, error) {
-	if Vb.BitLen() > 8 {
-		return common.Address{}, ErrInvalidSig
-	}
-	V := byte(Vb.Uint64() - 27)
-	if !crypto.ValidateSignatureValues(V, R, S, homestead) {
-		return common.Address{}, ErrInvalidSig
-	}
-	// encode the signature in uncompressed format
-	r, s := R.Bytes(), S.Bytes()
-	sig := make([]byte, crypto.SignatureLength)
-	copy(sig[32-len(r):32], r)
-	copy(sig[64-len(s):64], s)
-	sig[64] = V
-	// recover the public key from the signature
-	pub, err := crypto.Ecrecover(sighash[:], sig)
-	if err != nil {
-		return common.Address{}, err
-	}
-	if len(pub) == 0 || pub[0] != 4 {
-		return common.Address{}, errors.New("invalid public key")
-	}
-	var addr common.Address
-	copy(addr[:], crypto.Keccak256(pub[1:])[12:])
-	return addr, nil
 }
 
 // deriveChainId derives the chain id from the given v parameter

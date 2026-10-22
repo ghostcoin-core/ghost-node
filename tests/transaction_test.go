@@ -45,6 +45,8 @@ func TestTransaction(t *testing.T) {
 	// Geth accepts it, which is not a consensus issue since we use big.Int's
 	// internally to calculate the cost
 	txt.skipLoad("^ttValue/TransactionWithHighValueOverflow.json")
+	// Ghost refuses the secp256k1 transaction types.
+	skipSecp256k1TxFixtures(txt)
 	txt.walk(t, transactionTestDir, func(t *testing.T, name string, test *TransactionTest) {
 		cfg := params.MainnetChainConfig
 		if err := txt.checkFailure(t, test.Run(cfg)); err != nil {

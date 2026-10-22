@@ -175,7 +175,9 @@ type Message struct {
 	SkipAccountChecks bool
 }
 
-// TransactionToMessage converts a transaction into a Message.
+// TransactionToMessage converts a transaction into a Message. Only an account
+// transaction (type 0x52) converts: every other type is refused by its type
+// byte before the signer is asked for the sender.
 func TransactionToMessage(tx *types.Transaction, s types.Signer, baseFee *big.Int) (*Message, error) {
 	msg := &Message{
 		Nonce:             tx.Nonce(),
@@ -194,6 +196,9 @@ func TransactionToMessage(tx *types.Transaction, s types.Signer, baseFee *big.In
 	// If baseFee provided, set gasPrice to effectiveGasPrice.
 	if baseFee != nil {
 		msg.GasPrice = cmath.BigMin(msg.GasPrice.Add(msg.GasTipCap, baseFee), msg.GasFeeCap)
+	}
+	if err := types.CheckTxType(tx); err != nil {
+		return msg, err
 	}
 	var err error
 	msg.From, err = types.Sender(s, tx)

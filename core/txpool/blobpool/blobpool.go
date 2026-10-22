@@ -334,9 +334,11 @@ func New(config Config, chain BlockChain) *BlobPool {
 	}
 }
 
-// Filter returns whether the given transaction can be consumed by the blob pool.
+// Filter returns whether the given transaction can be consumed by the blob pool:
+// never, as blob transactions (type 0x03) are signed with secp256k1 and
+// refused on every chain.
 func (p *BlobPool) Filter(tx *types.Transaction) bool {
-	return tx.Type() == types.BlobTxType
+	return false
 }
 
 // Init sets the gas price needed to keep a transaction in the pool and the chain
@@ -1081,10 +1083,9 @@ func (p *BlobPool) SetGasTip(tip *big.Int) {
 // rules and adheres to some heuristic limits of the local node (price and size).
 func (p *BlobPool) validateTx(tx *types.Transaction) error {
 	// Ensure the transaction adheres to basic pool filters (type, size, tip) and
-	// consensus rules
+	// consensus rules. Every blob transaction is refused by its type byte.
 	baseOpts := &txpool.ValidationOptions{
 		Config:  p.chain.Config(),
-		Accept:  1 << types.BlobTxType,
 		MaxSize: txMaxSize,
 		MinTip:  p.gasTip.ToBig(),
 	}
