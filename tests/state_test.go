@@ -97,6 +97,8 @@ func initMatcher(st *testMatcher) {
 
 	// Ghost removes the elliptic-curve precompiles.
 	skipRemovedPrecompiles(st)
+	// Ghost refuses the secp256k1 transaction types.
+	skipSecp256k1TxFixtures(st)
 }
 
 func TestState(t *testing.T) {
@@ -132,6 +134,7 @@ func TestExecutionSpecState(t *testing.T) {
 	}
 	st := new(testMatcher)
 	skipRemovedPrecompiles(st)
+	skipSecp256k1TxFixtures(st)
 
 	st.walk(t, executionSpecStateTestDir, func(t *testing.T, name string, test *StateTest) {
 		execStateTest(t, st, test)

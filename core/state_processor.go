@@ -85,6 +85,11 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 	}
 	// Iterate over and process the individual transactions
 	for i, tx := range block.Transactions() {
+		// Only the reveals and the account transaction are taken: a block
+		// holding a secp256k1 type, or any other type, is invalid.
+		if err := types.CheckTxType(tx); err != nil {
+			return nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: %w", i, tx.Hash().Hex(), err)
+		}
 		if tx.IsGhostReveal() {
 			if p.bc == nil {
 				return nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: no chain for a reveal", i, tx.Hash().Hex())

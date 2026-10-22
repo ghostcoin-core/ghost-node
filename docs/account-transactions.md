@@ -205,7 +205,7 @@ The legacy pool admits type `0x52` when its chain gives its genesis block
 (`core.BlockChain` does): it then wraps its signer with the genesis hash and
 lists the type in `Filter` and in the accepted types of its validation. A
 pool whose chain gives no genesis block keeps the plain signer and refuses
-every account transaction.
+every account transaction. No pool takes a secp256k1 type (see below).
 
 The cheap checks run before the signature check: the type, the size, the
 canonical decoding, the scheme and the lengths, the chain ID, the derived
@@ -646,7 +646,39 @@ seed), `ethkey changepassword` re-encrypts one, and `ethkey signmessage` and
 `ethkey verifymessage` are removed (`TestGenerateInspectMLDSA44`). A secp256k1
 key is not converted: its account is not reachable by an ML-DSA-44 key.
 
+## The secp256k1 transaction types
+
+The node refuses the legacy (`0x00`), EIP-2930 (`0x01`), EIP-1559 (`0x02`),
+EIP-4844 (`0x03`) and EIP-7702 (`0x04`) transaction types from genesis, on
+every chain it runs (spec 09, sections 6 and 12, QS-1). The coin reveal
+(`0x50`), the data reveal (`0x51`) and the account transaction (`0x52`) are
+the only types it takes; every other type byte is refused too.
+
+The refusal is by the type byte alone, before any signature work
+(`types.CheckTxType`, error `types.ErrSecp256k1TxType`):
+
+- Block processing (`core.StateProcessor.Process`) and
+  `core.TransactionToMessage` refuse such a transaction, so a block holding
+  one is invalid (`TestBlockWithSecp256k1TxTypeIsInvalid`).
+- The transaction pool refuses it in `txpool.ValidateTransaction`, for a
+  remote and a local transaction; the legacy pool's `Filter` takes type
+  `0x52` only, and the blob pool takes nothing
+  (`TestSecp256k1TxTypesRefusedByPool`).
+- The node does not decode type `0x04` at all.
+
+The secp256k1 signers (`types.MakeSigner`, `types.LatestSigner` and the
+signers they return) still hash and sign the old types, so `types.SignTx` can
+build a test transaction, but they recover no sender: their `Sender` refuses
+every transaction by its type byte, and there is no public key recovery on
+the transaction path.
+
+The Ethereum execution fixtures under `tests/` sign their transactions with
+secp256k1, so they are skipped by directory name, each with its reason
+(`tests/ghost_secp256k1_test.go`): `GeneralStateTests`, `EIPTests/StateTests`,
+`evm-benchmarks/benchmarks`, `BlockchainTests`, `TransactionTests` and the
+execution-spec-tests `fixtures/state_tests` and `fixtures/blockchain_tests`.
+
 ## Not yet in this node
 
-Refusing the secp256k1 transaction types and signing with keys of scheme
-`0x0002` outside tests are separate pieces of work.
+Signing with keys of scheme `0x0002` outside tests is a separate piece of
+work.

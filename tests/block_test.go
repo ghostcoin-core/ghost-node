@@ -59,6 +59,8 @@ func TestBlockchain(t *testing.T) {
 	skipRemovedPrecompiles(bt)
 	// Expects 0x0a cold before Cancun; on Ghost the removed precompile is warm in every fork.
 	bt.skipLoad(`.*bcValidBlockTest/reentrencySuicide\.json`)
+	// Ghost refuses the secp256k1 transaction types.
+	skipSecp256k1TxFixtures(bt)
 
 	bt.walk(t, blockTestDir, func(t *testing.T, name string, test *BlockTest) {
 		if runtime.GOARCH == "386" && runtime.GOOS == "windows" && rand.Int63()%2 == 0 {
@@ -78,6 +80,7 @@ func TestExecutionSpecBlocktests(t *testing.T) {
 	}
 	bt := new(testMatcher)
 	skipRemovedPrecompiles(bt)
+	skipSecp256k1TxFixtures(bt)
 
 	bt.walk(t, executionSpecBlockchainTestDir, func(t *testing.T, name string, test *BlockTest) {
 		execBlockTest(t, bt, test)

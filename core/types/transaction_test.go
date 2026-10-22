@@ -111,7 +111,8 @@ func TestEIP2718TransactionSigHash(t *testing.T) {
 	}
 }
 
-// This test checks signature operations on access list transactions.
+// This test checks signature operations on access list transactions. The
+// signer signs them but recovers no sender, whatever the chain ID.
 func TestEIP2930Signer(t *testing.T) {
 	var (
 		key, _  = crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
@@ -135,13 +136,13 @@ func TestEIP2930Signer(t *testing.T) {
 			tx:             tx0,
 			signer:         signer1,
 			wantSignerHash: common.HexToHash("846ad7672f2a3a40c1f959cd4a8ad21786d620077084d84c8d7c077714caa139"),
-			wantSenderErr:  ErrInvalidChainId,
+			wantSenderErr:  ErrSecp256k1TxType,
 			wantHash:       common.HexToHash("1ccd12d8bbdb96ea391af49a35ab641e219b2dd638dea375f2bc94dd290f2549"),
 		},
 		{
 			tx:             tx1,
 			signer:         signer1,
-			wantSenderErr:  ErrInvalidSig,
+			wantSenderErr:  ErrSecp256k1TxType,
 			wantSignerHash: common.HexToHash("846ad7672f2a3a40c1f959cd4a8ad21786d620077084d84c8d7c077714caa139"),
 			wantHash:       common.HexToHash("1ccd12d8bbdb96ea391af49a35ab641e219b2dd638dea375f2bc94dd290f2549"),
 		},
@@ -149,7 +150,7 @@ func TestEIP2930Signer(t *testing.T) {
 			// This checks what happens when trying to sign an unsigned tx for the wrong chain.
 			tx:             tx1,
 			signer:         signer2,
-			wantSenderErr:  ErrInvalidChainId,
+			wantSenderErr:  ErrSecp256k1TxType,
 			wantSignerHash: common.HexToHash("367967247499343401261d718ed5aa4c9486583e4d89251afce47f4a33c33362"),
 			wantSignErr:    ErrInvalidChainId,
 		},
@@ -157,7 +158,7 @@ func TestEIP2930Signer(t *testing.T) {
 			// This checks what happens when trying to re-sign a signed tx for the wrong chain.
 			tx:             tx2,
 			signer:         signer1,
-			wantSenderErr:  ErrInvalidChainId,
+			wantSenderErr:  ErrSecp256k1TxType,
 			wantSignerHash: common.HexToHash("846ad7672f2a3a40c1f959cd4a8ad21786d620077084d84c8d7c077714caa139"),
 			wantSignErr:    ErrInvalidChainId,
 		},
@@ -212,49 +213,10 @@ func TestEIP2718TransactionEncode(t *testing.T) {
 	}
 }
 
-func decodeTx(data []byte) (*Transaction, error) {
-	var tx Transaction
-	t, err := &tx, rlp.DecodeBytes(data, &tx)
-	return t, err
-}
-
 func defaultTestKey() (*ecdsa.PrivateKey, common.Address) {
 	key, _ := crypto.HexToECDSA("45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8")
 	addr := crypto.PubkeyToAddress(key.PublicKey)
 	return key, addr
-}
-
-func TestRecipientEmpty(t *testing.T) {
-	_, addr := defaultTestKey()
-	tx, err := decodeTx(common.Hex2Bytes("f8498080808080011ca09b16de9d5bdee2cf56c28d16275a4da68cd30273e2525f3959f5d62557489921a0372ebd8fb3345f7db7b5a86d42e24d36e983e259b0664ceb8c227ec9af572f3d"))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	from, err := Sender(HomesteadSigner{}, tx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if addr != from {
-		t.Fatal("derived address doesn't match")
-	}
-}
-
-func TestRecipientNormal(t *testing.T) {
-	_, addr := defaultTestKey()
-
-	tx, err := decodeTx(common.Hex2Bytes("f85d80808094000000000000000000000000000000000000000080011ca0527c0d8f5c63f7b9f41324a7c8a563ee1190bcbf0dac8ab446291bdbf32f5c79a0552c4ef0a09a04395074dab9ed34d3fbfb843c2f2546cc30fe89ec143ca94ca6"))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	from, err := Sender(HomesteadSigner{}, tx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if addr != from {
-		t.Fatal("derived address doesn't match")
-	}
 }
 
 // TestTransactionCoding tests serializing/de-serializing to/from rlp and JSON.
