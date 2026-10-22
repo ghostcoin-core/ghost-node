@@ -28,18 +28,21 @@ import (
 
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/event"
 	"golang.org/x/exp/slices"
 )
 
-var testSigData = make([]byte, 32)
+// testSign signs an account transaction with the unlocked key of a.
+func testSign(ks *KeyStore, a common.Address) error {
+	_, err := ks.SignAccountTx(accounts.Account{Address: a}, testAccountSigner, testAccountTxData())
+	return err
+}
 
 func TestKeyStore(t *testing.T) {
 	t.Parallel()
 	dir, ks := tmpKeyStore(t, true)
 
-	a, err := ks.NewAccount("foo")
+	a, err := ks.NewMLDSAAccount("foo")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,14 +78,14 @@ func TestSign(t *testing.T) {
 	_, ks := tmpKeyStore(t, true)
 
 	pass := "" // not used but required by API
-	a1, err := ks.NewAccount(pass)
+	a1, err := ks.NewMLDSAAccount(pass)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := ks.Unlock(a1, ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ks.SignHash(accounts.Account{Address: a1.Address}, testSigData); err != nil {
+	if err := testSign(ks, a1.Address); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -92,7 +95,7 @@ func TestSignWithPassphrase(t *testing.T) {
 	_, ks := tmpKeyStore(t, true)
 
 	pass := "passwd"
-	acc, err := ks.NewAccount(pass)
+	acc, err := ks.NewMLDSAAccount(pass)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +104,7 @@ func TestSignWithPassphrase(t *testing.T) {
 		t.Fatal("expected account to be locked")
 	}
 
-	_, err = ks.SignHashWithPassphrase(acc, pass, testSigData)
+	_, err = ks.SignAccountTxWithPassphrase(acc, pass, testAccountSigner, testAccountTxData())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,8 +113,8 @@ func TestSignWithPassphrase(t *testing.T) {
 		t.Fatal("expected account to be locked")
 	}
 
-	if _, err = ks.SignHashWithPassphrase(acc, "invalid passwd", testSigData); err == nil {
-		t.Fatal("expected SignHashWithPassphrase to fail with invalid password")
+	if _, err = ks.SignAccountTxWithPassphrase(acc, "invalid passwd", testAccountSigner, testAccountTxData()); err == nil {
+		t.Fatal("expected SignAccountTxWithPassphrase to fail with invalid password")
 	}
 }
 
@@ -120,13 +123,13 @@ func TestTimedUnlock(t *testing.T) {
 	_, ks := tmpKeyStore(t, true)
 
 	pass := "foo"
-	a1, err := ks.NewAccount(pass)
+	a1, err := ks.NewMLDSAAccount(pass)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Signing without passphrase fails because account is locked
-	_, err = ks.SignHash(accounts.Account{Address: a1.Address}, testSigData)
+	err = testSign(ks, a1.Address)
 	if err != ErrLocked {
 		t.Fatal("Signing should've failed with ErrLocked before unlocking, got ", err)
 	}
@@ -137,14 +140,14 @@ func TestTimedUnlock(t *testing.T) {
 	}
 
 	// Signing without passphrase works because account is temp unlocked
-	_, err = ks.SignHash(accounts.Account{Address: a1.Address}, testSigData)
+	err = testSign(ks, a1.Address)
 	if err != nil {
 		t.Fatal("Signing shouldn't return an error after unlocking, got ", err)
 	}
 
 	// Signing fails again after automatic locking
 	time.Sleep(250 * time.Millisecond)
-	_, err = ks.SignHash(accounts.Account{Address: a1.Address}, testSigData)
+	err = testSign(ks, a1.Address)
 	if err != ErrLocked {
 		t.Fatal("Signing should've failed with ErrLocked timeout expired, got ", err)
 	}
@@ -155,7 +158,7 @@ func TestOverrideUnlock(t *testing.T) {
 	_, ks := tmpKeyStore(t, false)
 
 	pass := "foo"
-	a1, err := ks.NewAccount(pass)
+	a1, err := ks.NewMLDSAAccount(pass)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +169,7 @@ func TestOverrideUnlock(t *testing.T) {
 	}
 
 	// Signing without passphrase works because account is temp unlocked
-	_, err = ks.SignHash(accounts.Account{Address: a1.Address}, testSigData)
+	err = testSign(ks, a1.Address)
 	if err != nil {
 		t.Fatal("Signing shouldn't return an error after unlocking, got ", err)
 	}
@@ -177,14 +180,14 @@ func TestOverrideUnlock(t *testing.T) {
 	}
 
 	// Signing without passphrase still works because account is temp unlocked
-	_, err = ks.SignHash(accounts.Account{Address: a1.Address}, testSigData)
+	err = testSign(ks, a1.Address)
 	if err != nil {
 		t.Fatal("Signing shouldn't return an error after unlocking, got ", err)
 	}
 
 	// Signing fails again after automatic locking
 	time.Sleep(250 * time.Millisecond)
-	_, err = ks.SignHash(accounts.Account{Address: a1.Address}, testSigData)
+	err = testSign(ks, a1.Address)
 	if err != ErrLocked {
 		t.Fatal("Signing should've failed with ErrLocked timeout expired, got ", err)
 	}
@@ -196,7 +199,7 @@ func TestSignRace(t *testing.T) {
 	_, ks := tmpKeyStore(t, false)
 
 	// Create a test account.
-	a1, err := ks.NewAccount("")
+	a1, err := ks.NewMLDSAAccount("")
 	if err != nil {
 		t.Fatal("could not create the test account", err)
 	}
@@ -206,7 +209,7 @@ func TestSignRace(t *testing.T) {
 	}
 	end := time.Now().Add(500 * time.Millisecond)
 	for time.Now().Before(end) {
-		if _, err := ks.SignHash(accounts.Account{Address: a1.Address}, testSigData); err == ErrLocked {
+		if err := testSign(ks, a1.Address); err == ErrLocked {
 			return
 		} else if err != nil {
 			t.Errorf("Sign error: %v", err)
@@ -313,7 +316,7 @@ func TestWalletNotifications(t *testing.T) {
 	for i := 0; i < 1024; i++ {
 		if create := len(live) == 0 || rand.Int()%4 > 0; create {
 			// Add a new account and ensure wallet notifications arrives
-			account, err := ks.NewAccount("")
+			account, err := ks.NewMLDSAAccount("")
 			if err != nil {
 				t.Fatalf("failed to create test account: %v", err)
 			}
@@ -343,30 +346,11 @@ func TestWalletNotifications(t *testing.T) {
 	checkEvents(t, wantEvents, events)
 }
 
-// TestImportExport tests the import functionality of a keystore.
-func TestImportECDSA(t *testing.T) {
-	t.Parallel()
-	_, ks := tmpKeyStore(t, true)
-	key, err := crypto.GenerateKey()
-	if err != nil {
-		t.Fatalf("failed to generate key: %v", key)
-	}
-	if _, err = ks.ImportECDSA(key, "old"); err != nil {
-		t.Errorf("importing failed: %v", err)
-	}
-	if _, err = ks.ImportECDSA(key, "old"); err == nil {
-		t.Errorf("importing same key twice succeeded")
-	}
-	if _, err = ks.ImportECDSA(key, "new"); err == nil {
-		t.Errorf("importing same key twice succeeded")
-	}
-}
-
-// TestImportECDSA tests the import and export functionality of a keystore.
+// TestImportExport tests the import and export functionality of a keystore.
 func TestImportExport(t *testing.T) {
 	t.Parallel()
 	_, ks := tmpKeyStore(t, true)
-	acc, err := ks.NewAccount("old")
+	acc, err := ks.NewMLDSAAccount("old")
 	if err != nil {
 		t.Fatalf("failed to create account: %v", acc)
 	}
@@ -395,7 +379,7 @@ func TestImportExport(t *testing.T) {
 func TestImportRace(t *testing.T) {
 	t.Parallel()
 	_, ks := tmpKeyStore(t, true)
-	acc, err := ks.NewAccount("old")
+	acc, err := ks.NewMLDSAAccount("old")
 	if err != nil {
 		t.Fatalf("failed to create account: %v", acc)
 	}

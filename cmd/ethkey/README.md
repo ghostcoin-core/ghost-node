@@ -1,38 +1,26 @@
 ethkey
 ======
 
-ethkey is a simple command-line tool for working with Ethereum keyfiles.
+ethkey is a simple command-line tool for working with ML-DSA-44 account
+keyfiles. A keyfile holds the password-encrypted 32-byte seed of the key and
+has `"scheme":1`; secp256k1 keyfiles are not supported.
 
 
 # Usage
 
 ### `ethkey generate`
 
-Generate a new keyfile.
-If you want to use an existing private key to use in the keyfile, it can be 
-specified by setting `--privatekey` with the location of the file containing the 
-private key.
+Generate a new keyfile and print its address, scheme and public key.
+If you want to use an existing key seed in the keyfile, it can be
+specified by setting `--seed` with the location of a file containing the
+32-byte seed in hex.
 
 
 ### `ethkey inspect <keyfile>`
 
-Print various information about the keyfile.
-Private key information can be printed by using the `--private` flag;
+Print the address, scheme and public key of the keyfile.
+The secret seed can be printed by using the `--private` flag;
 make sure to use this feature with great caution!
-
-
-### `ethkey signmessage <keyfile> <message/file>`
-
-Sign the message with a keyfile.
-It is possible to refer to a file containing the message.
-To sign a message contained in a file, use the `--msgfile` flag.
-
-
-### `ethkey verifymessage <address> <signature> <message/file>`
-
-Verify the signature of the message.
-It is possible to refer to a file containing the message.
-To sign a message contained in a file, use the --msgfile flag.
 
 
 ### `ethkey changepassword <keyfile>`

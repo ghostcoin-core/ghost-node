@@ -1814,7 +1814,7 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 		} else if accs := ks.Accounts(); len(accs) > 0 {
 			developer = ks.Accounts()[0]
 		} else {
-			developer, err = ks.NewAccount(passphrase)
+			developer, err = ks.NewMLDSAAccount(passphrase)
 			if err != nil {
 				Fatalf("Failed to create developer account: %v", err)
 			}

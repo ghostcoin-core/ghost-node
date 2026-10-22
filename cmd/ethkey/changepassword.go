@@ -36,10 +36,11 @@ var commandChangePassphrase = &cli.Command{
 	Usage:     "change the password on a keyfile",
 	ArgsUsage: "<keyfile>",
 	Description: `
-Change the password of a keyfile.`,
+Change the password of an ML-DSA-44 keyfile.`,
 	Flags: []cli.Flag{
 		passphraseFlag,
 		newPassphraseFlag,
+		lightKDFFlag,
 	},
 	Action: func(ctx *cli.Context) error {
 		keyfilepath := ctx.Args().First()
@@ -56,6 +57,7 @@ Change the password of a keyfile.`,
 		if err != nil {
 			utils.Fatalf("Error decrypting key: %v", err)
 		}
+		defer clear(key.Seed)
 
 		// Get a new passphrase.
 		fmt.Println("Please provide a new password")
@@ -71,7 +73,11 @@ Change the password of a keyfile.`,
 		}
 
 		// Encrypt the key with the new passphrase.
-		newJson, err := keystore.EncryptKey(key, newPhrase, keystore.StandardScryptN, keystore.StandardScryptP)
+		scryptN, scryptP := keystore.StandardScryptN, keystore.StandardScryptP
+		if ctx.Bool(lightKDFFlag.Name) {
+			scryptN, scryptP = keystore.LightScryptN, keystore.LightScryptP
+		}
+		newJson, err := keystore.EncryptKey(key, newPhrase, scryptN, scryptP)
 		if err != nil {
 			utils.Fatalf("Error encrypting with new password: %v", err)
 		}

@@ -19,7 +19,6 @@ package accounts
 
 import (
 	"fmt"
-	"math/big"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
@@ -117,40 +116,6 @@ type Wallet interface {
 	// supply password in the mimetype field, or vice versa. Thus, an implementation
 	// should never echo the mimetype or return the mimetype in the error-response
 	SignDataWithPassphrase(account Account, passphrase, mimeType string, data []byte) ([]byte, error)
-
-	// SignText requests the wallet to sign the hash of a given piece of data, prefixed
-	// by the Ethereum prefix scheme
-	// It looks up the account specified either solely via its address contained within,
-	// or optionally with the aid of any location metadata from the embedded URL field.
-	//
-	// If the wallet requires additional authentication to sign the request (e.g.
-	// a password to decrypt the account, or a PIN code to verify the transaction),
-	// an AuthNeededError instance will be returned, containing infos for the user
-	// about which fields or actions are needed. The user may retry by providing
-	// the needed details via SignTextWithPassphrase, or by other means (e.g. unlock
-	// the account in a keystore).
-	//
-	// This method should return the signature in 'canonical' format, with v 0 or 1.
-	SignText(account Account, text []byte) ([]byte, error)
-
-	// SignTextWithPassphrase is identical to Signtext, but also takes a password
-	SignTextWithPassphrase(account Account, passphrase string, hash []byte) ([]byte, error)
-
-	// SignTx requests the wallet to sign the given transaction.
-	//
-	// It looks up the account specified either solely via its address contained within,
-	// or optionally with the aid of any location metadata from the embedded URL field.
-	//
-	// If the wallet requires additional authentication to sign the request (e.g.
-	// a password to decrypt the account, or a PIN code to verify the transaction),
-	// an AuthNeededError instance will be returned, containing infos for the user
-	// about which fields or actions are needed. The user may retry by providing
-	// the needed details via SignTxWithPassphrase, or by other means (e.g. unlock
-	// the account in a keystore).
-	SignTx(account Account, tx *types.Transaction, chainID *big.Int) (*types.Transaction, error)
-
-	// SignTxWithPassphrase is identical to SignTx, but also takes a password
-	SignTxWithPassphrase(account Account, passphrase string, tx *types.Transaction, chainID *big.Int) (*types.Transaction, error)
 
 	// SignAccountTx requests the wallet to sign the given account transaction
 	// (type 0x52) with the ML-DSA-44 key of the account, for the chain of

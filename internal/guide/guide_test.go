@@ -41,8 +41,8 @@ func TestAccountManagement(t *testing.T) {
 	// Create an encrypted keystore (using light scrypt parameters)
 	ks := keystore.NewKeyStore(filepath.Join(workdir, "keystore"), keystore.LightScryptN, keystore.LightScryptP)
 
-	// Create a new account with the specified encryption passphrase
-	newAcc, err := ks.NewAccount("Creation password")
+	// Create a new ML-DSA-44 account with the specified encryption passphrase
+	newAcc, err := ks.NewMLDSAAccount("Creation password")
 	if err != nil {
 		t.Fatalf("Failed to create new account: %v", err)
 	}

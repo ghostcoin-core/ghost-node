@@ -1,19 +1,25 @@
 This directory contains accounts for testing.
 The password that unlocks them is "foobar".
 
-The "good" key files which are supposed to be loadable are:
+The "good" key files which are supposed to be loadable are ML-DSA-44 key
+files ("scheme":1) of the seed of 32 bytes of one value:
 
-- File: UTC--2016-03-22T12-57-55.920751759Z--7ef5a6135f1fd6a02593eedc869c6d41d934aef8
-  Address: 0x7ef5a6135f1fd6a02593eedc869c6d41d934aef8
+- File: UTC--2026-10-21T09-00-00.000000000Z--<address>
+  Seed: 32 bytes of 0x0a
 - File: aaa
-  Address: 0xf466859ead1932d743d622cb74fc058882e8648a
+  Seed: 32 bytes of 0x0b
 - File: zzz
-  Address: 0x289d485d9771714cce91d3393d764e1311907acc
+  Seed: 32 bytes of 0x0c
 
-The other files (including this README) are broken in various ways
+The other files (including this README) are broken or refused in various ways
 and should not be picked up by package accounts:
 
 - File: no-address (missing address field, otherwise same as "aaa")
+- File: no-scheme (missing scheme field, otherwise same as "aaa")
+- File: other-scheme (scheme field 2, otherwise same as "aaa")
+- File: zero (zero address, otherwise same as "aaa")
+- File: ecdsa (a secp256k1 key file without scheme field, address
+  0xf466859ead1932d743d622cb74fc058882e8648a)
 - File: garbage (file with random data)
 - File: empty (file with no content)
 - File: swapfile~ (should be skipped)

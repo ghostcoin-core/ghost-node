@@ -252,7 +252,8 @@ func (ac *accountCache) scanAccounts() error {
 	var (
 		buf = new(bufio.Reader)
 		key struct {
-			Address string `json:"address"`
+			Address string  `json:"address"`
+			Scheme  *uint16 `json:"scheme"`
 		}
 	)
 	readAccount := func(path string) *accounts.Account {
@@ -264,7 +265,7 @@ func (ac *accountCache) scanAccounts() error {
 		defer fd.Close()
 		buf.Reset(fd)
 		// Parse the address.
-		key.Address = ""
+		key.Address, key.Scheme = "", nil
 		err = json.NewDecoder(buf).Decode(&key)
 		addr := common.HexToAddress(key.Address)
 		switch {
@@ -272,6 +273,11 @@ func (ac *accountCache) scanAccounts() error {
 			log.Debug("Failed to decode keystore key", "path", path, "err", err)
 		case addr == common.Address{}:
 			log.Debug("Failed to decode keystore key", "path", path, "err", "missing or zero address")
+		case key.Scheme == nil:
+			// Version 1, presale and secp256k1 key files have no scheme field.
+			log.Debug("Skipping keystore file without a scheme", "path", path)
+		case *key.Scheme != MLDSAScheme:
+			log.Debug("Skipping keystore file of an unsupported scheme", "path", path, "scheme", *key.Scheme)
 		default:
 			return &accounts.Account{
 				Address: addr,

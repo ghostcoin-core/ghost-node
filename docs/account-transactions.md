@@ -614,8 +614,39 @@ and the public key, and refuses a server `from` that disagrees, in
 `eth_getRawTransactionByHash` and refuses one whose hash, scheme or public
 key is not that of the JSON.
 
+## The keystore and its command-line tools
+
+The keystore (`accounts/keystore`) holds ML-DSA-44 account keys only. A key
+file keeps the password-encrypted version 3 layout around the 32-byte seed of
+the key and has `"scheme":1`; its `address` is the address of the scheme and
+the public key derived from the seed. A file without `scheme` (a secp256k1
+key file of the old format, a version 1 file or a presale wallet), a file of
+another scheme, and a file whose seed does not give its address are not
+listed, are refused to import and to unlock, and are refused by `DecryptKey`
+before the password is tried (`TestKeystoreRefusesECDSAKeys`). Every key file
+the keystore writes has `"scheme":1` (`TestKeystoreHasNoECDSAEntryPoints`).
+
+`NewMLDSAAccount` creates a key and `ImportSeed` imports a seed. The
+secp256k1 entry points are gone: `NewAccount`, `ImportECDSA`,
+`ImportPreSaleKey`, `SignHashWithPassphrase`, `SignTx`, `SignTxWithPassphrase`,
+`SignText` and `SignTextWithPassphrase`, and from `accounts.Wallet` the methods
+`SignTx`, `SignTxWithPassphrase`, `SignText` and `SignTextWithPassphrase`.
+A wallet's `SignData` and `SignDataWithPassphrase`, and `KeyStore.SignHash`
+(kept for `accounts/abi/bind`, which still calls it), return the error "the
+keystore signs only account transactions" and never sign.
+
+`geth account new` creates an ML-DSA-44 account, `geth account import`
+takes a file holding the 32-byte seed as 64 hex digits instead of a
+secp256k1 private key, and `geth account update` and `--unlock` work on
+ML-DSA-44 key files only; the presale `geth wallet import` is removed. The
+`--dev` developer account is an ML-DSA-44 account. `ethkey generate` (from a
+random seed or `--seed <file>`) and `ethkey inspect` show the address, the
+scheme and the public key of an ML-DSA-44 key file (`--private` shows the
+seed), `ethkey changepassword` re-encrypts one, and `ethkey signmessage` and
+`ethkey verifymessage` are removed (`TestGenerateInspectMLDSA44`). A secp256k1
+key is not converted: its account is not reachable by an ML-DSA-44 key.
+
 ## Not yet in this node
 
-Refusing the secp256k1 transaction types, removing the secp256k1 keys from
-the keystore and its command-line tools, and signing with keys of scheme
+Refusing the secp256k1 transaction types and signing with keys of scheme
 `0x0002` outside tests are separate pieces of work.
