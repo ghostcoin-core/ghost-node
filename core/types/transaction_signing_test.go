@@ -135,6 +135,11 @@ func TestCheckTxType(t *testing.T) {
 			}
 		}
 	}
+	// cmd/evm's t9n fixtures record this text for a refused transaction.
+	const want = "transaction type not supported: secp256k1 transaction types are refused: type 0x0"
+	if err := checkTxTypeByte(LegacyTxType); err == nil || err.Error() != want {
+		t.Errorf("legacy type: error %v, want %q", err, want)
+	}
 }
 
 // typeOnlyTx is a TxData of any type byte, for TestCheckTxType.

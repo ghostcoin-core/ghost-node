@@ -124,6 +124,7 @@ func testCallTracer(tracerName string, dirPath string, t *testing.T) {
 			if err := tx.UnmarshalBinary(common.FromHex(test.Input)); err != nil {
 				t.Fatalf("failed to parse testcase input: %v", err)
 			}
+			skipSecp256k1Fixture(t, tx)
 			// Configure a blockchain with the given prestate
 			var (
 				signer  = types.MakeSigner(test.Genesis.Config, new(big.Int).SetUint64(uint64(test.Context.Number)), uint64(test.Context.Time))
@@ -219,6 +220,7 @@ func benchTracer(tracerName string, test *callTracerTest, b *testing.B) {
 	if err := rlp.DecodeBytes(common.FromHex(test.Input), tx); err != nil {
 		b.Fatalf("failed to parse testcase input: %v", err)
 	}
+	skipSecp256k1Fixture(b, tx)
 	signer := types.MakeSigner(test.Genesis.Config, new(big.Int).SetUint64(uint64(test.Context.Number)), uint64(test.Context.Time))
 	origin, _ := signer.Sender(tx)
 	txContext := vm.TxContext{
