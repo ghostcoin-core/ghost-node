@@ -167,6 +167,15 @@ func (r *Reveal) BindingDigest(chainID uint64, genesis common.Hash) common.Hash 
 	return ghosttree.K(TagRevealBinding, r.BindingInput(chainID, genesis))
 }
 
+// SaltedBindingDigest returns the binding digest of the same reveal over a
+// salted coin: BindingDigest with the type CoinV2 in place of Coin. The
+// proof system accepts a coin reveal whose proof commits to either; the node
+// passes its verifier only BindingDigest, and a verifier that checks the
+// binding itself, such as the test stub, computes this one from the inputs.
+func (r *Reveal) SaltedBindingDigest(chainID uint64, genesis common.Hash) common.Hash {
+	return ghosttree.K(TagRevealBinding, r.bindingInput(chainID, genesis, CoinV2))
+}
+
 // BindingInput returns the 415 bytes the binding digest hashes: the chain
 // id (8), the version (2), the domain, which is the genesis hash (32), the
 // statement and its version (1 each), the type COIN (2), the purpose (1),
@@ -174,6 +183,11 @@ func (r *Reveal) BindingDigest(chainID uint64, genesis common.Hash) common.Hash 
 // (32 each), the rule, 32 zero bytes for the empty rule, and the note (156).
 // The version is always 1 and the rule always empty: the node supplies them.
 func (r *Reveal) BindingInput(chainID uint64, genesis common.Hash) []byte {
+	return r.bindingInput(chainID, genesis, Coin)
+}
+
+// bindingInput returns BindingInput with typ as the coin type.
+func (r *Reveal) bindingInput(chainID uint64, genesis common.Hash, typ [2]byte) []byte {
 	out, fee := r.Out, r.Fee
 	if out == nil {
 		out = new(uint256.Int)
@@ -186,7 +200,7 @@ func (r *Reveal) BindingInput(chainID uint64, genesis common.Hash) []byte {
 	b = binary.BigEndian.AppendUint16(b, Version)
 	b = append(b, genesis[:]...)
 	b = append(b, statementCoinReveal, statementVersion)
-	b = append(b, Coin[:]...)
+	b = append(b, typ[:]...)
 	b = append(b, purposeReveal)
 	b = append(b, r.Root[:]...)
 	b = append(b, r.Marker[:]...)
