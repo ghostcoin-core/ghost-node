@@ -55,8 +55,9 @@ var (
 	// stored frontier could not tell from an empty slot.
 	ErrZeroLeaf = errors.New("zero leaf")
 
-	// ErrDepth is returned by Params.Check for a depth other than 32.
-	ErrDepth = errors.New("tree depth is not 32")
+	// ErrDepth is returned by Params.Check for a depth other than the
+	// release depth, 32 (14 in a ghosttreetest14 test build).
+	ErrDepth = fmt.Errorf("tree depth is not %d", releaseDepth)
 )
 
 // Kind is the type of a tree or of a marker set.
@@ -137,12 +138,14 @@ type Params struct {
 	Depth int // levels of inner nodes above the leaves
 }
 
-// Release is the parameter set every chain uses.
-var Release = Params{Depth: 32}
+// Release is the parameter set every chain uses. Its depth is 32, so 2^32
+// leaves per tree, except in a test build made with the ghosttreetest14 build
+// tag, where it is 14 (depth_32.go, depth_14.go).
+var Release = Params{Depth: releaseDepth}
 
-// Check returns an error unless the depth is 32, so 2^32 leaves per tree.
+// Check returns an error unless the depth is the release depth.
 func (p Params) Check() error {
-	if p.Depth != 32 {
+	if p.Depth != releaseDepth {
 		return fmt.Errorf("%w: depth %d", ErrDepth, p.Depth)
 	}
 	return nil
