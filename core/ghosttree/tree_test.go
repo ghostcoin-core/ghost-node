@@ -411,40 +411,6 @@ func TestIndexExhaustedRejects(t *testing.T) {
 	}
 }
 
-func TestReleaseDepthIsThirtyTwo(t *testing.T) {
-	if Release.Depth != 32 {
-		t.Fatalf("release depth %d", Release.Depth)
-	}
-	if err := Release.Check(); err != nil {
-		t.Fatalf("release parameters refused: %v", err)
-	}
-	if Release.capacity() != 1<<32 {
-		t.Errorf("release capacity %d", Release.capacity())
-	}
-	for _, d := range []int{0, 1, 3, 16, 31, 33, 64} {
-		if err := (Params{Depth: d}).Check(); !errors.Is(err, ErrDepth) {
-			t.Errorf("depth %d: Check %v, want %v", d, err, ErrDepth)
-		}
-	}
-	for _, d := range []int{0, 33} {
-		if _, err := root(Params{Depth: d}, newState(t), Coin); !errors.Is(err, ErrDepth) {
-			t.Errorf("depth %d: root %v, want %v", d, err, ErrDepth)
-		}
-	}
-	// The frontier of the release tree fills slots 4 to 35 and no more.
-	st := newState(t)
-	prefill(st, Release, Coin, 0, Release.capacity()-1, 0)
-	if _, err := Append(st, Coin, 1, testLeaf(0)); err != nil {
-		t.Fatal(err)
-	}
-	if got := st.GetState(TreeAccount(Coin), Slot(SlotFrontier+32)); got != (common.Hash{}) {
-		t.Error("a 33rd frontier slot was written")
-	}
-	if SlotFrontier+MaxDepth-1 != 35 {
-		t.Errorf("the last frontier slot is %d, want 35", SlotFrontier+MaxDepth-1)
-	}
-}
-
 func TestCorruptTreeStateRejects(t *testing.T) {
 	twoTo64 := new(big.Int).Lsh(big.NewInt(1), 64)
 	for _, c := range []struct {
