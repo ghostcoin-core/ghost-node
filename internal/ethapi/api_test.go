@@ -100,8 +100,8 @@ func testTransactionMarshal(t *testing.T, tests []txData, config ctypes.ChainCon
 
 		// rpcTransaction
 		if tx.Type() == types.GhostAccountTxType {
-			// The RPC form of an account transaction carries its sender and
-			// hash, but not its signature, so it does not decode back.
+			// The RPC form of an account transaction carries its scheme,
+			// public key and signature instead of v, r and s.
 			rpcTx, err := newSignedRPCTransaction(signer, tx, common.Hash{}, 0, 0, nil)
 			if err != nil {
 				t.Fatalf("test %d: rpc transaction: %v", i, err)
@@ -113,7 +113,32 @@ func testTransactionMarshal(t *testing.T, tests []txData, config ctypes.ChainCon
 			if err != nil {
 				t.Fatalf("test %d: marshalling failed; %v", i, err)
 			}
-			want, have := tt.Want, string(data)
+			var fields map[string]any
+			if err := json.Unmarshal(data, &fields); err != nil {
+				t.Fatalf("test %d: unmarshal failed: %v", i, err)
+			}
+			scheme, publicKey, signature, _ := tx.GhostAccountAuth()
+			id := types.GhostScheme(scheme)
+			for name, want := range map[string]string{
+				"scheme":    hexutil.Encode(id[:]),
+				"publicKey": hexutil.Encode(publicKey),
+				"signature": hexutil.Encode(signature),
+			} {
+				if fields[name] != want {
+					t.Fatalf("test %d: %s is %v, want %s", i, name, fields[name], want)
+				}
+				delete(fields, name)
+			}
+			for _, name := range []string{"v", "r", "s", "yParity"} {
+				if _, ok := fields[name]; ok {
+					t.Fatalf("test %d: account transaction has %s", i, name)
+				}
+			}
+			rest, err := json.Marshal(fields)
+			if err != nil {
+				t.Fatalf("test %d: marshalling failed; %v", i, err)
+			}
+			want, have := tt.Want, string(rest)
 			require.JSONEqf(t, want, have, "test %d: rpc json not match, want %s have %s", i, want, have)
 			continue
 		}
@@ -183,9 +208,10 @@ func allTransactionTypes(addr common.Address, config ctypes.ChainConfigurator) [
 				"transactionIndex": null,
 				"value": "0x8",
 				"type": "0x52",
-				"v": "0x0",
-				"r": "0x0",
-				"s": "0x0"
+				"chainId": "0x539",
+				"maxFeePerGas": "0x9",
+				"maxPriorityFeePerGas": "0x6",
+				"accessList": []
 			}`,
 		}, {
 			Tx: &types.GhostAccountTx{
@@ -211,9 +237,10 @@ func allTransactionTypes(addr common.Address, config ctypes.ChainConfigurator) [
 				"transactionIndex": null,
 				"value": "0x8",
 				"type": "0x52",
-				"v": "0x0",
-				"r": "0x0",
-				"s": "0x0"
+				"chainId": "0x539",
+				"maxFeePerGas": "0x9",
+				"maxPriorityFeePerGas": "0x6",
+				"accessList": []
 			}`,
 		}, {
 			Tx: &types.GhostAccountTx{
@@ -245,9 +272,17 @@ func allTransactionTypes(addr common.Address, config ctypes.ChainConfigurator) [
 				"transactionIndex": null,
 				"value": "0x8",
 				"type": "0x52",
-				"v": "0x0",
-				"r": "0x0",
-				"s": "0x0"
+				"chainId": "0x539",
+				"maxFeePerGas": "0x9",
+				"maxPriorityFeePerGas": "0x6",
+				"accessList": [
+					{
+						"address": "0x0200000000000000000000000000000000000000",
+						"storageKeys": [
+							"0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421"
+						]
+					}
+				]
 			}`,
 		}, {
 			Tx: &types.GhostAccountTx{
@@ -274,9 +309,10 @@ func allTransactionTypes(addr common.Address, config ctypes.ChainConfigurator) [
 				"transactionIndex": null,
 				"value": "0x8",
 				"type": "0x52",
-				"v": "0x0",
-				"r": "0x0",
-				"s": "0x0"
+				"chainId": "0x539",
+				"maxFeePerGas": "0x9",
+				"maxPriorityFeePerGas": "0x6",
+				"accessList": []
 			}`,
 		},
 	}

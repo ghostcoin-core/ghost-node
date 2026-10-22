@@ -480,7 +480,7 @@ func (s *PersonalAccountAPI) signTransaction(ctx context.Context, args *Transact
 	if err := accountTxFeeCheck(s.b, tx); err != nil {
 		return nil, err
 	}
-	return signAccountTx(ctx, s.b, wallet, account, &passwd, tx)
+	return walletSignAccountTx(ctx, s.b, wallet, account, &passwd, tx)
 }
 
 // SendTransaction will create a transaction from the given arguments and
@@ -2050,7 +2050,7 @@ func (s *TransactionAPI) sign(ctx context.Context, addr common.Address, tx *type
 		return nil, err
 	}
 	// Request the wallet to sign the transaction
-	return signAccountTx(ctx, s.b, wallet, account, nil, tx)
+	return walletSignAccountTx(ctx, s.b, wallet, account, nil, tx)
 }
 
 // rpcSigConns bounds the number of RPC connections whose signature budgets
@@ -2170,7 +2170,7 @@ func (s *TransactionAPI) SendTransaction(ctx context.Context, args TransactionAr
 		return common.Hash{}, err
 	}
 	// Assemble the account transaction and sign with the wallet
-	signed, err := signAccountTx(ctx, s.b, wallet, account, nil, args.toAccountTx())
+	signed, err := walletSignAccountTx(ctx, s.b, wallet, account, nil, args.toAccountTx())
 	if err != nil {
 		return common.Hash{}, err
 	}
