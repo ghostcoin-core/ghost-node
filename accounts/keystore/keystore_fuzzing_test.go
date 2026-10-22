@@ -23,7 +23,7 @@ import (
 func FuzzPassword(f *testing.F) {
 	f.Fuzz(func(t *testing.T, password string) {
 		ks := NewKeyStore(t.TempDir(), LightScryptN, LightScryptP)
-		a, err := ks.NewAccount(password)
+		a, err := ks.NewMLDSAAccount(password)
 		if err != nil {
 			t.Fatal(err)
 		}

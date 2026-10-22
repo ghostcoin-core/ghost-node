@@ -23,7 +23,6 @@ import (
 	"errors"
 	"math/big"
 	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/cloudflare/circl/sign/mldsa/mldsa44"
@@ -62,25 +61,27 @@ func testMLDSAAccountOf(t *testing.T, seed []byte) ([]byte, common.Address) {
 	return pubBytes, types.GhostAccountAddressOf(types.GhostSchemeMLDSA44, pubBytes)
 }
 
-// testLegacyKeyStore returns a keystore over a copy of the secp256k1 key file
-// aaa of testdata/keystore (password "foobar") and its account.
-func testLegacyKeyStore(t *testing.T) (string, *KeyStore, accounts.Account) {
-	t.Helper()
-	dir := t.TempDir()
-	keyjson, err := os.ReadFile(filepath.Join("testdata", "keystore", "aaa"))
-	if err != nil {
-		t.Fatal(err)
+// fixtureAddress returns the address of the ML-DSA-44 key whose seed is 32
+// bytes of b, derived without the keystore. The key files of testdata hold
+// the seeds 0x0a (fixtureFileA and dupes/foo), 0x0b (aaa, no-address,
+// no-scheme, other-scheme, dupes/1 and dupes/2), 0x0c (zzz), 0x0d (foo/) and
+// 0x0e (very-light-scrypt.json, password ""); the others use the password
+// "foobar".
+func fixtureAddress(b byte) common.Address {
+	var seed [mldsa44.SeedSize]byte
+	for i := range seed {
+		seed[i] = b
 	}
-	path := filepath.Join(dir, "aaa")
-	if err := os.WriteFile(path, keyjson, 0600); err != nil {
-		t.Fatal(err)
-	}
-	acc := accounts.Account{
-		Address: common.HexToAddress("f466859ead1932d743d622cb74fc058882e8648a"),
-		URL:     accounts.URL{Scheme: KeyStoreScheme, Path: path},
-	}
-	return dir, NewKeyStore(dir, veryLightScryptN, veryLightScryptP), acc
+	pub, _ := mldsa44.NewKeyFromSeed(&seed)
+	return types.GhostAccountAddressOf(types.GhostSchemeMLDSA44, pub.Bytes())
 }
+
+var (
+	fixtureAddressA = fixtureAddress(0x0a)
+	fixtureAddressB = fixtureAddress(0x0b)
+	fixtureAddressC = fixtureAddress(0x0c)
+	fixtureFileA    = "UTC--2026-10-21T09-00-00.000000000Z--" + hex.EncodeToString(fixtureAddressA[:])
+)
 
 // TestKeystoreCreatesMLDSA44Accounts checks that the keystore creates, lists,
 // locks, unlocks and signs with ML-DSA-44 accounts: the key file keeps the
@@ -193,15 +194,14 @@ func TestKeystoreCreatesMLDSA44Accounts(t *testing.T) {
 	checkSigned(wallets[0].SignAccountTx(acc, testAccountSigner, testAccountTxData()))
 
 	// The key signs account transactions only.
-	if _, err := ks.SignHash(acc, make([]byte, 32)); !errors.Is(err, ErrMLDSAKey) {
-		t.Fatalf("SignHash: error %v, want %v", err, ErrMLDSAKey)
+	if _, err := ks.SignHash(acc, make([]byte, 32)); !errors.Is(err, ErrSignsAccountTxOnly) {
+		t.Fatalf("SignHash: error %v, want %v", err, ErrSignsAccountTxOnly)
 	}
-	legacy := types.NewTransaction(0, common.Address{}, new(big.Int), 21000, new(big.Int), nil)
-	if _, err := ks.SignTx(acc, legacy, big.NewInt(1)); !errors.Is(err, ErrMLDSAKey) {
-		t.Fatalf("SignTx: error %v, want %v", err, ErrMLDSAKey)
+	if _, err := wallets[0].SignData(acc, accounts.MimetypeTextPlain, []byte("text")); !errors.Is(err, ErrSignsAccountTxOnly) {
+		t.Fatalf("SignData: error %v, want %v", err, ErrSignsAccountTxOnly)
 	}
-	if _, err := ks.SignTxWithPassphrase(acc, "pass", legacy, big.NewInt(1)); !errors.Is(err, ErrMLDSAKey) {
-		t.Fatalf("SignTxWithPassphrase: error %v, want %v", err, ErrMLDSAKey)
+	if _, err := wallets[0].SignDataWithPassphrase(acc, "pass", accounts.MimetypeTextPlain, []byte("text")); !errors.Is(err, ErrSignsAccountTxOnly) {
+		t.Fatalf("SignDataWithPassphrase: error %v, want %v", err, ErrSignsAccountTxOnly)
 	}
 
 	if err := ks.Lock(acc.Address); err != nil {
@@ -278,111 +278,5 @@ func TestKeystoreImportSeedRejectsBadLength(t *testing.T) {
 	}
 	if from, err := types.Sender(testAccountSigner, tx); err != nil || from != acc.Address {
 		t.Fatalf("signed transaction has sender %x (error %v), want %x", from, err, acc.Address)
-	}
-}
-
-// TestKeystoreLegacyAccountsStillWork checks that a secp256k1 key file of
-// testdata/keystore, which has no scheme field, is still listed next to an
-// ML-DSA-44 account and still signs with the old methods.
-func TestKeystoreLegacyAccountsStillWork(t *testing.T) {
-	t.Parallel()
-	_, ks, legacyAcc := testLegacyKeyStore(t)
-
-	mldsaAcc, err := ks.NewMLDSAAccount("pass")
-	if err != nil {
-		t.Fatal(err)
-	}
-	listed := make(map[common.Address]bool)
-	for _, a := range ks.Accounts() {
-		listed[a.Address] = true
-	}
-	if len(listed) != 2 || !listed[legacyAcc.Address] || !listed[mldsaAcc.Address] {
-		t.Fatalf("listed %v, want the legacy account %x and the ML-DSA-44 account %x", listed, legacyAcc.Address, mldsaAcc.Address)
-	}
-
-	chainID := big.NewInt(1)
-	signer := types.LatestSignerForChainID(chainID)
-	newTx := func() *types.Transaction {
-		return types.NewTransaction(3, common.Address{0x02}, big.NewInt(5), 21000, big.NewInt(1), nil)
-	}
-	checkSigned := func(tx *types.Transaction, err error) {
-		t.Helper()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if from, err := types.Sender(signer, tx); err != nil || from != legacyAcc.Address {
-			t.Fatalf("signed transaction has sender %x (error %v), want %x", from, err, legacyAcc.Address)
-		}
-	}
-
-	// With the password.
-	checkSigned(ks.SignTxWithPassphrase(legacyAcc, "foobar", newTx(), chainID))
-	if _, err := ks.SignTxWithPassphrase(legacyAcc, "wrong", newTx(), chainID); err != ErrDecrypt {
-		t.Fatalf("signing with a wrong password: error %v, want %v", err, ErrDecrypt)
-	}
-	if sig, err := ks.SignHashWithPassphrase(legacyAcc, "foobar", make([]byte, 32)); err != nil || len(sig) != 65 {
-		t.Fatalf("SignHashWithPassphrase: signature of %d bytes, error %v", len(sig), err)
-	}
-
-	// Unlocked, through the keystore and its wallet.
-	if _, err := ks.SignTx(legacyAcc, newTx(), chainID); err != ErrLocked {
-		t.Fatalf("signing with a locked account: error %v, want %v", err, ErrLocked)
-	}
-	if err := ks.Unlock(legacyAcc, "foobar"); err != nil {
-		t.Fatal(err)
-	}
-	checkSigned(ks.SignTx(legacyAcc, newTx(), chainID))
-	if sig, err := ks.SignHash(legacyAcc, make([]byte, 32)); err != nil || len(sig) != 65 {
-		t.Fatalf("SignHash: signature of %d bytes, error %v", len(sig), err)
-	}
-	resolved, err := ks.Find(legacyAcc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var found bool
-	for _, w := range ks.Wallets() {
-		if w.Contains(resolved) {
-			found = true
-			checkSigned(w.SignTx(legacyAcc, newTx(), chainID))
-			if _, err := w.SignText(legacyAcc, []byte("text")); err != nil {
-				t.Fatalf("SignText: %v", err)
-			}
-		}
-	}
-	if !found {
-		t.Fatal("no wallet holds the legacy account")
-	}
-	if err := ks.Lock(legacyAcc.Address); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := ks.SignTx(legacyAcc, newTx(), chainID); err != ErrLocked {
-		t.Fatalf("signing after locking: error %v, want %v", err, ErrLocked)
-	}
-}
-
-// TestKeystoreLegacyAccountRefusesAccountTx checks that a secp256k1 account
-// does not sign an account transaction, locked or unlocked.
-func TestKeystoreLegacyAccountRefusesAccountTx(t *testing.T) {
-	t.Parallel()
-	_, ks, legacyAcc := testLegacyKeyStore(t)
-
-	if _, err := ks.SignAccountTxWithPassphrase(legacyAcc, "foobar", testAccountSigner, testAccountTxData()); !errors.Is(err, ErrNotMLDSAKey) {
-		t.Fatalf("SignAccountTxWithPassphrase: error %v, want %v", err, ErrNotMLDSAKey)
-	}
-	if err := ks.Unlock(legacyAcc, "foobar"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := ks.SignAccountTx(legacyAcc, testAccountSigner, testAccountTxData()); !errors.Is(err, ErrNotMLDSAKey) {
-		t.Fatalf("SignAccountTx: error %v, want %v", err, ErrNotMLDSAKey)
-	}
-	wallets := ks.Wallets()
-	if len(wallets) != 1 {
-		t.Fatalf("%d wallets, want 1", len(wallets))
-	}
-	if _, err := wallets[0].SignAccountTx(legacyAcc, testAccountSigner, testAccountTxData()); !errors.Is(err, ErrNotMLDSAKey) {
-		t.Fatalf("wallet SignAccountTx: error %v, want %v", err, ErrNotMLDSAKey)
-	}
-	if _, err := wallets[0].SignAccountTxWithPassphrase(legacyAcc, "foobar", testAccountSigner, testAccountTxData()); !errors.Is(err, ErrNotMLDSAKey) {
-		t.Fatalf("wallet SignAccountTxWithPassphrase: error %v, want %v", err, ErrNotMLDSAKey)
 	}
 }

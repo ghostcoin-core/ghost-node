@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 
 	"github.com/cloudflare/circl/sign/mldsa/mldsa44"
 	"github.com/ethereum/go-ethereum/accounts"
@@ -50,14 +51,17 @@ var (
 	// scheme the keystore does not hold.
 	ErrKeyScheme = errors.New("unsupported key file scheme")
 
-	// ErrNotMLDSAKey is returned when an account transaction is to be signed
-	// with an account whose key is a secp256k1 key.
+	// ErrNoKeyScheme is returned for a key file without the scheme field: a
+	// version 1, presale or secp256k1 key file, which the keystore refuses.
+	ErrNoKeyScheme = errors.New("key file has no scheme field: only ML-DSA-44 key files are supported")
+
+	// ErrNotMLDSAKey is returned for a key that holds no ML-DSA-44 seed.
 	ErrNotMLDSAKey = errors.New("account key is not an ML-DSA-44 key")
 
-	// ErrMLDSAKey is returned when a hash or a legacy transaction is to be
-	// signed with an ML-DSA-44 account key, which signs account transactions
+	// ErrSignsAccountTxOnly is returned when a hash or data is to be signed:
+	// the ML-DSA-44 account keys of the keystore sign account transactions
 	// only.
-	ErrMLDSAKey = errors.New("ML-DSA-44 account key signs account transactions only")
+	ErrSignsAccountTxOnly = errors.New("the keystore signs only account transactions")
 )
 
 // isMLDSA reports whether k is an ML-DSA-44 account key.
@@ -98,6 +102,51 @@ func newMLDSAKeyFromSeed(seed []byte, id uuid.UUID) (*Key, error) {
 	pub, _ := key.mldsaKeyPair()
 	key.Address = types.GhostAccountAddressOf(MLDSAScheme, pub.Bytes())
 	return key, nil
+}
+
+// NewRandomMLDSAKey returns a new ML-DSA-44 account key of a random seed and
+// a random id, for tools that write a key file outside a keystore directory.
+func NewRandomMLDSAKey() (*Key, error) {
+	return newMLDSAKey(crand.Reader)
+}
+
+// NewMLDSAKeyFromSeed returns the ML-DSA-44 account key of the 32-byte seed
+// with a random id. The key holds a copy of seed.
+func NewMLDSAKeyFromSeed(seed []byte) (*Key, error) {
+	id, err := uuid.NewRandom()
+	if err != nil {
+		return nil, fmt.Errorf("could not create random uuid: %w", err)
+	}
+	return newMLDSAKeyFromSeed(seed, id)
+}
+
+// LoadSeed reads the 32-byte seed of an ML-DSA-44 account key from a file
+// holding it as 64 hex digits, optionally followed by a line break.
+func LoadSeed(file string) ([]byte, error) {
+	content, err := os.ReadFile(file)
+	if err != nil {
+		return nil, err
+	}
+	defer clear(content)
+	text := bytes.TrimRight(content, "\r\n")
+	if len(text) != 2*SeedSize {
+		return nil, fmt.Errorf("%w: the seed file holds %d characters, want %d hex digits", ErrSeedSize, len(text), 2*SeedSize)
+	}
+	seed := make([]byte, SeedSize)
+	if _, err := hex.Decode(seed, text); err != nil {
+		clear(seed)
+		return nil, fmt.Errorf("invalid seed file: %w", err)
+	}
+	return seed, nil
+}
+
+// MLDSAPublicKey returns the encoded ML-DSA-44 public key of k.
+func (k *Key) MLDSAPublicKey() ([]byte, error) {
+	if !k.isMLDSA() {
+		return nil, ErrNotMLDSAKey
+	}
+	pub, _ := k.mldsaKeyPair()
+	return pub.Bytes(), nil
 }
 
 // checkMLDSAScheme refuses a scheme field other than the ML-DSA-44 one.
@@ -204,7 +253,7 @@ func decryptMLDSAKey(k *encryptedKeyJSONV3, auth string) (*Key, error) {
 }
 
 // signAccountTx signs tx for the chain of signer with the ML-DSA-44 key, and
-// refuses a secp256k1 key.
+// refuses a key without a seed.
 func signAccountTx(key *Key, signer types.Signer, tx *types.GhostAccountTx) (*types.Transaction, error) {
 	if !key.isMLDSA() {
 		return nil, ErrNotMLDSAKey

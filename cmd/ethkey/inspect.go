@@ -23,31 +23,31 @@ import (
 
 	"github.com/ethereum/go-ethereum/accounts/keystore"
 	"github.com/ethereum/go-ethereum/cmd/utils"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/urfave/cli/v2"
 )
 
 type outputInspect struct {
-	Address    string
-	PublicKey  string
-	PrivateKey string
+	Address   string
+	Scheme    uint16
+	PublicKey string
+	Seed      string `json:",omitempty"`
 }
 
 var (
 	privateFlag = &cli.BoolFlag{
 		Name:  "private",
-		Usage: "include the private key in the output",
+		Usage: "include the secret seed of the key in the output",
 	}
 )
 
 var commandInspect = &cli.Command{
 	Name:      "inspect",
-	Usage:     "inspect a keyfile",
+	Usage:     "inspect an ML-DSA-44 keyfile",
 	ArgsUsage: "<keyfile>",
 	Description: `
-Print various information about the keyfile.
+Print the address, scheme and public key of an ML-DSA-44 keyfile.
 
-Private key information can be printed by using the --private flag;
+The secret seed of the key can be printed by using the --private flag;
 make sure to use this feature with great caution!`,
 	Flags: []cli.Flag{
 		passphraseFlag,
@@ -69,25 +69,31 @@ make sure to use this feature with great caution!`,
 		if err != nil {
 			utils.Fatalf("Error decrypting key: %v", err)
 		}
+		defer clear(key.Seed)
+		pub, err := key.MLDSAPublicKey()
+		if err != nil {
+			utils.Fatalf("Failed to derive the public key: %v", err)
+		}
 
 		// Output all relevant information we can retrieve.
 		showPrivate := ctx.Bool(privateFlag.Name)
 		out := outputInspect{
-			Address: key.Address.Hex(),
-			PublicKey: hex.EncodeToString(
-				crypto.FromECDSAPub(&key.PrivateKey.PublicKey)),
+			Address:   key.Address.Hex(),
+			Scheme:    keystore.MLDSAScheme,
+			PublicKey: hex.EncodeToString(pub),
 		}
 		if showPrivate {
-			out.PrivateKey = hex.EncodeToString(crypto.FromECDSA(key.PrivateKey))
+			out.Seed = hex.EncodeToString(key.Seed)
 		}
 
 		if ctx.Bool(jsonFlag.Name) {
 			mustPrintJSON(out)
 		} else {
 			fmt.Println("Address:       ", out.Address)
+			fmt.Println("Scheme:        ", schemeName(out.Scheme))
 			fmt.Println("Public key:    ", out.PublicKey)
 			if showPrivate {
-				fmt.Println("Private key:   ", out.PrivateKey)
+				fmt.Println("Seed:          ", out.Seed)
 			}
 		}
 		return nil

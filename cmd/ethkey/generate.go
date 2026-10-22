@@ -17,27 +17,26 @@
 package main
 
 import (
-	"crypto/ecdsa"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
 
 	"github.com/ethereum/go-ethereum/accounts/keystore"
 	"github.com/ethereum/go-ethereum/cmd/utils"
-	"github.com/ethereum/go-ethereum/crypto"
-	"github.com/google/uuid"
 	"github.com/urfave/cli/v2"
 )
 
 type outputGenerate struct {
-	Address      string
-	AddressEIP55 string
+	Address   string
+	Scheme    uint16
+	PublicKey string
 }
 
 var (
-	privateKeyFlag = &cli.StringFlag{
-		Name:  "privatekey",
-		Usage: "file containing a raw private key to encrypt",
+	seedFlag = &cli.StringFlag{
+		Name:  "seed",
+		Usage: "file containing the 32-byte seed (64 hex digits) of the ML-DSA-44 key to encrypt",
 	}
 	lightKDFFlag = &cli.BoolFlag{
 		Name:  "lightkdf",
@@ -47,18 +46,18 @@ var (
 
 var commandGenerate = &cli.Command{
 	Name:      "generate",
-	Usage:     "generate new keyfile",
+	Usage:     "generate new ML-DSA-44 keyfile",
 	ArgsUsage: "[ <keyfile> ]",
 	Description: `
-Generate a new keyfile.
+Generate a new keyfile holding an ML-DSA-44 account key.
 
-If you want to encrypt an existing private key, it can be specified by setting
---privatekey with the location of the file containing the private key.
+If you want to encrypt an existing key, its 32-byte seed can be specified by
+setting --seed with the location of a file containing the seed in hex.
 `,
 	Flags: []cli.Flag{
 		passphraseFlag,
 		jsonFlag,
-		privateKeyFlag,
+		seedFlag,
 		lightKDFFlag,
 	},
 	Action: func(ctx *cli.Context) error {
@@ -73,32 +72,29 @@ If you want to encrypt an existing private key, it can be specified by setting
 			utils.Fatalf("Error checking if keyfile exists: %v", err)
 		}
 
-		var privateKey *ecdsa.PrivateKey
-		var err error
-		if file := ctx.String(privateKeyFlag.Name); file != "" {
-			// Load private key from file.
-			privateKey, err = crypto.LoadECDSA(file)
+		var (
+			key *keystore.Key
+			err error
+		)
+		if file := ctx.String(seedFlag.Name); file != "" {
+			// Load the seed from file.
+			seed, err := keystore.LoadSeed(file)
 			if err != nil {
-				utils.Fatalf("Can't load private key: %v", err)
+				utils.Fatalf("Can't load seed: %v", err)
+			}
+			key, err = keystore.NewMLDSAKeyFromSeed(seed)
+			clear(seed)
+			if err != nil {
+				utils.Fatalf("Can't derive the key: %v", err)
 			}
 		} else {
 			// If not loaded, generate random.
-			privateKey, err = crypto.GenerateKey()
+			key, err = keystore.NewRandomMLDSAKey()
 			if err != nil {
-				utils.Fatalf("Failed to generate random private key: %v", err)
+				utils.Fatalf("Failed to generate random key: %v", err)
 			}
 		}
-
-		// Create the keyfile object with a random UUID.
-		UUID, err := uuid.NewRandom()
-		if err != nil {
-			utils.Fatalf("Failed to generate random uuid: %v", err)
-		}
-		key := &keystore.Key{
-			Id:         UUID,
-			Address:    crypto.PubkeyToAddress(privateKey.PublicKey),
-			PrivateKey: privateKey,
-		}
+		defer clear(key.Seed)
 
 		// Encrypt key with passphrase.
 		passphrase := getPassphrase(ctx, true)
@@ -120,14 +116,30 @@ If you want to encrypt an existing private key, it can be specified by setting
 		}
 
 		// Output some information.
+		pub, err := key.MLDSAPublicKey()
+		if err != nil {
+			utils.Fatalf("Failed to derive the public key: %v", err)
+		}
 		out := outputGenerate{
-			Address: key.Address.Hex(),
+			Address:   key.Address.Hex(),
+			Scheme:    keystore.MLDSAScheme,
+			PublicKey: hex.EncodeToString(pub),
 		}
 		if ctx.Bool(jsonFlag.Name) {
 			mustPrintJSON(out)
 		} else {
 			fmt.Println("Address:", out.Address)
+			fmt.Println("Scheme:", schemeName(out.Scheme))
+			fmt.Println("Public key:", out.PublicKey)
 		}
 		return nil
 	},
+}
+
+// schemeName returns the printed name of a key file scheme.
+func schemeName(scheme uint16) string {
+	if scheme == keystore.MLDSAScheme {
+		return fmt.Sprintf("%d (ML-DSA-44)", scheme)
+	}
+	return fmt.Sprintf("%d", scheme)
 }
