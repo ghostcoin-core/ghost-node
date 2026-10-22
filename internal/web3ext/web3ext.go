@@ -522,12 +522,6 @@ web3._extend({
 			params: 0
 		}),
 		new web3._extend.Method({
-			name: 'sign',
-			call: 'eth_sign',
-			params: 2,
-			inputFormatter: [web3._extend.formatters.inputAddressFormatter, null]
-		}),
-		new web3._extend.Method({
 			name: 'resend',
 			call: 'eth_resend',
 			params: 3,
@@ -720,17 +714,6 @@ web3._extend({
 		new web3._extend.Method({
 			name: 'importRawKey',
 			call: 'personal_importRawKey',
-			params: 2
-		}),
-		new web3._extend.Method({
-			name: 'sign',
-			call: 'personal_sign',
-			params: 3,
-			inputFormatter: [null, web3._extend.formatters.inputAddressFormatter, null]
-		}),
-		new web3._extend.Method({
-			name: 'ecRecover',
-			call: 'personal_ecRecover',
 			params: 2
 		}),
 		new web3._extend.Method({

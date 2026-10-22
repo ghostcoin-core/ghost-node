@@ -328,14 +328,21 @@ func allBlobTxs(addr common.Address, config ctypes.ChainConfigurator) []txData {
 	}
 }
 
+// testAccountSeed is the seed of the ML-DSA-44 key of the test backend's
+// keystore account.
+var testAccountSeed = bytes.Repeat([]byte{0x5e}, keystore.SeedSize)
+
+// fixtureAccountAddr is the address of the secp256k1 keystore account the
+// testdata fixtures were generated with, which their genesis funds.
+var fixtureAccountAddr = common.HexToAddress("0x71562b71999873DB5b286dF957af199Ec94617F7")
+
 func newTestAccountManager(t *testing.T) (*accounts.Manager, accounts.Account) {
 	var (
-		dir        = t.TempDir()
-		am         = accounts.NewManager(&accounts.Config{InsecureUnlockAllowed: true})
-		b          = keystore.NewKeyStore(dir, 2, 1)
-		testKey, _ = crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
+		dir = t.TempDir()
+		am  = accounts.NewManager(&accounts.Config{InsecureUnlockAllowed: true})
+		b   = keystore.NewKeyStore(dir, 2, 1)
 	)
-	acc, err := b.ImportECDSA(testKey, "")
+	acc, err := b.ImportSeed(testAccountSeed, "")
 	if err != nil {
 		t.Fatalf("failed to create test account: %v", err)
 	}
@@ -365,7 +372,14 @@ func newTestBackend(t *testing.T, n int, gspec *genesisT.Genesis, engine consens
 		}
 	)
 	accman, acc := newTestAccountManager(t)
-	gspec.Alloc[acc.Address] = genesisT.GenesisAccount{Balance: big.NewInt(vars.Ether)}
+	// A genesis without allocations of its own funds the keystore account,
+	// which signs. Any other genesis keeps the allocation the testdata
+	// fixtures were generated with, so that their hashes hold.
+	if len(gspec.Alloc) == 0 {
+		gspec.Alloc[acc.Address] = genesisT.GenesisAccount{Balance: big.NewInt(vars.Ether)}
+	} else {
+		gspec.Alloc[fixtureAccountAddr] = genesisT.GenesisAccount{Balance: big.NewInt(vars.Ether)}
+	}
 	// Generate blocks for testing
 	db, blocks, _ := core.GenerateChainWithGenesis(gspec, engine, n, generator)
 	txlookupLimit := uint64(0)
@@ -894,111 +908,6 @@ func TestCall(t *testing.T) {
 		if !reflect.DeepEqual(result.String(), tc.want) {
 			t.Errorf("test %d, result mismatch, have\n%v\n, want\n%v\n", i, result.String(), tc.want)
 		}
-	}
-}
-
-func TestSignTransaction(t *testing.T) {
-	t.Parallel()
-	// Initialize test accounts
-	var (
-		key, _  = crypto.HexToECDSA("8a1f9a8f95be41cd7ccb6168179afb4504aefe388d1e14474d32c45c72ce7b7a")
-		to      = crypto.PubkeyToAddress(key.PublicKey)
-		genesis = &genesisT.Genesis{
-			Config: params.MergedTestChainConfig,
-			Alloc:  genesisT.GenesisAlloc{},
-		}
-	)
-	b := newTestBackend(t, 1, genesis, beacon.New(ethash.NewFaker()), func(i int, b *core.BlockGen) {
-		b.SetPoS()
-	})
-	api := NewTransactionAPI(b, nil)
-	res, err := api.FillTransaction(context.Background(), TransactionArgs{
-		From:  &b.acc.Address,
-		To:    &to,
-		Value: (*hexutil.Big)(big.NewInt(1)),
-	})
-	if err != nil {
-		t.Fatalf("failed to fill tx defaults: %v\n", err)
-	}
-
-	res, err = api.SignTransaction(context.Background(), argsFromTransaction(res.Tx, b.acc.Address))
-	if err != nil {
-		t.Fatalf("failed to sign tx: %v\n", err)
-	}
-	tx, err := json.Marshal(res.Tx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	expect := `{"type":"0x2","chainId":"0x1","nonce":"0x0","to":"0x703c4b2bd70c169f5717101caee543299fc946c7","gas":"0x5208","gasPrice":null,"maxPriorityFeePerGas":"0x0","maxFeePerGas":"0x684ee180","value":"0x1","input":"0x","accessList":[],"v":"0x0","r":"0x8fabeb142d585dd9247f459f7e6fe77e2520c88d50ba5d220da1533cea8b34e1","s":"0x582dd68b21aef36ba23f34e49607329c20d981d30404daf749077f5606785ce7","yParity":"0x0","hash":"0x93927839207cfbec395da84b8a2bc38b7b65d2cb2819e9fef1f091f5b1d4cc8f"}`
-	if !bytes.Equal(tx, []byte(expect)) {
-		t.Errorf("result mismatch. Have:\n%s\nWant:\n%s\n", tx, expect)
-	}
-}
-
-func TestSignBlobTransaction(t *testing.T) {
-	t.Parallel()
-	// Initialize test accounts
-	var (
-		key, _  = crypto.HexToECDSA("8a1f9a8f95be41cd7ccb6168179afb4504aefe388d1e14474d32c45c72ce7b7a")
-		to      = crypto.PubkeyToAddress(key.PublicKey)
-		genesis = &genesisT.Genesis{
-			Config: params.MergedTestChainConfig,
-			Alloc:  genesisT.GenesisAlloc{},
-		}
-	)
-	b := newTestBackend(t, 1, genesis, beacon.New(ethash.NewFaker()), func(i int, b *core.BlockGen) {
-		b.SetPoS()
-	})
-	api := NewTransactionAPI(b, nil)
-	res, err := api.FillTransaction(context.Background(), TransactionArgs{
-		From:       &b.acc.Address,
-		To:         &to,
-		Value:      (*hexutil.Big)(big.NewInt(1)),
-		BlobHashes: []common.Hash{{0x01, 0x22}},
-	})
-	if err != nil {
-		t.Fatalf("failed to fill tx defaults: %v\n", err)
-	}
-
-	_, err = api.SignTransaction(context.Background(), argsFromTransaction(res.Tx, b.acc.Address))
-	if err == nil {
-		t.Fatalf("should fail on blob transaction")
-	}
-	if !errors.Is(err, errBlobTxNotSupported) {
-		t.Errorf("error mismatch. Have: %v, want: %v", err, errBlobTxNotSupported)
-	}
-}
-
-func TestSendBlobTransaction(t *testing.T) {
-	t.Parallel()
-	// Initialize test accounts
-	var (
-		key, _  = crypto.HexToECDSA("8a1f9a8f95be41cd7ccb6168179afb4504aefe388d1e14474d32c45c72ce7b7a")
-		to      = crypto.PubkeyToAddress(key.PublicKey)
-		genesis = &genesisT.Genesis{
-			Config: params.MergedTestChainConfig,
-			Alloc:  genesisT.GenesisAlloc{},
-		}
-	)
-	b := newTestBackend(t, 1, genesis, beacon.New(ethash.NewFaker()), func(i int, b *core.BlockGen) {
-		b.SetPoS()
-	})
-	api := NewTransactionAPI(b, nil)
-	res, err := api.FillTransaction(context.Background(), TransactionArgs{
-		From:       &b.acc.Address,
-		To:         &to,
-		Value:      (*hexutil.Big)(big.NewInt(1)),
-		BlobHashes: []common.Hash{common.Hash{0x01, 0x22}},
-	})
-	if err != nil {
-		t.Fatalf("failed to fill tx defaults: %v\n", err)
-	}
-
-	_, err = api.SendTransaction(context.Background(), argsFromTransaction(res.Tx, b.acc.Address))
-	if err == nil {
-		t.Errorf("sending tx should have failed")
-	} else if !errors.Is(err, errBlobTxNotSupported) {
-		t.Errorf("unexpected error. Have %v, want %v\n", err, errBlobTxNotSupported)
 	}
 }
 

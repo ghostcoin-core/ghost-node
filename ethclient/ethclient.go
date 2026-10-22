@@ -226,11 +226,63 @@ type txExtraInfo struct {
 	From        *common.Address `json:"from,omitempty"`
 }
 
+// accountTxJSON holds the fields of an account transaction (type 0x52) that
+// the RPC server encodes differently from types.Transaction: the scheme is 2
+// bytes.
+type accountTxJSON struct {
+	Type   hexutil.Uint64 `json:"type"`
+	Scheme *hexutil.Bytes `json:"scheme"`
+}
+
+// errAccountTxFrom is returned when the server's from of an account
+// transaction is not the address of its scheme and public key.
+var errAccountTxFrom = errors.New("server returned an account transaction whose from is not derived from its scheme and public key")
+
 func (tx *rpcTransaction) UnmarshalJSON(msg []byte) error {
+	var acc accountTxJSON
+	if err := json.Unmarshal(msg, &acc); err != nil {
+		return err
+	}
+	if acc.Type == types.GhostAccountTxType {
+		var err error
+		if msg, err = accountTxTypesJSON(msg, acc.Scheme); err != nil {
+			return err
+		}
+	}
 	if err := json.Unmarshal(msg, &tx.tx); err != nil {
 		return err
 	}
-	return json.Unmarshal(msg, &tx.txExtraInfo)
+	if err := json.Unmarshal(msg, &tx.txExtraInfo); err != nil {
+		return err
+	}
+	// The sender of an account transaction is derived from its scheme and
+	// public key; a server from that disagrees is an error.
+	if from, ok := accountTxSender(tx.tx); ok {
+		if tx.From != nil && *tx.From != from {
+			return fmt.Errorf("%w: server from %v, derived %v", errAccountTxFrom, *tx.From, from)
+		}
+		tx.From = &from
+	}
+	return nil
+}
+
+// accountTxTypesJSON returns the RPC JSON of an account transaction with its
+// 2-byte scheme rewritten as the scheme number types.Transaction decodes.
+func accountTxTypesJSON(msg []byte, scheme *hexutil.Bytes) ([]byte, error) {
+	if scheme == nil || len(*scheme) != 2 {
+		return nil, errors.New("server returned an account transaction without a 2-byte scheme")
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(msg, &fields); err != nil {
+		return nil, err
+	}
+	id := hexutil.Uint64(uint64((*scheme)[0])<<8 | uint64((*scheme)[1]))
+	enc, err := json.Marshal(id)
+	if err != nil {
+		return nil, err
+	}
+	fields["scheme"] = enc
+	return json.Marshal(fields)
 }
 
 // TransactionByHash returns the transaction with the given hash.
@@ -256,10 +308,15 @@ func (ec *Client) TransactionByHash(ctx context.Context, hash common.Hash) (tx *
 //
 // There is a fast-path for transactions retrieved by TransactionByHash and
 // TransactionInBlock. Getting their sender address can be done without an RPC interaction.
+//
+// The sender of an account transaction (type 0x52) is derived from its scheme and public
+// key; a server that names another sender is an error.
 func (ec *Client) TransactionSender(ctx context.Context, tx *types.Transaction, block common.Hash, index uint) (common.Address, error) {
+	derived, isAccountTx := accountTxSender(tx)
+
 	// Try to load the address from the cache.
 	sender, err := types.Sender(&senderFromServer{blockhash: block}, tx)
-	if err == nil {
+	if err == nil && (!isAccountTx || sender == derived) {
 		return sender, nil
 	}
 
@@ -274,7 +331,23 @@ func (ec *Client) TransactionSender(ctx context.Context, tx *types.Transaction, 
 	if meta.Hash == (common.Hash{}) || meta.Hash != tx.Hash() {
 		return common.Address{}, errors.New("wrong inclusion block/index")
 	}
+	if isAccountTx {
+		if meta.From != derived {
+			return common.Address{}, fmt.Errorf("%w: server from %v, derived %v", errAccountTxFrom, meta.From, derived)
+		}
+		return derived, nil
+	}
 	return meta.From, nil
+}
+
+// accountTxSender returns the sender of an account transaction, derived from
+// its scheme and public key, and false for any other transaction.
+func accountTxSender(tx *types.Transaction) (common.Address, bool) {
+	scheme, publicKey, _, ok := tx.GhostAccountAuth()
+	if !ok {
+		return common.Address{}, false
+	}
+	return types.GhostAccountAddressOf(scheme, publicKey), true
 }
 
 // TransactionCount returns the total number of transactions in the given block.
