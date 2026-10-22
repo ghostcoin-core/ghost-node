@@ -18,6 +18,14 @@
 // must only ever be imported from _test.go files: a node with it would mint
 // for anyone who knows the stub proof format.
 //
+// The one exception is the test-depth build. With the ghosttreetest14 tag,
+// install.go installs the stub as the active verifier when the package is
+// initialised, and cmd/geth/ghostprivtest_install.go, under the same tag,
+// imports the package, so a test-depth geth accepts stub reveal proofs. A
+// build without the tag installs nothing, and the release tag together with
+// ghosttreetest14 does not build (core/ghosttree/depth_refuse.go), so a
+// release node never carries the stub.
+//
 // A stub proof is the proof field of a reveal whose first 32 bytes are
 // K("ghost/test-proof/v1", binding digest) and whose other bytes are zero.
 // The stub checks nothing else: membership, the marker's derivation and
