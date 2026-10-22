@@ -101,10 +101,10 @@ func bigOrZero(v *big.Int) *big.Int {
 	return new(big.Int).Set(v)
 }
 
-// signAccountTx signs the account transaction tx with the key of account in
-// wallet: with the unlocked key, or, with a passphrase, with the key it
+// walletSignAccountTx signs the account transaction tx with the key of account
+// in wallet: with the unlocked key, or, with a passphrase, with the key it
 // decrypts. The sender derived from the signed transaction must be account.
-func signAccountTx(ctx context.Context, b Backend, wallet accounts.Wallet, account accounts.Account, passwd *string, tx *types.GhostAccountTx) (*types.Transaction, error) {
+func walletSignAccountTx(ctx context.Context, b Backend, wallet accounts.Wallet, account accounts.Account, passwd *string, tx *types.GhostAccountTx) (*types.Transaction, error) {
 	signer, err := accountTxSigner(ctx, b)
 	if err != nil {
 		return nil, err
