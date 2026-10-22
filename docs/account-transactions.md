@@ -607,10 +607,12 @@ quantum-safe message format is specified.
 In an RPC response (a transaction, a block with full transactions, a pending
 transaction and a receipt), an account transaction has `scheme`, its 2 bytes
 in hex (`"0x0001"`), and `publicKey` in hex, and its `from` is derived from
-them; a transaction also has its `signature`. It has no `v`, `r`, `s` or
-`yParity`. The Go client (`ethclient`) decodes the 2-byte scheme, derives the
-sender from the scheme and the public key, and refuses a server `from` that
-disagrees, in `TransactionSender` as well.
+them. It has no `v`, `r`, `s`, `yParity` or `signature`. The Go client
+(`ethclient`) decodes the 2-byte scheme, derives the sender from the scheme
+and the public key, and refuses a server `from` that disagrees, in
+`TransactionSender` as well. It fetches the signed transaction with
+`eth_getRawTransactionByHash` and refuses one whose hash, scheme or public
+key is not that of the JSON.
 
 ## Not yet in this node
 

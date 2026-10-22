@@ -18,6 +18,7 @@
 package ethclient
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -183,6 +184,14 @@ func (ec *Client) getBlock(ctx context.Context, method string, args ...interface
 			}
 		}
 	}
+	// Fetch the signed account transactions, whose JSON has no signature.
+	rpcTxs := make([]*rpcTransaction, len(body.Transactions))
+	for i := range body.Transactions {
+		rpcTxs[i] = &body.Transactions[i]
+	}
+	if err := ec.fillAccountTxs(ctx, rpcTxs...); err != nil {
+		return nil, err
+	}
 	// Fill the sender cache of transactions in the block.
 	txs := make([]*types.Transaction, len(body.Transactions))
 	for i, tx := range body.Transactions {
@@ -218,6 +227,11 @@ func (ec *Client) HeaderByNumber(ctx context.Context, number *big.Int) (*types.H
 type rpcTransaction struct {
 	tx *types.Transaction
 	txExtraInfo
+
+	// account is set for an account transaction (type 0x52), whose JSON has
+	// no signature: tx is nil until fillAccountTxs fetches the signed
+	// transaction.
+	account *accountTxJSON
 }
 
 type txExtraInfo struct {
@@ -226,63 +240,103 @@ type txExtraInfo struct {
 	From        *common.Address `json:"from,omitempty"`
 }
 
-// accountTxJSON holds the fields of an account transaction (type 0x52) that
-// the RPC server encodes differently from types.Transaction: the scheme is 2
-// bytes.
+// accountTxJSON holds the fields of an account transaction (type 0x52) in
+// its RPC JSON: the 2-byte scheme and the public key, from which its sender
+// is derived. The JSON has no v, r, s or signature.
 type accountTxJSON struct {
-	Type   hexutil.Uint64 `json:"type"`
-	Scheme *hexutil.Bytes `json:"scheme"`
+	Type      hexutil.Uint64 `json:"type"`
+	Hash      common.Hash    `json:"hash"`
+	Scheme    *hexutil.Bytes `json:"scheme"`
+	PublicKey *hexutil.Bytes `json:"publicKey"`
 }
 
 // errAccountTxFrom is returned when the server's from of an account
 // transaction is not the address of its scheme and public key.
 var errAccountTxFrom = errors.New("server returned an account transaction whose from is not derived from its scheme and public key")
 
+// errAccountTxRaw is returned when the signed account transaction the server
+// returns is not the one of its JSON.
+var errAccountTxRaw = errors.New("server returned a signed account transaction that does not match its JSON")
+
 func (tx *rpcTransaction) UnmarshalJSON(msg []byte) error {
 	var acc accountTxJSON
 	if err := json.Unmarshal(msg, &acc); err != nil {
 		return err
 	}
-	if acc.Type == types.GhostAccountTxType {
-		var err error
-		if msg, err = accountTxTypesJSON(msg, acc.Scheme); err != nil {
+	if acc.Type != types.GhostAccountTxType {
+		if err := json.Unmarshal(msg, &tx.tx); err != nil {
 			return err
 		}
+		return json.Unmarshal(msg, &tx.txExtraInfo)
 	}
-	if err := json.Unmarshal(msg, &tx.tx); err != nil {
-		return err
+	if acc.Scheme == nil || len(*acc.Scheme) != 2 {
+		return errors.New("server returned an account transaction without a 2-byte scheme")
+	}
+	if acc.PublicKey == nil {
+		return errors.New("server returned an account transaction without a public key")
 	}
 	if err := json.Unmarshal(msg, &tx.txExtraInfo); err != nil {
 		return err
 	}
 	// The sender of an account transaction is derived from its scheme and
 	// public key; a server from that disagrees is an error.
-	if from, ok := accountTxSender(tx.tx); ok {
-		if tx.From != nil && *tx.From != from {
-			return fmt.Errorf("%w: server from %v, derived %v", errAccountTxFrom, *tx.From, from)
-		}
-		tx.From = &from
+	from := types.GhostAccountAddressOf(acc.scheme(), *acc.PublicKey)
+	if tx.From != nil && *tx.From != from {
+		return fmt.Errorf("%w: server from %v, derived %v", errAccountTxFrom, *tx.From, from)
 	}
+	tx.From = &from
+	tx.tx, tx.account = nil, &acc
 	return nil
 }
 
-// accountTxTypesJSON returns the RPC JSON of an account transaction with its
-// 2-byte scheme rewritten as the scheme number types.Transaction decodes.
-func accountTxTypesJSON(msg []byte, scheme *hexutil.Bytes) ([]byte, error) {
-	if scheme == nil || len(*scheme) != 2 {
-		return nil, errors.New("server returned an account transaction without a 2-byte scheme")
+// scheme returns the scheme ID of the 2-byte scheme of the JSON.
+func (acc *accountTxJSON) scheme() uint16 {
+	return uint16((*acc.Scheme)[0])<<8 | uint16((*acc.Scheme)[1])
+}
+
+// fillAccountTxs fetches the signed account transactions of txs, whose JSON
+// has no signature, by their hashes, and checks that each is the transaction
+// of its JSON: its hash, scheme and public key.
+func (ec *Client) fillAccountTxs(ctx context.Context, txs ...*rpcTransaction) error {
+	var accs []*rpcTransaction
+	for _, tx := range txs {
+		if tx.account != nil {
+			accs = append(accs, tx)
+		}
 	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(msg, &fields); err != nil {
-		return nil, err
+	if len(accs) == 0 {
+		return nil
 	}
-	id := hexutil.Uint64(uint64((*scheme)[0])<<8 | uint64((*scheme)[1]))
-	enc, err := json.Marshal(id)
-	if err != nil {
-		return nil, err
+	raws := make([]hexutil.Bytes, len(accs))
+	reqs := make([]rpc.BatchElem, len(accs))
+	for i, tx := range accs {
+		reqs[i] = rpc.BatchElem{
+			Method: "eth_getRawTransactionByHash",
+			Args:   []interface{}{tx.account.Hash},
+			Result: &raws[i],
+		}
 	}
-	fields["scheme"] = enc
-	return json.Marshal(fields)
+	if err := ec.c.BatchCallContext(ctx, reqs); err != nil {
+		return err
+	}
+	for i, tx := range accs {
+		if reqs[i].Error != nil {
+			return reqs[i].Error
+		}
+		if len(raws[i]) == 0 {
+			return fmt.Errorf("server returned no signed account transaction %v", tx.account.Hash)
+		}
+		signed := new(types.Transaction)
+		if err := signed.UnmarshalBinary(raws[i]); err != nil {
+			return err
+		}
+		scheme, publicKey, _, ok := signed.GhostAccountAuth()
+		if !ok || signed.Hash() != tx.account.Hash || scheme != tx.account.scheme() || !bytes.Equal(publicKey, *tx.account.PublicKey) {
+			return fmt.Errorf("%w: %v", errAccountTxRaw, tx.account.Hash)
+		}
+		tx.tx, tx.account = signed, nil
+	}
+	return nil
 }
 
 // TransactionByHash returns the transaction with the given hash.
@@ -293,6 +347,8 @@ func (ec *Client) TransactionByHash(ctx context.Context, hash common.Hash) (tx *
 		return nil, false, err
 	} else if json == nil {
 		return nil, false, ethereum.NotFound
+	} else if err := ec.fillAccountTxs(ctx, json); err != nil {
+		return nil, false, err
 	} else if _, r, _ := json.tx.RawSignatureValues(); r == nil {
 		return nil, false, errors.New("server returned transaction without signature")
 	}
@@ -366,6 +422,8 @@ func (ec *Client) TransactionInBlock(ctx context.Context, blockHash common.Hash,
 	}
 	if json == nil {
 		return nil, ethereum.NotFound
+	} else if err := ec.fillAccountTxs(ctx, json); err != nil {
+		return nil, err
 	} else if _, r, _ := json.tx.RawSignatureValues(); r == nil {
 		return nil, errors.New("server returned transaction without signature")
 	}

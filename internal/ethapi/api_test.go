@@ -100,8 +100,8 @@ func testTransactionMarshal(t *testing.T, tests []txData, config ctypes.ChainCon
 
 		// rpcTransaction
 		if tx.Type() == types.GhostAccountTxType {
-			// The RPC form of an account transaction carries its scheme,
-			// public key and signature instead of v, r and s.
+			// The RPC form of an account transaction carries its scheme and
+			// public key instead of v, r and s.
 			rpcTx, err := newSignedRPCTransaction(signer, tx, common.Hash{}, 0, 0, nil)
 			if err != nil {
 				t.Fatalf("test %d: rpc transaction: %v", i, err)
@@ -117,19 +117,18 @@ func testTransactionMarshal(t *testing.T, tests []txData, config ctypes.ChainCon
 			if err := json.Unmarshal(data, &fields); err != nil {
 				t.Fatalf("test %d: unmarshal failed: %v", i, err)
 			}
-			scheme, publicKey, signature, _ := tx.GhostAccountAuth()
+			scheme, publicKey, _, _ := tx.GhostAccountAuth()
 			id := types.GhostScheme(scheme)
 			for name, want := range map[string]string{
 				"scheme":    hexutil.Encode(id[:]),
 				"publicKey": hexutil.Encode(publicKey),
-				"signature": hexutil.Encode(signature),
 			} {
 				if fields[name] != want {
 					t.Fatalf("test %d: %s is %v, want %s", i, name, fields[name], want)
 				}
 				delete(fields, name)
 			}
-			for _, name := range []string{"v", "r", "s", "yParity"} {
+			for _, name := range []string{"v", "r", "s", "yParity", "signature"} {
 				if _, ok := fields[name]; ok {
 					t.Fatalf("test %d: account transaction has %s", i, name)
 				}

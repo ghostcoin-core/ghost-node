@@ -40,9 +40,15 @@ import (
 	"github.com/ethereum/go-ethereum/rpc"
 )
 
-// tamperedTxAPI serves one transaction JSON for every transaction lookup.
+// tamperedTxAPI serves one transaction JSON for every transaction lookup and
+// one signed transaction for every raw transaction lookup.
 type tamperedTxAPI struct {
-	tx json.RawMessage
+	tx  json.RawMessage
+	raw hexutil.Bytes
+}
+
+func (api *tamperedTxAPI) GetRawTransactionByHash(hash common.Hash) hexutil.Bytes {
+	return api.raw
 }
 
 func (api *tamperedTxAPI) GetTransactionByHash(hash common.Hash) json.RawMessage {
@@ -181,6 +187,11 @@ func TestEthclientFromDerivedFromPublicKey(t *testing.T) {
 	if fields["scheme"] != "0x0001" {
 		t.Fatalf("served scheme %v, want 0x0001", fields["scheme"])
 	}
+	for _, key := range []string{"v", "r", "s", "yParity", "signature"} {
+		if _, ok := fields[key]; ok {
+			t.Errorf("served transaction has %s", key)
+		}
+	}
 	tamper := func(key string, value interface{}) json.RawMessage {
 		cpy := make(map[string]interface{}, len(fields))
 		for k, v := range fields {
@@ -226,5 +237,20 @@ func TestEthclientFromDerivedFromPublicKey(t *testing.T) {
 	}
 	if sender, err := tampered.TransactionSender(ctx, uncached, blockHash, 0); !errors.Is(err, errAccountTxFrom) {
 		t.Errorf("tampered sender: %v, error %v, want %v", sender, err, errAccountTxFrom)
+	}
+
+	// The signed transaction the server returns must be the one of the JSON.
+	srv2 := rpc.NewServer()
+	defer srv2.Stop()
+	if err := srv2.RegisterName("eth", &tamperedTxAPI{tx: tamper("hash", common.Hash{0x52}.Hex()), raw: raw}); err != nil {
+		t.Fatal(err)
+	}
+	mismatched := NewClient(rpc.DialInProc(srv2))
+	defer mismatched.Close()
+	if _, _, err := mismatched.TransactionByHash(ctx, common.Hash{0x52}); !errors.Is(err, errAccountTxRaw) {
+		t.Errorf("mismatched signed transaction by hash: error %v, want %v", err, errAccountTxRaw)
+	}
+	if _, err := mismatched.TransactionInBlock(ctx, blockHash, 0); !errors.Is(err, errAccountTxRaw) {
+		t.Errorf("mismatched signed transaction in block: error %v, want %v", err, errAccountTxRaw)
 	}
 }
