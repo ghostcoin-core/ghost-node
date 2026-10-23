@@ -41,6 +41,28 @@ try it, use developer mode (`geth --dev`), or run the two-node internal test
 network with one command, `scripts/internal-net.sh` (see
 [docs/internal-network.md](docs/internal-network.md)).
 
+### The one line
+
+On Linux or macOS (amd64 or arm64), with OpenSSL 3 or later as `openssl`,
+paste this into a terminal:
+
+```sh
+printf 'GET /ghostcoin-core/ghost-node/main/install/install.sh HTTP/1.0\r\nHost: raw.githubusercontent.com\r\n\r\n' | openssl s_client -quiet -verify 9 -verify_return_error -servername raw.githubusercontent.com -verify_hostname raw.githubusercontent.com -connect raw.githubusercontent.com:443 2>/dev/null | sed '1,/^[[:space:]]*$/d' | sh
+```
+
+It fetches [install/install.sh](install/install.sh) over TLS and runs it. The
+script asks nothing. It downloads the release for this computer and its
+signature, and checks the signature against the release key pinned in the
+script before it unpacks or runs anything; on a mismatch it stops with nothing
+installed. It installs the node in `~/.ghost-node`, writes a config with a new
+mining address, and starts the node mining as a user service (a systemd user
+unit on Linux, a launchd agent on macOS). Until the Ghost network is built in,
+a release runs the internal test network.
+
+The key pinned today is a test key that nobody holds the private half of, so
+the installer accepts no release yet. The real key replaces the `.pub` file in
+`install/` and the same lines in `install.sh`; a test keeps the two equal.
+
 ## Building
 
 You need Go 1.26 (the exact toolchain is pinned in `go.mod`) and a C compiler.
