@@ -30,31 +30,16 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 )
 
-// Seal implements consensus.Engine, searching for a nonce on the CPU in
-// light mode. The threads share the key's cache, each with its own VM. The
-// first sealed block is sent on results; closing stop ends the search.
+// Seal implements consensus.Engine. The block becomes the work handed to
+// remote miners, and the local sealer searches for a nonce on the CPU in
+// light mode unless local mining is off. The threads share the key's cache,
+// each with its own VM. The first sealed block is sent on results; closing
+// stop ends the local search.
 func (r *RandomX) Seal(chain consensus.ChainHeaderReader, block *types.Block, results chan<- *types.Block, stop <-chan struct{}) error {
 	header := block.Header()
 	target := ghostrules.SealTarget(header.Difficulty)
 	if target == nil {
 		return errInvalidDifficulty
-	}
-	threads := r.Threads()
-	if threads == 0 {
-		threads = runtime.NumCPU()
-	}
-	if threads < 0 {
-		// Local mining is off: wait for a thread change or the stop.
-		go func() {
-			select {
-			case <-stop:
-			case <-r.update:
-				if err := r.Seal(chain, block, results, stop); err != nil {
-					r.log.Error("Failed to restart sealing after update", "err", err)
-				}
-			}
-		}()
-		return nil
 	}
 	if wait := r.sealDelay(header.Time); wait > 0 {
 		// Every verifier would hold the block as a future block: wait
@@ -76,6 +61,25 @@ func (r *RandomX) Seal(chain consensus.ChainHeaderReader, block *types.Block, re
 	key, err := r.keyOf(chainLookup(chain), header)
 	if err != nil {
 		return err
+	}
+	r.remote.push(chain, block, key, results)
+
+	threads := r.Threads()
+	if threads == 0 {
+		threads = runtime.NumCPU()
+	}
+	if threads < 0 {
+		// Local mining is off: wait for a thread change or the stop.
+		go func() {
+			select {
+			case <-stop:
+			case <-r.update:
+				if err := r.Seal(chain, block, results, stop); err != nil {
+					r.log.Error("Failed to restart sealing after update", "err", err)
+				}
+			}
+		}()
+		return nil
 	}
 	entry, err := r.caches.acquire(key)
 	if err != nil {
