@@ -208,8 +208,9 @@ type Config struct {
 
 	// Checkpoint settings (SyncFromCheckpoint, Checkpoint, CheckpointOracle):
 	// see checkpoint.go. Release builds have none, and their TOML decoding in
-	// gen_config.go refuses a file that names one.
-	checkpointConfig
+	// gen_config.go refuses a file that names one. The TOML encoder must not
+	// reflect over this unexported field; MarshalTOML writes the settings.
+	checkpointConfig `toml:"-"`
 }
 
 // ConsensusChainID returns the chain ID that picks a chain's consensus
