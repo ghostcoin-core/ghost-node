@@ -97,7 +97,7 @@ type RandomX struct {
 
 	caches *cacheSet
 	keys   *lru.Cache[common.Hash, common.Hash] // header hash -> key block hash
-	remote *remoteSealer                         // work for remote miners
+	remote *remoteSealer                        // work for remote miners
 
 	lock    sync.Mutex    // guards threads
 	threads int           // mining threads; 0 means one per CPU, negative none
