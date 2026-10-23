@@ -222,6 +222,78 @@ func TestRemoteSealWrongNonceRefused(t *testing.T) {
 	}
 }
 
+// TestRemoteSealVerifyLimitRefused fills every check slot and submits a
+// valid solution: it is refused and nothing reaches the miner. Once a slot
+// frees, the same solution is accepted.
+func TestRemoteSealVerifyLimitRefused(t *testing.T) {
+	_, engine, chain := remoteSetup(t, testChainLength)
+	api := &API{engine}
+	block := assembleNext(t, engine, chain, chain.CurrentBlock(), common.Address{0xce})
+	results := handOut(t, engine, chain, block)
+	work, err := api.GetWork()
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonce, result := solveWork(t, work, true)
+
+	for i := 0; i < maxRemoteVerifies; i++ {
+		engine.remote.verifying <- struct{}{}
+	}
+	if err := engine.remote.submit(nonce, common.HexToHash(work[0]), result); err != errVerifyBusy {
+		t.Fatalf("submission with every check slot taken: err %v, want %v", err, errVerifyBusy)
+	}
+	expectNoResult(t, results, "checks full")
+
+	<-engine.remote.verifying
+	if !api.SubmitWork(nonce, common.HexToHash(work[0]), result) {
+		t.Fatal("the valid solution was refused once a check slot was free")
+	}
+	select {
+	case <-results:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the accepted solution did not reach the miner")
+	}
+	if n := len(engine.remote.verifying); n != maxRemoteVerifies-1 {
+		t.Fatalf("%d check slots taken after the check, want %d", n, maxRemoteVerifies-1)
+	}
+}
+
+// TestRemoteSealHashrateMinersBounded submits rates under more miner ids
+// than the node keeps: the extra ids are refused, known ids still update,
+// and expired rates make room again without the hash rate being read.
+func TestRemoteSealHashrateMinersBounded(t *testing.T) {
+	engine := newTestEngine(t, testParams())
+	api := &API{engine}
+	for i := 0; i < maxRemoteMiners; i++ {
+		if !api.SubmitHashrate(hexutil.Uint64(1), common.BigToHash(big.NewInt(int64(i)))) {
+			t.Fatalf("rate of miner %d refused below the limit", i)
+		}
+	}
+	extra := common.BigToHash(big.NewInt(maxRemoteMiners))
+	if api.SubmitHashrate(hexutil.Uint64(1), extra) {
+		t.Fatal("a rate from a new miner was kept above the limit")
+	}
+	if !api.SubmitHashrate(hexutil.Uint64(5), common.BigToHash(big.NewInt(0))) {
+		t.Fatal("a known miner's rate update was refused at the limit")
+	}
+	if n := len(engine.remote.rates); n != maxRemoteMiners {
+		t.Fatalf("%d miners kept, want %d", n, maxRemoteMiners)
+	}
+
+	engine.remote.mu.Lock()
+	for id, r := range engine.remote.rates {
+		r.ping = time.Now().Add(-2 * rateExpiry)
+		engine.remote.rates[id] = r
+	}
+	engine.remote.mu.Unlock()
+	if !api.SubmitHashrate(hexutil.Uint64(1), extra) {
+		t.Fatal("a new miner was refused after every kept rate expired")
+	}
+	if n := len(engine.remote.rates); n != 1 {
+		t.Fatalf("%d miners kept after expiry, want 1", n)
+	}
+}
+
 // TestRemoteSealStaleWorkRefused hands out work at two heights, then work
 // staleThreshold blocks above the first: a solution for the first is
 // refused as stale, one for work less than staleThreshold behind is still
