@@ -143,13 +143,12 @@ type Config struct {
 	RequiredBlocks map[uint64]common.Hash `toml:"-"`
 
 	// Light client options
-	LightServ          int  `toml:",omitempty"` // Maximum percentage of time allowed for serving LES requests
-	LightIngress       int  `toml:",omitempty"` // Incoming bandwidth limit for light servers
-	LightEgress        int  `toml:",omitempty"` // Outgoing bandwidth limit for light servers
-	LightPeers         int  `toml:",omitempty"` // Maximum number of LES client peers
-	LightNoPrune       bool `toml:",omitempty"` // Whether to disable light chain pruning
-	LightNoSyncServe   bool `toml:",omitempty"` // Whether to serve light clients before syncing
-	SyncFromCheckpoint bool `toml:",omitempty"` // Whether to sync the header chain from the configured checkpoint
+	LightServ        int  `toml:",omitempty"` // Maximum percentage of time allowed for serving LES requests
+	LightIngress     int  `toml:",omitempty"` // Incoming bandwidth limit for light servers
+	LightEgress      int  `toml:",omitempty"` // Outgoing bandwidth limit for light servers
+	LightPeers       int  `toml:",omitempty"` // Maximum number of LES client peers
+	LightNoPrune     bool `toml:",omitempty"` // Whether to disable light chain pruning
+	LightNoSyncServe bool `toml:",omitempty"` // Whether to serve light clients before syncing
 
 	// Ultra Light client options
 	UltraLightServers      []string `toml:",omitempty"` // List of trusted ultra light servers
@@ -207,11 +206,10 @@ type Config struct {
 	// send-transaction variants. The unit is ether.
 	RPCTxFeeCap float64
 
-	// Checkpoint is a hardcoded checkpoint which can be nil.
-	Checkpoint *ctypes.TrustedCheckpoint `toml:",omitempty"`
-
-	// CheckpointOracle is the configuration for checkpoint oracle.
-	CheckpointOracle *ctypes.CheckpointOracleConfig `toml:",omitempty"`
+	// Checkpoint settings (SyncFromCheckpoint, Checkpoint, CheckpointOracle):
+	// see checkpoint.go. Release builds have none, and their TOML decoding in
+	// gen_config.go refuses a file that names one.
+	checkpointConfig
 }
 
 // ConsensusChainID returns the chain ID that picks a chain's consensus

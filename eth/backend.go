@@ -55,8 +55,6 @@ import (
 	"github.com/ethereum/go-ethereum/p2p"
 	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/ethereum/go-ethereum/params"
-	"github.com/ethereum/go-ethereum/params/types/coregeth"
-	"github.com/ethereum/go-ethereum/params/types/goethereum"
 	"github.com/ethereum/go-ethereum/params/vars"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/rpc"
@@ -237,6 +235,13 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 		eth.blockchain.Stop()
 		return nil, err
 	}
+	// Release builds have no sync checkpoint, and refuse a chain configuration
+	// that sets one.
+	checkpoint, err := config.SyncCheckpoint(eth.blockchain.Config())
+	if err != nil {
+		eth.blockchain.Stop()
+		return nil, err
+	}
 	// The tree history follows the canonical chain from here on; a database
 	// whose history is missing or behind gets it built at once.
 	if err := eth.blockchain.SetTreeHistory(eth.treeHistory); err != nil {
@@ -262,14 +267,6 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	}
 	// Permit the downloader to use the trie cache allowance during fast sync
 	cacheLimit := cacheConfig.TrieCleanLimit + cacheConfig.TrieDirtyLimit + cacheConfig.SnapshotLimit
-	checkpoint := config.Checkpoint
-	if checkpoint == nil {
-		if p, ok := eth.blockchain.Config().(*coregeth.CoreGethChainConfig); ok {
-			checkpoint = p.TrustedCheckpoint
-		} else if p, ok := eth.blockchain.Config().(*goethereum.ChainConfig); ok {
-			checkpoint = p.TrustedCheckpoint
-		}
-	}
 	if eth.handler, err = newHandler(&handlerConfig{
 		Database:       chainDb,
 		Chain:          eth.blockchain,
