@@ -264,12 +264,7 @@ func (r *RandomX) verifySeal(header *types.Header, key common.Hash) error {
 	if header.Difficulty == nil || header.Difficulty.Sign() <= 0 {
 		return errInvalidDifficulty
 	}
-	entry, err := r.caches.acquire(key)
-	if err != nil {
-		return err
-	}
-	defer r.caches.release(entry)
-	hash, err := r.caches.hash(entry, sealInput(r.SealHash(header), header.Nonce.Uint64()))
+	hash, err := r.powHash(header, key)
 	if err != nil {
 		return err
 	}
@@ -277,6 +272,16 @@ func (r *RandomX) verifySeal(header *types.Header, key common.Hash) error {
 		return errInvalidPoW
 	}
 	return nil
+}
+
+// powHash returns the header's RandomX hash under key.
+func (r *RandomX) powHash(header *types.Header, key common.Hash) ([32]byte, error) {
+	entry, err := r.caches.acquire(key)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	defer r.caches.release(entry)
+	return r.caches.hash(entry, sealInput(r.SealHash(header), header.Nonce.Uint64()))
 }
 
 // sealInput is the RandomX input of a header: its seal hash followed by the
@@ -377,18 +382,21 @@ func (r *RandomX) requiredDifficulty(chain consensus.ChainHeaderReader, time uin
 }
 
 // APIs implements consensus.Engine, serving API under the "ethash"
-// namespace, the proof-of-work name the chain configuration uses.
+// namespace, the proof-of-work name the chain configuration uses, and under
+// the "eth" namespace, where remote miners call getWork and submitWork.
 func (r *RandomX) APIs(chain consensus.ChainHeaderReader) []rpc.API {
-	return []rpc.API{{Namespace: "ethash", Service: &API{r}}}
+	apis := []rpc.API{{Namespace: "ethash", Service: &API{r}}}
+	return append(apis, rpc.API{Namespace: "eth", Service: &API{r}})
 }
 
-// API is the engine's RPC service. It reports the local sealer only; the
-// engine hands out no work to remote miners.
+// API is the engine's RPC service: the hash rate, and work for remote
+// miners (remote.go).
 type API struct {
 	r *RandomX
 }
 
-// GetHashrate returns the local sealer's hashes per second.
+// GetHashrate returns the hashes per second of the local sealer and of the
+// remote miners that submitted a rate.
 func (api *API) GetHashrate() uint64 {
 	return uint64(api.r.Hashrate())
 }

@@ -97,6 +97,7 @@ type RandomX struct {
 
 	caches *cacheSet
 	keys   *lru.Cache[common.Hash, common.Hash] // header hash -> key block hash
+	remote *remoteSealer                         // work for remote miners
 
 	lock    sync.Mutex    // guards threads
 	threads int           // mining threads; 0 means one per CPU, negative none
@@ -139,7 +140,7 @@ func New(config Config) (*RandomX, error) {
 	if config.Log == nil {
 		config.Log = log.Root()
 	}
-	return &RandomX{
+	r := &RandomX{
 		params:      config.Params,
 		epochLength: config.EpochLength,
 		keyLag:      config.KeyLag,
@@ -148,7 +149,9 @@ func New(config Config) (*RandomX, error) {
 		keys:        lru.NewCache[common.Hash, common.Hash](keyMemoSize),
 		update:      make(chan struct{}),
 		now:         time.Now,
-	}, nil
+	}
+	r.remote = newRemoteSealer(r)
+	return r, nil
 }
 
 var (
@@ -183,21 +186,23 @@ func (r *RandomX) SetThreads(threads int) {
 	}
 }
 
-// Hashrate returns the sealer's hashes per second since the previous call,
-// or over the last call's window when called again within a second.
+// Hashrate returns the local sealer's hashes per second since the previous
+// call, or over the last call's window when called again within a second,
+// plus the rates remote miners submitted.
 func (r *RandomX) Hashrate() float64 {
+	remote := float64(r.remote.rate())
 	r.rateLock.Lock()
 	defer r.rateLock.Unlock()
 	now, count := time.Now(), r.hashes.Load()
 	if r.rateAt.IsZero() {
 		r.rateAt, r.rateFrom = now, count
-		return 0
+		return remote
 	}
 	if elapsed := now.Sub(r.rateAt); elapsed >= time.Second {
 		r.rate = float64(count-r.rateFrom) / elapsed.Seconds()
 		r.rateAt, r.rateFrom = now, count
 	}
-	return r.rate
+	return r.rate + remote
 }
 
 // Close implements consensus.Engine. Caches are shared by the process and
