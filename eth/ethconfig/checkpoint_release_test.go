@@ -34,16 +34,18 @@ import (
 )
 
 // checkpointFields lists the field names of t, and of the structs it embeds,
-// that name a checkpoint.
+// that name a checkpoint. An embedded struct counts by the fields it
+// promotes, not by its own type name.
 func checkpointFields(t reflect.Type) []string {
 	var found []string
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
-		if strings.Contains(strings.ToLower(f.Name), "checkpoint") {
-			found = append(found, f.Name)
-		}
 		if f.Anonymous && f.Type.Kind() == reflect.Struct {
 			found = append(found, checkpointFields(f.Type)...)
+			continue
+		}
+		if strings.Contains(strings.ToLower(f.Name), "checkpoint") {
+			found = append(found, f.Name)
 		}
 	}
 	return found
@@ -92,13 +94,20 @@ func TestReleaseHasNoCheckpointOverride(t *testing.T) {
 		t.Errorf("NetworkId = %d, want 7", cfg.NetworkId)
 	}
 
-	// The encoded configuration, as dumpconfig writes it, names no checkpoint.
-	out, err := toml.Marshal(&cfg)
-	if err != nil {
-		t.Fatalf("encode configuration: %v", err)
-	}
-	if strings.Contains(strings.ToLower(string(out)), "checkpoint") {
-		t.Errorf("encoded configuration names a checkpoint:\n%s", out)
+	// The encoded configuration, as dumpconfig writes it (Config as a field,
+	// so through MarshalTOML), names no checkpoint. Encoding Config directly
+	// reflects over its fields and must name none either.
+	for name, v := range map[string]interface{}{
+		"as field": &struct{ Eth Config }{Eth: cfg},
+		"direct":   &cfg,
+	} {
+		out, err := toml.Marshal(v)
+		if err != nil {
+			t.Fatalf("encode configuration %s: %v", name, err)
+		}
+		if strings.Contains(strings.ToLower(string(out)), "checkpoint") {
+			t.Errorf("encoded configuration %s names a checkpoint:\n%s", name, out)
+		}
 	}
 
 	// A chain configuration's trusted checkpoint or oracle is refused, and a
