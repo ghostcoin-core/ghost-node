@@ -35,6 +35,15 @@ const (
 
 	// rateExpiry is how long a submitted remote hash rate counts.
 	rateExpiry = 10 * time.Second
+
+	// maxRemoteMiners is how many remote miners' hash rates are kept at once;
+	// a rate from a new miner is refused while that many unexpired ones are.
+	maxRemoteMiners = 64
+
+	// maxRemoteVerifies is how many submitted solutions are checked at once.
+	// Each check needs a RandomX VM; a submission beyond the limit is refused
+	// before any VM is taken.
+	maxRemoteVerifies = 2
 )
 
 var (
@@ -44,6 +53,7 @@ var (
 	errResultMismatch    = errors.New("submitted result is not the RandomX hash of the work and nonce")
 	errNoResultsChannel  = errors.New("sealing result has no receiver")
 	errResultNotReadable = errors.New("sealing result is not read by miner")
+	errVerifyBusy        = errors.New("too many submitted solutions being checked")
 )
 
 // remoteWork is one block handed out to remote miners.
@@ -65,6 +75,8 @@ type remoteSealer struct {
 	current *remoteWork                 // the newest work
 	pkg     [4]string                   // the newest work's package
 	rates   map[common.Hash]remoteRate  // miner id -> submitted rate
+
+	verifying chan struct{} // one slot per solution being checked
 }
 
 // remoteRate is a hash rate submitted by a remote miner.
@@ -75,9 +87,10 @@ type remoteRate struct {
 
 func newRemoteSealer(r *RandomX) *remoteSealer {
 	return &remoteSealer{
-		r:     r,
-		works: make(map[common.Hash]*remoteWork),
-		rates: make(map[common.Hash]remoteRate),
+		r:         r,
+		works:     make(map[common.Hash]*remoteWork),
+		rates:     make(map[common.Hash]remoteRate),
+		verifying: make(chan struct{}, maxRemoteVerifies),
 	}
 }
 
@@ -132,6 +145,14 @@ func (s *remoteSealer) submit(nonce types.BlockNonce, sealHash, result common.Ha
 		s.r.log.Warn("Work submitted is too old", "number", work.block.NumberU64(), "sealhash", sealHash)
 		return errStaleWork
 	}
+	// Take a check slot before any RandomX VM, or refuse.
+	select {
+	case s.verifying <- struct{}{}:
+		defer func() { <-s.verifying }()
+	default:
+		s.r.log.Warn("Work submitted while the checks are full", "sealhash", sealHash)
+		return errVerifyBusy
+	}
 	header := work.block.Header()
 	header.Nonce = nonce
 	header.MixDigest = common.Hash{}
@@ -177,11 +198,18 @@ func (s *remoteSealer) submit(nonce types.BlockNonce, sealHash, result common.Ha
 	}
 }
 
-// submitRate records a remote miner's hash rate.
-func (s *remoteSealer) submitRate(id common.Hash, rate uint64) {
+// submitRate records a remote miner's hash rate and reports whether it was
+// kept. Expired rates are dropped first; a new miner is refused while
+// maxRemoteMiners unexpired rates are kept.
+func (s *remoteSealer) submitRate(id common.Hash, rate uint64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.dropExpiredRates()
+	if _, known := s.rates[id]; !known && len(s.rates) >= maxRemoteMiners {
+		return false
+	}
 	s.rates[id] = remoteRate{rate: rate, ping: time.Now()}
+	return true
 }
 
 // rate returns the sum of the hash rates remote miners submitted within
@@ -189,15 +217,22 @@ func (s *remoteSealer) submitRate(id common.Hash, rate uint64) {
 func (s *remoteSealer) rate() uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.dropExpiredRates()
 	var total uint64
-	for id, r := range s.rates {
-		if time.Since(r.ping) > rateExpiry {
-			delete(s.rates, id)
-			continue
-		}
+	for _, r := range s.rates {
 		total += r.rate
 	}
 	return total
+}
+
+// dropExpiredRates removes the rates older than rateExpiry. The caller
+// holds s.mu.
+func (s *remoteSealer) dropExpiredRates() {
+	for id, r := range s.rates {
+		if time.Since(r.ping) > rateExpiry {
+			delete(s.rates, id)
+		}
+	}
 }
 
 // GetWork returns the work package for a remote miner:
@@ -223,8 +258,8 @@ func (api *API) SubmitWork(nonce types.BlockNonce, hash, result common.Hash) boo
 }
 
 // SubmitHashrate records a remote miner's hash rate under an id unique to
-// that miner, so the node reports the combined rate.
+// that miner, so the node reports the combined rate. It reports false when
+// the node already keeps the rates of as many miners as it will.
 func (api *API) SubmitHashrate(rate hexutil.Uint64, id common.Hash) bool {
-	api.r.remote.submitRate(id, uint64(rate))
-	return true
+	return api.r.remote.submitRate(id, uint64(rate))
 }
