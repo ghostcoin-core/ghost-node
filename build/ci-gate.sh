@@ -91,9 +91,10 @@ stage_typecheck() {
 	echo "--- Release builds have no fake seals"
 	go test -tags ghostrelease -run '^TestRelease' ./consensus/ethash
 	echo "--- Release builds have no checkpoint override"
-	# Without cgo: the release proof verifier's library is built only in the
-	# build stage, and this test reads configuration alone.
-	CGO_ENABLED=0 go test -tags ghostrelease -run '^TestReleaseHasNoCheckpointOverride$' ./eth/ethconfig
+	# With cgo: the package links core, whose EVMC bindings need it, and a
+	# release build of core links the proof verifier's library, built first.
+	go run build/ci.go ghostverifier
+	LIBRARY_PATH=build/cache/ghostverifier/release CGO_ENABLED=1 go test -tags ghostrelease -run '^TestReleaseHasNoCheckpointOverride$' ./eth/ethconfig
 	echo "--- No proof-of-stake code in the node"
 	# The beacon wrapper is kept only for upstream tests and the evm test
 	# runner; the node itself must not link it.
