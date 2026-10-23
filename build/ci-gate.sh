@@ -90,6 +90,10 @@ stage_typecheck() {
 	go vet -tags integrationtests ./...
 	echo "--- Release builds have no fake seals"
 	go test -tags ghostrelease -run '^TestRelease' ./consensus/ethash
+	echo "--- Release builds have no checkpoint override"
+	# Without cgo: the release proof verifier's library is built only in the
+	# build stage, and this test reads configuration alone.
+	CGO_ENABLED=0 go test -tags ghostrelease -run '^TestReleaseHasNoCheckpointOverride$' ./eth/ethconfig
 	echo "--- No proof-of-stake code in the node"
 	# The beacon wrapper is kept only for upstream tests and the evm test
 	# runner; the node itself must not link it.
