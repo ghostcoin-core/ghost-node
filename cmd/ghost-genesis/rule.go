@@ -41,6 +41,11 @@ const (
 
 	// GenesisGasLimit is the gas limit of the genesis block.
 	GenesisGasLimit = 30_000_000
+
+	// GenesisOffset is the number of seconds the genesis timestamp lies after
+	// the selected block's median time past (spec 06 section 8.3, spec 05
+	// section 10).
+	GenesisOffset = 6000
 )
 
 var (

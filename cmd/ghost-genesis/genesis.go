@@ -88,11 +88,11 @@ func presetParams() (ghostrules.Params, error) {
 }
 
 // genesisOf is the genesis of a selected Bitcoin block: its time is the
-// block's median time past, which is at or above T_L, and its extra data is
-// the block's hash as Bitcoin prints it, so anyone can check the anchor. The
-// difficulty is the preset's starting difficulty, the base fee the initial
-// one, and nothing is allocated: value enters only by block rewards and
-// reveals.
+// block's median time past, which is at or above T_L, plus GenesisOffset
+// seconds, and its extra data is the block's hash as Bitcoin prints it, so
+// anyone can check the anchor. The difficulty is the preset's starting
+// difficulty, the base fee the initial one, and nothing is allocated: value
+// enters only by block rewards and reveals.
 //
 // The chain configuration only shapes the header here (London from block 0,
 // no withdrawals, blob or beacon root fields); the header does not carry the
@@ -105,13 +105,19 @@ func genesisOf(bitcoinHash [32]byte, medianTime uint32) (*genesisT.Genesis, erro
 	anchor := Display(bitcoinHash)
 	return &genesisT.Genesis{
 		Config:     ghost.InternalNetGenesis().Config,
-		Timestamp:  uint64(medianTime),
+		Timestamp:  genesisTime(medianTime),
 		ExtraData:  anchor[:],
 		GasLimit:   GenesisGasLimit,
 		Difficulty: new(big.Int).Set(p.StartDifficulty),
 		BaseFee:    big.NewInt(vars.InitialBaseFee),
 		Alloc:      genesisT.GenesisAlloc{},
 	}, nil
+}
+
+// genesisTime is the genesis timestamp of a block with the given median time
+// past: MTP(B) + GenesisOffset.
+func genesisTime(medianTime uint32) uint64 {
+	return uint64(medianTime) + GenesisOffset
 }
 
 // genesisBlock builds the block of a genesis, with the roots of the empty
