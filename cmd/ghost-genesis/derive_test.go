@@ -105,8 +105,8 @@ func requireGenesis(t *testing.T, name string, out output, want fixtureHeader, h
 		t.Errorf("genesis number %v, parent %x", h.Number, h.ParentHash)
 	case !bytes.Equal(h.Extra, display[:]):
 		t.Errorf("genesis extra data %x, want the Bitcoin block %x", h.Extra, display)
-	case h.Time != fixtureTL:
-		t.Errorf("genesis time %d, want the median time past %d", h.Time, fixtureTL)
+	case h.Time != fixtureTL+6000:
+		t.Errorf("genesis time %d, want the median time past %d plus 6000", h.Time, fixtureTL)
 	case h.Difficulty.Cmp(start) != 0:
 		t.Errorf("genesis difficulty %v, want the preset's starting difficulty %v", h.Difficulty, start)
 	case h.GasLimit != GenesisGasLimit:
@@ -199,6 +199,39 @@ func TestDeriveGenesisReorg(t *testing.T) {
 	short := raw[:(fixtureMainLen+26-fixtureForkAt)*BitcoinHeaderSize]
 	if _, err := Derive(fixtureTL, short); !errors.Is(err, ErrTooFewConfirmations) {
 		t.Errorf("heavier branch, two confirmations: error %v, want %v", err, ErrTooFewConfirmations)
+	}
+}
+
+// TestGenesisTimestampOffset checks that the genesis timestamp is the
+// selected block's median time past plus the 6000 seconds of the spec, for
+// every fixture and for a T_L that selects an earlier block.
+func TestGenesisTimestampOffset(t *testing.T) {
+	if GenesisOffset != 6000 {
+		t.Fatalf("GenesisOffset %d, the spec gives 6000", GenesisOffset)
+	}
+	for _, c := range []struct {
+		name string
+		tl   uint64
+	}{
+		{"normal", fixtureTL},
+		{"reorg", fixtureTL},
+		{"normal", uint64(mainTime(13))},
+	} {
+		_, raw := loadFixture(t, c.name)
+		d, err := Derive(c.tl, raw)
+		if err != nil {
+			t.Fatalf("%s at T_L %d: %v", c.name, c.tl, err)
+		}
+		want := uint64(d.MedianTime) + 6000
+		if d.Genesis.Timestamp != want {
+			t.Errorf("%s at T_L %d: genesis timestamp %d, want MTP %d + 6000", c.name, c.tl, d.Genesis.Timestamp, d.MedianTime)
+		}
+		if got := d.Block.Time(); got != want {
+			t.Errorf("%s at T_L %d: genesis header time %d, want MTP %d + 6000", c.name, c.tl, got, d.MedianTime)
+		}
+		if d.Block.Time() == uint64(d.MedianTime) {
+			t.Errorf("%s at T_L %d: genesis header time is the bare median time past", c.name, c.tl)
+		}
 	}
 }
 
