@@ -18,6 +18,7 @@ package main
 
 import (
 	"encoding/hex"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -27,7 +28,9 @@ import (
 
 // The fixture generator. It mines Bitcoin headers at the easiest bits, so a
 // nonce takes about two tries, and builds the header files of the fixtures
-// in testdata. The files are pinned: the tests compare the generator's
+// in testdata. They are not Bitcoin's chain: the tests read them as a test
+// chain whose checkpoint is their first header and whose proof-of-work limit
+// is the target of those bits, defined here and nowhere in the command. The files are pinned: the tests compare the generator's
 // output with them and, on a difference, print the generator's output, which
 // is the content to write to rebuild a fixture. Every test derives from the
 // stored file, not from the generator.
@@ -59,18 +62,61 @@ type fixtureHeader struct {
 	hash [32]byte
 }
 
-// mineFixtureHeader mines a header on prev with the given time, whose merkle
-// root is derived from label so that headers of different branches differ.
+// fixturePowLimit is the easy proof-of-work limit of the fixtures' test
+// chain, the target of fixtureBits. It exists only in the tests: the command
+// reads Bitcoin mainnet alone.
+func fixturePowLimit(t *testing.T) *big.Int {
+	t.Helper()
+	limit, err := compactTarget(fixtureBits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return limit
+}
+
+// fixtureChain is the test chain whose checkpoint is the fixture header
+// first, at the given height, with the easy proof-of-work limit.
+func fixtureChain(t *testing.T, first fixtureHeader, height int) chain {
+	t.Helper()
+	h, err := decodeBitcoinHeader(first.raw[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return chain{
+		checkpointHash:   first.hash,
+		checkpointHeight: height,
+		checkpointBits:   h.Bits,
+		powLimit:         fixturePowLimit(t),
+	}
+}
+
+// normalChain is the test chain of the fixtures: its checkpoint is
+// main-branch block 0, at height 0.
+func normalChain(t *testing.T) chain {
+	t.Helper()
+	return fixtureChain(t, mainBranch(t, 1)[0], 0)
+}
+
+// mineFixtureHeader mines a header at fixtureBits on prev with the given
+// time, whose merkle root is derived from label so that headers of different
+// branches differ.
 func mineFixtureHeader(t *testing.T, prev [32]byte, label string, time uint32) fixtureHeader {
 	t.Helper()
+	return mineHeader(t, prev, label, time, fixtureBits)
+}
+
+// mineHeader mines a header with the given time and bits on prev.
+func mineHeader(t *testing.T, prev [32]byte, label string, time, bits uint32) fixtureHeader {
+	t.Helper()
 	merkle := doubleSHA256([]byte("ghost-genesis fixture merkle root " + label))
+	limit := fixturePowLimit(t)
 	for nonce := uint32(0); nonce < 1<<20; nonce++ {
-		raw := encodeBitcoinHeader(fixtureVersion, prev, merkle, time, fixtureBits, nonce)
+		raw := encodeBitcoinHeader(fixtureVersion, prev, merkle, time, bits, nonce)
 		h, err := decodeBitcoinHeader(raw[:])
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := h.checkProofOfWork(); err == nil {
+		if _, err := h.checkProofOfWork(limit); err == nil {
 			return fixtureHeader{raw: raw, hash: h.Hash()}
 		}
 	}

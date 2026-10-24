@@ -88,7 +88,7 @@ type headerNode struct {
 	hash   [32]byte
 	parent *headerNode
 	index  int      // position in the file
-	height int      // blocks above the first header of the file
+	height int      // Bitcoin height, counted from the checkpoint's
 	work   *big.Int // work of the branch from the first header to here
 	mtp    uint32   // median time past, valid when hasMTP
 	hasMTP bool
@@ -100,12 +100,14 @@ type headerTree struct {
 	byHash map[[32]byte]*headerNode
 }
 
-// readHeaders decodes and checks a header file: each header after the first
-// links to an earlier one, carries proof of work for its own bits, and has a
+// readHeaders decodes and checks a header file of the chain c: the first
+// header is c's checkpoint, every header carries proof of work for its own
+// bits within c's proof-of-work limit, and each header after the first links
+// to an earlier one, has the bits c's difficulty rules require, and has a
 // timestamp above its parent's median time past where the file holds enough
-// of the parent's ancestry to know it. The first header is the anchor; its
-// own parent is not checked.
-func readHeaders(data []byte) (*headerTree, error) {
+// of the parent's ancestry to know it. The checkpoint's own parent is not
+// checked.
+func readHeaders(c chain, data []byte) (*headerTree, error) {
 	if len(data) == 0 || len(data)%BitcoinHeaderSize != 0 {
 		return nil, fmt.Errorf("%w: %d bytes", ErrHeaderFile, len(data))
 	}
@@ -119,15 +121,27 @@ func readHeaders(data []byte) (*headerTree, error) {
 		if _, ok := tree.byHash[n.hash]; ok {
 			return nil, fmt.Errorf("%w: header %d, block %x", ErrDuplicateHeader, i, Display(n.hash))
 		}
-		work, err := h.checkProofOfWork()
+		work, err := h.checkProofOfWork(c.powLimit)
 		if err != nil {
 			return nil, fmt.Errorf("header %d: %w", i, err)
 		}
 		n.work = work
-		if i > 0 {
+		if i == 0 {
+			if err := c.checkCheckpoint(n); err != nil {
+				return nil, err
+			}
+			n.height = c.checkpointHeight
+		} else {
 			parent, ok := tree.byHash[h.PrevBlock]
 			if !ok {
 				return nil, fmt.Errorf("%w: header %d names %x", ErrHeaderLink, i, Display(h.PrevBlock))
+			}
+			want, err := c.requiredBits(parent)
+			if err != nil {
+				return nil, fmt.Errorf("header %d: %w", i, err)
+			}
+			if h.Bits != want {
+				return nil, fmt.Errorf("%w: header %d, bits %#08x, want %#08x", ErrDifficulty, i, h.Bits, want)
 			}
 			if parent.hasMTP && h.Time <= parent.mtp {
 				return nil, fmt.Errorf("%w: header %d, time %d, parent's median time past %d", ErrMedianTime, i, h.Time, parent.mtp)

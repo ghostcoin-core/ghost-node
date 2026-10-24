@@ -40,11 +40,12 @@ import (
 // output is the parsed output of a derive run.
 type output map[string]string
 
-// deriveCmd runs the command on a header file and returns its parsed output.
+// deriveCmd runs the command on a header file of the fixtures' test chain
+// and returns its parsed output.
 func deriveCmd(t *testing.T, tl uint64, path string) (output, error) {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
-	err := run([]string{"derive", "-tl", strconv.FormatUint(tl, 10), "-headers", path}, &stdout, &stderr)
+	err := runOn(normalChain(t), []string{"derive", "-tl", strconv.FormatUint(tl, 10), "-headers", path}, &stdout, &stderr)
 	if err != nil {
 		if stdout.Len() != 0 {
 			t.Fatalf("a refused derivation printed %q", stdout.String())
@@ -167,7 +168,7 @@ func TestDeriveGenesisReorg(t *testing.T) {
 
 	// The main branch alone, the first headers of the file, selects its
 	// block 20 with exactly the confirmations.
-	mainOnly, err := Derive(fixtureTL, raw[:fixtureMainLen*BitcoinHeaderSize])
+	mainOnly, err := deriveOn(normalChain(t), fixtureTL,raw[:fixtureMainLen*BitcoinHeaderSize])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,13 +192,13 @@ func TestDeriveGenesisReorg(t *testing.T) {
 	// main branch selects its block 20, the other its block 25 with one
 	// confirmation. The headers do not settle the choice.
 	tied := raw[:(fixtureMainLen+25-fixtureForkAt)*BitcoinHeaderSize]
-	if _, err := Derive(fixtureTL, tied); !errors.Is(err, ErrTiedBranches) {
+	if _, err := deriveOn(normalChain(t), fixtureTL, tied);!errors.Is(err, ErrTiedBranches) {
 		t.Errorf("tied branches: error %v, want %v", err, ErrTiedBranches)
 	}
 	// With one more block the other branch is heavier but its block 25 is
 	// two confirmations deep: refused, not the main branch's choice.
 	short := raw[:(fixtureMainLen+26-fixtureForkAt)*BitcoinHeaderSize]
-	if _, err := Derive(fixtureTL, short); !errors.Is(err, ErrTooFewConfirmations) {
+	if _, err := deriveOn(normalChain(t), fixtureTL, short);!errors.Is(err, ErrTooFewConfirmations) {
 		t.Errorf("heavier branch, two confirmations: error %v, want %v", err, ErrTooFewConfirmations)
 	}
 }
@@ -218,7 +219,7 @@ func TestGenesisTimestampOffset(t *testing.T) {
 		{"normal", uint64(mainTime(13))},
 	} {
 		_, raw := loadFixture(t, c.name)
-		d, err := Derive(c.tl, raw)
+		d, err := deriveOn(normalChain(t), c.tl, raw)
 		if err != nil {
 			t.Fatalf("%s at T_L %d: %v", c.name, c.tl, err)
 		}
@@ -239,7 +240,7 @@ func TestDerivedGenesisEmptyAlloc(t *testing.T) {
 	for _, name := range []string{"normal", "reorg"} {
 		t.Run(name, func(t *testing.T) {
 			_, raw := loadFixture(t, name)
-			d, err := Derive(fixtureTL, raw)
+			d, err := deriveOn(normalChain(t), fixtureTL, raw)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -287,7 +288,7 @@ func TestDeriveGenesisRefusesBadHeaders(t *testing.T) {
 	for nonce := h12.Nonce + 1; ; nonce++ {
 		tampered := encodeBitcoinHeader(h12.Version, h12.PrevBlock, h12.MerkleRoot, h12.Time, h12.Bits, nonce)
 		h, _ := decodeBitcoinHeader(tampered[:])
-		if _, err := h.checkProofOfWork(); err != nil {
+		if _, err := h.checkProofOfWork(fixturePowLimit(t)); err != nil {
 			copy(badPoW[12*BitcoinHeaderSize:], tampered[:])
 			break
 		}
@@ -301,22 +302,33 @@ func TestDeriveGenesisRefusesBadHeaders(t *testing.T) {
 	h15 := mineFixtureHeader(t, main[14].hash, "early 15", mainTime(9))
 	early = append(early, h15.raw[:]...)
 
+	// Header 12 with bits other than its parent's, mined to meet them.
+	otherBits := append([]byte{}, raw[:12*BitcoinHeaderSize]...)
+	h12other := mineHeader(t, main[11].hash, "main 12", h12.Time, 0x201fffff)
+	otherBits = append(otherBits, h12other.raw[:]...)
+
+	normal := normalChain(t)
 	for _, c := range []struct {
 		name    string
+		chain   chain
 		headers []byte
 		want    error
 	}{
-		{"empty file", nil, ErrHeaderFile},
-		{"partial header", raw[:len(raw)-1], ErrHeaderFile},
-		{"missing link", without(5), ErrHeaderLink},
-		{"duplicate header", append(append([]byte{}, raw...), raw[:BitcoinHeaderSize]...), ErrDuplicateHeader},
-		{"proof of work", badPoW, ErrProofOfWork},
-		{"zero target", badBits, ErrBits},
-		{"median time past", early, ErrMedianTime},
-		{"T_L not reached", raw[:18*BitcoinHeaderSize], ErrNotReached},
-		{"starts too late", raw[10*BitcoinHeaderSize:], ErrStartsLate},
+		{"empty file", normal, nil, ErrHeaderFile},
+		{"partial header", normal, raw[:len(raw)-1], ErrHeaderFile},
+		{"missing link", normal, without(5), ErrHeaderLink},
+		{"duplicate header", normal, append(append([]byte{}, raw...), raw[:BitcoinHeaderSize]...), ErrDuplicateHeader},
+		{"proof of work", normal, badPoW, ErrProofOfWork},
+		{"zero target", normal, badBits, ErrBits},
+		{"bits change within a period", normal, otherBits, ErrDifficulty},
+		{"median time past", normal, early, ErrMedianTime},
+		{"T_L not reached", normal, raw[:18*BitcoinHeaderSize], ErrNotReached},
+		// The headers start at a checkpoint on block 10, too late to know
+		// the median time past of block 20's parent.
+		{"starts too late", fixtureChain(t, main[10], 10), raw[10*BitcoinHeaderSize:], ErrStartsLate},
+		{"not the checkpoint", normal, raw[10*BitcoinHeaderSize:], ErrCheckpoint},
 	} {
-		if _, err := Derive(fixtureTL, c.headers); !errors.Is(err, c.want) {
+		if _, err := deriveOn(c.chain, fixtureTL, c.headers); !errors.Is(err, c.want) {
 			t.Errorf("%s: error %v, want %v", c.name, err, c.want)
 		}
 	}
