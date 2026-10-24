@@ -19,10 +19,12 @@
 //
 //	ghost-genesis derive -tl <unix seconds> -headers <file>
 //
-// The header file holds raw 80-byte Bitcoin block headers, each linked to an
-// earlier one except the first, possibly on competing branches. The command
-// checks the header chain (links, proof of work against each header's bits,
-// timestamps above the median time past), reads the branch with the most
+// The header file holds raw 80-byte Bitcoin mainnet block headers, the first
+// of them the mainnet checkpoint pinned in the command and each other linked
+// to an earlier one, possibly on competing branches. The command checks the
+// header chain (the checkpoint, links, mainnet's difficulty rules for each
+// header's bits, proof of work against them, timestamps above the median
+// time past), reads the branch with the most
 // work, selects the first block whose median time past is at or above T_L,
 // requires it to be Confirmations deep, and prints the selected block, the
 // genesis hash and the genesis block's RLP bytes. When the headers do not
@@ -46,8 +48,14 @@ func main() {
 	}
 }
 
-// run runs the command with its arguments, without the program name.
+// run runs the command with its arguments, without the program name, on
+// Bitcoin mainnet headers.
 func run(args []string, stdout, stderr io.Writer) error {
+	return runOn(mainnetChain(), args, stdout, stderr)
+}
+
+// runOn is run for headers of the chain c.
+func runOn(c chain, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 || args[0] != "derive" {
 		return errUsage
 	}
@@ -65,7 +73,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	d, err := Derive(*tl, headers)
+	d, err := deriveOn(c, *tl, headers)
 	if err != nil {
 		return err
 	}

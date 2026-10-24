@@ -34,7 +34,7 @@ import (
 // Ghost genesis derived from it.
 type Derivation struct {
 	BitcoinHash   [32]byte // the selected block's hash, in internal byte order
-	BitcoinHeight int      // its height above the first header of the file
+	BitcoinHeight int      // its Bitcoin height
 	Confirmations int      // its depth on the heaviest branch, counting itself
 	MedianTime    uint32   // its median time past
 
@@ -48,10 +48,15 @@ func (d *Derivation) Encoded() ([]byte, error) {
 }
 
 // Derive applies the genesis Bitcoin-block rule to T_L and a file of raw
-// Bitcoin headers, and builds the Ghost genesis of the selected block. It
-// reads nothing but its arguments.
+// Bitcoin mainnet headers starting at the mainnet checkpoint, and builds the
+// Ghost genesis of the selected block. It reads nothing but its arguments.
 func Derive(tl uint64, headers []byte) (*Derivation, error) {
-	tree, err := readHeaders(headers)
+	return deriveOn(mainnetChain(), tl, headers)
+}
+
+// deriveOn is Derive for headers of the chain c.
+func deriveOn(c chain, tl uint64, headers []byte) (*Derivation, error) {
+	tree, err := readHeaders(c, headers)
 	if err != nil {
 		return nil, err
 	}

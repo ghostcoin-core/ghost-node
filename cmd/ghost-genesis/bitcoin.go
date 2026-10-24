@@ -29,7 +29,7 @@ const BitcoinHeaderSize = 80
 
 var (
 	// ErrBits is returned for a header whose compact target is negative,
-	// zero or above 2^256 - 1.
+	// zero, above 2^256 - 1 or above the network's proof-of-work limit.
 	ErrBits = errors.New("header bits are not a valid target")
 
 	// ErrProofOfWork is returned for a header whose hash is above the target
@@ -121,13 +121,36 @@ func compactTarget(bits uint32) (*big.Int, error) {
 	return target, nil
 }
 
-// checkProofOfWork checks the header's hash, read as a little-endian number,
-// against the target of the header's own bits, and returns the header's
+// compactBits encodes a non-negative target as compact bits, as Bitcoin
+// Core's GetCompact does: the target's three most significant bytes, moved
+// down a byte when the top one would set the sign bit, and its length in
+// bytes. The bytes below the three are dropped.
+func compactBits(target *big.Int) uint32 {
+	size := uint((target.BitLen() + 7) / 8)
+	var mantissa uint64
+	if size <= 3 {
+		mantissa = target.Uint64() << (8 * (3 - size))
+	} else {
+		mantissa = new(big.Int).Rsh(target, 8*(size-3)).Uint64()
+	}
+	if mantissa&0x00800000 != 0 {
+		mantissa >>= 8
+		size++
+	}
+	return uint32(mantissa) | uint32(size)<<24
+}
+
+// checkProofOfWork checks that the target of the header's own bits is not
+// above the network's proof-of-work limit and the header's hash, read as a
+// little-endian number, not above that target, and returns the header's
 // work, 2^256 / (target + 1).
-func (h *bitcoinHeader) checkProofOfWork() (*big.Int, error) {
+func (h *bitcoinHeader) checkProofOfWork(powLimit *big.Int) (*big.Int, error) {
 	target, err := compactTarget(h.Bits)
 	if err != nil {
 		return nil, err
+	}
+	if target.Cmp(powLimit) > 0 {
+		return nil, fmt.Errorf("%w: %#08x is above the network's proof-of-work limit", ErrBits, h.Bits)
 	}
 	display := Display(h.Hash())
 	if new(big.Int).SetBytes(display[:]).Cmp(target) > 0 {
