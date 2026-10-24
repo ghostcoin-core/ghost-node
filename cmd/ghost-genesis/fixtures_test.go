@@ -30,8 +30,9 @@ import (
 // nonce takes about two tries, and builds the header files of the fixtures
 // in testdata. They are not Bitcoin's chain: the tests read them as a test
 // chain whose checkpoint is their first header and whose proof-of-work limit
-// is the target of those bits, defined here and nowhere in the command. The files are pinned: the tests compare the generator's
-// output with them and, on a difference, print the generator's output, which
+// is the target of those bits, defined here and nowhere in the command. The
+// files are pinned: the tests compare the generator's output with them and,
+// on a difference, print the generator's output, which
 // is the content to write to rebuild a fixture. Every test derives from the
 // stored file, not from the generator.
 //
