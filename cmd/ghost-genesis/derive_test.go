@@ -168,7 +168,7 @@ func TestDeriveGenesisReorg(t *testing.T) {
 
 	// The main branch alone, the first headers of the file, selects its
 	// block 20 with exactly the confirmations.
-	mainOnly, err := deriveOn(normalChain(t), fixtureTL,raw[:fixtureMainLen*BitcoinHeaderSize])
+	mainOnly, err := deriveOn(normalChain(t), fixtureTL, raw[:fixtureMainLen*BitcoinHeaderSize])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,13 +192,13 @@ func TestDeriveGenesisReorg(t *testing.T) {
 	// main branch selects its block 20, the other its block 25 with one
 	// confirmation. The headers do not settle the choice.
 	tied := raw[:(fixtureMainLen+25-fixtureForkAt)*BitcoinHeaderSize]
-	if _, err := deriveOn(normalChain(t), fixtureTL, tied);!errors.Is(err, ErrTiedBranches) {
+	if _, err := deriveOn(normalChain(t), fixtureTL, tied); !errors.Is(err, ErrTiedBranches) {
 		t.Errorf("tied branches: error %v, want %v", err, ErrTiedBranches)
 	}
 	// With one more block the other branch is heavier but its block 25 is
 	// two confirmations deep: refused, not the main branch's choice.
 	short := raw[:(fixtureMainLen+26-fixtureForkAt)*BitcoinHeaderSize]
-	if _, err := deriveOn(normalChain(t), fixtureTL, short);!errors.Is(err, ErrTooFewConfirmations) {
+	if _, err := deriveOn(normalChain(t), fixtureTL, short); !errors.Is(err, ErrTooFewConfirmations) {
 		t.Errorf("heavier branch, two confirmations: error %v, want %v", err, ErrTooFewConfirmations)
 	}
 }
