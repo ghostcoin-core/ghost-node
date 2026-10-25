@@ -603,6 +603,14 @@ func (c *countChain) reset() {
 	c.lookups.Store(0)
 }
 
+// headersOnly is the counting chain seen without its tree-root index: it
+// gives headers and nothing else.
+type headersOnly struct{ c *countChain }
+
+func (h headersOnly) GetHeader(hash common.Hash, number uint64) *types.Header {
+	return h.c.GetHeader(hash, number)
+}
+
 // unreadyChain is the counting chain with a tree-root index that is not
 // ready.
 type unreadyChain struct {
@@ -628,9 +636,8 @@ func (f *fixture) newCountedPool(chain BlockChain, verifier ghostpriv.Verifier) 
 
 // TestGhostPoolAbsentRootsReadNoHeaders has several peers deliver their
 // whole budget of reveals with roots that no block carries, half with a
-// proof and half without, and checks that a reveal without a proof is
-// refused by its proof before its root is looked up, that one with a proof
-// is refused by one lookup in the tree-root index, that neither reads a
+// proof and half without, and checks that each is refused by one lookup in
+// the tree-root index before its proof is verified, that none reads a
 // header, that each is charged to its peer and gives its check slot back,
 // and that reveals of other peers are then checked and admitted, on this
 // head and the next.
@@ -660,7 +667,7 @@ func TestGhostPoolAbsentRootsReadNoHeaders(t *testing.T) {
 				peer := fmt.Sprintf("flooder-%d", i)
 				if j%2 == 0 {
 					tx := f.unproven(testMarker(n), fee, root)
-					requireErr(t, p.AddFromPeer(peer, []*types.Transaction{tx})[0], ghostpriv.ErrRevealProof, "flooded reveal without a proof")
+					requireErr(t, p.AddFromPeer(peer, []*types.Transaction{tx})[0], ghostpriv.ErrRevealRoot, "flooded reveal without a proof")
 				} else {
 					tx := f.revealWithRoot(testMarker(n), recipient(i), fee, root)
 					requireErr(t, p.AddFromPeer(peer, []*types.Transaction{tx})[0], ghostpriv.ErrRevealRoot, "flooded reveal with a root of no block")
@@ -671,11 +678,11 @@ func TestGhostPoolAbsentRootsReadNoHeaders(t *testing.T) {
 		if reads := chain.reads.Load(); reads != 0 {
 			t.Fatalf("round %d: the flood read %d headers, want none", round, reads)
 		}
-		if checks := verifier.checks.Load(); checks != total {
-			t.Fatalf("round %d: %d proofs checked, want %d", round, checks, total)
+		if checks := verifier.checks.Load(); checks != 0 {
+			t.Fatalf("round %d: %d proofs checked, want none", round, checks)
 		}
-		if lookups := chain.lookups.Load(); lookups != total/2 {
-			t.Fatalf("round %d: %d root lookups, want %d, one per reveal with a proof", round, lookups, total/2)
+		if lookups := chain.lookups.Load(); lookups != total {
+			t.Fatalf("round %d: %d root lookups, want %d, one per reveal", round, lookups, total)
 		}
 	}
 	// honest has remoteSlots other peers each deliver a valid reveal for the
@@ -951,9 +958,10 @@ func TestGhostPoolSlowCheckDoesNotBlockPool(t *testing.T) {
 // peers deliver reveals of a root that only its first block carries, and
 // checks, counting the header reads and index lookups through a stub chain,
 // that admitting one reads a few headers whatever the length of the chain,
-// where the block checks of the same reveal walk the whole ancestry; that a
-// reveal without a proof is refused before its root is looked up; and that
-// with the index not ready a peer's reveal is refused without a walk.
+// as the block checks of the same reveal do with the index, where without
+// it they walk the whole ancestry; that a reveal without a proof is refused
+// by its proof after one root lookup; and that with the index not ready a
+// peer's reveal is refused without a walk.
 func TestGhostPoolOldRootAdmissionReadsNoAncestry(t *testing.T) {
 	const length = 200
 	f := newFixture(t, length, nil)
@@ -981,7 +989,8 @@ func TestGhostPoolOldRootAdmissionReadsNoAncestry(t *testing.T) {
 	verifier := new(countVerifier)
 	p := f.newCountedPool(chain, verifier)
 
-	// The block checks of an old-root reveal walk the ancestry down to it.
+	// The block checks of an old-root reveal ask the index too; without one
+	// they walk the ancestry down to it.
 	walked := f.revealWithRoot(testMarker(0), recipient(0), fee, *oldRoot)
 	st, err := f.chain.StateAt(head.Root)
 	if err != nil {
@@ -989,11 +998,19 @@ func TestGhostPoolOldRootAdmissionReadsNoAncestry(t *testing.T) {
 	}
 	chain.reset()
 	env := &ghostpriv.BlockEnv{Header: p.nextHeader(head), Chain: chain, ChainID: f.gspec.Config.GetChainID(), Genesis: f.genesis.Hash()}
-	if _, _, err := ghostpriv.CheckReveal(st, env, verifier, walked.GhostRevealEnvelope()); err != nil {
+	if _, _, err := ghostpriv.CheckReveal(st.Copy(), env, verifier, walked.GhostRevealEnvelope()); err != nil {
 		t.Fatalf("block checks refused the old-root reveal: %v", err)
 	}
+	if reads, lookups := chain.reads.Load(), chain.lookups.Load(); reads > maxReads || lookups != 1 {
+		t.Fatalf("block checks read %d headers and looked the root up %d times, want at most %d and once", reads, lookups, maxReads)
+	}
+	chain.reset()
+	env.Chain = headersOnly{chain}
+	if _, _, err := ghostpriv.CheckReveal(st.Copy(), env, verifier, walked.GhostRevealEnvelope()); err != nil {
+		t.Fatalf("block checks without the index refused the old-root reveal: %v", err)
+	}
 	if reads := chain.reads.Load(); reads < length-1 {
-		t.Fatalf("block checks read %d headers, want the walk of at least %d", reads, length-1)
+		t.Fatalf("block checks without the index read %d headers, want the walk of at least %d", reads, length-1)
 	}
 
 	// The pool admits old-root reveals from peers with a few reads each.
@@ -1011,12 +1028,13 @@ func TestGhostPoolOldRootAdmissionReadsNoAncestry(t *testing.T) {
 		}
 	}
 
-	// A reveal without a proof is refused before the root is looked up.
+	// A reveal without a proof is refused by its proof, checked last, after
+	// one root lookup and a few reads.
 	chain.reset()
 	verifier.checks.Store(0)
 	requireErr(t, p.AddFromPeer("peer-x", []*types.Transaction{f.unproven(testMarker(10), fee, *oldRoot)})[0], ghostpriv.ErrRevealProof, "old-root reveal without a proof")
-	if reads, lookups := chain.reads.Load(), chain.lookups.Load(); reads != 0 || lookups != 0 {
-		t.Fatalf("reveal without a proof read %d headers and looked up %d roots, want none", reads, lookups)
+	if reads, lookups := chain.reads.Load(), chain.lookups.Load(); reads > maxReads || lookups != 1 {
+		t.Fatalf("reveal without a proof read %d headers and looked up %d roots, want at most %d and one", reads, lookups, maxReads)
 	}
 	if checks := verifier.checks.Load(); checks != 1 {
 		t.Fatalf("%d proofs checked, want 1", checks)
@@ -1043,5 +1061,211 @@ func TestGhostPoolOldRootAdmissionReadsNoAncestry(t *testing.T) {
 	}
 	if err := q.Add([]*types.Transaction{f.revealWithRoot(testMarker(21), recipient(21), fee, *oldRoot)}, true, true)[0]; err != nil {
 		t.Fatalf("local reveal with the index not ready refused: %v", err)
+	}
+}
+
+// addOne adds one reveal from peer, over the node's RPC for no peer.
+func addOne(p *Pool, peer string, tx *types.Transaction) error {
+	if peer == "" {
+		return p.Add([]*types.Transaction{tx}, true, true)[0]
+	}
+	return p.AddFromPeer(peer, []*types.Transaction{tx})[0]
+}
+
+// encodeReveal is the transaction of a reveal's fields as they are.
+func encodeReveal(t *testing.T, r *ghostpriv.Reveal) *types.Transaction {
+	t.Helper()
+	env, err := r.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := types.NewGhostRevealTx(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tx
+}
+
+// noVerifier is a node without a proof verifier.
+type noVerifier struct{}
+
+func (noVerifier) VerifyReveal(*ghostpriv.VerifyInputs, []byte) error {
+	return fmt.Errorf("%w: synthetic test node", ghostpriv.ErrNoVerifier)
+}
+
+// TestGhostPoolRefusesBadRootBeforeProof checks that a reveal whose root no
+// block of the ancestry carries is refused by one lookup in the tree-root
+// index without its proof verified, with a proof or without, from a peer or
+// the node, and that one taking more than the hidden set holds is refused by
+// the backstop without its proof verified too; the proof is verified last,
+// only for a reveal every other check passed.
+func TestGhostPoolRefusesBadRootBeforeProof(t *testing.T) {
+	f := newFixture(t, 1, nil)
+	chain := &countChain{BlockChain: f.chain}
+	verifier := new(countVerifier)
+	p := f.newCountedPool(chain, verifier)
+	fee := f.windowFee(2)
+	genesisRoot := *f.genesis.Header().CoinTreeRoot
+	absent := ghosttree.K("ghost/test-root", []byte("synthetic absent root"))
+
+	for _, tc := range []struct {
+		name string
+		peer string
+		tx   *types.Transaction
+	}{
+		{"peer reveal of an absent root without a proof", "peer-a", f.unproven(testMarker(1), fee, absent)},
+		{"peer reveal of an absent root with a proof", "peer-b", f.revealWithRoot(testMarker(2), recipient(2), fee, absent)},
+		{"local reveal of an absent root without a proof", "", f.unproven(testMarker(3), fee, absent)},
+		{"local reveal of an absent root with a proof", "", f.revealWithRoot(testMarker(4), recipient(4), fee, absent)},
+	} {
+		chain.reset()
+		verifier.checks.Store(0)
+		requireErr(t, addOne(p, tc.peer, tc.tx), ghostpriv.ErrRevealRoot, tc.name)
+		if checks := verifier.checks.Load(); checks != 0 {
+			t.Fatalf("%s: %d proofs verified, want none", tc.name, checks)
+		}
+		if lookups := chain.lookups.Load(); lookups != 1 {
+			t.Fatalf("%s: %d root lookups, want one", tc.name, lookups)
+		}
+	}
+
+	// The backstop runs before the proof too.
+	overdraw := encodeReveal(t, &ghostpriv.Reveal{
+		Version: ghostpriv.Version,
+		ChainID: f.gspec.Config.GetChainID().Uint64(),
+		Marker:  testMarker(5),
+		Root:    genesisRoot,
+		Out:     uint256.MustFromBig(new(big.Int).Mul(oneGhost, big.NewInt(2))),
+		Fee:     new(uint256.Int).Set(fee),
+	})
+	verifier.checks.Store(0)
+	requireErr(t, addOne(p, "peer-c", overdraw), ghostpriv.ErrRevealBackstop, "reveal taking more than is hidden")
+	if checks := verifier.checks.Load(); checks != 0 {
+		t.Fatalf("overdrawing reveal: %d proofs verified, want none", checks)
+	}
+
+	// A reveal every other check passes has its proof verified, once.
+	verifier.checks.Store(0)
+	requireErr(t, addOne(p, "peer-d", f.unproven(testMarker(6), fee, genesisRoot)), ghostpriv.ErrRevealProof, "reveal of an eligible root without a proof")
+	if checks := verifier.checks.Load(); checks != 1 {
+		t.Fatalf("reveal of an eligible root without a proof: %d proofs verified, want one", checks)
+	}
+	verifier.checks.Store(0)
+	valid := f.revealWithFee(testMarker(7), recipient(7), fee)
+	if err := addOne(p, "peer-e", valid); err != nil {
+		t.Fatalf("valid reveal refused: %v", err)
+	}
+	if checks := verifier.checks.Load(); checks != 1 || !p.Has(valid.Hash()) {
+		t.Fatalf("valid reveal: %d proofs verified, held %v, want one and held", checks, p.Has(valid.Hash()))
+	}
+}
+
+// TestGhostPoolRemembersRejectedHashes checks that a reveal refused for a
+// bad proof or a bad encoding is refused again by its hash without any
+// check, from any peer or the node and on a later head, each peer charged;
+// that refusals a later head or another node can lift, a fee of another
+// window or a missing verifier, are not remembered; and that the set of
+// remembered hashes is bounded, forgetting the oldest first.
+func TestGhostPoolRemembersRejectedHashes(t *testing.T) {
+	f := newFixture(t, 3, nil)
+	chain := &countChain{BlockChain: f.chain}
+	verifier := new(countVerifier)
+	p := f.newCountedPool(chain, verifier)
+	fee := f.windowFee(2)
+	genesisRoot := *f.genesis.Header().CoinTreeRoot
+
+	bad := f.unproven(testMarker(1), fee, genesisRoot)
+	requireErr(t, addOne(p, "peer-a", bad), ghostpriv.ErrRevealProof, "reveal without a proof")
+	badVersion := encodeReveal(t, &ghostpriv.Reveal{Version: ghostpriv.Version + 1, ChainID: f.gspec.Config.GetChainID().Uint64(), Marker: testMarker(2), Fee: fee})
+	requireErr(t, addOne(p, "peer-a", badVersion), ghostpriv.ErrRevealVersion, "reveal of another version")
+	if checks := verifier.checks.Load(); checks != 1 {
+		t.Fatalf("%d proofs verified, want one", checks)
+	}
+
+	// Each comes again, from the same peer, another and the node, and is
+	// refused with its first refusal, without a proof, a header or a root
+	// read.
+	again := func(what string, peer string, tx *types.Transaction, first error) {
+		t.Helper()
+		chain.reset()
+		verifier.checks.Store(0)
+		err := addOne(p, peer, tx)
+		requireErr(t, err, ErrRejectedBefore, what)
+		requireErr(t, err, first, what)
+		if checks, reads, lookups := verifier.checks.Load(), chain.reads.Load(), chain.lookups.Load(); checks != 0 || reads != 0 || lookups != 0 {
+			t.Fatalf("%s: %d proofs verified, %d headers read and %d roots looked up, want none", what, checks, reads, lookups)
+		}
+	}
+	for _, peer := range []string{"peer-a", "peer-b", ""} {
+		again("reveal without a proof again from "+peer, peer, bad, ghostpriv.ErrRevealProof)
+	}
+	again("reveal of another version again", "peer-b", badVersion, ghostpriv.ErrRevealVersion)
+	p.mu.RLock()
+	tokensA, tokensB := p.peers["peer-a"].tokens, p.peers["peer-b"].tokens
+	p.mu.RUnlock()
+	if tokensA != PeerRevealsPerBlock-3 || tokensB != PeerRevealsPerBlock-2 {
+		t.Fatalf("peers have %d and %d reveals left, want %d and %d: every refusal is charged", tokensA, tokensB, PeerRevealsPerBlock-3, PeerRevealsPerBlock-2)
+	}
+	for i := 0; i < PeerRevealsPerBlock-3; i++ {
+		again("reveal without a proof again from peer-a", "peer-a", bad, ghostpriv.ErrRevealProof)
+	}
+	requireErr(t, addOne(p, "peer-a", bad), ErrPeerBudget, "remembered reveal from a peer with no budget left")
+
+	// A new head does not forget them.
+	old := f.chain.CurrentBlock()
+	f.insert(2)
+	f.reset(p, old)
+	again("reveal without a proof on a new head", "peer-c", bad, ghostpriv.ErrRevealProof)
+
+	// A reveal priced for a later window is refused, and admitted once the
+	// head reaches it.
+	early := f.revealWithFee(testMarker(3), recipient(3), f.windowFee(4))
+	requireErr(t, addOne(p, "", early), ghostpriv.ErrRevealFee, "reveal priced for the next window")
+	// A reveal refused by a node without a verifier is admitted once it has
+	// one.
+	later := f.reveal(testMarker(4), recipient(4), 3)
+	p.verifier = func() ghostpriv.Verifier { return noVerifier{} }
+	requireErr(t, addOne(p, "", later), ghostpriv.ErrNoVerifier, "reveal checked without a verifier")
+	p.verifier = func() ghostpriv.Verifier { return verifier }
+	if err := addOne(p, "", later); err != nil {
+		t.Fatalf("reveal refused without a verifier, then with one: %v", err)
+	}
+	old = f.chain.CurrentBlock()
+	f.insert(3)
+	f.reset(p, old)
+	if err := addOne(p, "", early); err != nil {
+		t.Fatalf("reveal priced for the window the head reached: %v", err)
+	}
+
+	// The set is bounded, and forgets the oldest first.
+	var s rejectedSet
+	first := fmt.Errorf("%w: synthetic test refusal", ghostpriv.ErrRevealProof)
+	hashAt := func(i int) common.Hash { return common.BigToHash(big.NewInt(int64(i) + 1)) }
+	const extra = 10
+	for i := 0; i < maxRejected+extra; i++ {
+		s.add(hashAt(i), first)
+	}
+	if len(s.errs) != maxRejected || len(s.ring) != maxRejected {
+		t.Fatalf("set holds %d hashes in a ring of %d, want %d", len(s.errs), len(s.ring), maxRejected)
+	}
+	for i := 0; i < maxRejected+extra; i++ {
+		if ok := s.lookup(hashAt(i)) != nil; ok != (i >= extra) {
+			t.Fatalf("hash %d remembered %v, want %v", i, ok, i >= extra)
+		}
+	}
+	// Only the refusals no head can lift are remembered.
+	for _, err := range []error{
+		fmt.Errorf("%w: synthetic", ghostpriv.ErrRevealRoot),
+		fmt.Errorf("%w: synthetic", ghostpriv.ErrRevealFee),
+		fmt.Errorf("%w: synthetic", ghostpriv.ErrRevealMarker),
+		fmt.Errorf("%w: synthetic", ghostpriv.ErrRevealBackstop),
+		fmt.Errorf("%w: %w", ghostpriv.ErrRevealProof, ghostpriv.ErrNoVerifier),
+		ErrPoolFull, ErrPeerBudget, ErrChecksBusy, ErrRootLookup, ErrMarkerPending, errHeadMoving,
+	} {
+		var only rejectedSet
+		only.add(hashAt(0), err)
+		if only.lookup(hashAt(0)) != nil {
+			t.Errorf("refusal %v remembered", err)
+		}
 	}
 }

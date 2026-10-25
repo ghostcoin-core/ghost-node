@@ -214,7 +214,9 @@ func (r *Reveal) bindingInput(chainID uint64, genesis common.Hash, typ [2]byte) 
 }
 
 // ChainReader gives the headers of the including block's ancestry by hash
-// and number. *core.BlockChain satisfies it.
+// and number. *core.BlockChain satisfies it, and is also a
+// ghosttree.HeaderLookup and ghosttree.RootIndex: the root check then asks
+// its tree-root index instead of walking the ancestry.
 type ChainReader interface {
 	GetHeader(hash common.Hash, number uint64) *types.Header
 }
@@ -260,12 +262,28 @@ func (env *BlockEnv) windowBaseFee() (*big.Int, error) {
 	return h.BaseFee, nil
 }
 
-// rootEligible reports whether root is the coin tree root in the header of
-// a block of the including block's ancestry, strictly below it, found by
-// walking parent links. A missing ancestor ends the walk with false.
-func (env *BlockEnv) rootEligible(root common.Hash) bool {
-	for h := env.parent(env.Header); h != nil; h = env.parent(h) {
-		if h.CoinTreeRoot != nil && *h.CoinTreeRoot == root {
+// rootEligible reports whether root is the tree root of the kind in the
+// header of a block of the including block's ancestry, strictly below it
+// (spec 05, section 5). When the chain keeps a tree-root index, as
+// *core.BlockChain does, the index answers: ghosttree.EligibleRoot walks a
+// side branch only down to its fork point, so the reads are bounded
+// whatever the age of the root. When the chain keeps no index, or the index
+// is not ready, the parent links are walked down to the genesis, so that a
+// valid block is never refused because the index lags. Any other failed
+// lookup, and a missing ancestor, is false.
+func (env *BlockEnv) rootEligible(kind ghosttree.Kind, root common.Hash) bool {
+	parent := env.parent(env.Header)
+	if parent == nil {
+		return false
+	}
+	if chain, ok := env.Chain.(ghosttree.HeaderLookup); ok {
+		eligible, err := ghosttree.EligibleRoot(chain, parent, kind, root)
+		if !errors.Is(err, ghosttree.ErrIndexNotReady) {
+			return err == nil && eligible
+		}
+	}
+	for h := parent; h != nil; h = env.parent(h) {
+		if r := ghosttree.HeaderRoot(h, kind); r != nil && *r == root {
 			return true
 		}
 	}
@@ -303,7 +321,7 @@ func CheckReveal(st StateDB, env *BlockEnv, verifier Verifier, envelope []byte) 
 	// Check 6: the node's own binding digest.
 	binding := r.BindingDigest(chainID, env.Genesis)
 	// Check 7: the root.
-	if !env.rootEligible(r.Root) {
+	if !env.rootEligible(ghosttree.Coin, r.Root) {
 		return nil, Fee{}, fmt.Errorf("%w: %x", ErrRevealRoot, r.Root)
 	}
 	// Check 8: the marker, against the spent set, which holds the markers of
@@ -569,18 +587,6 @@ func (r *DataReveal) BindingInput(chainID uint64, genesis common.Hash) []byte {
 	return b
 }
 
-// dataRootEligible reports whether root is the data tree root in the header
-// of a block of the including block's ancestry, strictly below it, found by
-// walking parent links. A missing ancestor ends the walk with false.
-func (env *BlockEnv) dataRootEligible(root common.Hash) bool {
-	for h := env.parent(env.Header); h != nil; h = env.parent(h) {
-		if r := ghosttree.HeaderRoot(h, ghosttree.Data); r != nil && *r == root {
-			return true
-		}
-	}
-	return false
-}
-
 // CheckDataReveal runs checks 1 to 11 of a data reveal against the state
 // before it and returns the decoded data reveal and its purpose. It changes
 // nothing.
@@ -621,7 +627,7 @@ func CheckDataReveal(st StateDB, env *BlockEnv, verifier Verifier, envelope []by
 	// Check 8: the node's own binding digest.
 	binding := r.BindingDigest(chainID, env.Genesis)
 	// Check 9: the root, a data tree root of the ancestry.
-	if !env.dataRootEligible(r.Root) {
+	if !env.rootEligible(ghosttree.Data, r.Root) {
 		return nil, 0, fmt.Errorf("%w: %x", ErrDataRevealRoot, r.Root)
 	}
 	// Check 10: the marker, against the data marker set, which holds the

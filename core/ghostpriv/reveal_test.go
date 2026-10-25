@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"math/big"
 	"testing"
 
@@ -699,6 +700,221 @@ func TestRevealRootMustBeAncestorCoinRoot(t *testing.T) {
 	byNumber.Chain = headerReader{chain: chain, byNumber: true}
 	if err := check(&byNumber, stSide, r1); !errors.Is(err, ghostpriv.ErrRevealRoot) {
 		t.Errorf("main root through a by-number reader: %v", err)
+	}
+}
+
+// countReader is the chain, with its tree-root index, counting the headers
+// read from it.
+type countReader struct {
+	*core.BlockChain
+	reads int
+}
+
+func (c *countReader) GetHeader(hash common.Hash, number uint64) *types.Header {
+	c.reads++
+	return c.BlockChain.GetHeader(hash, number)
+}
+
+// walkReader is the counting chain seen without its index: it gives headers
+// and nothing else.
+type walkReader struct{ c *countReader }
+
+func (r walkReader) GetHeader(hash common.Hash, number uint64) *types.Header {
+	return r.c.GetHeader(hash, number)
+}
+
+// unreadyReader is the counting chain with a tree-root index that is not
+// ready.
+type unreadyReader struct{ *countReader }
+
+func (unreadyReader) RootIndexHead() (uint64, common.Hash, error) {
+	return 0, common.Hash{}, fmt.Errorf("%w: synthetic test index", ghosttree.ErrIndexNotReady)
+}
+
+// brokenReader is the counting chain with a tree-root index whose entries
+// cannot be read.
+type brokenReader struct{ *countReader }
+
+func (brokenReader) RootFirstHeight(ghosttree.Kind, common.Hash) (uint64, bool, error) {
+	return 0, false, errors.New("synthetic test index read failure")
+}
+
+// rootLookupReaders are the readers of chain the root lookup tests run
+// with: the chain with its index, without one, with one not ready and with
+// one that cannot be read.
+func rootLookupReaders(chain *core.BlockChain) (indexed *countReader, walk walkReader, unready unreadyReader, broken brokenReader) {
+	indexed = &countReader{BlockChain: chain}
+	return indexed, walkReader{&countReader{BlockChain: chain}}, unreadyReader{&countReader{BlockChain: chain}}, brokenReader{&countReader{BlockChain: chain}}
+}
+
+// maxRootLookupReads is the most headers the checks of one reveal may read
+// with the tree-root index: the fee window, the parent, a short side branch
+// and the header the index entry names.
+const maxRootLookupReads = 8
+
+// rootLookupChainLength is the height of the chains of the root lookup
+// tests, well above maxRootLookupReads.
+const rootLookupChainLength = 64
+
+// TestRevealRootLookupUsesIndex builds a long chain whose old root, the
+// genesis's coin root, no later block carries, and checks that the block
+// checks of a reveal against it, or against a root of no block, read a
+// bounded number of headers when the chain keeps its tree-root index, where
+// without one they walk the ancestry; that an index not ready falls back to
+// the walk and still accepts a valid reveal; that an index that cannot be
+// read refuses the reveal; that on a stored side branch the lookup walks
+// only down to the fork point; and that the data reveal's root check, on the
+// genesis's data root, does the same.
+func TestRevealRootLookupUsesIndex(t *testing.T) {
+	useStub(t)
+	f := newFixture(t, ghost.InternalNetGasLimit, nil)
+	miner := common.Address{0xcb}
+	c1, c2 := testCoin("indexed one", oneGhost), testCoin("indexed side", oneGhost)
+	main, _ := f.generate(rootLookupChainLength, func(i int, b *core.BlockGen) {
+		if i == 0 {
+			b.AddTx(f.commitTx(keyA, 0, c1))
+			b.AddTx(f.dataCommitTx(keyC, 0, testDataFile("indexed data"), new(big.Int)))
+		}
+	})
+	side, _ := f.generate(1, func(i int, b *core.BlockGen) {
+		b.SetCoinbase(common.Address{0x5e})
+		b.AddTx(f.commitTx(keyB, 0, c2))
+	})
+	chain := f.newChain()
+	f.insert(chain, main)
+	f.insert(chain, side)
+	if chain.CurrentBlock().Hash() != main[len(main)-1].Hash() || chain.GetHeader(side[0].Hash(), 1) == nil {
+		t.Fatal("the side block is not a stored side block")
+	}
+	var (
+		oldRoot = *f.genesis.Header().CoinTreeRoot
+		r1      = *main[0].Header().CoinTreeRoot
+		rSide   = *side[0].Header().CoinTreeRoot
+		absent  = common.Hash{0x0b}
+	)
+	for _, b := range main {
+		if *b.Header().CoinTreeRoot == oldRoot {
+			t.Fatalf("block %d carries the genesis coin root", b.NumberU64())
+		}
+	}
+	env, st := nextEnv(t, chain, main[len(main)-1].Header(), miner)
+	check := func(env *ghostpriv.BlockEnv, chainReader ghostpriv.ChainReader, root common.Hash) error {
+		fee := chainWindowFee(t, chain, env.Header).Total
+		r := f.newReveal(root, testMarker("lookup"), testCoin("lookup rest", ghostAmount(1, 2)), addrB, u256(ghostAmount(1, 4)), fee)
+		e := *env
+		e.Chain = chainReader
+		_, _, err := ghostpriv.CheckReveal(st.Copy(), &e, stub, envelope(t, r))
+		return err
+	}
+
+	// With the index, the old root is accepted and a root of no block refused,
+	// each with a few reads.
+	indexed, walk, unready, broken := rootLookupReaders(chain)
+	if err := check(env, indexed, oldRoot); err != nil {
+		t.Fatalf("old root with the index: %v", err)
+	}
+	if indexed.reads > maxRootLookupReads {
+		t.Fatalf("old root with the index read %d headers, want at most %d", indexed.reads, maxRootLookupReads)
+	}
+	indexed.reads = 0
+	if err := check(env, indexed, absent); !errors.Is(err, ghostpriv.ErrRevealRoot) {
+		t.Fatalf("root of no block with the index: %v, want %v", err, ghostpriv.ErrRevealRoot)
+	}
+	if indexed.reads > maxRootLookupReads {
+		t.Fatalf("root of no block with the index read %d headers, want at most %d", indexed.reads, maxRootLookupReads)
+	}
+
+	// Without an index the same checks walk the ancestry, with the same
+	// answers.
+	if err := check(env, walk, oldRoot); err != nil {
+		t.Fatalf("old root by the walk: %v", err)
+	}
+	if walk.c.reads < rootLookupChainLength {
+		t.Fatalf("old root by the walk read %d headers, want the walk of at least %d", walk.c.reads, rootLookupChainLength)
+	}
+	if err := check(env, walk, absent); !errors.Is(err, ghostpriv.ErrRevealRoot) {
+		t.Fatalf("root of no block by the walk: %v, want %v", err, ghostpriv.ErrRevealRoot)
+	}
+
+	// An index not ready falls back to the walk: a valid reveal is not
+	// refused because the index lags.
+	if err := check(env, unready, oldRoot); err != nil {
+		t.Fatalf("old root with the index not ready: %v", err)
+	}
+	if unready.reads < rootLookupChainLength {
+		t.Fatalf("old root with the index not ready read %d headers, want the walk of at least %d", unready.reads, rootLookupChainLength)
+	}
+
+	// Any other failed lookup refuses the reveal, though the walk would take it.
+	if err := check(env, broken, oldRoot); !errors.Is(err, ghostpriv.ErrRevealRoot) {
+		t.Fatalf("old root with an unreadable index: %v, want %v", err, ghostpriv.ErrRevealRoot)
+	}
+
+	// A block on the stored side block: the side branch is walked down to the
+	// fork point, the genesis, and the index answers below it.
+	sideHeader := *env.Header
+	sideHeader.ParentHash = side[0].Hash()
+	sideHeader.Number = big.NewInt(2)
+	sideEnv := *env
+	sideEnv.Header = &sideHeader
+	for name, root := range map[string]common.Hash{"the side block": rSide, "the genesis": oldRoot} {
+		indexed.reads = 0
+		if err := check(&sideEnv, indexed, root); err != nil {
+			t.Errorf("root of %s on the side branch: %v", name, err)
+		}
+		if indexed.reads > maxRootLookupReads {
+			t.Errorf("root of %s on the side branch read %d headers, want at most %d", name, indexed.reads, maxRootLookupReads)
+		}
+	}
+	if err := check(&sideEnv, indexed, r1); !errors.Is(err, ghostpriv.ErrRevealRoot) {
+		t.Errorf("main chain root on the side branch: %v, want %v", err, ghostpriv.ErrRevealRoot)
+	}
+
+	// The data reveal's root check asks the index the same way.
+	useZeroDataFee(t)
+	oldData := *f.genesis.Header().DataTreeRoot
+	for _, b := range main {
+		if *b.Header().DataTreeRoot == oldData {
+			t.Fatalf("block %d carries the genesis data root", b.NumberU64())
+		}
+	}
+	checkData := func(chainReader ghostpriv.ChainReader, root common.Hash) error {
+		r := f.newDataReveal(root, testDataMarker("lookup"), ghostpriv.PurposeReveal, addrC)
+		e := *env
+		e.Chain = chainReader
+		_, _, err := ghostpriv.CheckDataReveal(st.Copy(), &e, stub, dataEnvelope(t, r))
+		return err
+	}
+	indexed.reads = 0
+	if err := checkData(indexed, oldData); err != nil {
+		t.Fatalf("old data root with the index: %v", err)
+	}
+	if indexed.reads > maxRootLookupReads {
+		t.Fatalf("old data root with the index read %d headers, want at most %d", indexed.reads, maxRootLookupReads)
+	}
+	indexed.reads = 0
+	if err := checkData(indexed, absent); !errors.Is(err, ghostpriv.ErrDataRevealRoot) {
+		t.Fatalf("data root of no block with the index: %v, want %v", err, ghostpriv.ErrDataRevealRoot)
+	}
+	if indexed.reads > maxRootLookupReads {
+		t.Fatalf("data root of no block with the index read %d headers, want at most %d", indexed.reads, maxRootLookupReads)
+	}
+	if err := checkData(indexed, oldRoot); !errors.Is(err, ghostpriv.ErrDataRevealRoot) {
+		t.Fatalf("coin root as a data root: %v, want %v", err, ghostpriv.ErrDataRevealRoot)
+	}
+	walk.c.reads = 0
+	if err := checkData(walk, oldData); err != nil {
+		t.Fatalf("old data root by the walk: %v", err)
+	}
+	if walk.c.reads < rootLookupChainLength {
+		t.Fatalf("old data root by the walk read %d headers, want the walk of at least %d", walk.c.reads, rootLookupChainLength)
+	}
+	unready.reads = 0
+	if err := checkData(unready, oldData); err != nil {
+		t.Fatalf("old data root with the index not ready: %v", err)
+	}
+	if err := checkData(broken, oldData); !errors.Is(err, ghostpriv.ErrDataRevealRoot) {
+		t.Fatalf("old data root with an unreadable index: %v, want %v", err, ghostpriv.ErrDataRevealRoot)
 	}
 }
 
