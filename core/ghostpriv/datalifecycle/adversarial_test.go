@@ -368,7 +368,7 @@ func TestDataLifecycleCRD6(t *testing.T) {
 	// A coin commit puts a coin leaf in the coin tree.
 	n := s.node(1)
 	coinF := ghosttree.K("ghost/test-data-lifecycle/coin-fingerprint/v1", []byte("CR-D6"))
-	coinData, err := ghostpriv.CommitData(coinF, make([]byte, ghostpriv.NoteSize))
+	coinData, err := ghostpriv.SaltedCommitData(coinF, make([]byte, ghostpriv.SaltSize), make([]byte, ghostpriv.NoteSize))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -670,7 +670,7 @@ func TestDataLifecycleCRD12(t *testing.T) {
 	forger := openWallet(newPhantomKey("CR-D12 changed note"), s.chainID())
 	cf := contentFingerprint(plaintext)
 	note := forger.noteFor(uint64(len(plaintext)), contentFingerprint(testFile("CR-D12 changed")))
-	data, err := ghostpriv.CommitData(forger.fingerprint(cf), note[:])
+	data, err := ghostpriv.SaltedCommitData(forger.fingerprint(cf), make([]byte, ghostpriv.SaltSize), note[:])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -736,8 +736,8 @@ func TestDataLifecycleCRD14(t *testing.T) {
 	for _, size := range []int{ghostpriv.NoteSize - 1, ghostpriv.NoteSize + 1} {
 		bad := make([]byte, size)
 		copy(bad, note[:])
-		if _, err := ghostpriv.CommitData(f, bad); err == nil {
-			t.Fatalf("CommitData took a note of %d bytes", size)
+		if _, err := ghostpriv.SaltedCommitData(f, make([]byte, ghostpriv.SaltSize), bad); err == nil {
+			t.Fatalf("SaltedCommitData took a note of %d bytes", size)
 		}
 		data := binary.BigEndian.AppendUint16(nil, ghostpriv.Version)
 		data = append(append(data, f[:]...), bad...)

@@ -196,7 +196,11 @@ type coin struct {
 	note  []byte
 }
 
-func (c coin) commitment() common.Hash { return ghostpriv.Commitment(c.f, c.value) }
+// commitment is the leaf of c: a commit sends salted data, so it is the
+// version 2 commitment of F and the value.
+func (c coin) commitment() common.Hash {
+	return ghostpriv.CommitmentVersion(ghostpriv.SaltedCommitVersion, c.f, c.value)
+}
 
 func testNote(seed byte) []byte {
 	note := make([]byte, ghostpriv.NoteSize)
@@ -222,7 +226,7 @@ func testMarker(name string) common.Hash {
 // entry address.
 func (f *fixture) commitTx(key *mldsa44.PrivateKey, nonce uint64, c coin) *types.Transaction {
 	f.t.Helper()
-	data, err := ghostpriv.CommitData(c.f, c.note)
+	data, err := ghostpriv.SaltedCommitData(c.f, make([]byte, ghostpriv.SaltSize), c.note)
 	if err != nil {
 		f.t.Fatal(err)
 	}

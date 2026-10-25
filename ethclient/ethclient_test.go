@@ -1313,7 +1313,7 @@ func TestCommitAndRevealOverRPCAreMined(t *testing.T) {
 	defer client.Close()
 
 	// The commit is an ordinary account transaction.
-	data, err := ghostpriv.CommitData(ghosttree.K("ghost/test-coin-f", []byte("client")), make([]byte, ghostpriv.NoteSize))
+	data, err := ghostpriv.SaltedCommitData(ghosttree.K("ghost/test-coin-f", []byte("client")), make([]byte, ghostpriv.SaltSize), make([]byte, ghostpriv.NoteSize))
 	if err != nil {
 		t.Fatal(err)
 	}

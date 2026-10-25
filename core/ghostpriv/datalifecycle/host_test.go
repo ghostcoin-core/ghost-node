@@ -75,7 +75,7 @@ var (
 )
 
 const (
-	dataCommitLogSize = 8 + 32 + ghostpriv.NoteSize
+	dataCommitLogSize = 8 + 32 + ghostpriv.NoteSize + ghostpriv.SaltSize
 	dataRevealLogSize = 1 + 20
 )
 

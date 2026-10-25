@@ -38,7 +38,8 @@ import (
 
 // dataFile is what a wallet keeps of a data commitment it made: F_d and the
 // note, and the commitment format version of the data it was committed with
-// (0 for version 1). The node never sees the file itself.
+// (0 for the zero salt the test data commits send, also version 2). The
+// node never sees the file itself.
 type dataFile struct {
 	f       common.Hash
 	note    []byte
@@ -47,7 +48,7 @@ type dataFile struct {
 
 func (d dataFile) commitment() common.Hash {
 	if d.version == 0 {
-		return ghostpriv.DataCommitment(d.f)
+		return ghostpriv.DataCommitmentVersion(ghostpriv.SaltedCommitVersion, d.f)
 	}
 	return ghostpriv.DataCommitmentVersion(d.version, d.f)
 }
@@ -63,20 +64,27 @@ func testDataFile(name string) dataFile {
 // account transaction to the data commit entry address.
 func (f *fixture) dataCommitTx(key *mldsa44.PrivateKey, nonce uint64, d dataFile, value *big.Int) *types.Transaction {
 	f.t.Helper()
-	data, err := ghostpriv.CommitData(d.f, d.note)
+	data, err := ghostpriv.SaltedCommitData(d.f, make([]byte, ghostpriv.SaltSize), d.note)
 	if err != nil {
 		f.t.Fatal(err)
 	}
 	return f.callTx(key, nonce, ghost.DataCommitEntryAddress, value, data, 60_000)
 }
 
-// dataCommitLog is the receipt log a data commit writes.
+// dataCommitLog is the receipt log a data commit writes, without the salt
+// after the note.
 func dataCommitLog(index, position uint32, d dataFile) []byte {
 	leaf := d.commitment()
 	data := binary.BigEndian.AppendUint32(nil, index)
 	data = binary.BigEndian.AppendUint32(data, position)
 	data = append(data, leaf[:]...)
 	return append(data, d.note...)
+}
+
+// zeroSaltDataCommitLog is the receipt log of a data commit of d with the
+// zero salt the test data commits send.
+func zeroSaltDataCommitLog(index, position uint32, d dataFile) []byte {
+	return append(dataCommitLog(index, position, d), make([]byte, ghostpriv.SaltSize)...)
 }
 
 func dataLeafCount(st *state.StateDB) uint64 {
@@ -90,10 +98,10 @@ func dataLeafCount(st *state.StateDB) uint64 {
 // that the coin tree, the totals and every balance but the gas are as they
 // were.
 func TestDataCommitAppendsToDataTree(t *testing.T) {
-	// The commitment is K over DATA at version 1 and F_d, and never a coin
+	// The commitment is K over DATA at version 2 and F_d, and never a coin
 	// commitment.
 	known := testDataFile("known")
-	want := ghosttree.K("ghost/data-commitment/v1", []byte{0x01, 0x02}, known.f[:])
+	want := ghosttree.K("ghost/data-commitment/v1", []byte{0x02, 0x02}, known.f[:])
 	if known.commitment() != want {
 		t.Fatalf("data commitment %x, want %x", known.commitment(), want)
 	}
@@ -116,7 +124,7 @@ func TestDataCommitAppendsToDataTree(t *testing.T) {
 	blocks, _ := f.generate(1, func(i int, b *core.BlockGen) {
 		b.SetCoinbase(miner)
 		txs = append(txs, f.dataCommitTx(keyA, 0, first, new(big.Int)))
-		data, err := ghostpriv.CommitData(second.f, second.note)
+		data, err := ghostpriv.SaltedCommitData(second.f, make([]byte, ghostpriv.SaltSize), second.note)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -210,10 +218,10 @@ func TestDataCommitAppendsToDataTree(t *testing.T) {
 		if len(l.Topics) != 1 || l.Topics[0] != ghosttree.K("ghost/data-commit-receipt/v1") {
 			t.Errorf("log %d topics %x", i, l.Topics)
 		}
-		if want := dataCommitLog(0, uint32(i), []dataFile{first, second}[i]); !bytes.Equal(l.Data, want) {
+		if want := zeroSaltDataCommitLog(0, uint32(i), []dataFile{first, second}[i]); !bytes.Equal(l.Data, want) {
 			t.Errorf("log %d data\n%x\nwant\n%x", i, l.Data, want)
 		}
-		if len(l.Data) != 4+4+32+156 {
+		if len(l.Data) != 4+4+32+156+16 {
 			t.Errorf("log %d data has %d bytes", i, len(l.Data))
 		}
 	}
@@ -243,17 +251,16 @@ func TestDataCommitAppendsToDataTree(t *testing.T) {
 	}
 	f.insert(chain, more[1:])
 	r := chain.GetReceiptsByHash(more[1].Hash())[0]
-	if len(r.Logs) != 1 || !bytes.Equal(r.Logs[0].Data, dataCommitLog(0, 2, third)) {
+	if len(r.Logs) != 1 || !bytes.Equal(r.Logs[0].Data, zeroSaltDataCommitLog(0, 2, third)) {
 		t.Fatal("the third data commit is not at position 2")
 	}
 }
 
-// TestSaltedDataCommitCarriesSaltToHistory data commits one file with
-// version 1 data and one with salted data in a block: both are accepted, the
-// salted one is recorded under the version 2 data commitment of F_d, its receipt
-// log is the version 1 log with the salt after the note (212 bytes), and the
-// tree history returns the salt with its leaf and note while the version 1
-// leaf has none. Salted data with a value is still refused.
+// TestSaltedDataCommitCarriesSaltToHistory data commits one file with a
+// zero salt and one with a drawn salt in a block: both are recorded under the
+// version 2 data commitment of F_d, each receipt log carries its salt after
+// the note (212 bytes), and the tree history returns each salt with its leaf
+// and note. Salted data with a value is still refused.
 func TestSaltedDataCommitCarriesSaltToHistory(t *testing.T) {
 	f := newFixture(t, ghost.InternalNetGasLimit, nil)
 	var (
@@ -300,9 +307,9 @@ func TestSaltedDataCommitCarriesSaltToHistory(t *testing.T) {
 		t.Fatal("a salted data commit changed the coin tree root")
 	}
 
-	// The logs: version 1 unchanged, salted with the salt after the note.
-	if got, want := receipts[0].Logs[0].Data, dataCommitLog(0, 0, plain); !bytes.Equal(got, want) || len(got) != 196 {
-		t.Errorf("version 1 log of %d bytes\n%x\nwant\n%x", len(got), got, want)
+	// The logs: each with its salt after the note.
+	if got, want := receipts[0].Logs[0].Data, zeroSaltDataCommitLog(0, 0, plain); !bytes.Equal(got, want) || len(got) != 212 {
+		t.Errorf("zero-salt log of %d bytes\n%x\nwant\n%x", len(got), got, want)
 	}
 	if got, want := receipts[1].Logs[0].Data, append(dataCommitLog(0, 1, salted), salt...); !bytes.Equal(got, want) || len(got) != 212 {
 		t.Errorf("salted log of %d bytes\n%x\nwant\n%x", len(got), got, want)
@@ -316,7 +323,7 @@ func TestSaltedDataCommitCarriesSaltToHistory(t *testing.T) {
 	if len(records) != 2 || records[0].Kind != ghosttree.Data || records[1].Kind != ghosttree.Data || records[1].Leaf != leaves[1] {
 		t.Fatalf("history records %+v", records)
 	}
-	checkSalt(t, "version 1 record", records[0].Salt, nil)
+	checkSalt(t, "zero-salt record", records[0].Salt, make([]byte, ghostpriv.SaltSize))
 	checkSalt(t, "salted record", records[1].Salt, salt)
 	page, err := history.Page(ghosttree.Data, 0, 0, block.Hash())
 	if err != nil {
@@ -330,7 +337,7 @@ func TestSaltedDataCommitCarriesSaltToHistory(t *testing.T) {
 			t.Errorf("entry %d: leaf %x note %x", i, e.Leaf, e.Note[:])
 		}
 	}
-	checkSalt(t, "version 1 entry", page.Entries[0].Salt, nil)
+	checkSalt(t, "zero-salt entry", page.Entries[0].Salt, make([]byte, ghostpriv.SaltSize))
 	checkSalt(t, "salted entry", page.Entries[1].Salt, salt)
 	if coin, err := history.Page(ghosttree.Coin, 0, 0, block.Hash()); err != nil || coin.Filled != 0 {
 		t.Errorf("coin page after data commits: %+v, %v", coin, err)
@@ -346,7 +353,7 @@ func TestDataCommitRejectsValueAndWrongLength(t *testing.T) {
 	chain := f.newChain()
 	env, st := nextEnv(t, chain, chain.CurrentBlock(), common.Address{0xcb})
 	good := testDataFile("rejections")
-	goodData, err := ghostpriv.CommitData(good.f, good.note)
+	goodData, err := ghostpriv.SaltedCommitData(good.f, make([]byte, ghostpriv.SaltSize), good.note)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -368,11 +375,12 @@ func TestDataCommitRejectsValueAndWrongLength(t *testing.T) {
 		{"empty data", f.callTx(keyA, 0, to, zero, nil, 60_000), ghostpriv.ErrCommitData},
 		{"one byte", f.callTx(keyA, 0, to, zero, goodData[:1], 60_000), ghostpriv.ErrCommitData},
 		{"34 bytes, no note", f.callTx(keyA, 0, to, zero, goodData[:34], 60_000), ghostpriv.ErrCommitData},
-		{"189 bytes", f.callTx(keyA, 0, to, zero, goodData[:189], 60_000), ghostpriv.ErrCommitData},
-		{"191 bytes, a storage location", f.callTx(keyA, 0, to, zero, append(append([]byte{}, goodData...), 1), 60_000), ghostpriv.ErrCommitData},
-		{"222 bytes, a fingerprint", f.callTx(keyA, 0, to, zero, append(append([]byte{}, goodData...), make([]byte, 32)...), 60_000), ghostpriv.ErrCommitData},
+		{"205 bytes", f.callTx(keyA, 0, to, zero, goodData[:205], 60_000), ghostpriv.ErrCommitData},
+		{"207 bytes, a storage location", f.callTx(keyA, 0, to, zero, append(append([]byte{}, goodData...), 1), 60_000), ghostpriv.ErrCommitData},
+		{"238 bytes, a fingerprint", f.callTx(keyA, 0, to, zero, append(append([]byte{}, goodData...), make([]byte, 32)...), 60_000), ghostpriv.ErrCommitData},
 		{"version 0", f.callTx(keyA, 0, to, zero, withData(func(d []byte) []byte { d[1] = 0; return d }), 60_000), ghostpriv.ErrCommitData},
-		{"version 2, with a value", f.callTx(keyA, 0, to, oneGhost, withData(func(d []byte) []byte { d[1] = 2; return d }), 60_000), ghostpriv.ErrCommitData},
+		{"190 bytes of version 1", f.callTx(keyA, 0, to, zero, versionOneCommitData(good.f, good.note), 60_000), ghostpriv.ErrCommitData},
+		{"206 bytes of version 1", f.callTx(keyA, 0, to, zero, withData(func(d []byte) []byte { d[1] = 1; return d }), 60_000), ghostpriv.ErrCommitData},
 		{"zero F", f.callTx(keyA, 0, to, zero, zeroF, 60_000), ghostpriv.ErrCommitZeroF},
 		{"zero F, with a value", f.callTx(keyA, 0, to, oneGhost, zeroF, 60_000), ghostpriv.ErrCommitZeroF},
 		{"intrinsic gas", f.callTx(keyA, 0, to, zero, goodData, 21_000), core.ErrIntrinsicGas},

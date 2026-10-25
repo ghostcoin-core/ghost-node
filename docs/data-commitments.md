@@ -58,30 +58,24 @@ commit: the 206 bytes of salted commit data, version 2
 | 34 | 16 | salt |
 | 50 | 156 | note |
 
-or the 190 bytes of version 1 data without a salt (`ghostpriv.CommitData`),
-still accepted unchanged because version 1 commitments stay valid:
-
-| Offset | Length | Field |
-|---|---|---|
-| 0 | 2 | version, `0x0001` |
-| 2 | 32 | `F_d` |
-| 34 | 156 | note |
+The node refuses the old 190 bytes of version 1 data without a salt from
+genesis: a new chain has no version 1 leaves, and two version 1 commits to one
+key would share a marker.
 
 The salt is carried in the clear so that a wallet can read it back with the
 leaf and note. The node computes the commitment itself,
 `D = K("ghost/data-commitment/v1", DATA, F_d)`
 (`ghostpriv.DataCommitmentVersion`), from `F_d` only, with the `DATA` of the
-data's version: `0x02 0x02` for the 206 bytes of version 2, `0x01 0x02` for
-the 190 bytes of version 1. The salt is already in `F_d` and the node never uses it. The
+data's version, `0x02 0x02` for the 206 bytes of version 2. The salt is already in `F_d` and the node never uses it. The
 commitment carries no amount and never equals a coin commitment.
 
 The checks run in this order and stop at the first failure; each failure makes
 the transaction invalid, so a block carrying it is invalid:
 
 1. ordinary validity: nonce, sender without code, fee caps, intrinsic gas;
-2. data of exactly 206 bytes with version 2, or of exactly 190 bytes with
-   version 1 (`ErrCommitData`); anything else, an extra field, another
-   version or a version with the other length included, is rejected;
+2. data of exactly 206 bytes with version 2 (`ErrCommitData`); anything
+   else, the 190 bytes of version 1, an extra field or another version
+   included, is rejected;
 3. `F_d` not all zero (`ErrCommitZeroF`);
 4. value exactly 0 (`ErrDataCommitValue`);
 5. the sender's funds cover the gas (`core.ErrInsufficientFunds`);

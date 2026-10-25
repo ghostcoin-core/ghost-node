@@ -1,17 +1,15 @@
-//! Writes the known-answer fixtures of the node's verifier tests,
-//! core/ghostpriv/testdata/coin_reveal.bin.gz (a version 1 coin) and
+//! Writes the known-answer fixture of the node's verifier tests,
 //! core/ghostpriv/testdata/salted_coin_reveal.bin.gz (a salted, version 2
-//! coin), uncompressed:
+//! coin; the node takes no version 1 coin), uncompressed:
 //!
-//!     cargo run --release --locked --example knownanswer -- coin_reveal.bin salted_coin_reveal.bin
-//!     gzip -n -9 coin_reveal.bin salted_coin_reveal.bin
+//!     cargo run --release --locked --example knownanswer -- salted_coin_reveal.bin
+//!     gzip -n -9 salted_coin_reveal.bin
 //!
-//! Each file is the chain parameters (42 bytes), the coin reveal statement
+//! The file is the chain parameters (42 bytes), the coin reveal statement
 //! (368 bytes), both in the layout of ghost_proofs.h, and then the proof, as
-//! the pinned prover makes it. The statement layout is the same for both
-//! formats. The salts and the zero-knowledge randomness are fixed, so the
-//! output is the same on every run; it is for tests only and must never be
-//! used for a real reveal.
+//! the pinned prover makes it. The salts and the zero-knowledge randomness
+//! are fixed, so the output is the same on every run; it is for tests only
+//! and must never be used for a real reveal.
 
 use std::{env, fs, process};
 
@@ -51,14 +49,14 @@ fn write(out: &str, tx: &CoinReveal, proof: &Proof) {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    if args.len() != 3 {
-        eprintln!("usage: knownanswer <version 1 output file> <salted output file>");
+    if args.len() != 2 {
+        eprintln!("usage: knownanswer <output file>");
         process::exit(2);
     }
-    let (out, salted_out) = (&args[1], &args[2]);
+    let out = &args[1];
 
-    // A coin of 1,000,000 at position 5 of a coin tree whose leaves are empty
-    // but one, revealed for 600,000 and a fee of 21.
+    // A salted coin of 1,000,000 at position 5 of a coin tree whose leaves
+    // are empty but one, revealed for 600,000 and a fee of 21.
     let mut path = [[0u8; 32]; TREE_DEPTH];
     let mut empty = empty_leaf();
     for (level, sibling) in path.iter_mut().enumerate() {
@@ -66,15 +64,19 @@ fn main() {
         empty = tree_node(Tree::Coin, level as u8, &empty, &empty);
     }
     path[0] = [9; 32];
-    let opening = CoinOpening {
+    let opening = SaltedCoinOpening {
         s: [1; 32],
         r: [2; 32],
         b: [3; 32],
+        salt: TEST_INPUT_SALT,
         v: amount_word(1_000_000),
         position: 5,
         path,
     };
-    let leaf = coin_commitment(&coin_fingerprint(&opening.s, &opening.r, &opening.b, &EMPTY_RULE), &opening.v);
+    let leaf = coin_commitment_v2(
+        &coin_fingerprint_v2(&opening.s, &opening.r, &opening.b, &opening.salt, &EMPTY_RULE),
+        &opening.v,
+    );
     let request = RevealRequest {
         root: merkle_root(Tree::Coin, &leaf, opening.position, &opening.path),
         recipient: [0x11; 20],
@@ -83,47 +85,16 @@ fn main() {
         rule: EMPTY_RULE,
         remainder_note: [0x33; NOTE_BYTES],
     };
-    let remainder = CoinRemainder {
+    let remainder = SaltedCoinRemainder {
         s: [1; 32],
         r: [2; 32],
         b: [4; 32],
-        v: amount_word(1_000_000 - 600_000 - 21),
-    };
-    let (tx, proof) =
-        prove_coin_reveal(&params(), &opening, &remainder, &request, TEST_ZK_RANDOMNESS).expect("honest proof");
-    assert_eq!(verify_coin_reveal(&params(), &tx, &proof), Ok(()));
-    assert!(verify_salted_coin_reveal(&params(), &tx, &proof).is_err());
-    write(out, &tx, &proof);
-
-    // The same coin, salted: the salt is a private witness, so the statement
-    // has the same layout and only the proof tells the formats apart.
-    let opening = SaltedCoinOpening {
-        s: opening.s,
-        r: opening.r,
-        b: opening.b,
-        salt: TEST_INPUT_SALT,
-        v: opening.v,
-        position: opening.position,
-        path: opening.path,
-    };
-    let leaf = coin_commitment_v2(
-        &coin_fingerprint_v2(&opening.s, &opening.r, &opening.b, &opening.salt, &EMPTY_RULE),
-        &opening.v,
-    );
-    let request = RevealRequest {
-        root: merkle_root(Tree::Coin, &leaf, opening.position, &opening.path),
-        ..request
-    };
-    let remainder = SaltedCoinRemainder {
-        s: remainder.s,
-        r: remainder.r,
-        b: remainder.b,
         salt: TEST_REMAINDER_SALT,
-        v: remainder.v,
+        v: amount_word(1_000_000 - 600_000 - 21),
     };
     let (tx, proof) = prove_salted_coin_reveal(&params(), &opening, &remainder, &request, TEST_ZK_RANDOMNESS)
         .expect("honest salted proof");
     assert_eq!(verify_salted_coin_reveal(&params(), &tx, &proof), Ok(()));
     assert!(verify_coin_reveal(&params(), &tx, &proof).is_err());
-    write(salted_out, &tx, &proof);
+    write(out, &tx, &proof);
 }

@@ -108,7 +108,9 @@ type coin struct {
 	value *uint256.Int
 }
 
-func (c coin) leaf() common.Hash   { return ghostpriv.Commitment(c.owner.fingerprint(c.index), c.value) }
+func (c coin) leaf() common.Hash {
+	return ghostpriv.CommitmentVersion(ghostpriv.SaltedCommitVersion, c.owner.fingerprint(c.index), c.value)
+}
 func (c coin) marker() common.Hash { return c.owner.marker(c.index) }
 
 func (c coin) note() [ghostpriv.NoteSize]byte { return c.owner.note(c.index, c.value) }
@@ -139,7 +141,7 @@ var (
 )
 
 const (
-	commitLogSize = 8 + 32 + 32 + ghostpriv.NoteSize
+	commitLogSize = 8 + 32 + 32 + ghostpriv.NoteSize + ghostpriv.SaltSize
 	revealLogSize = 8 + 32 + ghostpriv.NoteSize + 20 + 32
 )
 
