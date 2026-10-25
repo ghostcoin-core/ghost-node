@@ -358,8 +358,9 @@ func CheckReveal(st StateDB, env *BlockEnv, verifier Verifier, envelope []byte) 
 	}
 	chainID := env.ChainID.Uint64()
 	// Check 5: the fee of the including block's window or of the window
-	// before it. The fee returned is the one that matched, so that the tip
-	// and the burned base part are those of that window.
+	// before it, which must cover G_PRIV times the including block's base
+	// fee. The fee returned is the one that matched, split by the cover rule
+	// into the burn and the tip, never above that window's nominal tip.
 	fee, err := env.windowFee(r.Fee)
 	if err != nil {
 		return nil, Fee{}, err
@@ -410,7 +411,8 @@ func CheckReveal(st StateDB, env *BlockEnv, verifier Verifier, envelope []byte) 
 
 // ApplyReveal checks a reveal and makes its one atomic change: it marks the
 // marker spent, credits out to the recipient as a plain balance credit,
-// burns the base part of the fee, pays the tip to the coinbase, appends the
+// burns G_PRIV times the larger of the window price and the block's base fee,
+// pays the rest of the fee to the coinbase as the tip, appends the
 // remainder with the receipt log and adds out plus fee to the total out. The
 // gas is the caller's. On an error nothing is changed.
 func ApplyReveal(st StateDB, env *BlockEnv, verifier Verifier, envelope []byte) error {
