@@ -22,10 +22,12 @@
 //
 // The pool checks a reveal with the chain rules of core/ghostpriv against
 // the block that would come next on the current head, with the active
-// verifier, at a cost bounded per reveal: the proof is verified first, the
-// root rule is answered by the chain's tree-root index for the pool's head
-// instead of the walk of the ancestry the block checks make, and the other
-// checks read at most the headers of the fee window. It holds at most one
+// verifier, at a cost bounded per reveal: the root rule is answered by the
+// chain's tree-root index for the pool's head, the other checks read at most
+// the headers of the fee window, and the proof is verified last, only for a
+// reveal every other check passed. A reveal refused for a reason no head can
+// change, a bad proof among them, is remembered by its hash in a bounded set
+// and refused again without any check. It holds at most one
 // reveal per marker, the first seen: a later reveal of the same marker is
 // refused, and a held reveal whose marker another reveal spent in a block is
 // dropped when the pool rechecks on the new head.
@@ -113,7 +115,80 @@ var (
 	// index cannot answer for, an index not ready among others: it is
 	// dropped, never checked by a walk of the ancestry.
 	ErrRootLookup = errors.New("reveal root cannot be looked up in the tree-root index")
+
+	// ErrRejectedBefore is returned, wrapping the first refusal, for a reveal
+	// the pool refused before for a reason that no head can change: it is
+	// refused again without any check.
+	ErrRejectedBefore = errors.New("reveal refused before")
 )
+
+// maxRejected is the most hashes of refused reveals the pool remembers; the
+// oldest is forgotten first.
+const maxRejected = 4096
+
+// rejectedSet is the bounded set of the hashes of refused reveals, each with
+// its first refusal, forgetting the oldest when full.
+type rejectedSet struct {
+	errs map[common.Hash]error
+	ring []common.Hash // the remembered hashes, in the order they came
+	next int           // the place of ring the next hash takes once full
+}
+
+// add remembers hash with its refusal err if err holds whatever the head,
+// that is if it comes from the bytes of the reveal alone: its decoding, its
+// chain id, the shape of a data reveal, or its proof, which is verified
+// last, so a proof refused is refused for good. A refusal that a later head,
+// a reorganisation or the pool's own load can lift is not remembered: the
+// fee of the window, the root, the marker, the backstop, the caps, the
+// budgets and a node without a verifier.
+func (s *rejectedSet) add(hash common.Hash, err error) {
+	if !permanentRefusal(err) {
+		return
+	}
+	if s.errs == nil {
+		s.errs = make(map[common.Hash]error)
+	}
+	if _, ok := s.errs[hash]; ok {
+		return
+	}
+	if len(s.ring) < maxRejected {
+		s.ring = append(s.ring, hash)
+	} else {
+		delete(s.errs, s.ring[s.next])
+		s.ring[s.next] = hash
+		s.next = (s.next + 1) % maxRejected
+	}
+	s.errs[hash] = err
+}
+
+// lookup returns the first refusal of a remembered hash, nil for a hash not
+// remembered.
+func (s *rejectedSet) lookup(hash common.Hash) error {
+	return s.errs[hash]
+}
+
+// permanentRefusals are the refusals of a reveal that its bytes alone decide.
+var permanentRefusals = []error{
+	ghostpriv.ErrRevealLength, ghostpriv.ErrRevealVersion, ghostpriv.ErrRevealAmount,
+	ghostpriv.ErrRevealChainID, ghostpriv.ErrRevealProof,
+	ghostpriv.ErrDataRevealLength, ghostpriv.ErrDataRevealVersion, ghostpriv.ErrDataRevealAmount,
+	ghostpriv.ErrDataRevealChainID, ghostpriv.ErrDataRevealPurpose, ghostpriv.ErrDataRevealShape,
+	ghostpriv.ErrDataRevealProof,
+}
+
+// permanentRefusal reports whether err is a refusal of a reveal that no
+// head can lift.
+func permanentRefusal(err error) bool {
+	if err == nil || errors.Is(err, ghostpriv.ErrNoVerifier) {
+		return false
+	}
+	for _, target := range permanentRefusals {
+		if errors.Is(err, target) {
+			return true
+		}
+	}
+	return false
+}
 
 // BlockChain is the part of the chain the pool needs. *core.BlockChain
 // satisfies it.
@@ -161,9 +236,9 @@ type peerBudget struct {
 // The reveal checks run outside the pool's lock, at most maxValidations at
 // a time, against a snapshot of the head: they verify the proof, and the
 // lock must not be held through that. Their cost is bounded per reveal
-// whatever the age of its root: the proof first, then one lookup in the
-// tree-root index, then the other checks, which read at most the headers of
-// the fee window. A reveal being checked holds its marker and a place under
+// whatever the age of its root: one lookup in the tree-root index, then the
+// other checks, which read at most the headers of the fee window, then the
+// proof. A reveal being checked holds its marker and a place under
 // the caps, so that the first seen of two competing reveals is still the
 // one kept.
 //
@@ -188,6 +263,7 @@ type Pool struct {
 	validating map[markerKey]common.Hash // reveals being checked, by marker
 	locals     int                       // local reveals among those being checked
 	peers      map[string]*peerBudget
+	rejected   rejectedSet // reveals refused for good, refused again unchecked
 
 	feed  event.Feed
 	scope event.SubscriptionScope
@@ -365,6 +441,18 @@ func (p *Pool) add(tx *types.Transaction, peer string) error {
 		return fmt.Errorf("%w: type %#x", core.ErrTxTypeNotSupported, tx.Type())
 	}
 	hash := tx.Hash()
+	// A reveal refused for good before is refused again without any check,
+	// and charged to the peer as any other.
+	p.mu.Lock()
+	if first := p.rejected.lookup(hash); first != nil {
+		_, err := p.charge(peer, hash)
+		p.mu.Unlock()
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("%w: %w", ErrRejectedBefore, first)
+	}
+	p.mu.Unlock()
 	// Decoding runs the length, version and amount checks; a peer is charged
 	// for a reveal that fails them as for any other.
 	fields, decodeErr := decode(tx)
@@ -372,6 +460,7 @@ func (p *Pool) add(tx *types.Transaction, peer string) error {
 	p.mu.Lock()
 	slot, err := p.admit(hash, fields, decodeErr, tx.Size(), peer)
 	if err != nil {
+		p.rejected.add(hash, err)
 		p.mu.Unlock()
 		return err
 	}
@@ -432,6 +521,7 @@ func (p *Pool) add(tx *types.Transaction, peer string) error {
 		err = fmt.Errorf("%w: %d reveals, %d bytes", ErrPoolFull, len(p.all), p.bytes)
 	}
 	if err != nil {
+		p.rejected.add(hash, err)
 		p.mu.Unlock()
 		return err
 	}
@@ -459,7 +549,7 @@ func (p *Pool) add(tx *types.Transaction, peer string) error {
 // fails costs the peer as much as one that passes. Then come the decoding,
 // the peer's one check slot and held cap, a marker held or being checked
 // for another reveal, the chain id, the fee, a spent marker and the caps.
-// The proof and the root are left to the reveal checks, the proof first.
+// The root and the proof are left to the reveal checks, the proof last.
 // A remote reveal takes a check slot last, without waiting, and admit
 // returns it; a local reveal takes its slot after the lock is let go. The
 // caller holds the lock.
@@ -471,16 +561,9 @@ func (p *Pool) admit(hash common.Hash, fields revealFields, decodeErr error, siz
 	if decodeErr == nil && p.validating[key] == hash {
 		return nil, txpool.ErrAlreadyKnown
 	}
-	var b *peerBudget
-	if peer != "" {
-		b = p.budget(peer)
-		if _, ok := b.announced[hash]; ok {
-			delete(b.announced, hash)
-		} else if b.tokens > 0 {
-			b.tokens--
-		} else {
-			return nil, fmt.Errorf("%w: peer %s, %d reveals per head", ErrPeerBudget, peer, PeerRevealsPerBlock)
-		}
+	b, err := p.charge(peer, hash)
+	if err != nil {
+		return nil, err
 	}
 	if decodeErr != nil {
 		return nil, decodeErr
@@ -520,6 +603,26 @@ func (p *Pool) admit(hash common.Hash, fields revealFields, decodeErr error, siz
 	default:
 		return nil, fmt.Errorf("%w: peer %s", ErrChecksBusy, peer)
 	}
+}
+
+// charge takes the reveal with the given hash from the budget of peer and
+// returns the budget: nothing for a reveal the peer announced and the node
+// agreed to fetch, one of its reveals of this head for any other, and a
+// refusal when none is left. A local reveal, of no peer, has no budget. The
+// caller holds the lock.
+func (p *Pool) charge(peer string, hash common.Hash) (*peerBudget, error) {
+	if peer == "" {
+		return nil, nil
+	}
+	b := p.budget(peer)
+	if _, ok := b.announced[hash]; ok {
+		delete(b.announced, hash)
+	} else if b.tokens > 0 {
+		b.tokens--
+	} else {
+		return nil, fmt.Errorf("%w: peer %s, %d reveals per head", ErrPeerBudget, peer, PeerRevealsPerBlock)
+	}
+	return b, nil
 }
 
 // cheapRules runs the reveal checks that read no ancestry against the
@@ -754,15 +857,16 @@ func (p *Pool) snapshot() (*types.Header, *state.StateDB, error) {
 // state after head, for the block that would come next on head, at a cost
 // bounded per reveal, cheap first:
 //
-//  1. the proof, for the inputs the node computes, before any root or
-//     header is read;
-//  2. the root rule, from the chain's tree-root index for head, with no
+//  1. the root rule, from the chain's tree-root index for head, with no
 //     walk of the ancestry;
-//  3. the other checks of core/ghostpriv, on a view of the chain that holds
-//     only the headers of the fee window, so that their own walk for the
-//     root stops there; a root the index found below the window is
-//     refused by that walk, and the checks that come after the root, the
-//     marker and the backstop, are then run here.
+//  2. the other checks of core/ghostpriv but the proof, among them the
+//     chain id, the fee, the marker and the backstop, on a view of the
+//     chain that holds only the headers of the fee window, so that their
+//     own root check stops there; a root the index found below the window
+//     is refused by that check, and the checks that come after the root,
+//     the marker and the backstop, are then run here;
+//  3. the proof, for the inputs the node computes, last, so that a reveal
+//     refused by any other check costs no proof verification.
 //
 // When the index cannot answer, a remote reveal is refused with
 // ErrRootLookup; the node's own reveal is checked by core/ghostpriv on the
@@ -774,9 +878,19 @@ func (p *Pool) check(head *types.Header, st *state.StateDB, tx *types.Transactio
 	if err != nil {
 		return err
 	}
+	if err := p.checkRules(head, st, rv, genesis, local); err != nil {
+		return err
+	}
 	if err := p.verifier().VerifyReveal(rv.in, rv.proof); err != nil {
 		return fmt.Errorf("%w: %w", rv.errProof, err)
 	}
+	return nil
+}
+
+// checkRules runs the reveal checks of check but the proof, steps 1 and 2.
+// The checks of core/ghostpriv are given pendingProof, which accepts the
+// inputs whose proof check verifies after them and no others.
+func (p *Pool) checkRules(head *types.Header, st *state.StateDB, rv *checkedReveal, genesis common.Hash, local bool) error {
 	next := p.nextHeader(head)
 	env := &ghostpriv.BlockEnv{
 		Header:  next,
@@ -789,13 +903,13 @@ func (p *Pool) check(head *types.Header, st *state.StateDB, tx *types.Transactio
 		if !local {
 			return fmt.Errorf("%w: %x: %v", ErrRootLookup, rv.in.Root, err)
 		}
-		return rv.rules(st, env, provenVerifier{rv.in})
+		return rv.rules(st, env, pendingProof{rv.in})
 	}
 	if !eligible {
 		return fmt.Errorf("%w: %x", rv.errRoot, rv.in.Root)
 	}
 	env.Chain = windowChain{chain: p.chain, min: ghostpriv.WindowStart(next.Number.Uint64())}
-	if err = rv.rules(st, env, provenVerifier{rv.in}); !errors.Is(err, rv.errRoot) {
+	if err = rv.rules(st, env, pendingProof{rv.in}); !errors.Is(err, rv.errRoot) {
 		return err
 	}
 	// Every check before the root passed and the index found the root: what
@@ -898,12 +1012,12 @@ func decodeForCheck(tx *types.Transaction, genesis common.Hash) (*checkedReveal,
 	}
 }
 
-// provenVerifier accepts the inputs whose proof check already verified, and
-// refuses any others: the checks of core/ghostpriv then do not verify the
-// same proof again.
-type provenVerifier struct{ in *ghostpriv.VerifyInputs }
+// pendingProof accepts the inputs whose proof check verifies after the
+// checks of core/ghostpriv, and refuses any others: those checks then run
+// every rule but the proof, and the proof is verified once, last.
+type pendingProof struct{ in *ghostpriv.VerifyInputs }
 
-func (v provenVerifier) VerifyReveal(in *ghostpriv.VerifyInputs, proof []byte) error {
+func (v pendingProof) VerifyReveal(in *ghostpriv.VerifyInputs, proof []byte) error {
 	errDiffer := errors.New("inputs differ from the verified ones")
 	if in == nil || in.Out == nil || in.Fee == nil || !in.Out.Eq(v.in.Out) || !in.Fee.Eq(v.in.Fee) {
 		return errDiffer
