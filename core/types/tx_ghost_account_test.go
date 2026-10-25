@@ -425,8 +425,8 @@ func TestGhostAccountTxRefusesUnknownScheme(t *testing.T) {
 	}{
 		{0x0000, GhostMLDSA44PublicKeySize, GhostMLDSA44SignatureSize},
 		{0x0000, GhostSLHDSAPublicKeySize, GhostSLHDSASignatureSize},
-		{0x0003, GhostMLDSA44PublicKeySize, GhostMLDSA44SignatureSize},
-		{0x0003, GhostSLHDSAPublicKeySize, GhostSLHDSASignatureSize},
+		{0x0005, GhostMLDSA44PublicKeySize, GhostMLDSA44SignatureSize},
+		{0x0005, GhostSLHDSAPublicKeySize, GhostSLHDSASignatureSize},
 		{0xffff, GhostMLDSA44PublicKeySize, GhostMLDSA44SignatureSize},
 	} {
 		inner := ghostTestTxData(nil)
@@ -791,6 +791,325 @@ func TestGhostAccountTxSLHDSA(t *testing.T) {
 		var dec Transaction
 		if err := dec.UnmarshalBinary(enc); !errors.Is(err, ErrGhostAccountLength) {
 			t.Errorf("%s: decoding error %v, want %v", tc.name, err, ErrGhostAccountLength)
+		}
+	}
+}
+
+// ghostTestRescueKeys returns the ML-DSA-44 and SLH-DSA-SHAKE-128s keys of a
+// rescue-key account and its 1,344-byte public key.
+func ghostTestRescueKeys(t testing.TB, seed byte) (*mldsa44.PrivateKey, *slhdsa.PrivateKey, []byte) {
+	t.Helper()
+	mlKey := ghostTestKey(seed)
+	slhKey := ghostTestSLHDSAKey(t, seed)
+	slhPub, err := slhKey.PublicKey().MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pk := GhostRescuePublicKey(mlKey.Public().(*mldsa44.PublicKey).Bytes(), slhPub)
+	if len(pk) != GhostRescuePublicKeySize || GhostRescuePublicKeySize != 1344 {
+		t.Fatalf("rescue public key of %d bytes, want 1344", len(pk))
+	}
+	return mlKey, slhKey, pk
+}
+
+// ghostTestRescueTxs signs the same transaction data as scheme 0x0003 and as
+// scheme 0x0004 with the keys of one rescue-key account.
+func ghostTestRescueTxs(t testing.TB, signer Signer, mlKey *mldsa44.PrivateKey, slhKey *slhdsa.PrivateKey, pk []byte, txdata *GhostAccountTx) (tx3, tx4 *Transaction) {
+	t.Helper()
+	tx3, err := SignGhostAccountTxRescue(signer, mlKey, pk[GhostMLDSA44PublicKeySize:], txdata)
+	if err != nil {
+		t.Fatalf("signing scheme 0x0003: %v", err)
+	}
+	tx4, err = SignGhostAccountTxRescueSLHDSA(signer, pk[:GhostMLDSA44PublicKeySize], slhKey, txdata)
+	if err != nil {
+		t.Fatalf("signing scheme 0x0004: %v", err)
+	}
+	return tx3, tx4
+}
+
+// ghostRescueTx returns a copy of tx with the scheme, public key and
+// signature replaced.
+func ghostRescueTx(tx *Transaction, scheme uint16, pub, sig []byte) *Transaction {
+	inner := tx.inner.copy().(*GhostAccountTx)
+	inner.Scheme = GhostScheme(scheme)
+	inner.PublicKey = common.CopyBytes(pub)
+	inner.Signature = common.CopyBytes(sig)
+	return NewTx(inner)
+}
+
+// TestGhostRescueSenderIsOneAccount checks that schemes 0x0003 and 0x0004
+// over one rescue public key name one account, the address derived with
+// scheme 0x0003, and that it is not the account of the ML-DSA-44 key alone.
+func TestGhostRescueSenderIsOneAccount(t *testing.T) {
+	signer := ghostTestSigner()
+	mlKey, slhKey, pk := ghostTestRescueKeys(t, 1)
+	to := common.HexToAddress("0x00000000000000000000000000000000000000bb")
+	tx3, tx4 := ghostTestRescueTxs(t, signer, mlKey, slhKey, pk, ghostTestTxData(&to))
+
+	for _, tc := range []struct {
+		tx      *Transaction
+		scheme  uint16
+		sigSize int
+	}{{tx3, GhostSchemeMLDSA44Rescue, GhostMLDSA44SignatureSize}, {tx4, GhostSchemeSLHDSARescue, GhostSLHDSASignatureSize}} {
+		scheme, pub, sig, _ := tc.tx.GhostAccountAuth()
+		if scheme != tc.scheme || !bytes.Equal(pub, pk) || len(sig) != tc.sigSize {
+			t.Fatalf("signed scheme %#04x, key %d bytes, signature %d bytes; want %#04x, 1344 and %d", scheme, len(pub), len(sig), tc.scheme, tc.sigSize)
+		}
+	}
+	from3, err := Sender(signer, tx3)
+	if err != nil {
+		t.Fatalf("sender of the 0x0003 transaction: %v", err)
+	}
+	from4, err := Sender(signer, tx4)
+	if err != nil {
+		t.Fatalf("sender of the 0x0004 transaction: %v", err)
+	}
+	want := GhostAccountAddressOf(GhostSchemeMLDSA44Rescue, pk)
+	if from3 != want || from4 != want {
+		t.Fatalf("senders %v (0x0003) and %v (0x0004), want both %v", from3, from4, want)
+	}
+	if got := GhostAccountAddressOf(GhostSchemeSLHDSARescue, pk); got != want {
+		t.Fatalf("address of scheme 0x0004 %v, want the 0x0003 address %v", got, want)
+	}
+	id := GhostScheme(GhostSchemeMLDSA44Rescue)
+	if h := ghostTaggedHash(GhostAccountAddressTag, id[:], pk); common.BytesToAddress(h[:common.AddressLength]) != want {
+		t.Fatal("the rescue address is not K(ghost/account-address/v1, 0x0003, public_key)")
+	}
+	if plain := GhostAccountAddressOf(GhostSchemeMLDSA44, pk[:GhostMLDSA44PublicKeySize]); plain == want {
+		t.Fatal("the rescue account is the account of its ML-DSA-44 key under scheme 0x0001")
+	}
+	for name, tx := range map[string]*Transaction{"0x0003": tx3, "0x0004": tx4} {
+		if addr, err := GhostAccountAddress(signer, tx); err != nil || addr != want {
+			t.Errorf("%s: address %v %v, want %v", name, addr, err, want)
+		}
+		enc, err := tx.MarshalBinary()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var dec Transaction
+		if err := dec.UnmarshalBinary(enc); err != nil {
+			t.Fatalf("%s: decoding: %v", name, err)
+		}
+		if from, err := Sender(signer, &dec); err != nil || from != want {
+			t.Errorf("%s: sender after decoding %v %v, want %v", name, from, err, want)
+		}
+		js, err := json.Marshal(tx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var decJSON Transaction
+		if err := json.Unmarshal(js, &decJSON); err != nil || decJSON.Hash() != tx.Hash() {
+			t.Errorf("%s: JSON round trip: %v", name, err)
+		}
+	}
+}
+
+// TestGhostRescueCrossSchemeSignatureRefused checks that each rescue scheme
+// verifies with its own algorithm only: the signature of one scheme under the
+// other is refused for its length before any verification, and a signature
+// of the right length but of the other scheme's sighash, or of the other
+// algorithm padded to length, does not verify.
+func TestGhostRescueCrossSchemeSignatureRefused(t *testing.T) {
+	signer := ghostTestSigner()
+	mlKey, slhKey, pk := ghostTestRescueKeys(t, 1)
+	to := common.HexToAddress("0x00000000000000000000000000000000000000bb")
+	tx3, tx4 := ghostTestRescueTxs(t, signer, mlKey, slhKey, pk, ghostTestTxData(&to))
+	_, _, mlSig, _ := tx3.GhostAccountAuth()
+	_, _, slhSig, _ := tx4.GhostAccountAuth()
+
+	// The signature of one scheme under the other: refused for its length.
+	for _, tc := range []struct {
+		name   string
+		scheme uint16
+		sig    []byte
+	}{
+		{"ML-DSA-44 signature under 0x0004", GhostSchemeSLHDSARescue, mlSig},
+		{"SLH-DSA signature under 0x0003", GhostSchemeMLDSA44Rescue, slhSig},
+	} {
+		bad := ghostRescueTx(tx3, tc.scheme, pk, tc.sig)
+		if _, err := signer.Sender(bad); !errors.Is(err, ErrGhostAccountLength) || errors.Is(err, ErrInvalidSig) {
+			t.Errorf("%s: sender error %v, want %v before any verification", tc.name, err, ErrGhostAccountLength)
+		}
+		if _, err := GhostAccountAddress(signer, bad); !errors.Is(err, ErrGhostAccountLength) {
+			t.Errorf("%s: address error %v, want %v", tc.name, err, ErrGhostAccountLength)
+		}
+		enc, err := bad.MarshalBinary()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var dec Transaction
+		if err := dec.UnmarshalBinary(enc); !errors.Is(err, ErrGhostAccountLength) {
+			t.Errorf("%s: decoding error %v, want %v", tc.name, err, ErrGhostAccountLength)
+		}
+	}
+
+	// Signatures of the right length that are not of the scheme's own
+	// algorithm over its own sighash: refused by the verifier.
+	sighash3 := signer.Hash(tx3)
+	sighash4 := signer.Hash(tx4)
+	if sighash3 == sighash4 {
+		t.Fatal("the sighash does not cover the scheme")
+	}
+	ctx := []byte(GhostAccountTxContext)
+	mlOver4 := make([]byte, mldsa44.SignatureSize)
+	if err := mldsa44.SignTo(mlKey, sighash4[:], ctx, true, mlOver4); err != nil {
+		t.Fatal(err)
+	}
+	slhOver3, err := slhdsa.SignRandomized(slhKey, nil, slhdsa.NewMessage(sighash3[:]), ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	padded := append(common.CopyBytes(mlOver4), make([]byte, GhostSLHDSASignatureSize-GhostMLDSA44SignatureSize)...)
+	for _, tc := range []struct {
+		name   string
+		scheme uint16
+		sig    []byte
+	}{
+		{"ML-DSA-44 signature of the 0x0004 sighash, padded, under 0x0004", GhostSchemeSLHDSARescue, padded},
+		{"SLH-DSA signature of the 0x0004 sighash, cut, under 0x0003", GhostSchemeMLDSA44Rescue, slhSig[:GhostMLDSA44SignatureSize]},
+		{"ML-DSA-44 signature of the 0x0004 sighash under 0x0003", GhostSchemeMLDSA44Rescue, mlOver4},
+		{"SLH-DSA signature of the 0x0003 sighash under 0x0004", GhostSchemeSLHDSARescue, slhOver3},
+	} {
+		bad := ghostRescueTx(tx3, tc.scheme, pk, tc.sig)
+		if _, err := signer.Sender(bad); !errors.Is(err, ErrGhostAccountSignature) {
+			t.Errorf("%s: sender error %v, want %v", tc.name, err, ErrGhostAccountSignature)
+		}
+	}
+
+	// Each scheme verifies under its own half of the public key: the right
+	// sighash signed by keys that are not the account's halves is refused.
+	otherML, otherSLH, _ := ghostTestRescueKeys(t, 2)
+	otherMLSig := make([]byte, mldsa44.SignatureSize)
+	if err := mldsa44.SignTo(otherML, sighash3[:], ctx, true, otherMLSig); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := signer.Sender(ghostRescueTx(tx3, GhostSchemeMLDSA44Rescue, pk, otherMLSig)); !errors.Is(err, ErrGhostAccountSignature) {
+		t.Errorf("0x0003 signed by a key that is not its ML-DSA-44 half: %v, want %v", err, ErrGhostAccountSignature)
+	}
+	otherSLHSig, err := slhdsa.SignRandomized(otherSLH, nil, slhdsa.NewMessage(sighash4[:]), ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := signer.Sender(ghostRescueTx(tx4, GhostSchemeSLHDSARescue, pk, otherSLHSig)); !errors.Is(err, ErrGhostAccountSignature) {
+		t.Errorf("0x0004 signed by a key that is not its SLH-DSA half: %v, want %v", err, ErrGhostAccountSignature)
+	}
+	// The untouched transactions verify.
+	for name, tx := range map[string]*Transaction{"0x0003": tx3, "0x0004": tx4} {
+		if _, err := signer.Sender(tx); err != nil {
+			t.Errorf("%s: valid transaction refused: %v", name, err)
+		}
+	}
+}
+
+// TestGhostRescueRefusesWrongLengths checks that a rescue scheme takes only
+// its exact lengths, a 1,344-byte key and its signature length, in the
+// binary and JSON decoders and the signer, before any verification.
+func TestGhostRescueRefusesWrongLengths(t *testing.T) {
+	signer := ghostTestSigner()
+	key := bytes.Repeat([]byte{0x5a}, GhostRescuePublicKeySize)
+	mlSig := bytes.Repeat([]byte{0xa5}, GhostMLDSA44SignatureSize)
+	slhSig := bytes.Repeat([]byte{0xa5}, GhostSLHDSASignatureSize)
+	base := NewTx(ghostTestTxData(nil))
+	for _, tc := range []struct {
+		name   string
+		scheme uint16
+		pub    []byte
+		sig    []byte
+	}{
+		{"0x0003 with a 1,312-byte key", GhostSchemeMLDSA44Rescue, key[:GhostMLDSA44PublicKeySize], mlSig},
+		{"0x0003 with a 32-byte key", GhostSchemeMLDSA44Rescue, key[:GhostSLHDSAPublicKeySize], mlSig},
+		{"0x0003 with a 1,343-byte key", GhostSchemeMLDSA44Rescue, key[:GhostRescuePublicKeySize-1], mlSig},
+		{"0x0003 with a 1,345-byte key", GhostSchemeMLDSA44Rescue, append(common.CopyBytes(key), 0), mlSig},
+		{"0x0003 with a 7,856-byte signature", GhostSchemeMLDSA44Rescue, key, slhSig},
+		{"0x0003 with a signature one byte short", GhostSchemeMLDSA44Rescue, key, mlSig[:GhostMLDSA44SignatureSize-1]},
+		{"0x0003 with a signature one byte long", GhostSchemeMLDSA44Rescue, key, append(common.CopyBytes(mlSig), 0)},
+		{"0x0004 with a 1,312-byte key", GhostSchemeSLHDSARescue, key[:GhostMLDSA44PublicKeySize], slhSig},
+		{"0x0004 with a 32-byte key", GhostSchemeSLHDSARescue, key[:GhostSLHDSAPublicKeySize], slhSig},
+		{"0x0004 with a 1,343-byte key", GhostSchemeSLHDSARescue, key[:GhostRescuePublicKeySize-1], slhSig},
+		{"0x0004 with a 1,345-byte key", GhostSchemeSLHDSARescue, append(common.CopyBytes(key), 0), slhSig},
+		{"0x0004 with a 2,420-byte signature", GhostSchemeSLHDSARescue, key, mlSig},
+		{"0x0004 with a signature one byte short", GhostSchemeSLHDSARescue, key, slhSig[:GhostSLHDSASignatureSize-1]},
+		{"0x0004 with a signature one byte long", GhostSchemeSLHDSARescue, key, append(common.CopyBytes(slhSig), 0)},
+	} {
+		bad := ghostRescueTx(base, tc.scheme, tc.pub, tc.sig)
+		enc, err := bad.MarshalBinary()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var dec Transaction
+		if err := dec.UnmarshalBinary(enc); !errors.Is(err, ErrGhostAccountLength) {
+			t.Errorf("%s: decoding error %v, want %v", tc.name, err, ErrGhostAccountLength)
+		}
+		js, err := json.Marshal(bad)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(js, &dec); !errors.Is(err, ErrGhostAccountLength) {
+			t.Errorf("%s: JSON decoding error %v, want %v", tc.name, err, ErrGhostAccountLength)
+		}
+		if _, err := signer.Sender(bad); !errors.Is(err, ErrGhostAccountLength) || errors.Is(err, ErrInvalidSig) {
+			t.Errorf("%s: sender error %v, want %v before any verification", tc.name, err, ErrGhostAccountLength)
+		}
+		if _, err := GhostAccountAddress(signer, bad); !errors.Is(err, ErrGhostAccountLength) {
+			t.Errorf("%s: address error %v, want %v", tc.name, err, ErrGhostAccountLength)
+		}
+	}
+	// The exact lengths pass the shape checks and reach the verifier.
+	for _, tc := range []struct {
+		scheme uint16
+		sig    []byte
+	}{{GhostSchemeMLDSA44Rescue, mlSig}, {GhostSchemeSLHDSARescue, slhSig}} {
+		if _, err := signer.Sender(ghostRescueTx(base, tc.scheme, key, tc.sig)); !errors.Is(err, ErrGhostAccountSignature) {
+			t.Errorf("scheme %#04x with its exact lengths: %v, want %v", tc.scheme, err, ErrGhostAccountSignature)
+		}
+	}
+	// The signing helpers refuse a partner key of the wrong length.
+	mlKey, slhKey, pk := ghostTestRescueKeys(t, 1)
+	if _, err := SignGhostAccountTxRescue(signer, mlKey, pk, ghostTestTxData(nil)); !errors.Is(err, ErrGhostAccountLength) {
+		t.Errorf("signing 0x0003 with a 1,344-byte SLH-DSA key: %v, want %v", err, ErrGhostAccountLength)
+	}
+	if _, err := SignGhostAccountTxRescueSLHDSA(signer, pk, slhKey, ghostTestTxData(nil)); !errors.Is(err, ErrGhostAccountLength) {
+		t.Errorf("signing 0x0004 with a 1,344-byte ML-DSA-44 key: %v, want %v", err, ErrGhostAccountLength)
+	}
+}
+
+// TestGhostRescueRefusesUnassignedSchemes checks that the IDs after the
+// rescue schemes stay unassigned: 0x0005 and 0xffff with the lengths of a
+// rescue scheme are refused for their scheme.
+func TestGhostRescueRefusesUnassignedSchemes(t *testing.T) {
+	signer := ghostTestSigner()
+	key := bytes.Repeat([]byte{0x5a}, GhostRescuePublicKeySize)
+	base := NewTx(ghostTestTxData(nil))
+	for _, scheme := range []uint16{0x0005, 0xffff} {
+		for _, sigSize := range []int{GhostMLDSA44SignatureSize, GhostSLHDSASignatureSize} {
+			bad := ghostRescueTx(base, scheme, key, bytes.Repeat([]byte{0xa5}, sigSize))
+			enc, err := bad.MarshalBinary()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var dec Transaction
+			if err := dec.UnmarshalBinary(enc); !errors.Is(err, ErrGhostAccountScheme) {
+				t.Errorf("scheme %#04x, %d-byte signature: decoding error %v, want %v", scheme, sigSize, err, ErrGhostAccountScheme)
+			}
+			js, err := json.Marshal(bad)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(js, &dec); !errors.Is(err, ErrGhostAccountScheme) {
+				t.Errorf("scheme %#04x, %d-byte signature: JSON decoding error %v, want %v", scheme, sigSize, err, ErrGhostAccountScheme)
+			}
+			if _, err := signer.Sender(bad); !errors.Is(err, ErrGhostAccountScheme) || errors.Is(err, ErrInvalidSig) {
+				t.Errorf("scheme %#04x, %d-byte signature: sender error %v, want %v", scheme, sigSize, err, ErrGhostAccountScheme)
+			}
+			if _, err := GhostAccountAddress(signer, bad); !errors.Is(err, ErrGhostAccountScheme) {
+				t.Errorf("scheme %#04x, %d-byte signature: address error %v, want %v", scheme, sigSize, err, ErrGhostAccountScheme)
+			}
+		}
+	}
+	// ghostVerify itself knows no other scheme.
+	for _, scheme := range []uint16{0x0000, 0x0005, 0xffff} {
+		if err := ghostVerify(scheme, key, common.Hash{}, make([]byte, GhostSLHDSASignatureSize)); !errors.Is(err, ErrGhostAccountScheme) {
+			t.Errorf("verifying scheme %#04x: %v, want %v", scheme, err, ErrGhostAccountScheme)
 		}
 	}
 }

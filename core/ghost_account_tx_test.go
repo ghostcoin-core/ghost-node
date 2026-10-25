@@ -99,7 +99,7 @@ func TestGhostAccountTxVerifyGasSet(t *testing.T) {
 	if ghost.AccountTxVerifyGasMLDSA44%1000 != 0 || ghost.AccountTxVerifyGasSLHDSA%1000 != 0 {
 		t.Fatal("the verification gas is not a multiple of 1,000")
 	}
-	for _, scheme := range []uint16{0x0000, 0x0003, 0xffff} {
+	for _, scheme := range []uint16{0x0000, 0x0005, 0xffff} {
 		if ghost.AccountTxVerifyGas(scheme) != 0 {
 			t.Errorf("scheme %#04x has verification gas", scheme)
 		}
@@ -374,5 +374,291 @@ func TestGhostAccountTxSLHDSABlock(t *testing.T) {
 	bad := GenerateBadBlock(chain2.Genesis(), engine, types.Transactions{transferTx(genesisHash, blocks[0].BaseFee(), intrinsic-1)}, config)
 	if _, err := chain2.InsertChain(types.Blocks{bad}); !errors.Is(err, ErrIntrinsicGas) {
 		t.Errorf("gas one below the intrinsic gas: import error %v, want %v", err, ErrIntrinsicGas)
+	}
+}
+
+// The intrinsic gas the rescue schemes take on top of the type 0x02
+// intrinsic gas (spec 09, section 8.1): 16 * (2 + 1,344 + 2,420) + 3,000 for
+// 0x0003 and 16 * (2 + 1,344 + 7,856) + 12,000 for 0x0004.
+const (
+	ghostRescueExtraGas       uint64 = 63_256
+	ghostRescueSLHDSAExtraGas uint64 = 159_232
+)
+
+// ghostRescueFeeCap is the fee cap of the rescue test transactions, well
+// above the base fee of the test blocks.
+var ghostRescueFeeCap = big.NewInt(10_000_000_000)
+
+// ghostRescueBlockKeys returns the ML-DSA-44 and SLH-DSA-SHAKE-128s keys of
+// a rescue-key account made from seed, and the account's public key.
+func ghostRescueBlockKeys(t *testing.T, seed byte) (*mldsa44.PrivateKey, *slhdsa.PrivateKey, []byte) {
+	t.Helper()
+	mlKey := ghostBlockKey(seed)
+	_, slhKey, err := slhdsa.GenerateKey(bytes.NewReader(bytes.Repeat([]byte{seed}, 48)), slhdsa.SHAKE_128s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slhPub, err := slhKey.PublicKey().MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return mlKey, &slhKey, types.GhostRescuePublicKey(mlKey.Public().(*mldsa44.PublicKey).Bytes(), slhPub)
+}
+
+// ghostRescueTransfer is a transfer of value from a rescue account.
+func ghostRescueTransfer(config *goethereum.ChainConfig, nonce, gas uint64, to common.Address, value int64) *types.GhostAccountTx {
+	return &types.GhostAccountTx{
+		ChainID:   config.ChainID,
+		Nonce:     nonce,
+		GasTipCap: big.NewInt(1),
+		GasFeeCap: ghostRescueFeeCap,
+		Gas:       gas,
+		To:        &to,
+		Value:     big.NewInt(value),
+	}
+}
+
+// ghostSignRescue signs txdata as scheme 0x0003 with the ML-DSA-44 half of
+// the account of pk.
+func ghostSignRescue(t *testing.T, signer types.Signer, mlKey *mldsa44.PrivateKey, pk []byte, txdata *types.GhostAccountTx) *types.Transaction {
+	t.Helper()
+	tx, err := types.SignGhostAccountTxRescue(signer, mlKey, pk[types.GhostMLDSA44PublicKeySize:], txdata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tx
+}
+
+// ghostSignRescueSLHDSA signs txdata as scheme 0x0004 with the SLH-DSA half
+// of the account of pk.
+func ghostSignRescueSLHDSA(t *testing.T, signer types.Signer, slhKey *slhdsa.PrivateKey, pk []byte, txdata *types.GhostAccountTx) *types.Transaction {
+	t.Helper()
+	tx, err := types.SignGhostAccountTxRescueSLHDSA(signer, pk[:types.GhostMLDSA44PublicKeySize], slhKey, txdata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tx
+}
+
+// TestGhostRescueTxBlock checks rescue-key accounts in a block: a 0x0003 and
+// a 0x0004 transfer of one account share its nonce and balance and bill the
+// pinned intrinsic gas, and a 0x0004 transfer of an account whose ML-DSA-44
+// half is 1,312 zero bytes, a key no one can sign for, moves funds: 0x0004
+// never depends on the ML-DSA-44 half.
+func TestGhostRescueTxBlock(t *testing.T) {
+	if h, ok := ghost.MLRescueHeight(); ok {
+		t.Fatalf("ML_RESCUE_HEIGHT is set to %d", h)
+	}
+	mlKey, slhKey, pk := ghostRescueBlockKeys(t, 3)
+	_, zeroSLHKey, zeroSLHPk := ghostRescueBlockKeys(t, 4)
+	zeroPk := types.GhostRescuePublicKey(make([]byte, types.GhostMLDSA44PublicKeySize), zeroSLHPk[types.GhostMLDSA44PublicKeySize:])
+	const initial = 1_000_000_000_000_000_000
+	var (
+		config    = ghostAccountTestConfig()
+		from      = types.GhostAccountAddressOf(types.GhostSchemeMLDSA44Rescue, pk)
+		zeroFrom  = types.GhostAccountAddressOf(types.GhostSchemeSLHDSARescue, zeroPk)
+		recipient = common.HexToAddress("0x00000000000000000000000000000000000000bb")
+		gspec     = &genesisT.Genesis{
+			Config: config,
+			Alloc: genesisT.GenesisAlloc{
+				from:     {Balance: big.NewInt(initial)},
+				zeroFrom: {Balance: big.NewInt(initial)},
+			},
+		}
+		engine = beacon.New(ethash.NewFaker())
+		gas3   = vars.TxGas + ghostRescueExtraGas
+		gas4   = vars.TxGas + ghostRescueSLHDSAExtraGas
+	)
+	if from == zeroFrom || from == types.GhostAccountAddressOf(types.GhostSchemeMLDSA44, pk[:types.GhostMLDSA44PublicKeySize]) {
+		t.Fatal("the test accounts are not distinct")
+	}
+	var genesisHash common.Hash
+	var txs []*types.Transaction
+	_, blocks, receipts := GenerateChainWithGenesis(gspec, engine, 1, func(i int, b *BlockGen) {
+		b.SetPoS()
+		genesisHash = b.PrevBlock(-1).Hash()
+		signer := types.NewGhostAccountSigner(types.LatestSigner(config), genesisHash)
+		txs = []*types.Transaction{
+			ghostSignRescue(t, signer, mlKey, pk, ghostRescueTransfer(config, 0, gas3, recipient, 1000)),
+			ghostSignRescueSLHDSA(t, signer, slhKey, pk, ghostRescueTransfer(config, 1, gas4, recipient, 2000)),
+			ghostSignRescueSLHDSA(t, signer, zeroSLHKey, zeroPk, ghostRescueTransfer(config, 0, gas4, recipient, 4000)),
+		}
+		for _, tx := range txs {
+			b.AddTx(tx)
+		}
+	})
+	// The pinned intrinsic gas, billed exactly.
+	if ghostRescueExtraGas != 16*(2+types.GhostRescuePublicKeySize+types.GhostMLDSA44SignatureSize)+ghost.AccountTxVerifyGasMLDSA44 ||
+		ghostRescueSLHDSAExtraGas != 16*(2+types.GhostRescuePublicKeySize+types.GhostSLHDSASignatureSize)+ghost.AccountTxVerifyGasSLHDSA {
+		t.Fatal("the pinned rescue gas is not the formula of spec 09, section 8.1")
+	}
+	for i, want := range []uint64{ghostRescueExtraGas, ghostRescueSLHDSAExtraGas, ghostRescueSLHDSAExtraGas} {
+		if got, err := GhostAccountExtraIntrinsicGas(txs[i]); err != nil || got != want {
+			t.Fatalf("transaction %d: extra intrinsic gas %d %v, want %d", i, got, err, want)
+		}
+	}
+	for i, want := range []uint64{gas3, gas4, gas4} {
+		if got := receipts[0][i].GasUsed; got != want {
+			t.Fatalf("transaction %d: gas used %d, want %d", i, got, want)
+		}
+	}
+
+	chain, err := NewBlockChain(rawdb.NewMemoryDatabase(), nil, gspec, nil, engine, vm.Config{}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer chain.Stop()
+	if n, err := chain.InsertChain(blocks); err != nil {
+		t.Fatalf("block %d not imported: %v", n, err)
+	}
+	statedb, err := chain.State()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := statedb.GetBalance(recipient).Uint64(); got != 7000 {
+		t.Errorf("recipient balance %d, want 7000", got)
+	}
+	price := new(big.Int).Add(blocks[0].BaseFee(), big.NewInt(1))
+	spent := func(gas uint64, value int64) *big.Int {
+		return new(big.Int).Add(new(big.Int).Mul(new(big.Int).SetUint64(gas), price), big.NewInt(value))
+	}
+	wantFrom := new(big.Int).Sub(big.NewInt(initial), spent(gas3, 1000))
+	wantFrom.Sub(wantFrom, spent(gas4, 2000))
+	if got := statedb.GetBalance(from).ToBig(); got.Cmp(wantFrom) != 0 {
+		t.Errorf("rescue account balance %v, want %v: both schemes pay from one balance", got, wantFrom)
+	}
+	if got := statedb.GetNonce(from); got != 2 {
+		t.Errorf("rescue account nonce %d, want 2: both schemes share one nonce", got)
+	}
+	wantZero := new(big.Int).Sub(big.NewInt(initial), spent(gas4, 4000))
+	if got := statedb.GetBalance(zeroFrom).ToBig(); got.Cmp(wantZero) != 0 {
+		t.Errorf("zero ML-DSA half account balance %v, want %v", got, wantZero)
+	}
+	if got := statedb.GetNonce(zeroFrom); got != 1 {
+		t.Errorf("zero ML-DSA half account nonce %d, want 1", got)
+	}
+	for i, r := range chain.GetReceiptsByHash(blocks[0].Hash()) {
+		if r.Type != types.GhostAccountTxType || r.Status != types.ReceiptStatusSuccessful {
+			t.Errorf("receipt %d: type %#x status %d", i, r.Type, r.Status)
+		}
+	}
+	// One gas below the pinned intrinsic gas is refused.
+	for _, tc := range []struct {
+		name string
+		tx   *types.Transaction
+	}{
+		{"0x0003", ghostSignRescue(t, types.NewGhostAccountSigner(types.LatestSigner(config), genesisHash), mlKey, pk, ghostRescueTransfer(config, 0, gas3-1, recipient, 1000))},
+		{"0x0004", ghostSignRescueSLHDSA(t, types.NewGhostAccountSigner(types.LatestSigner(config), genesisHash), slhKey, pk, ghostRescueTransfer(config, 0, gas4-1, recipient, 1000))},
+	} {
+		chain, err := NewBlockChain(rawdb.NewMemoryDatabase(), nil, gspec, nil, engine, vm.Config{}, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bad := GenerateBadBlock(chain.Genesis(), engine, types.Transactions{tc.tx}, config)
+		if _, err := chain.InsertChain(types.Blocks{bad}); !errors.Is(err, ErrIntrinsicGas) {
+			t.Errorf("%s one gas below the intrinsic gas: import error %v, want %v", tc.name, err, ErrIntrinsicGas)
+		}
+		chain.Stop()
+	}
+}
+
+// TestGhostRescueSunsetBlock checks ML_RESCUE_HEIGHT H in blocks: a block of
+// height H-1 holding a 0x0003 transaction is valid, blocks at H and H+1
+// holding one are invalid, and 0x0004 transactions of the same account stay
+// valid at H and after.
+func TestGhostRescueSunsetBlock(t *testing.T) {
+	const height = 3
+	h := uint64(height)
+	defer ghost.SetMLRescueHeight(&h)()
+
+	mlKey, slhKey, pk := ghostRescueBlockKeys(t, 5)
+	var (
+		config    = ghostAccountTestConfig()
+		from      = types.GhostAccountAddressOf(types.GhostSchemeMLDSA44Rescue, pk)
+		recipient = common.HexToAddress("0x00000000000000000000000000000000000000bb")
+		gspec     = &genesisT.Genesis{
+			Config: config,
+			Alloc: genesisT.GenesisAlloc{
+				from: {Balance: big.NewInt(1_000_000_000_000_000_000)},
+			},
+		}
+		engine = beacon.New(ethash.NewFaker())
+		gas3   = vars.TxGas + ghostRescueExtraGas
+		gas4   = vars.TxGas + ghostRescueSLHDSAExtraGas
+	)
+	var signer types.Signer
+	// Block 1 is empty, block H-1 holds 0x0003 (nonce 0), blocks H and H+1
+	// hold 0x0004 (nonces 1 and 2).
+	_, blocks, _ := GenerateChainWithGenesis(gspec, engine, height+1, func(i int, b *BlockGen) {
+		b.SetPoS()
+		if signer == nil {
+			signer = types.NewGhostAccountSigner(types.LatestSigner(config), b.PrevBlock(-1).Hash())
+		}
+		switch b.Number().Uint64() {
+		case height - 1:
+			b.AddTx(ghostSignRescue(t, signer, mlKey, pk, ghostRescueTransfer(config, 0, gas3, recipient, 1000)))
+		case height:
+			b.AddTx(ghostSignRescueSLHDSA(t, signer, slhKey, pk, ghostRescueTransfer(config, 1, gas4, recipient, 1000)))
+		case height + 1:
+			b.AddTx(ghostSignRescueSLHDSA(t, signer, slhKey, pk, ghostRescueTransfer(config, 2, gas4, recipient, 1000)))
+		}
+	})
+	if blocks[height-2].NumberU64() != height-1 || len(blocks[height-2].Transactions()) != 1 {
+		t.Fatalf("block %d does not hold the 0x0003 transaction", height-1)
+	}
+
+	chain, err := NewBlockChain(rawdb.NewMemoryDatabase(), nil, gspec, nil, engine, vm.Config{}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer chain.Stop()
+	if n, err := chain.InsertChain(blocks); err != nil {
+		t.Fatalf("block %d not imported: %v", n+1, err)
+	}
+	statedb, err := chain.State()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := statedb.GetNonce(from); got != 3 {
+		t.Errorf("sender nonce %d, want 3", got)
+	}
+	if got := statedb.GetBalance(recipient).Uint64(); got != 3000 {
+		t.Errorf("recipient balance %d, want 3000", got)
+	}
+
+	// A 0x0003 transaction in a block at H, and at H+1, makes it invalid.
+	for _, number := range []uint64{height, height + 1} {
+		parents := blocks[:number-1]
+		nonce := number - 2 // the next nonce after the parent's transactions
+		tx := ghostSignRescue(t, signer, mlKey, pk, ghostRescueTransfer(config, nonce, gas3, recipient, 1000))
+		chain, err := NewBlockChain(rawdb.NewMemoryDatabase(), nil, gspec, nil, engine, vm.Config{}, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n, err := chain.InsertChain(parents); err != nil {
+			t.Fatalf("parent block %d not imported: %v", n, err)
+		}
+		parent := parents[len(parents)-1]
+		bad := GenerateBadBlock(parent, engine, types.Transactions{tx}, config)
+		if bad.NumberU64() != number {
+			t.Fatalf("bad block at %d, want %d", bad.NumberU64(), number)
+		}
+		if _, err := chain.InsertChain(types.Blocks{bad}); !errors.Is(err, ErrGhostAccountSunset) {
+			t.Errorf("0x0003 in block %d (H = %d): import error %v, want %v", number, height, err, ErrGhostAccountSunset)
+		}
+		if chain.CurrentBlock().Number.Uint64() != parent.NumberU64() {
+			t.Errorf("block %d: the invalid block became the head", number)
+		}
+		// The same transaction applies one block before H.
+		statedb, _ := chain.State()
+		header := types.CopyHeader(bad.Header())
+		header.Number = new(big.Int).SetUint64(height - 1)
+		header.GasUsed = 0
+		if number == height {
+			if _, err := ApplyTransaction(config, chain, &header.Coinbase, new(GasPool).AddGas(header.GasLimit), statedb, header, tx, &header.GasUsed, vm.Config{}); err != nil {
+				t.Errorf("0x0003 in a block of height %d: %v", height-1, err)
+			}
+		}
+		chain.Stop()
 	}
 }

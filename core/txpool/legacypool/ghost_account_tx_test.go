@@ -34,6 +34,7 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/params/ghost"
 	"github.com/ethereum/go-ethereum/params/vars"
+	"github.com/ethereum/go-ethereum/trie"
 	"github.com/holiman/uint256"
 )
 
@@ -164,7 +165,7 @@ func TestGhostAccountTxPool(t *testing.T) {
 		tx   ghostPoolTx
 		want error
 	}{
-		{"unknown scheme", key, ghostPoolTx{nonce: 1, gas: txGas, badSig: true, scheme: 0x0003}, types.ErrGhostAccountScheme},
+		{"unknown scheme", key, ghostPoolTx{nonce: 1, gas: txGas, badSig: true, scheme: 0x0005}, types.ErrGhostAccountScheme},
 		{"lengths of another scheme", key, ghostPoolTx{nonce: 1, gas: txGas, badSig: true, scheme: types.GhostSchemeSLHDSA}, types.ErrGhostAccountLength},
 		{"wrong chain ID", key, ghostPoolTx{nonce: 1, gas: txGas, badSig: true, chainID: big.NewInt(999)}, types.ErrInvalidChainId},
 		{"intrinsic gas too low", key, ghostPoolTx{nonce: 1, gas: txGas - 1, badSig: true}, core.ErrIntrinsicGas},
@@ -353,5 +354,271 @@ func TestGhostAccountTxPoolWithoutGenesis(t *testing.T) {
 	}
 	if err := pool.addRemoteSync(tx); errors.Is(err, txpool.ErrAlreadyKnown) {
 		t.Error("the refused transaction was kept")
+	}
+}
+
+// ghostRescueAccount is a rescue-key account of the pool tests.
+type ghostRescueAccount struct {
+	mlKey  *mldsa44.PrivateKey
+	slhKey *slhdsa.PrivateKey
+	pk     []byte
+	from   common.Address
+}
+
+// newGhostRescueAccount returns the rescue-key account made from seed,
+// funded in the pool's state.
+func newGhostRescueAccount(t *testing.T, pool *LegacyPool, seed byte) *ghostRescueAccount {
+	t.Helper()
+	mlKey, mlPub, _ := testAccount(seed)
+	_, slhKey, err := slhdsa.GenerateKey(bytes.NewReader(bytes.Repeat([]byte{seed}, 48)), slhdsa.SHAKE_128s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slhPub, err := slhKey.PublicKey().MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pk := types.GhostRescuePublicKey(mlPub, slhPub)
+	acc := &ghostRescueAccount{mlKey: mlKey, slhKey: &slhKey, pk: pk, from: types.GhostAccountAddressOf(types.GhostSchemeMLDSA44Rescue, pk)}
+	testAddBalance(pool, acc.from, big.NewInt(1_000_000_000_000_000_000))
+	return acc
+}
+
+// tx signs a transfer of the account under scheme 0x0003 or 0x0004, at the
+// scheme's intrinsic gas, with a fee cap and tip of price.
+func (a *ghostRescueAccount) tx(t *testing.T, genesis common.Hash, scheme uint16, nonce uint64, price int64) *types.Transaction {
+	t.Helper()
+	chainID := params.TestChainConfig.GetChainID()
+	signer := types.NewGhostAccountSigner(types.LatestSignerForChainID(chainID), genesis)
+	to := common.HexToAddress("0x00000000000000000000000000000000000000bb")
+	sigSize := types.GhostMLDSA44SignatureSize
+	if scheme == types.GhostSchemeSLHDSARescue {
+		sigSize = types.GhostSLHDSASignatureSize
+	}
+	txdata := &types.GhostAccountTx{
+		ChainID:   chainID,
+		Nonce:     nonce,
+		GasTipCap: big.NewInt(price),
+		GasFeeCap: big.NewInt(price),
+		Gas:       vars.TxGas + ghost.AccountTxSigByteGas*uint64(2+types.GhostRescuePublicKeySize+sigSize) + ghost.AccountTxVerifyGas(scheme),
+		To:        &to,
+		Value:     big.NewInt(100),
+	}
+	var (
+		tx  *types.Transaction
+		err error
+	)
+	switch scheme {
+	case types.GhostSchemeMLDSA44Rescue:
+		tx, err = types.SignGhostAccountTxRescue(signer, a.mlKey, a.pk[types.GhostMLDSA44PublicKeySize:], txdata)
+	case types.GhostSchemeSLHDSARescue:
+		tx, err = types.SignGhostAccountTxRescueSLHDSA(signer, a.pk[:types.GhostMLDSA44PublicKeySize], a.slhKey, txdata)
+	default:
+		t.Fatalf("scheme %#04x is no rescue scheme", scheme)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tx
+}
+
+// ghostPoolHead is a head of the given number for a pool reset.
+func ghostPoolHead(number uint64, parent common.Hash, extra string) *types.Header {
+	return &types.Header{
+		ParentHash: parent,
+		Number:     new(big.Int).SetUint64(number),
+		GasLimit:   10_000_000,
+		BaseFee:    big.NewInt(1),
+		Extra:      []byte(extra),
+	}
+}
+
+// ghostReorgChain is the test chain with the blocks of a reorganisation.
+type ghostReorgChain struct {
+	*testBlockChain
+	blocks map[common.Hash]*types.Block
+}
+
+func (c *ghostReorgChain) GetBlock(hash common.Hash, number uint64) *types.Block {
+	if b := c.blocks[hash]; b != nil && b.NumberU64() == number {
+		return b
+	}
+	return nil
+}
+
+// TestGhostPoolRescueSunset checks ML_RESCUE_HEIGHT H in the pool: a 0x0003
+// transaction is accepted while the next block is below H and refused, with
+// no signature check, once it is at H or after; the pending and queued 0x0003
+// transactions are dropped when the head reaches H-1, those a
+// reorganisation puts back included; 0x0004 transactions stay, and a 0x0004
+// transaction replaces a 0x0003 one at its nonce before H.
+func TestGhostPoolRescueSunset(t *testing.T) {
+	t.Run("reorganisation", testGhostPoolRescueSunsetReorg)
+
+	const height = 10
+	h := uint64(height)
+	defer ghost.SetMLRescueHeight(&h)()
+
+	pool, genesis := setupGhostAccountPool(t)
+	defer pool.Close()
+	counter := newCountingVerify(true)
+	useVerifier(pool, counter, ghost.SigFailureCacheSize)
+	a := newGhostRescueAccount(t, pool, 0x31)
+	b := newGhostRescueAccount(t, pool, 0x32)
+	const (
+		mlRescue  = types.GhostSchemeMLDSA44Rescue
+		slhRescue = types.GhostSchemeSLHDSARescue
+	)
+
+	// Head 0: a 0x0003 and a 0x0004 transaction of one account are pending.
+	a0 := a.tx(t, genesis, mlRescue, 0, 1)
+	a1 := a.tx(t, genesis, slhRescue, 1, 1)
+	for _, tx := range []*types.Transaction{a0, a1} {
+		if err := pool.addRemoteSync(tx); err != nil {
+			t.Fatalf("nonce %d refused: %v", tx.Nonce(), err)
+		}
+	}
+	// A 0x0004 transaction replaces a 0x0003 one at its nonce.
+	b0 := b.tx(t, genesis, mlRescue, 0, 1)
+	if err := pool.addRemoteSync(b0); err != nil {
+		t.Fatalf("0x0003 refused: %v", err)
+	}
+	b0r := b.tx(t, genesis, slhRescue, 0, 2)
+	if err := pool.addRemoteSync(b0r); err != nil {
+		t.Fatalf("0x0004 replacement refused: %v", err)
+	}
+	if pool.Get(b0.Hash()) != nil || pool.Get(b0r.Hash()) == nil {
+		t.Fatal("the 0x0004 transaction did not replace the 0x0003 one")
+	}
+
+	// Head H-2, next block H-1: 0x0003 is still accepted, and nothing is
+	// dropped. Nonce 3 is queued behind the gap at nonce 2.
+	<-pool.requestReset(nil, ghostPoolHead(height-2, common.Hash{}, ""))
+	a3 := a.tx(t, genesis, mlRescue, 3, 1)
+	if err := pool.addRemoteSync(a3); err != nil {
+		t.Fatalf("0x0003 with the next block at H-1 refused: %v", err)
+	}
+	for _, tx := range []*types.Transaction{a0, a1, a3, b0r} {
+		if pool.Get(tx.Hash()) == nil {
+			t.Fatalf("nonce %d dropped before the sunset", tx.Nonce())
+		}
+	}
+	if pending, queued := pool.Stats(); pending != 3 || queued != 1 {
+		t.Fatalf("pending %d queued %d, want 3 and 1", pending, queued)
+	}
+
+	// Head H-1, next block H: the pending and the queued 0x0003
+	// transactions are dropped, the 0x0004 ones stay.
+	<-pool.requestReset(nil, ghostPoolHead(height-1, common.Hash{}, ""))
+	for _, tx := range []*types.Transaction{a0, a3} {
+		if pool.Get(tx.Hash()) != nil {
+			t.Errorf("0x0003 nonce %d still in the pool with the next block at H", tx.Nonce())
+		}
+	}
+	for _, tx := range []*types.Transaction{a1, b0r} {
+		if pool.Get(tx.Hash()) == nil {
+			t.Errorf("0x0004 nonce %d dropped at the sunset", tx.Nonce())
+		}
+	}
+	if err := validatePoolInternals(pool); err != nil {
+		t.Fatal(err)
+	}
+
+	// Next block H, then H+1: 0x0003 is refused before any signature check,
+	// a bad signature included; 0x0004 is accepted.
+	for _, head := range []uint64{height - 1, height} {
+		<-pool.requestReset(nil, ghostPoolHead(head, common.Hash{}, ""))
+		calls, _, _ := counter.stats()
+		good := a.tx(t, genesis, mlRescue, 0, 1)
+		_, pk, sig, _ := good.GhostAccountAuth()
+		sig[0] ^= 1
+		for name, tx := range map[string]*types.Transaction{"valid": good, "bad signature": withGhostAuth(good, good.Gas(), mlRescue, pk, sig)} {
+			err := pool.addRemoteSync(tx)
+			if !errors.Is(err, core.ErrGhostAccountSunset) || errors.Is(err, types.ErrInvalidSig) {
+				t.Errorf("next block %d, %s 0x0003: error %v, want %v", head+1, name, err, core.ErrGhostAccountSunset)
+			}
+			if pool.Get(tx.Hash()) != nil {
+				t.Errorf("next block %d, %s 0x0003: in the pool", head+1, name)
+			}
+		}
+		if after, _, _ := counter.stats(); after != calls {
+			t.Errorf("next block %d: %d signatures verified for refused 0x0003 transactions, want none", head+1, after-calls)
+		}
+	}
+	a0slh := a.tx(t, genesis, slhRescue, 0, 1)
+	if err := pool.addRemoteSync(a0slh); err != nil {
+		t.Fatalf("0x0004 after H refused: %v", err)
+	}
+	if err := validatePoolInternals(pool); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// testGhostPoolRescueSunsetReorg is the reorganisation part of
+// TestGhostPoolRescueSunset: a 0x0003 transaction of a block a
+// reorganisation drops goes back into the pool, unless the new head is at
+// H-1 or above, and a pending 0x0003 transaction is dropped by the same
+// reorganisation.
+func testGhostPoolRescueSunsetReorg(t *testing.T) {
+	const height = 10
+	for _, sunset := range []bool{false, true} {
+		var restore func()
+		if sunset {
+			h := uint64(height)
+			restore = ghost.SetMLRescueHeight(&h)
+		} else {
+			restore = ghost.SetMLRescueHeight(nil)
+		}
+		statedb, _ := state.New(types.EmptyRootHash, state.NewDatabase(rawdb.NewMemoryDatabase()), nil)
+		chain := &ghostReorgChain{newTestBlockChain(params.TestChainConfig, 10_000_000, statedb, new(event.Feed)), map[common.Hash]*types.Block{}}
+		pool := New(testTxPoolConfig, chain)
+		if err := pool.Init(testTxPoolConfig.PriceLimit, chain.CurrentBlock(), makeAddressReserver()); err != nil {
+			t.Fatal(err)
+		}
+		<-pool.initDoneCh
+		genesis := testGenesis.Hash()
+		a := newGhostRescueAccount(t, pool, 0x33)
+		b := newGhostRescueAccount(t, pool, 0x34)
+
+		// The old chain holds a's 0x0003 nonce 0 at H-2; the new chain, from
+		// the same block at H-3, reaches H-1 without it.
+		reorged := a.tx(t, genesis, types.GhostSchemeMLDSA44Rescue, 0, 1)
+		ancestor := types.NewBlock(ghostPoolHead(height-3, common.Hash{}, "ancestor"), nil, nil, nil, trie.NewStackTrie(nil))
+		old := types.NewBlock(ghostPoolHead(height-2, ancestor.Hash(), "old"), []*types.Transaction{reorged}, nil, nil, trie.NewStackTrie(nil))
+		new1 := types.NewBlock(ghostPoolHead(height-2, ancestor.Hash(), "new"), nil, nil, nil, trie.NewStackTrie(nil))
+		new2 := types.NewBlock(ghostPoolHead(height-1, new1.Hash(), "new"), nil, nil, nil, trie.NewStackTrie(nil))
+		for _, blk := range []*types.Block{ancestor, old, new1, new2} {
+			chain.blocks[blk.Hash()] = blk
+		}
+		<-pool.requestReset(nil, old.Header())
+
+		// In the pool at the old head: a's 0x0004 nonce 1, queued behind the
+		// reorged nonce, and b's 0x0003 and 0x0004 nonces 0 and 1.
+		a1 := a.tx(t, genesis, types.GhostSchemeSLHDSARescue, 1, 1)
+		b0 := b.tx(t, genesis, types.GhostSchemeMLDSA44Rescue, 0, 1)
+		b1 := b.tx(t, genesis, types.GhostSchemeSLHDSARescue, 1, 1)
+		for _, tx := range []*types.Transaction{a1, b0, b1} {
+			if err := pool.addRemoteSync(tx); err != nil {
+				t.Fatalf("sunset %v: nonce %d refused: %v", sunset, tx.Nonce(), err)
+			}
+		}
+		<-pool.requestReset(old.Header(), new2.Header())
+
+		if got := pool.Get(reorged.Hash()) != nil; got == sunset {
+			t.Errorf("sunset %v: the reorged 0x0003 transaction in the pool: %v", sunset, got)
+		}
+		if got := pool.Get(b0.Hash()) != nil; got == sunset {
+			t.Errorf("sunset %v: the pending 0x0003 transaction in the pool: %v", sunset, got)
+		}
+		for _, tx := range []*types.Transaction{a1, b1} {
+			if pool.Get(tx.Hash()) == nil {
+				t.Errorf("sunset %v: 0x0004 nonce %d dropped by the reorganisation", sunset, tx.Nonce())
+			}
+		}
+		if err := validatePoolInternals(pool); err != nil {
+			t.Fatalf("sunset %v: %v", sunset, err)
+		}
+		pool.Close()
+		restore()
 	}
 }

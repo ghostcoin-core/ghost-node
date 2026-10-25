@@ -297,6 +297,49 @@ func TestSignatureVerifyPrecompileSchemes(t *testing.T) {
 	}
 }
 
+// TestSignatureVerifyPrecompileRefusesRescueSchemes checks that the rescue
+// schemes 0x0003 and 0x0004, account transaction schemes with verification
+// gas, are refused by the precompile: an input of their exact lengths, with a
+// valid ML-DSA-44 signature in the first half of the key, fails and takes all
+// the gas.
+func TestSignatureVerifyPrecompileRefusesRescueSchemes(t *testing.T) {
+	p := &signatureVerify{}
+	pk, sk := sigTestKey(1)
+	msg := []byte("a message")
+	mlSig := sigTestSign(t, sk, sigTestContext, msg)
+	rescueKey := types.GhostRescuePublicKey(pk.Bytes(), make([]byte, types.GhostSLHDSAPublicKeySize))
+	for _, tc := range []struct {
+		scheme uint16
+		sig    []byte
+	}{
+		{types.GhostSchemeMLDSA44Rescue, mlSig},
+		{types.GhostSchemeSLHDSARescue, make([]byte, types.GhostSLHDSASignatureSize)},
+	} {
+		if ghost.AccountTxVerifyGas(tc.scheme) == 0 {
+			t.Fatalf("scheme %#04x has no verification gas; the test needs a scheme the account transaction accepts", tc.scheme)
+		}
+		if _, _, ok := signatureVerifySizes(tc.scheme); ok {
+			t.Errorf("scheme %#04x: the precompile has sizes for it", tc.scheme)
+		}
+		in := sigVerifyInput(tc.scheme, sigTestContext, rescueKey, tc.sig, msg)
+		if g := p.RequiredGas(in); g != 0 {
+			t.Errorf("scheme %#04x: required gas %d, want 0 (the failure takes all the gas instead)", tc.scheme, g)
+		}
+		ret, left, err := RunPrecompiledContract(p, in, 1_000_000)
+		if !errors.Is(err, ErrSignatureVerifyScheme) || left != 0 || ret != nil {
+			t.Errorf("scheme %#04x: %x, %d gas left, error %v; want a failure with %v and no gas left", tc.scheme, ret, left, err, ErrSignatureVerifyScheme)
+		}
+		const outer = 1_000_000
+		_, ok, left := callThroughContract(t, ghost.InternalNetGenesis().Config, SignatureVerifyAddress, in, outer)
+		if ok {
+			t.Errorf("scheme %#04x: the contract's call succeeds", tc.scheme)
+		}
+		if left > outer/2 {
+			t.Errorf("scheme %#04x: the contract's call leaves %d gas, want at most %d", tc.scheme, left, outer/2)
+		}
+	}
+}
+
 // TestSignatureVerifyPrecompileTxContext is QS-7: a context that begins with
 // "ghost/tx/" fails, so a transaction signature cannot be checked as a
 // message signature; any other context verifies.

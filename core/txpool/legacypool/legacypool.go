@@ -19,6 +19,7 @@ package legacypool
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"math/big"
 	"sort"
@@ -630,10 +631,64 @@ func (pool *LegacyPool) validateTxBasics(tx *types.Transaction, local bool) erro
 	if local {
 		opts.MinTip = new(big.Int)
 	}
+	// Scheme 0x0003 is refused from ML_RESCUE_HEIGHT on: refuse it here,
+	// before any signature work, once the next block is at that height.
+	if pool.rescueSunset() && isRescueMLDSATx(tx) {
+		return fmt.Errorf("%w: next block %d", core.ErrGhostAccountSunset, pool.nextBlockNumber())
+	}
 	if err := txpool.ValidateTransaction(tx, pool.currentHead.Load(), pool.signer, opts); err != nil {
 		return err
 	}
 	return nil
+}
+
+// isRescueMLDSATx reports whether tx is an account transaction of scheme
+// 0x0003, the ML-DSA-44 half of a rescue-key account.
+func isRescueMLDSATx(tx *types.Transaction) bool {
+	scheme, _, _, ok := tx.GhostAccountAuth()
+	return ok && scheme == types.GhostSchemeMLDSA44Rescue
+}
+
+// nextBlockNumber returns the number of the block after the pool's head.
+func (pool *LegacyPool) nextBlockNumber() uint64 {
+	head := pool.currentHead.Load()
+	if head == nil {
+		return 0
+	}
+	return head.Number.Uint64() + 1
+}
+
+// rescueSunset reports whether the next block is at or above
+// ML_RESCUE_HEIGHT, so that it cannot hold a scheme 0x0003 transaction.
+func (pool *LegacyPool) rescueSunset() bool {
+	return pool.currentHead.Load() != nil && ghost.MLRescueSunset(pool.nextBlockNumber())
+}
+
+// dropRescueSunset removes every pending and queued scheme 0x0003
+// transaction once the next block is at or above ML_RESCUE_HEIGHT. Scheme
+// 0x0004 transactions stay.
+//
+// Note, this method assumes the pool lock is held!
+func (pool *LegacyPool) dropRescueSunset() {
+	if !pool.rescueSunset() {
+		return
+	}
+	var drop []common.Hash
+	for _, lists := range []map[common.Address]*list{pool.pending, pool.queue} {
+		for _, txs := range lists {
+			for _, tx := range txs.Flatten() {
+				if isRescueMLDSATx(tx) {
+					drop = append(drop, tx.Hash())
+				}
+			}
+		}
+	}
+	for _, hash := range drop {
+		pool.removeTx(hash, true, true)
+	}
+	if len(drop) > 0 {
+		log.Debug("Dropped account transactions past ML_RESCUE_HEIGHT", "count", len(drop))
+	}
 }
 
 // validateTx checks whether a transaction is valid according to the consensus
@@ -1365,6 +1420,10 @@ func (pool *LegacyPool) runReorg(done chan struct{}, reset *txpoolResetRequest, 
 	if reset != nil {
 		// Reset from the old head to the new, rescheduling any reorged transactions
 		pool.reset(reset.oldHead, reset.newHead)
+
+		// Drop the scheme 0x0003 transactions the next block can no longer
+		// hold, those reinjected by a reorganisation included.
+		pool.dropRescueSunset()
 
 		// Nonces were reset, discard any events that became stale
 		for addr := range events {

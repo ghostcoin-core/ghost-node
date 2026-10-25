@@ -45,11 +45,25 @@ const (
 	// GhostSchemeSLHDSA is SLH-DSA-SHAKE-128s (FIPS 205), pure mode.
 	GhostSchemeSLHDSA uint16 = 0x0002
 
+	// GhostSchemeMLDSA44Rescue is an ML-DSA-44 account with an SLH-DSA
+	// rescue key (spec 09, section 5.1), signed with its ML-DSA-44 half. It
+	// is refused from ML_RESCUE_HEIGHT on.
+	GhostSchemeMLDSA44Rescue uint16 = 0x0003
+
+	// GhostSchemeSLHDSARescue is the same account signed with its
+	// SLH-DSA-SHAKE-128s half, the rescue key. Its sender is derived with
+	// scheme 0x0003, so both IDs name one account.
+	GhostSchemeSLHDSARescue uint16 = 0x0004
+
 	// The key and signature lengths of each scheme.
 	GhostMLDSA44PublicKeySize = 1312
 	GhostMLDSA44SignatureSize = 2420
 	GhostSLHDSAPublicKeySize  = 32
 	GhostSLHDSASignatureSize  = 7856
+
+	// GhostRescuePublicKeySize is the public key length of schemes 0x0003
+	// and 0x0004: the ML-DSA-44 public key followed by the SLH-DSA one.
+	GhostRescuePublicKeySize = GhostMLDSA44PublicKeySize + GhostSLHDSAPublicKeySize
 
 	// GhostAccountAddressTag is the hash tag of the sender's address.
 	GhostAccountAddressTag = "ghost/account-address/v1"
@@ -122,36 +136,61 @@ func ghostSchemeSizes(id uint16) (pubKey, sig int, ok bool) {
 		return GhostMLDSA44PublicKeySize, GhostMLDSA44SignatureSize, true
 	case GhostSchemeSLHDSA:
 		return GhostSLHDSAPublicKeySize, GhostSLHDSASignatureSize, true
+	case GhostSchemeMLDSA44Rescue:
+		return GhostRescuePublicKeySize, GhostMLDSA44SignatureSize, true
+	case GhostSchemeSLHDSARescue:
+		return GhostRescuePublicKeySize, GhostSLHDSASignatureSize, true
 	}
 	return 0, 0, false
 }
 
 // ghostVerify verifies the signature of a sighash under a scheme. The scheme
 // and the lengths of the key and signature must have been checked: a key or
-// signature of another scheme never reaches a verifier.
+// signature of another scheme never reaches a verifier. A rescue-key scheme
+// verifies under its half of the public key only: 0x0003 under the first
+// 1,312 bytes with ML-DSA-44, 0x0004 under the last 32 bytes with SLH-DSA.
 func ghostVerify(scheme uint16, publicKey []byte, sighash common.Hash, sig []byte) error {
-	ctx := []byte(GhostAccountTxContext)
 	switch scheme {
 	case GhostSchemeMLDSA44:
-		var pk mldsa44.PublicKey
-		if err := pk.UnmarshalBinary(publicKey); err != nil {
-			return fmt.Errorf("%w: %v", ErrGhostAccountLength, err)
-		}
-		if !mldsa44.Verify(&pk, sighash[:], ctx, sig) {
-			return ErrGhostAccountSignature
-		}
-		return nil
+		return ghostVerifyMLDSA44(publicKey, sighash, sig)
 	case GhostSchemeSLHDSA:
-		pk := slhdsa.PublicKey{ID: ghostSLHDSAParams}
-		if err := pk.UnmarshalBinary(publicKey); err != nil {
-			return fmt.Errorf("%w: %v", ErrGhostAccountLength, err)
+		return ghostVerifySLHDSA(publicKey, sighash, sig)
+	case GhostSchemeMLDSA44Rescue:
+		if len(publicKey) != GhostRescuePublicKeySize {
+			return ErrGhostAccountLength
 		}
-		if !slhdsa.Verify(&pk, slhdsa.NewMessage(sighash[:]), sig, ctx) {
-			return ErrGhostAccountSignature
+		return ghostVerifyMLDSA44(publicKey[:GhostMLDSA44PublicKeySize], sighash, sig)
+	case GhostSchemeSLHDSARescue:
+		if len(publicKey) != GhostRescuePublicKeySize {
+			return ErrGhostAccountLength
 		}
-		return nil
+		return ghostVerifySLHDSA(publicKey[GhostMLDSA44PublicKeySize:], sighash, sig)
 	}
 	return fmt.Errorf("%w: scheme %#04x", ErrGhostAccountScheme, scheme)
+}
+
+// ghostVerifyMLDSA44 verifies an ML-DSA-44 signature of a sighash.
+func ghostVerifyMLDSA44(publicKey []byte, sighash common.Hash, sig []byte) error {
+	var pk mldsa44.PublicKey
+	if err := pk.UnmarshalBinary(publicKey); err != nil {
+		return fmt.Errorf("%w: %v", ErrGhostAccountLength, err)
+	}
+	if !mldsa44.Verify(&pk, sighash[:], []byte(GhostAccountTxContext), sig) {
+		return ErrGhostAccountSignature
+	}
+	return nil
+}
+
+// ghostVerifySLHDSA verifies an SLH-DSA-SHAKE-128s signature of a sighash.
+func ghostVerifySLHDSA(publicKey []byte, sighash common.Hash, sig []byte) error {
+	pk := slhdsa.PublicKey{ID: ghostSLHDSAParams}
+	if err := pk.UnmarshalBinary(publicKey); err != nil {
+		return fmt.Errorf("%w: %v", ErrGhostAccountLength, err)
+	}
+	if !slhdsa.Verify(&pk, slhdsa.NewMessage(sighash[:]), sig, []byte(GhostAccountTxContext)) {
+		return ErrGhostAccountSignature
+	}
+	return nil
 }
 
 // checkShape checks what can be checked of the transaction alone: a known
@@ -186,8 +225,12 @@ func ghostTaggedHash(tag string, parts ...[]byte) common.Hash {
 
 // GhostAccountAddressOf returns the address of the account of a scheme and a
 // public key: the first 20 bytes of K("ghost/account-address/v1", scheme,
-// public_key). It checks nothing.
+// public_key). It checks nothing. Scheme 0x0004 is derived as scheme 0x0003:
+// both sign for the one account of a rescue public key.
 func GhostAccountAddressOf(scheme uint16, publicKey []byte) common.Address {
+	if scheme == GhostSchemeSLHDSARescue {
+		scheme = GhostSchemeMLDSA44Rescue
+	}
 	id := GhostScheme(scheme)
 	h := ghostTaggedHash(GhostAccountAddressTag, id[:], publicKey)
 	return common.BytesToAddress(h[:common.AddressLength])
@@ -424,6 +467,53 @@ func SignGhostAccountTxSLHDSA(signer Signer, key *slhdsa.PrivateKey, txdata *Gho
 	}
 	return signGhostAccountTx(signer, GhostSchemeSLHDSA, pub, txdata, func(sighash []byte) ([]byte, error) {
 		return slhdsa.SignRandomized(key, nil, slhdsa.NewMessage(sighash), []byte(GhostAccountTxContext))
+	})
+}
+
+// GhostRescuePublicKey returns the public key of a rescue-key account,
+// schemes 0x0003 and 0x0004: the ML-DSA-44 public key followed by the
+// SLH-DSA-SHAKE-128s one. It checks nothing.
+func GhostRescuePublicKey(mldsaPub, slhdsaPub []byte) []byte {
+	pub := make([]byte, 0, len(mldsaPub)+len(slhdsaPub))
+	pub = append(pub, mldsaPub...)
+	return append(pub, slhdsaPub...)
+}
+
+// SignGhostAccountTxRescue signs txdata as scheme 0x0003 with the ML-DSA-44
+// key of a rescue-key account whose SLH-DSA public key is slhdsaPub, for the
+// chain of signer, which must come from NewGhostAccountSigner.
+func SignGhostAccountTxRescue(signer Signer, mldsaKey *mldsa44.PrivateKey, slhdsaPub []byte, txdata *GhostAccountTx) (*Transaction, error) {
+	if len(slhdsaPub) != GhostSLHDSAPublicKeySize {
+		return nil, fmt.Errorf("%w: SLH-DSA public key of %d bytes", ErrGhostAccountLength, len(slhdsaPub))
+	}
+	pub := GhostRescuePublicKey(mldsaKey.Public().(*mldsa44.PublicKey).Bytes(), slhdsaPub)
+	return signGhostAccountTx(signer, GhostSchemeMLDSA44Rescue, pub, txdata, func(sighash []byte) ([]byte, error) {
+		sig := make([]byte, mldsa44.SignatureSize)
+		if err := mldsa44.SignTo(mldsaKey, sighash, []byte(GhostAccountTxContext), true, sig); err != nil {
+			return nil, err
+		}
+		return sig, nil
+	})
+}
+
+// SignGhostAccountTxRescueSLHDSA signs txdata as scheme 0x0004 with the
+// SLH-DSA-SHAKE-128s rescue key of an account whose ML-DSA-44 public key is
+// mldsaPub, for the chain of signer, which must come from
+// NewGhostAccountSigner.
+func SignGhostAccountTxRescueSLHDSA(signer Signer, mldsaPub []byte, slhdsaKey *slhdsa.PrivateKey, txdata *GhostAccountTx) (*Transaction, error) {
+	if len(mldsaPub) != GhostMLDSA44PublicKeySize {
+		return nil, fmt.Errorf("%w: ML-DSA-44 public key of %d bytes", ErrGhostAccountLength, len(mldsaPub))
+	}
+	if slhdsaKey.ID != ghostSLHDSAParams {
+		return nil, fmt.Errorf("%w: SLH-DSA key of %v, want %v", ErrGhostAccountScheme, slhdsaKey.ID, ghostSLHDSAParams)
+	}
+	slhPub, err := slhdsaKey.PublicKey().MarshalBinary()
+	if err != nil {
+		return nil, err
+	}
+	pub := GhostRescuePublicKey(mldsaPub, slhPub)
+	return signGhostAccountTx(signer, GhostSchemeSLHDSARescue, pub, txdata, func(sighash []byte) ([]byte, error) {
+		return slhdsa.SignRandomized(slhdsaKey, nil, slhdsa.NewMessage(sighash), []byte(GhostAccountTxContext))
 	})
 }
 

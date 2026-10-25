@@ -47,9 +47,50 @@ a type `0x02` transaction, without `v`, `r` and `s`, and `scheme`,
 |---|---|---|---|---|
 | `0x0001` | ML-DSA-44 (FIPS 204, pure mode) | 1,312 bytes | 2,420 bytes | yes |
 | `0x0002` | SLH-DSA-SHAKE-128s (FIPS 205, pure mode) | 32 bytes | 7,856 bytes | yes |
+| `0x0003` | ML-DSA-44 account with an SLH-DSA rescue key, signed with ML-DSA-44 | 1,344 bytes | 2,420 bytes | until `ML_RESCUE_HEIGHT` |
+| `0x0004` | the same account, signed with SLH-DSA-SHAKE-128s | 1,344 bytes | 7,856 bytes | yes |
 
-Scheme `0x0000` and every other value are refused when the transaction is
-decoded, before any signature is verified.
+Scheme `0x0000`, `0x0005` and every other value are refused when the
+transaction is decoded, before any signature is verified.
+
+### Rescue-key accounts
+
+Schemes `0x0003` and `0x0004` (spec 09, sections 5.1 to 5.3) are one account
+with two keys. Its public key is the 1,312-byte ML-DSA-44 public key followed
+by the 32-byte SLH-DSA-SHAKE-128s public key, 1,344 bytes
+(`types.GhostRescuePublicKey`). Its address is derived with scheme `0x0003`
+for both IDs, `K("ghost/account-address/v1", 0x0003, public_key)`, so a
+`0x0003` and a `0x0004` transaction of one key share one nonce and one
+balance; `types.GhostAccountAddressOf(0x0004, pk)` returns that address too.
+It is not the address of the ML-DSA-44 key alone under `0x0001`.
+
+A `0x0003` signature is verified with ML-DSA-44 under the first 1,312 bytes
+of the key, a `0x0004` signature with SLH-DSA-SHAKE-128s under the last 32,
+both with the context `ghost/tx/v1`. The scheme is in the signed data, so a
+signature of one scheme never verifies under the other, and a `0x0004`
+transaction does not depend on the ML-DSA-44 half at all
+(`TestGhostRescueTxBlock` moves funds with an ML-DSA-44 half of 1,312 zero
+bytes). `types.SignGhostAccountTxRescue` signs `0x0003` with the ML-DSA-44
+key and `types.SignGhostAccountTxRescueSLHDSA` signs `0x0004` with the
+SLH-DSA key; the keystore and RPC do not sign either.
+
+`ML_RESCUE_HEIGHT` is a consensus parameter, none at genesis
+(`ghost.MLRescueHeight`, `ghost.SetMLRescueHeight` and
+`ghost.MLRescueSunset` in `params/ghost/accounttx.go`; the upgrade that sets
+a network's height is separate work). From that height on a `0x0003`
+transaction is refused and `0x0004` stays:
+
+- In a block: `preCheck` of the state transition returns
+  `core.ErrGhostAccountSunset` for a `0x0003` message in a block at or above
+  the height, so such a block is invalid (`TestGhostRescueSunsetBlock`).
+- In the pool: `validateTxBasics` refuses a `0x0003` transaction with
+  `core.ErrGhostAccountSunset`, before any signature work, once the next
+  block (head + 1) is at or above the height. The reorg step run on every
+  new head, reorganisations included, drops every pending and queued
+  `0x0003` transaction at that point, those a reorganisation puts back
+  included (`TestGhostPoolRescueSunset`).
+
+The signature-verify precompile accepts neither `0x0003` nor `0x0004`.
 
 The key and signature lengths are checked against the scheme before any
 signature is verified, when the transaction is decoded and again by the
@@ -107,7 +148,18 @@ intrinsic_gas = type 0x02 intrinsic gas
 For ML-DSA-44 the extra part is 16 * 3,734 + 3,000 = 62,744 gas, so a plain
 transfer takes 83,744 gas. For SLH-DSA-SHAKE-128s it is
 16 * (2 + 32 + 7,856) = 126,240 byte gas plus 12,000, 138,240 gas, so a
-plain transfer takes 159,240 gas. The extra part is carried as
+plain transfer takes 159,240 gas. The rescue schemes take the
+`VERIFY_GAS` of the algorithm they verify with: `VERIFY_GAS[0x0003]` is that
+of ML-DSA-44 and `VERIFY_GAS[0x0004]` that of SLH-DSA-SHAKE-128s.
+
+| Scheme | Byte gas | `VERIFY_GAS` | Extra part | Plain transfer |
+|---|---|---|---|---|
+| `0x0001` | 16 * 3,734 = 59,744 | 3,000 | 62,744 | 83,744 |
+| `0x0002` | 16 * 7,890 = 126,240 | 12,000 | 138,240 | 159,240 |
+| `0x0003` | 16 * 3,766 = 60,256 | 3,000 | 63,256 | 84,256 |
+| `0x0004` | 16 * 9,202 = 147,232 | 12,000 | 159,232 | 180,232 |
+
+The extra part is carried as
 `core.Message.ExtraIntrinsicGas`, set by `core.TransactionToMessage` and
 added where the state transition adds the intrinsic gas. The constants are in
 `params/ghost/accounttx.go`.
@@ -212,7 +264,10 @@ canonical decoding, the scheme and the lengths, the chain ID, the derived
 sender, no code at the sender (EIP-3607), the nonce, the balance and the
 intrinsic gas. The signature is verified last, in
 `txpool.ValidateTransactionWithState`, and the sender is then cached in the
-transaction.
+transaction. A `0x0003` transaction is refused first of all once the next
+block is at or above `ML_RESCUE_HEIGHT`, and dropped from the pool at that
+head (see [Rescue-key accounts](#rescue-key-accounts)). A rescue
+transaction counts as one signature check in the budgets below.
 
 ## Bounded signature checks
 

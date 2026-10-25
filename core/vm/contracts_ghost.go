@@ -105,6 +105,12 @@ type signatureVerifyCall struct {
 // signatureVerifySizes returns the public key and signature lengths of an
 // accepted scheme, and false for any other scheme.
 func signatureVerifySizes(scheme uint16) (publicKey, signature int, ok bool) {
+	// The rescue-key schemes 0x0003 and 0x0004 have the verification gas of
+	// their base schemes, but they are account transaction schemes only
+	// (spec 09, section 5.1): the precompile never accepts them.
+	if scheme == types.GhostSchemeMLDSA44Rescue || scheme == types.GhostSchemeSLHDSARescue {
+		return 0, 0, false
+	}
 	if ghost.AccountTxVerifyGas(scheme) == 0 {
 		return 0, 0, false
 	}
