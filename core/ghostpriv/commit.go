@@ -230,8 +230,8 @@ func (c *DataCommit) Commitment() common.Hash {
 
 // ParseDataCommit checks the data and value of a top-level call to the data
 // commit entry address, in this order: exactly 206 bytes of version 2, the
-// layout of a coin commit (ErrCommitData), F not zero (ErrCommitZeroF), then a value of exactly 0
-// (ErrDataCommitValue). The commitment is computed from F; nothing in the
+// layout of a coin commit (ErrCommitData), F not zero (ErrCommitZeroF), then
+// a value of exactly 0 (ErrDataCommitValue). The commitment is computed from F; nothing in the
 // data can set it.
 func ParseDataCommit(data []byte, value *big.Int) (*DataCommit, error) {
 	f, salt, note, err := parseCommitData(data)
