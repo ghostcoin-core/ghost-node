@@ -245,21 +245,54 @@ func (env *BlockEnv) parent(h *types.Header) *types.Header {
 	return p
 }
 
-// windowBaseFee returns the base fee of the first block of the including
-// block's fee window, found by walking its parent links; the including block
-// itself when it starts the window.
-func (env *BlockEnv) windowBaseFee() (*big.Int, error) {
-	h := env.Header
+// windowFeeOf returns the fee of the window that starts at the header of the
+// first block of h's fee window, found by walking the parent links from h; h
+// itself when it starts the window. It also returns that first header.
+func (env *BlockEnv) windowFeeOf(h *types.Header) (Fee, *types.Header, error) {
 	start := WindowStart(h.Number.Uint64())
 	for h.Number.Uint64() > start {
 		if h = env.parent(h); h == nil {
-			return nil, fmt.Errorf("%w: ancestor at height %d", ErrRevealChainInfo, start)
+			return Fee{}, nil, fmt.Errorf("%w: ancestor at height %d", ErrRevealChainInfo, start)
 		}
 	}
 	if h.BaseFee == nil {
-		return nil, fmt.Errorf("%w: block %d has no base fee", ErrRevealChainInfo, start)
+		return Fee{}, nil, fmt.Errorf("%w: block %d has no base fee", ErrRevealChainInfo, start)
 	}
-	return h.BaseFee, nil
+	fee, err := WindowFee(h.BaseFee)
+	if err != nil {
+		return Fee{}, nil, err
+	}
+	return fee, h, nil
+}
+
+// windowFee returns the window fee that paid equals: the fee of the including
+// block's window, else that of the window before it. The first window has
+// none before it. The previous window is read only when the current fee does
+// not match, so the walk reads at most the headers of the two windows. Any
+// other fee is ErrRevealFee.
+func (env *BlockEnv) windowFee(paid *uint256.Int) (Fee, error) {
+	cur, start, err := env.windowFeeOf(env.Header)
+	if err != nil {
+		return Fee{}, fmt.Errorf("%w: %w", ErrRevealFee, err)
+	}
+	if cur.Total.Eq(paid) {
+		return cur, nil
+	}
+	if start.Number.Sign() == 0 {
+		return Fee{}, fmt.Errorf("%w: have %v, want %v", ErrRevealFee, paid, cur.Total)
+	}
+	last := env.parent(start)
+	if last == nil {
+		return Fee{}, fmt.Errorf("%w: have %v, want %v: %w: ancestor at height %d", ErrRevealFee, paid, cur.Total, ErrRevealChainInfo, start.Number.Uint64()-1)
+	}
+	prev, _, err := env.windowFeeOf(last)
+	if err != nil {
+		return Fee{}, fmt.Errorf("%w: have %v, want %v: %w", ErrRevealFee, paid, cur.Total, err)
+	}
+	if prev.Total.Eq(paid) {
+		return prev, nil
+	}
+	return Fee{}, fmt.Errorf("%w: have %v, want %v or %v", ErrRevealFee, paid, cur.Total, prev.Total)
 }
 
 // rootEligible reports whether root is the tree root of the kind in the
@@ -291,7 +324,8 @@ func (env *BlockEnv) rootEligible(kind ghosttree.Kind, root common.Hash) bool {
 }
 
 // CheckReveal runs checks 1 to 11 of a reveal against the state before it
-// and returns the decoded reveal and its window fee. It changes nothing.
+// and returns the decoded reveal and the window fee it pays: that of the
+// including block's window or of the window before it. It changes nothing.
 func CheckReveal(st StateDB, env *BlockEnv, verifier Verifier, envelope []byte) (*Reveal, Fee, error) {
 	// Checks 1 to 3: type, length, version and amount words.
 	r, err := DecodeReveal(envelope)
@@ -306,17 +340,12 @@ func CheckReveal(st StateDB, env *BlockEnv, verifier Verifier, envelope []byte) 
 		return nil, Fee{}, fmt.Errorf("%w: have %d, chain %v", ErrRevealChainID, r.ChainID, env.ChainID)
 	}
 	chainID := env.ChainID.Uint64()
-	// Check 5: the fee of the window.
-	bRef, err := env.windowBaseFee()
+	// Check 5: the fee of the including block's window or of the window
+	// before it. The fee returned is the one that matched, so that the tip
+	// and the burned base part are those of that window.
+	fee, err := env.windowFee(r.Fee)
 	if err != nil {
-		return nil, Fee{}, fmt.Errorf("%w: %w", ErrRevealFee, err)
-	}
-	fee, err := WindowFee(bRef)
-	if err != nil {
-		return nil, Fee{}, fmt.Errorf("%w: %w", ErrRevealFee, err)
-	}
-	if !fee.Total.Eq(r.Fee) {
-		return nil, Fee{}, fmt.Errorf("%w: have %v, want %v", ErrRevealFee, r.Fee, fee.Total)
+		return nil, Fee{}, err
 	}
 	// Check 6: the node's own binding digest.
 	binding := r.BindingDigest(chainID, env.Genesis)
