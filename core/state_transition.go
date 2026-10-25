@@ -124,6 +124,12 @@ func IntrinsicGas(data []byte, accessList types.AccessList, isContractCreation b
 // that scheme is accepted (spec 09, section 13).
 var ErrGhostAccountVerifyGas = errors.New("account transaction scheme has no verification gas")
 
+// ErrGhostAccountSunset is returned for an account transaction of scheme
+// 0x0003, signed with the ML-DSA-44 half of a rescue-key account, in a block
+// at or above ML_RESCUE_HEIGHT (spec 09, section 5.3). Scheme 0x0004 of the
+// same account stays accepted.
+var ErrGhostAccountSunset = errors.New("account transaction scheme 0x0003 is past ML_RESCUE_HEIGHT")
+
 // GhostAccountExtraIntrinsicGas returns the intrinsic gas an account
 // transaction (type 0x52) takes on top of the type 0x02 intrinsic gas:
 // 16 * (2 + len(public_key) + len(signature)) + VERIFY_GAS of its scheme
@@ -169,6 +175,10 @@ type Message struct {
 	// an account transaction (GhostAccountExtraIntrinsicGas), zero otherwise.
 	ExtraIntrinsicGas uint64
 
+	// GhostAccountScheme is the scheme ID of an account transaction, zero
+	// for every other message.
+	GhostAccountScheme uint16
+
 	// When SkipAccountChecks is true, the message nonce is not checked against the
 	// account nonce in state. It also disables checking that the sender is an EOA.
 	// This field will be set to true for operations like RPC eth_call.
@@ -204,6 +214,9 @@ func TransactionToMessage(tx *types.Transaction, s types.Signer, baseFee *big.In
 	msg.From, err = types.Sender(s, tx)
 	if err != nil {
 		return msg, err
+	}
+	if scheme, _, _, ok := tx.GhostAccountAuth(); ok {
+		msg.GhostAccountScheme = scheme
 	}
 	msg.ExtraIntrinsicGas, err = GhostAccountExtraIntrinsicGas(tx)
 	return msg, err
@@ -349,6 +362,11 @@ func (st *StateTransition) preCheck() error {
 		if codeHash != (common.Hash{}) && codeHash != types.EmptyCodeHash {
 			return fmt.Errorf("%w: address %v, codehash: %s", ErrSenderNoEOA,
 				msg.From.Hex(), codeHash)
+		}
+		// Scheme 0x0003 ends at ML_RESCUE_HEIGHT; the account is then
+		// signed for with its SLH-DSA half, scheme 0x0004.
+		if msg.GhostAccountScheme == types.GhostSchemeMLDSA44Rescue && ghost.MLRescueSunset(st.evm.Context.BlockNumber.Uint64()) {
+			return fmt.Errorf("%w: address %v, block %d", ErrGhostAccountSunset, msg.From.Hex(), st.evm.Context.BlockNumber)
 		}
 	}
 	// Make sure that transaction gasFeeCap is greater than the baseFee (post london)

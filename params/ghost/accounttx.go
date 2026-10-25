@@ -16,6 +16,8 @@
 
 package ghost
 
+import "sync/atomic"
+
 // The gas constants of the account transaction, type 0x52 (spec 09,
 // section 8; docs/account-transactions.md). They are consensus constants.
 const (
@@ -83,10 +85,44 @@ const (
 // verification gas is refused.
 func AccountTxVerifyGas(scheme uint16) uint64 {
 	switch scheme {
-	case 0x0001:
+	case 0x0001, 0x0003: // 0x0003 is verified with ML-DSA-44
 		return AccountTxVerifyGasMLDSA44
-	case 0x0002:
+	case 0x0002, 0x0004: // 0x0004 is verified with SLH-DSA-SHAKE-128s
 		return AccountTxVerifyGasSLHDSA
 	}
 	return 0
+}
+
+// mlRescueHeight is ML_RESCUE_HEIGHT (spec 09, section 5.3), the first block
+// in which a transaction of scheme 0x0003 is refused; nil while no height is
+// set. It is a consensus parameter, unset at genesis.
+var mlRescueHeight atomic.Pointer[uint64]
+
+// MLRescueHeight returns ML_RESCUE_HEIGHT, and false while none is set.
+func MLRescueHeight() (uint64, bool) {
+	h := mlRescueHeight.Load()
+	if h == nil {
+		return 0, false
+	}
+	return *h, true
+}
+
+// SetMLRescueHeight sets ML_RESCUE_HEIGHT for the process; nil clears it. It
+// returns a function that puts back the height it replaced.
+func SetMLRescueHeight(height *uint64) (restore func()) {
+	var next *uint64
+	if height != nil {
+		h := *height
+		next = &h
+	}
+	prev := mlRescueHeight.Swap(next)
+	return func() { mlRescueHeight.Store(prev) }
+}
+
+// MLRescueSunset reports whether scheme 0x0003 is refused in the block of
+// the given number: true only when ML_RESCUE_HEIGHT is set and number is at
+// or above it.
+func MLRescueSunset(number uint64) bool {
+	h, ok := MLRescueHeight()
+	return ok && number >= h
 }
