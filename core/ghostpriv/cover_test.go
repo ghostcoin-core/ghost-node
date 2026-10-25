@@ -26,6 +26,7 @@ import (
 	"github.com/ethereum/go-ethereum/consensus/misc/eip1559"
 	"github.com/ethereum/go-ethereum/core/ghostpriv"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/params/vars"
 	"github.com/holiman/uint256"
 )
 
@@ -168,7 +169,6 @@ func (rejectProof) VerifyReveal(*ghostpriv.VerifyInputs, []byte) error {
 // burns at least G_PRIV times the block's base fee and pays at most the
 // nominal tip, and blocks 0 and 1 of the window accept it at any load.
 func TestCoverRuleBurnsBaseFee(t *testing.T) {
-	const minGasLimit = 5000
 	s := newScenario(t, 1)
 	config := s.chain.Config()
 	rng := rand.New(rand.NewSource(20261025))
@@ -199,7 +199,7 @@ func TestCoverRuleBurnsBaseFee(t *testing.T) {
 					t.Fatalf("b_ref %v, block %d: tip %v above the nominal %v", bRef, j, split.Tip, fee.Tip)
 				}
 			}
-			limit := uint64(minGasLimit) + uint64(rng.Int63n(60_000_000))
+			limit := vars.MinGasLimit + uint64(rng.Int63n(60_000_000))
 			parent := &types.Header{Number: big.NewInt(int64(j + 1)), GasLimit: limit, GasUsed: limit, BaseFee: beta}
 			beta = eip1559.CalcBaseFee(config, parent)
 		}
