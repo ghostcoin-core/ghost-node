@@ -324,11 +324,11 @@ func TestGhostTreeRealNodePagesAndReorg(t *testing.T) {
 		})
 		return tx.Hash()
 	}
-	coinData, err := ghostpriv.CommitData(coinF, coinNote)
+	coinData, err := ghostpriv.SaltedCommitData(coinF, make([]byte, ghostpriv.SaltSize), coinNote)
 	if err != nil {
 		t.Fatal(err)
 	}
-	dataData, err := ghostpriv.CommitData(dataF, dataNote)
+	dataData, err := ghostpriv.SaltedCommitData(dataF, make([]byte, ghostpriv.SaltSize), dataNote)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -338,8 +338,8 @@ func TestGhostTreeRealNodePagesAndReorg(t *testing.T) {
 	t.Logf("coin commit in block %d, data commit in block %d", coinBlock.Number, dataBlock.Number)
 
 	committed := map[ghosttree.Kind][]treeLeaf{
-		ghosttree.Coin: {{ghostpriv.Commitment(coinF, uint256.MustFromBig(value)), coinNote}},
-		ghosttree.Data: {{ghostpriv.DataCommitment(dataF), dataNote}},
+		ghosttree.Coin: {{ghostpriv.CommitmentVersion(ghostpriv.SaltedCommitVersion, coinF, uint256.MustFromBig(value)), coinNote}},
+		ghosttree.Data: {{ghostpriv.DataCommitmentVersion(ghostpriv.SaltedCommitVersion, dataF), dataNote}},
 	}
 	// Let a mine past both, then stop it.
 	last := max(coinBlock.Number, dataBlock.Number)

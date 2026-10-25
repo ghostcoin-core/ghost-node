@@ -339,7 +339,7 @@ func TestSupplyChangesOnlyByRewardAndReveal(t *testing.T) {
 
 	// A commit moves its value from the payer into the hidden set.
 	note := make([]byte, ghostpriv.NoteSize)
-	data, err := ghostpriv.CommitData(ghosttree.K("ghost/test-supply/fingerprint"), note)
+	data, err := ghostpriv.SaltedCommitData(ghosttree.K("ghost/test-supply/fingerprint"), make([]byte, ghostpriv.SaltSize), note)
 	if err != nil {
 		t.Fatal(err)
 	}

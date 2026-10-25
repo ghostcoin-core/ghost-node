@@ -73,13 +73,15 @@ var (
 
 // realProof is a fixture chain of the pool tests, the internal network's
 // genesis with the pool tests' account's alloc, whose block 1 commits one
-// GHOST to the fingerprint the pinned prover chose, and the honest reveal of
+// GHOST to the fingerprint and salt the pinned prover chose, and the honest reveal of
 // that coin in block 2 as the prover made it.
 type realProof struct {
 	*fixture
 	commitF common.Hash
-	reveal  *ghostpriv.Reveal
-	fee     ghostpriv.Fee
+	// commitSalt is the salt of block 1's salted commit data.
+	commitSalt []byte
+	reveal     *ghostpriv.Reveal
+	fee        ghostpriv.Fee
 	// commitTx is block 1's commit once signed: ML-DSA signatures are
 	// randomized, so signing again would give another block 1.
 	commitTx *types.Transaction
@@ -114,7 +116,7 @@ func newRealProof(t *testing.T) *realProof {
 	}
 
 	raw := readRealFixture(t)
-	if len(raw) <= realRequestBytes+32+realStatementBytes {
+	if len(raw) <= realRequestBytes+32+ghostpriv.SaltSize+realStatementBytes {
 		t.Fatalf("fixture of %d bytes; %s", len(raw), realProofRegenerate)
 	}
 	if !bytes.Equal(raw[:realRequestBytes], request) {
@@ -122,7 +124,9 @@ func newRealProof(t *testing.T) *realProof {
 	}
 	rest := raw[realRequestBytes:]
 	commitF := common.BytesToHash(rest[:32])
-	s := rest[32 : 32+realStatementBytes]
+	commitSalt := common.CopyBytes(rest[32 : 32+ghostpriv.SaltSize])
+	rest = rest[32+ghostpriv.SaltSize:]
+	s := rest[:realStatementBytes]
 	r := &ghostpriv.Reveal{
 		Version:   ghostpriv.Version,
 		ChainID:   gspec.Config.GetChainID().Uint64(),
@@ -132,7 +136,7 @@ func newRealProof(t *testing.T) *realProof {
 		Recipient: common.BytesToAddress(s[252:272]),
 		Out:       new(uint256.Int).SetBytes(s[272:304]),
 		Fee:       new(uint256.Int).SetBytes(s[304:336]),
-		Proof:     common.CopyBytes(rest[32+realStatementBytes:]),
+		Proof:     common.CopyBytes(rest[realStatementBytes:]),
 	}
 	copy(r.Note[:], s[96:252])
 	if r.Recipient != realRecipient || r.Out.ToBig().Cmp(realOut) != 0 || !r.Fee.Eq(fee.Total) {
@@ -144,7 +148,7 @@ func newRealProof(t *testing.T) *realProof {
 	if len(r.Proof) > ghostpriv.ProofSize {
 		t.Fatalf("proof of %d bytes, the field holds %d", len(r.Proof), ghostpriv.ProofSize)
 	}
-	return &realProof{fixture: f, commitF: commitF, reveal: r, fee: fee}
+	return &realProof{fixture: f, commitF: commitF, commitSalt: commitSalt, reveal: r, fee: fee}
 }
 
 // realRequest is the request of revealfixture.rs for the chain: the chain
@@ -205,7 +209,7 @@ func (rp *realProof) commit() *types.Transaction {
 	if rp.commitTx != nil {
 		return rp.commitTx
 	}
-	data, err := ghostpriv.CommitData(rp.commitF, make([]byte, ghostpriv.NoteSize))
+	data, err := ghostpriv.SaltedCommitData(rp.commitF, rp.commitSalt, make([]byte, ghostpriv.NoteSize))
 	if err != nil {
 		rp.t.Fatal(err)
 	}
@@ -401,7 +405,7 @@ func TestRealProofRevealPoolAndBlock(t *testing.T) {
 	if !ghosttree.IsSpent(st, ghosttree.Coin, rp.reveal.Marker) {
 		t.Error("marker not spent")
 	}
-	commitment := ghostpriv.Commitment(rp.commitF, uint256.MustFromBig(oneGhost))
+	commitment := ghostpriv.CommitmentVersion(ghostpriv.SaltedCommitVersion, rp.commitF, uint256.MustFromBig(oneGhost))
 	wantRoot := ghosttree.RootFromPageRoots(ghosttree.Coin, []common.Hash{
 		ghosttree.PageRoot(ghosttree.Coin, []common.Hash{commitment, rp.reveal.Remainder}),
 	})
@@ -427,7 +431,7 @@ func TestRealProofTamperedRevealRejected(t *testing.T) {
 	rp := newRealProof(t)
 	for name, r := range rp.tamperedReveals() {
 		t.Run(name, func(t *testing.T) {
-			rp := &realProof{fixture: &fixture{t: t, gspec: rp.gspec, genesis: rp.genesis}, commitF: rp.commitF, reveal: rp.reveal, fee: rp.fee}
+			rp := &realProof{fixture: &fixture{t: t, gspec: rp.gspec, genesis: rp.genesis}, commitF: rp.commitF, commitSalt: rp.commitSalt, reveal: rp.reveal, fee: rp.fee}
 			tx := rp.revealTx(r)
 
 			// The pool on block 1 refuses it.

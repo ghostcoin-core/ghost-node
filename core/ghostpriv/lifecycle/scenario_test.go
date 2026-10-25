@@ -80,7 +80,7 @@ func (s *scenario) node(i int) *node { return s.net.nodes[i%len(s.net.nodes)] }
 func (s *scenario) commitTx(n *node, c coin) *types.Transaction {
 	s.t.Helper()
 	note := c.note()
-	data, err := ghostpriv.CommitData(c.owner.fingerprint(c.index), note[:])
+	data, err := ghostpriv.SaltedCommitData(c.owner.fingerprint(c.index), make([]byte, ghostpriv.SaltSize), note[:])
 	if err != nil {
 		s.t.Fatal(err)
 	}

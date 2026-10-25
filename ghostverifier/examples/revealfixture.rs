@@ -14,8 +14,8 @@
 //! recipient (20 bytes), out and fee, the amounts as 32-byte amount words:
 //! 1,186 bytes.
 //!
-//! The file is the request, the fingerprint F the tests commit, the coin
-//! reveal statement (368 bytes) in the layout of ghost_proofs.h and then the
+//! The file is the request, the fingerprint F and the salt (16 bytes) the
+//! tests commit with salted, version 2 commit data, the coin reveal statement (368 bytes) in the layout of ghost_proofs.h and then the
 //! proof, as the pinned prover makes it. The coin's secrets and the
 //! zero-knowledge randomness are fixed, so the output is the same on every
 //! run for one request; it is for tests only and must never be used for a
@@ -28,6 +28,11 @@ use ghost_proofs::*;
 
 /// Length of the request file.
 const REQUEST_BYTES: usize = CHAIN_PARAMS_BYTES + 4 + 32 * TREE_DEPTH + 32 + 20 + 32 + 32;
+
+/// Fixed test-only salts of the committed coin and of its remainder; a
+/// wallet draws every salt fresh.
+const TEST_SALT: [u8; SALT_BYTES] = [0x25; SALT_BYTES];
+const TEST_REMAINDER_SALT: [u8; SALT_BYTES] = [0x26; SALT_BYTES];
 
 /// Fixed test-only secrets of the committed coin and of its remainder.
 const TEST_S: [u8; 32] = [0x21; 32];
@@ -93,16 +98,17 @@ fn main() {
         process::exit(1);
     };
 
-    let fingerprint = coin_fingerprint(&TEST_S, &TEST_R, &TEST_B, &EMPTY_RULE);
-    let opening = CoinOpening {
+    let fingerprint = coin_fingerprint_v2(&TEST_S, &TEST_R, &TEST_B, &TEST_SALT, &EMPTY_RULE);
+    let opening = SaltedCoinOpening {
         s: TEST_S,
         r: TEST_R,
         b: TEST_B,
+        salt: TEST_SALT,
         v: value,
         position,
         path,
     };
-    let leaf = coin_commitment(&fingerprint, &opening.v);
+    let leaf = coin_commitment_v2(&fingerprint, &opening.v);
     let reveal = RevealRequest {
         root: merkle_root(Tree::Coin, &leaf, opening.position, &opening.path),
         recipient,
@@ -111,19 +117,22 @@ fn main() {
         rule: EMPTY_RULE,
         remainder_note: TEST_REMAINDER_NOTE,
     };
-    let remainder = CoinRemainder {
+    let remainder = SaltedCoinRemainder {
         s: TEST_S,
         r: TEST_R,
         b: TEST_REMAINDER_B,
+        salt: TEST_REMAINDER_SALT,
         v: amount_word(left),
     };
-    let (tx, proof) =
-        prove_coin_reveal(&params, &opening, &remainder, &reveal, TEST_ZK_RANDOMNESS).expect("honest proof");
-    assert_eq!(verify_coin_reveal(&params, &tx, &proof), Ok(()));
+    let (tx, proof) = prove_salted_coin_reveal(&params, &opening, &remainder, &reveal, TEST_ZK_RANDOMNESS)
+        .expect("honest salted proof");
+    assert_eq!(verify_salted_coin_reveal(&params, &tx, &proof), Ok(()));
+    assert!(verify_coin_reveal(&params, &tx, &proof).is_err());
 
     let mut file = Vec::new();
     file.extend_from_slice(&request);
     file.extend_from_slice(&fingerprint);
+    file.extend_from_slice(&TEST_SALT);
     file.extend_from_slice(&coin_reveal_to_bytes(&tx));
     file.extend_from_slice(proof.as_bytes());
     if let Err(err) = fs::write(out, &file) {

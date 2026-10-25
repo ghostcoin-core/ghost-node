@@ -119,12 +119,13 @@ func commitHop(t *testing.T, n *node, block *types.Block, txHash common.Hash) *h
 	h.add("tx.to", dec.To().Bytes())
 	h.add("tx.value", common.BigToHash(dec.Value()).Bytes())
 	data := dec.Data()
-	if len(data) != ghostpriv.CommitDataSize {
+	if len(data) != ghostpriv.SaltedCommitDataSize {
 		t.Fatalf("commit data of %d bytes", len(data))
 	}
 	h.add("data.version", data[0:2])
 	h.add("data.F_d", data[2:34])
-	h.addNote("data.note", data[34:])
+	h.add("data.salt", data[34:34+ghostpriv.SaltSize])
+	h.addNote("data.note", data[34+ghostpriv.SaltSize:])
 	v, r, s := dec.RawSignatureValues()
 	h.add("tx.v", common.BigToHash(v).Bytes())
 	h.add("tx.r", common.BigToHash(r).Bytes())

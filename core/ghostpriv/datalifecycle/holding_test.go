@@ -179,7 +179,7 @@ type holdingWitness struct {
 func (ps *proofSystem) prove(n *node, at *types.Header, wit holdingWitness, pub holdingProof) (holdingProof, error) {
 	leaf := wit.w.commitment(wit.cf)
 	if wit.opens != nil {
-		leaf = ghostpriv.DataCommitment(*wit.opens)
+		leaf = ghostpriv.DataCommitmentVersion(ghostpriv.SaltedCommitVersion, *wit.opens)
 	}
 	root := pub.DataRoot
 	if !ghosttree.VerifyMembership(&types.Header{DataTreeRoot: &root}, ghosttree.Data, wit.position, leaf, wit.path) {

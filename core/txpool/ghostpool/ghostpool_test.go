@@ -137,7 +137,7 @@ func (f *fixture) reset(p *Pool, old *types.Header) {
 // transaction of key signed for the chain of signer.
 func commitTx(t *testing.T, key *mldsa44.PrivateKey, signer types.Signer, nonce uint64, value *big.Int) *types.Transaction {
 	t.Helper()
-	data, err := ghostpriv.CommitData(ghosttree.K("ghost/test-coin-f", []byte("pool")), make([]byte, ghostpriv.NoteSize))
+	data, err := ghostpriv.SaltedCommitData(ghosttree.K("ghost/test-coin-f", []byte("pool")), make([]byte, ghostpriv.SaltSize), make([]byte, ghostpriv.NoteSize))
 	if err != nil {
 		t.Fatal(err)
 	}
