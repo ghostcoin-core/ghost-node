@@ -1013,18 +1013,7 @@ func decodeForCheck(tx *types.Transaction, genesis common.Hash) (*checkedReveal,
 		// A purpose field other than reveal or revoke is refused by the
 		// chain rules whatever the proof.
 		return &checkedReveal{
-			in: &ghostpriv.VerifyInputs{
-				Kind:      ghosttree.Data,
-				Purpose:   r.Purpose[31],
-				Binding:   r.BindingDigest(r.ChainID, genesis),
-				ChainID:   r.ChainID,
-				Domain:    genesis,
-				Root:      r.Root,
-				Marker:    r.Marker,
-				Recipient: r.Verifier,
-				Out:       new(uint256.Int),
-				Fee:       new(uint256.Int).Set(r.Fee),
-			},
+			in:        r.VerifyInputs(r.Purpose[31], r.ChainID, genesis),
 			proof:     common.CopyBytes(r.Proof),
 			errProof:  ghostpriv.ErrDataRevealProof,
 			errRoot:   ghostpriv.ErrDataRevealRoot,

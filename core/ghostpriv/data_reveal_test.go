@@ -21,6 +21,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"math/big"
+	"reflect"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -28,6 +29,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/ghostpriv"
 	"github.com/ethereum/go-ethereum/core/ghostpriv/ghostprivtest"
 	"github.com/ethereum/go-ethereum/core/ghosttree"
+	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params/ghost"
@@ -177,7 +179,7 @@ func noProofVerified(t *testing.T, v *countingVerifier, what string) {
 	v.calls = 0
 }
 
-// checkDataBindingLayout checks the 164 bytes of the data binding digest
+// checkDataBindingLayout checks the 196 bytes of the data binding digest
 // field by field, its tag, that the node supplies the chain id, version,
 // domain and type, that every field it covers changes it, and that it never
 // equals the coin digest of the same fields.
@@ -194,13 +196,14 @@ func checkDataBindingLayout(t *testing.T) {
 			Out:      new(uint256.Int),
 			Fee:      uint256.NewInt(0x6666),
 			Proof:    bytes.Repeat([]byte{0x99}, 100),
+			Cf:       filled(0xcf),
 		}
 	}
 	r := layout()
 	const chainID = 6_777_971
 	genesis := filled(0x88)
 	in := r.BindingInput(chainID, genesis)
-	if len(in) != 164 || ghostpriv.DataBindingSize != 164 {
+	if len(in) != 196 || ghostpriv.DataBindingSize != 196 {
 		t.Fatalf("data binding input of %d bytes", len(in))
 	}
 	var want []byte
@@ -215,6 +218,7 @@ func checkDataBindingLayout(t *testing.T) {
 	want = append(want, r.Root[:]...)
 	want = append(want, r.Marker[:]...)
 	want = append(want, word(0x6666)...)
+	want = append(want, r.Cf[:]...)
 	if !bytes.Equal(in, want) {
 		t.Fatalf("data binding input\n%x\nwant\n%x", in, want)
 	}
@@ -237,6 +241,7 @@ func checkDataBindingLayout(t *testing.T) {
 		"purpose":  func(r *ghostpriv.DataReveal) { r.Purpose = ghostpriv.PurposeField(ghostpriv.PurposeReveal) },
 		"verifier": func(r *ghostpriv.DataReveal) { r.Verifier[19] ^= 1 },
 		"fee":      func(r *ghostpriv.DataReveal) { r.Fee.AddUint64(r.Fee, 1) },
+		"cf":       func(r *ghostpriv.DataReveal) { r.Cf[31] ^= 1 },
 	} {
 		m := layout()
 		change(m)
@@ -272,8 +277,8 @@ func checkDataBindingLayout(t *testing.T) {
 }
 
 // checkDataEnvelopeLayout checks that a data reveal envelope has the coin
-// reveal's size and offsets under its own type byte, and that each decoder
-// takes only its own type.
+// reveal's size and offsets under its own type byte, with cf in the first 32
+// bytes of the note slot, and that each decoder takes only its own type.
 func checkDataEnvelopeLayout(t *testing.T) {
 	t.Helper()
 	r := &ghostpriv.DataReveal{
@@ -284,6 +289,7 @@ func checkDataEnvelopeLayout(t *testing.T) {
 		Purpose:  ghostpriv.PurposeField(ghostpriv.PurposeReveal),
 		Verifier: common.BytesToAddress(bytes.Repeat([]byte{0x44}, 20)),
 		Proof:    bytes.Repeat([]byte{0x99}, 100),
+		Cf:       filled(0xcf),
 	}
 	env := dataEnvelope(t, r)
 	if types.GhostDataRevealEnvelopeSize != ghostpriv.EnvelopeSize {
@@ -307,7 +313,9 @@ func checkDataEnvelopeLayout(t *testing.T) {
 		{"out", 126, 158, make([]byte, 32)},
 		{"fee", 158, 190, make([]byte, 32)},
 		{"proof", 190, 290, r.Proof},
-		{"proof padding and note", 290, 1_311_066, make([]byte, 1_311_066-290)},
+		{"proof padding", 290, 1_310_910, make([]byte, 1_310_910-290)},
+		{"cf", 1_310_910, 1_310_942, r.Cf[:]},
+		{"rest of the note slot", 1_310_942, 1_311_066, make([]byte, 124)},
 	} {
 		if !bytes.Equal(p[f.from:f.to], f.want) {
 			t.Errorf("payload field %s at %d to %d", f.name, f.from, f.to)
@@ -334,6 +342,152 @@ func checkDataEnvelopeLayout(t *testing.T) {
 	} {
 		if _, err := ghostpriv.DecodeDataReveal(bad); !errors.Is(err, ghostpriv.ErrDataRevealLength) {
 			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+// testCf is a synthetic content fingerprint: the node checks none against
+// anything, so any 32 bytes do.
+func testCf(name string) common.Hash {
+	return crypto.Keccak256Hash([]byte("synthetic content fingerprint " + name))
+}
+
+// dataRevealChain builds three blocks on the internal network, the first with
+// a data commit, and returns the fixture, the environment and state of the
+// next block and the data root of block 1.
+func dataRevealChain(t *testing.T, name string) (*fixture, *ghostpriv.BlockEnv, *state.StateDB, common.Hash) {
+	t.Helper()
+	f := newFixture(t, ghost.InternalNetGasLimit, nil)
+	blocks, _ := f.generate(3, func(i int, b *core.BlockGen) {
+		if i == 0 {
+			b.AddTx(f.dataCommitTx(keyA, 0, testDataFile(name), new(big.Int)))
+		}
+	})
+	chain := f.newChain()
+	f.insert(chain, blocks)
+	env, st := nextEnv(t, chain, blocks[2].Header(), common.Address{0xcb})
+	return f, env, st, *blocks[0].Header().DataTreeRoot
+}
+
+// TestDataRevealCarriesFingerprint checks that cf rides in the first 32 bytes
+// of the note slot, at payload offset 190 + 1,310,720, round-trips through
+// MarshalBinary and DecodeDataReveal and leaves the envelope at 1,311,067
+// bytes, and that a non-zero byte in the other 124 bytes of the slot fails
+// check 7 with ErrDataRevealShape before any proof is verified.
+func TestDataRevealCarriesFingerprint(t *testing.T) {
+	checkDataEnvelopeLayout(t)
+	useStub(t)
+	useZeroDataFee(t)
+	f, env, st, root := dataRevealChain(t, "fingerprint")
+	cf := testCf("carried")
+	r := f.newDataReveal(root, testDataMarker("fingerprint"), ghostpriv.PurposeReveal, common.Address{0x7e, 0xcf})
+	r.Cf = cf
+	f.proveData(r)
+
+	enc := dataEnvelope(t, r)
+	if len(enc) != 1_311_067 || types.GhostDataRevealEnvelopeSize != 1_311_067 {
+		t.Fatalf("data reveal envelope of %d bytes", len(enc))
+	}
+	const slot = 190 + 1_310_720
+	p := enc[1:]
+	if !bytes.Equal(p[slot:slot+32], cf[:]) {
+		t.Fatalf("note slot starts %x, want cf %x", p[slot:slot+32], cf)
+	}
+	if !bytes.Equal(p[slot+32:], make([]byte, 124)) || len(p[slot+32:]) != 124 {
+		t.Fatal("the rest of the note slot is not 124 zero bytes")
+	}
+	dec, err := ghostpriv.DecodeDataReveal(enc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dec.Cf != cf || dec.Note != ([ghostpriv.NoteSize - 32]byte{}) {
+		t.Fatalf("decoded cf %x, note %x", dec.Cf, dec.Note)
+	}
+	if again, err := dec.MarshalBinary(); err != nil || !bytes.Equal(again, enc) {
+		t.Fatal("re-encoding differs")
+	}
+	counter := &countingVerifier{}
+	if _, _, err := ghostpriv.CheckDataReveal(st.Copy(), env, counter, enc); err != nil || counter.calls != 1 {
+		t.Fatalf("data reveal with cf: %v, %d proofs verified", err, counter.calls)
+	}
+
+	// Any non-zero byte after cf is a remainder the data reveal cannot have.
+	counter.calls = 0
+	for _, at := range []int{32, 33, 64, 100, 155} {
+		bad := common.CopyBytes(enc)
+		bad[1+slot+at] = 0x01
+		if dec, err := ghostpriv.DecodeDataReveal(bad); err != nil || dec.Cf != cf || dec.Note[at-32] != 0x01 {
+			t.Fatalf("note slot byte %d: decoded %v", at, err)
+		}
+		if _, _, err := ghostpriv.CheckDataReveal(st.Copy(), env, counter, bad); !errors.Is(err, ghostpriv.ErrDataRevealShape) {
+			t.Errorf("note slot byte %d: %v, want %v", at, err, ghostpriv.ErrDataRevealShape)
+		}
+	}
+	noProofVerified(t, counter, "a note after cf")
+}
+
+// TestDataRevealBindsFingerprint checks that cf enters the binding digest: a
+// changed cf changes the digest, and a stub proof made for another cf is
+// refused at the proof check.
+func TestDataRevealBindsFingerprint(t *testing.T) {
+	useStub(t)
+	useZeroDataFee(t)
+	f, env, st, root := dataRevealChain(t, "binds")
+	for _, purpose := range []byte{ghostpriv.PurposeReveal, ghostpriv.PurposeRevoke} {
+		r := f.newDataReveal(root, testDataMarker("binds"), purpose, common.Address{0x7e, 0xb1})
+		r.Cf = testCf("bound")
+		f.proveData(r)
+		other := cloneData(r)
+		other.Cf = testCf("other")
+		zero := cloneData(r)
+		zero.Cf = common.Hash{}
+		digest := r.BindingDigest(f.chainID, f.genesis.Hash())
+		if other.BindingDigest(f.chainID, f.genesis.Hash()) == digest || zero.BindingDigest(f.chainID, f.genesis.Hash()) == digest {
+			t.Fatalf("purpose %d: changing cf leaves the binding digest", purpose)
+		}
+		if _, _, err := ghostpriv.CheckDataReveal(st.Copy(), env, stub, dataEnvelope(t, r)); err != nil {
+			t.Fatalf("purpose %d with its own cf: %v", purpose, err)
+		}
+		for name, m := range map[string]*ghostpriv.DataReveal{"another cf": other, "a zero cf": zero} {
+			_, _, err := ghostpriv.CheckDataReveal(st.Copy(), env, stub, dataEnvelope(t, m))
+			if !errors.Is(err, ghostpriv.ErrDataRevealProof) || !errors.Is(err, ghostprivtest.ErrStubProof) {
+				t.Errorf("purpose %d, proof for %s: %v, want %v", purpose, name, err, ghostpriv.ErrDataRevealProof)
+			}
+		}
+		// Proved for its own cf, the other reveal passes: cf is the reason.
+		f.proveData(other)
+		if _, _, err := ghostpriv.CheckDataReveal(st.Copy(), env, stub, dataEnvelope(t, other)); err != nil {
+			t.Fatalf("purpose %d, another cf proved anew: %v", purpose, err)
+		}
+	}
+}
+
+// TestDataRevealVerifyInputsCarryFingerprint checks that the inputs the
+// verifier receives from CheckDataReveal carry the reveal's cf, and that
+// DataReveal.VerifyInputs, which the pool uses too, gives the same inputs.
+func TestDataRevealVerifyInputsCarryFingerprint(t *testing.T) {
+	useStub(t)
+	useZeroDataFee(t)
+	f, env, st, root := dataRevealChain(t, "inputs")
+	for _, purpose := range []byte{ghostpriv.PurposeReveal, ghostpriv.PurposeRevoke} {
+		for _, cf := range []common.Hash{testCf("inputs one"), testCf("inputs two")} {
+			r := f.newDataReveal(root, testDataMarker("inputs"), purpose, common.Address{0x7e, 0x1f})
+			r.Cf = cf
+			f.proveData(r)
+			counter := &countingVerifier{}
+			if _, _, err := ghostpriv.CheckDataReveal(st.Copy(), env, counter, dataEnvelope(t, r)); err != nil || counter.calls != 1 {
+				t.Fatalf("purpose %d: %v, %d proofs verified", purpose, err, counter.calls)
+			}
+			if counter.last.Cf != cf {
+				t.Errorf("purpose %d: the verifier saw cf %x, want %x", purpose, counter.last.Cf, cf)
+			}
+			want := r.VerifyInputs(purpose, f.chainID, f.genesis.Hash())
+			if want.Cf != cf || want.Binding != r.BindingDigest(f.chainID, f.genesis.Hash()) {
+				t.Errorf("purpose %d: VerifyInputs carries cf %x", purpose, want.Cf)
+			}
+			if !reflect.DeepEqual(*want, counter.last) {
+				t.Errorf("purpose %d: the checks gave\n%+v\nVerifyInputs gives\n%+v", purpose, counter.last, *want)
+			}
 		}
 	}
 }

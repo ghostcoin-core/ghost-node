@@ -17,7 +17,7 @@ crate-type = ["staticlib", "rlib"]
 
 # The only dependency, pinned to one revision of the ghost repository.
 [dependencies]
-ghost-proofs = { git = "https://github.com/ghostcoin-core/ghost", rev = "94a094079c447d3b228524397b79bb85d856627d" }
+ghost-proofs = { git = "https://github.com/ghostcoin-core/ghost", rev = "3eab17cf3128518946d04e8ea7c9b01450ab07d2" }
 
 # No feature is on by default. unsettled-points-test is for tests only: it
 # adds ghost_verify_data_reveal_unsettled, which accepts a data reveal the

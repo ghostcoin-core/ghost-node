@@ -68,7 +68,7 @@ fn prove(purpose: DataPurpose) -> Fixture {
         s: [1; 32],
         r: [2; 32],
         b: [3; 32],
-        cf: [4; 32],
+        cf: TEST_CF,
         position: 3,
         path,
     };
@@ -165,7 +165,7 @@ fn header_matches() {
     assert_eq!(header_define("GHOST_PROOFS_CHAIN_PARAMS_BYTES"), CHAIN_PARAMS_BYTES as i64);
     assert_eq!(header_define("GHOST_PROOFS_PROOF_MAX_BYTES"), PROOF_MAX_BYTES as i64);
     assert_eq!((PURPOSE_REVEAL, PURPOSE_REVOKE), (0x02, 0x03));
-    assert_eq!(DATA_REVEAL_BYTES, 161);
+    assert_eq!(DATA_REVEAL_BYTES, 193);
     for status in [
         GHOST_PROOFS_ACCEPTED,
         GHOST_PROOFS_REJECTED,
@@ -174,6 +174,45 @@ fn header_matches() {
         GHOST_PROOFS_PANICKED,
     ] {
         assert_ne!(status, GHOST_DATA_FEE_UNSETTLED);
+    }
+}
+
+/// The content fingerprint the fixture's opening carries.
+const TEST_CF: [u8; 32] = [4; 32];
+
+#[test]
+fn data_reveal_statement_carries_cf() {
+    for (name, f) in [("reveal", reveal()), ("revoke", revoke())] {
+        assert_eq!(f.statement.len(), 193, "{name}");
+        assert_eq!(f.statement[161..193], TEST_CF, "{name}: cf at 161..193");
+        let tx = data_reveal_from_bytes(&f.statement).expect("statement");
+        assert_eq!(tx.cf, TEST_CF, "{name}: decoded cf");
+        assert_eq!(data_reveal_to_bytes(&tx), f.statement, "{name}: round trip");
+        // Another cf is written at 161..193 and nowhere else.
+        let mut other = data_reveal_from_bytes(&f.statement).expect("statement");
+        other.cf = [0xcf; 32];
+        let bytes = data_reveal_to_bytes(&other);
+        assert_eq!(bytes[..161], f.statement[..161], "{name}: before cf");
+        assert_eq!(bytes[161..], [0xcf; 32], "{name}: other cf");
+        assert_eq!(data_reveal_from_bytes(&bytes), Ok(other), "{name}: other cf round trip");
+        // The real proof, accepted by the unsettled verifier through C.
+        assert_eq!(unsettled_c(&f.params, &f.statement, &f.proof), GHOST_PROOFS_ACCEPTED, "{name} through C");
+    }
+}
+
+#[test]
+fn data_reveal_rejects_other_cf() {
+    for (name, f) in [("reveal", reveal()), ("revoke", revoke())] {
+        for at in [161, 175, 192] {
+            let mut statement = f.statement;
+            statement[at] ^= 1;
+            let what = format!("{name} cf byte {at}");
+            assert_rejects(&what, unsettled_c(&f.params, &statement, &f.proof));
+            assert_rejects(&what, verify_data_reveal_unsettled_bytes(&f.params, &statement, &f.proof));
+        }
+        let mut zero = f.statement;
+        zero[161..].fill(0);
+        assert_rejects(&format!("{name} zero cf"), unsettled_c(&f.params, &zero, &f.proof));
     }
 }
 
@@ -208,8 +247,10 @@ fn shipped_verifier_names_the_unsettled_fee() {
 #[test]
 fn changed_statement_field_rejected() {
     for (name, f) in [("reveal", reveal()), ("revoke", revoke())] {
-        // Each 32-byte field: root, marker, party, fee, rule.
-        for (field, at) in [("root", 1), ("marker", 33), ("party", 65 + 31), ("fee", 97 + 31), ("rule", 129 + 31)] {
+        // Each 32-byte field: root, marker, party, fee, rule, cf.
+        for (field, at) in
+            [("root", 1), ("marker", 33), ("party", 65 + 31), ("fee", 97 + 31), ("rule", 129 + 31), ("cf", 161)]
+        {
             let mut statement = f.statement;
             statement[at] ^= 1;
             assert_rejects(&format!("{name} {field}"), unsettled_c(&f.params, &statement, &f.proof));
