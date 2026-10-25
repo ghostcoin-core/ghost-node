@@ -445,7 +445,7 @@ func ApplyReveal(st StateDB, env *BlockEnv, verifier Verifier, envelope []byte) 
 }
 
 // DataBindingSize is the length of a data reveal's binding digest input.
-const DataBindingSize = 164
+const DataBindingSize = 196
 
 // The errors of the data reveal checks, one per check, in the order they
 // run. Check 8 computes the binding digest and cannot fail.
@@ -487,7 +487,10 @@ func PurposeField(purpose byte) common.Hash { return common.Hash{31: purpose} }
 
 // DataReveal is a decoded data reveal payload. It has the coin reveal's
 // layout: the remainder field holds the purpose, the recipient field is the
-// verifier-or-recipient field, and out, fee and the note must be zero.
+// verifier-or-recipient field, and out must be zero. The remainder's note
+// slot, which a data reveal has no use for, carries the content fingerprint
+// cf in its first 32 bytes; the other NoteSize - 32 bytes, Note, must be
+// zero. Any 32 bytes are a valid cf: the proof binds it.
 type DataReveal struct {
 	Version  uint16
 	ChainID  uint64
@@ -497,8 +500,9 @@ type DataReveal struct {
 	Verifier common.Address // the verifier-or-recipient field; credits nothing
 	Out      *uint256.Int
 	Fee      *uint256.Int
-	Proof    []byte // ProofSize bytes, or fewer to be padded with zeros
-	Note     [NoteSize]byte
+	Proof    []byte      // ProofSize bytes, or fewer to be padded with zeros
+	Cf       common.Hash // the content fingerprint, bytes 0..32 of the note slot
+	Note     [NoteSize - 32]byte
 }
 
 // MarshalBinary returns the data reveal's envelope: the type byte 0x51 and
@@ -524,7 +528,8 @@ func (r *DataReveal) MarshalBinary() ([]byte, error) {
 		copy(p[offFee:offProof], amountWord(r.Fee))
 	}
 	copy(p[offProof:offNote], r.Proof)
-	copy(p[offNote:], r.Note[:])
+	copy(p[offNote:], r.Cf[:])
+	copy(p[offNote+32:], r.Note[:])
 	return env, nil
 }
 
@@ -545,8 +550,9 @@ func DecodeDataReveal(envelope []byte) (*DataReveal, error) {
 		Purpose:  common.BytesToHash(p[offRemainder:offRecipient]),
 		Verifier: common.BytesToAddress(p[offRecipient:offOut]),
 		Proof:    common.CopyBytes(p[offProof:offNote]),
+		Cf:       common.BytesToHash(p[offNote : offNote+32]),
 	}
-	copy(r.Note[:], p[offNote:])
+	copy(r.Note[:], p[offNote+32:])
 	if r.Version != Version {
 		return nil, fmt.Errorf("%w: %d", ErrDataRevealVersion, r.Version)
 	}
@@ -583,19 +589,19 @@ func (r *DataReveal) purpose() (byte, error) {
 var dataBindingType = [2]byte{0x02, 0x01}
 
 // BindingDigest returns the binding digest a data reveal's proof must commit
-// to, K("ghost/data-reveal-binding/v1", fields) over the 164 bytes of
+// to, K("ghost/data-reveal-binding/v1", fields) over the 196 bytes of
 // BindingInput. Its tag, statement and type differ from the coin reveal's,
 // so it never equals a coin reveal's digest.
 func (r *DataReveal) BindingDigest(chainID uint64, genesis common.Hash) common.Hash {
 	return ghosttree.K(TagDataRevealBinding, r.BindingInput(chainID, genesis))
 }
 
-// BindingInput returns the 164 bytes the data binding digest hashes: the
+// BindingInput returns the 196 bytes the data binding digest hashes: the
 // chain id (8), the version (2), the domain, which is the genesis hash (32),
 // the transaction type 0x51 (1), the statement 0x02 and its version (1
 // each), the type field (2, dataBindingType), the purpose (1, the last byte of the purpose
 // field), the verifier-or-recipient field (20), the root and marker (32
-// each) and the fee (32). The node supplies the chain id, version, domain,
+// each), the fee (32) and the content fingerprint cf (32). The node supplies the chain id, version, domain,
 // transaction type, statement and type; the proof is not covered.
 func (r *DataReveal) BindingInput(chainID uint64, genesis common.Hash) []byte {
 	fee := r.Fee
@@ -613,7 +619,31 @@ func (r *DataReveal) BindingInput(chainID uint64, genesis common.Hash) []byte {
 	b = append(b, r.Root[:]...)
 	b = append(b, r.Marker[:]...)
 	b = append(b, amountWord(fee)...)
+	b = append(b, r.Cf[:]...)
 	return b
+}
+
+// VerifyInputs returns the inputs the verifier receives for the data reveal's
+// proof with the given purpose, chain id and genesis hash. Both a block's
+// checks and the pool build them here, so they never disagree.
+func (r *DataReveal) VerifyInputs(purpose byte, chainID uint64, genesis common.Hash) *VerifyInputs {
+	fee := new(uint256.Int)
+	if r.Fee != nil {
+		fee.Set(r.Fee)
+	}
+	return &VerifyInputs{
+		Kind:      ghosttree.Data,
+		Purpose:   purpose,
+		Binding:   r.BindingDigest(chainID, genesis),
+		ChainID:   chainID,
+		Domain:    genesis,
+		Root:      r.Root,
+		Marker:    r.Marker,
+		Recipient: r.Verifier,
+		Out:       new(uint256.Int),
+		Fee:       fee,
+		Cf:        r.Cf,
+	}
 }
 
 // CheckDataReveal runs checks 1 to 11 of a data reveal against the state
@@ -646,15 +676,16 @@ func CheckDataReveal(st StateDB, env *BlockEnv, verifier Verifier, envelope []by
 	if err != nil {
 		return nil, 0, err
 	}
-	// Check 7: no value and no remainder: out and the note are zero.
+	// Check 7: no value and no remainder: out and the note slot after cf
+	// are zero.
 	if !r.Out.IsZero() {
 		return nil, 0, fmt.Errorf("%w: out %v", ErrDataRevealShape, r.Out)
 	}
-	if r.Note != ([NoteSize]byte{}) {
+	if r.Note != ([NoteSize - 32]byte{}) {
 		return nil, 0, fmt.Errorf("%w: a note", ErrDataRevealShape)
 	}
-	// Check 8: the node's own binding digest.
-	binding := r.BindingDigest(chainID, env.Genesis)
+	// Check 8: the node's own binding digest, in the verifier's inputs.
+	in := r.VerifyInputs(purpose, chainID, env.Genesis)
 	// Check 9: the root, a data tree root of the ancestry.
 	if !env.rootEligible(ghosttree.Data, r.Root) {
 		return nil, 0, fmt.Errorf("%w: %x", ErrDataRevealRoot, r.Root)
@@ -667,18 +698,6 @@ func CheckDataReveal(st StateDB, env *BlockEnv, verifier Verifier, envelope []by
 	// Check 11: the proof, for the inputs the node computed.
 	if verifier == nil {
 		verifier = DefaultVerifier()
-	}
-	in := &VerifyInputs{
-		Kind:      ghosttree.Data,
-		Purpose:   purpose,
-		Binding:   binding,
-		ChainID:   chainID,
-		Domain:    env.Genesis,
-		Root:      r.Root,
-		Marker:    r.Marker,
-		Recipient: r.Verifier,
-		Out:       new(uint256.Int),
-		Fee:       new(uint256.Int).Set(r.Fee),
 	}
 	if err := verifier.VerifyReveal(in, common.CopyBytes(r.Proof)); err != nil {
 		return nil, 0, fmt.Errorf("%w: %w", ErrDataRevealProof, err)

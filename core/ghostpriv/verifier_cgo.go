@@ -166,8 +166,8 @@ func ghostCoinStatement(in *VerifyInputs) []byte {
 // ghostDataStatement returns the data reveal statement: the purpose (1) in
 // the codes of ghost_data.h, which differ from the node's, the root and marker
 // (32 each), the party, which is the verifier-or-recipient address left-padded
-// with zeros to 32 bytes, the fee as a 32-byte amount word and the rule (32).
-// A nil fee is zero. The caller passes only PurposeReveal or PurposeRevoke.
+// with zeros to 32 bytes, the fee as a 32-byte amount word, the rule (32) and
+// the content fingerprint cf (32). A nil fee is zero. The caller passes only PurposeReveal or PurposeRevoke.
 func ghostDataStatement(in *VerifyInputs) []byte {
 	fee := in.Fee
 	if fee == nil {
@@ -184,7 +184,8 @@ func ghostDataStatement(in *VerifyInputs) []byte {
 	b = append(b, in.Marker[:]...)
 	b = append(b, party[:]...)
 	b = append(b, amountWord(fee)...)
-	return append(b, in.Rule[:]...)
+	b = append(b, in.Rule[:]...)
+	return append(b, in.Cf[:]...)
 }
 
 func ghostStatusName(status C.int32_t) string {

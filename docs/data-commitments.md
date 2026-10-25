@@ -115,11 +115,16 @@ other. The payload has the coin reveal's offsets:
 | 126 | 32 | out, must be zero |
 | 158 | 32 | fee, must be zero (see [fee](#fee)) |
 | 190 | 1,310,720 | proof, then zeros |
-| 1,310,910 | 156 | note, must be all zero |
+| 1,310,910 | 32 | cf, the content fingerprint |
+| 1,310,942 | 124 | rest of the note slot, must be all zero |
 
 The verifier-or-recipient field names who the reveal is for; it credits
-nothing and no code runs for it. There is no remainder: a data reveal with a
-note, or with out, is rejected.
+nothing and no code runs for it. A data reveal has no remainder, so the
+remainder's note slot carries the content fingerprint `cf` in its first 32
+bytes; the width and gas of the payload are the coin reveal's. Any 32 bytes
+are a valid `cf`: the node checks it against nothing, and the proof binds it.
+A data reveal with out, or with a non-zero byte in the other 124 bytes of the
+slot, is rejected.
 
 Like the coin reveal a data reveal has no sender, nonce or signature
 (`types.Sender` returns `types.ErrNoSender`), takes exactly
@@ -161,7 +166,7 @@ the block invalid:
 4. the chain id is this chain's (`ErrDataRevealChainID`);
 5. the fee (`ErrDataRevealFee`, see [fee](#fee));
 6. the purpose is reveal or revoke (`ErrDataRevealPurpose`);
-7. out is zero and the note all zero (`ErrDataRevealShape`);
+7. out is zero and the note slot after `cf` all zero (`ErrDataRevealShape`);
 8. the node computes the binding digest itself;
 9. the root is the data tree root in the header of a block of the including
    block's own ancestry, strictly below it (`ErrDataRevealRoot`); a coin tree
@@ -177,11 +182,12 @@ balance and no running total changes.
 
 ### Binding digest
 
-`K("ghost/data-reveal-binding/v1", fields)` over 164 bytes: chain id (8),
+`K("ghost/data-reveal-binding/v1", fields)` over 196 bytes: chain id (8),
 version (2), domain (32, the genesis block hash), transaction type `0x51`,
 statement `0x02`, statement version `0x01`, type field `0x02 0x01` (2, part
 of the binding layout, not a leaf type), purpose (1), the
-verifier-or-recipient field (20), root and marker (32 each) and fee (32). The
+verifier-or-recipient field (20), root and marker (32 each), fee (32) and
+`cf` (32), so a changed `cf` changes the digest. The
 node fills in the chain id, version, domain, transaction type, statement and
 type itself and never takes the digest from the sender; the proof field is not
 covered. Its tag, statement and length differ from the coin reveal's, so a
@@ -191,8 +197,13 @@ data digest never equals a coin digest of the same fields.
 
 The proof goes through the same `Verifier.VerifyReveal` as the coin reveal.
 `VerifyInputs.Kind` is `ghosttree.Data` and `VerifyInputs.Purpose` the purpose
-byte; `Recipient` holds the verifier-or-recipient field and `Remainder`,
-`Out`, `Rule` and `Note` are zero. The default verifier rejects every data
+byte; `Recipient` holds the verifier-or-recipient field, `Cf` the reveal's
+`cf`, and `Remainder`, `Out`, `Rule` and `Note` are zero. Block processing and
+the pool build these inputs in one place, `DataReveal.VerifyInputs`, so they
+never disagree. The linked verifier's statement, in the layout of
+`ghostverifier/ghost_data.h`, is 193 bytes: the purpose (1), then the root,
+marker, party, fee, rule and `cf` (32 each), `cf` at bytes 161 to 193. The
+default verifier rejects every data
 reveal with `ErrNoVerifier`. The stub of `core/ghostpriv/ghostprivtest`
 accepts only the stub proof of the data digest, so the stub proof of a coin
 reveal never verifies a data reveal.

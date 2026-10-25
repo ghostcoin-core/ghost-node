@@ -29,8 +29,9 @@ pub use ghost_proofs::ffi::ghost_verify_coin_reveal;
 pub use ghost_proofs::{PURPOSE_REVEAL, PURPOSE_REVOKE};
 
 /// Length of a data reveal statement: the purpose (1), then the root, marker,
-/// party, fee and rule (32 each), in that order.
-pub const DATA_REVEAL_BYTES: usize = 1 + 5 * 32;
+/// party, fee, rule and content fingerprint `cf` (32 each), in that order, so
+/// `cf` sits at 161..193.
+pub const DATA_REVEAL_BYTES: usize = 1 + 6 * 32;
 
 /// The status of a data reveal the verifier rejects because the data reveal
 /// fee is not settled. It rejects, like every status but
@@ -51,6 +52,7 @@ pub fn data_reveal_from_bytes(bytes: &[u8; DATA_REVEAL_BYTES]) -> Result<DataRev
         party: word(2),
         fee: word(3),
         rule: word(4),
+        cf: word(5),
     })
 }
 
@@ -58,7 +60,7 @@ pub fn data_reveal_from_bytes(bytes: &[u8; DATA_REVEAL_BYTES]) -> Result<DataRev
 pub fn data_reveal_to_bytes(tx: &DataReveal) -> [u8; DATA_REVEAL_BYTES] {
     let mut b = [0u8; DATA_REVEAL_BYTES];
     b[0] = tx.purpose.code();
-    for (i, w) in [&tx.root, &tx.marker, &tx.party, &tx.fee, &tx.rule].into_iter().enumerate() {
+    for (i, w) in [&tx.root, &tx.marker, &tx.party, &tx.fee, &tx.rule, &tx.cf].into_iter().enumerate() {
         b[1 + 32 * i..1 + 32 * (i + 1)].copy_from_slice(w);
     }
     b

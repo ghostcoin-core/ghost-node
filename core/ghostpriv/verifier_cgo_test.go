@@ -138,6 +138,7 @@ func TestGhostDataVerifier(t *testing.T) {
 			Recipient: coin.Recipient,
 			Out:       new(uint256.Int),
 			Fee:       new(uint256.Int),
+			Cf:        common.Hash{0: 0xcf, 31: 0x01},
 		}
 	}
 	proof := func() []byte { return common.CopyBytes(ka.proof) }

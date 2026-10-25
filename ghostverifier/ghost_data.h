@@ -19,9 +19,10 @@
  *
  * Statement, GHOST_DATA_REVEAL_BYTES bytes:
  *   purpose 1 (GHOST_DATA_PURPOSE_REVEAL or GHOST_DATA_PURPOSE_REVOKE), root
- *   32, marker 32, party 32, fee 32, rule 32, in that order. The party is the
- *   verifier-or-recipient address left-padded with zeros to 32 bytes, the fee
- *   a 32-byte amount word.
+ *   32, marker 32, party 32, fee 32, rule 32, cf 32, in that order, so cf
+ *   is at bytes 161 to 193. The party is the verifier-or-recipient address
+ *   left-padded with zeros to 32 bytes, the fee a 32-byte amount word and cf
+ *   the content fingerprint the data reveal carries, which the proof binds.
  *
  * Proof: as ghost_proofs.h, 1 to GHOST_PROOFS_PROOF_MAX_BYTES bytes, one
  * serialized proof optionally followed by zero bytes.
@@ -40,7 +41,7 @@
 #define GHOST_DATA_PURPOSE_REVEAL 0x02
 #define GHOST_DATA_PURPOSE_REVOKE 0x03
 
-#define GHOST_DATA_REVEAL_BYTES 161
+#define GHOST_DATA_REVEAL_BYTES 193
 
 #ifdef __cplusplus
 extern "C" {

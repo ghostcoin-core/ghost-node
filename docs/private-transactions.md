@@ -191,7 +191,13 @@ one data verifier of ghost-proofs, `verify_data_reveal`. A data reveal and a
 data revoke differ only in the purpose byte that starts the statement: `0x02`
 or `0x03` in the codes of ghost-proofs, to which the node maps its own
 `PurposeReveal` (`0x01`) and `PurposeRevoke` (`0x02`), then the root, marker, party (the verifier-or-recipient address
-left-padded to 32 bytes), fee and rule, 32 bytes each. A kind or purpose it
+left-padded to 32 bytes), fee, rule and the content fingerprint `cf`, 32 bytes
+each, 193 bytes in all with `cf` at 161 to 193. `cf` rides in the first 32
+bytes of the data reveal's note slot (see `docs/data-commitments.md`); for a
+coin reveal `VerifyInputs.Cf` is zero and the coin statement is unchanged. The
+crate pins ghost-proofs at revision
+`3eab17cf3128518946d04e8ea7c9b01450ab07d2` of the ghost repository in
+`ghostverifier/Cargo.toml` and `Cargo.lock`. A kind or purpose it
 does not verify is `ErrProofStatement`, without calling it; every answer but
 acceptance is `ErrProofRejected`.
 

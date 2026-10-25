@@ -192,6 +192,7 @@ func revealHop(t *testing.T, name string, envelope []byte, l *types.Log) *hop {
 	h.add("out", common.Hash(r.Out.Bytes32()).Bytes())
 	h.add("fee", common.Hash(r.Fee.Bytes32()).Bytes())
 	h.add("proof[0:32]", r.Proof[:32])
+	h.add("cf", r.Cf[:])
 	h.addNote("note", r.Note[:])
 	if l != nil {
 		rl, ok := parseDataRevealLog(t, l)
