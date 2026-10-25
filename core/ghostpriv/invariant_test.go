@@ -204,7 +204,10 @@ func TestAccountingInvariantRandomized(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				burned.Add(burned, fee.BasePart.ToBig())
+				if fee, err = fee.Cover(block.BaseFee()); err != nil {
+					t.Fatal(err)
+				}
+				burned.Add(burned, fee.Burn.ToBig())
 				continue
 			}
 			burned.Add(burned, new(big.Int).Mul(block.BaseFee(), new(big.Int).SetUint64(r.GasUsed)))

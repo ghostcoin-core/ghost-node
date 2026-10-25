@@ -265,12 +265,29 @@ func (env *BlockEnv) windowFeeOf(h *types.Header) (Fee, *types.Header, error) {
 	return fee, h, nil
 }
 
-// windowFee returns the window fee that paid equals: the fee of the including
-// block's window, else that of the window before it. The first window has
-// none before it. The previous window is read only when the current fee does
-// not match, so the walk reads at most the headers of the two windows. Any
-// other fee is ErrRevealFee.
+// windowFee returns the window fee that paid equals, the fee of the
+// including block's window, else that of the window before it, split by the
+// cover rule for the including block's base fee. The first window has none
+// before it. The previous window is read only when the current fee does not
+// match, so the walk reads at most the headers of the two windows. Any other
+// fee, or one that fails the cover rule, is ErrRevealFee.
 func (env *BlockEnv) windowFee(paid *uint256.Int) (Fee, error) {
+	fee, err := env.matchFee(paid)
+	if err != nil {
+		return Fee{}, err
+	}
+	if env.Header.BaseFee == nil {
+		return Fee{}, fmt.Errorf("%w: %w: including block has no base fee", ErrRevealFee, ErrRevealChainInfo)
+	}
+	split, err := fee.Cover(env.Header.BaseFee)
+	if err != nil {
+		return Fee{}, fmt.Errorf("%w: %w", ErrRevealFee, err)
+	}
+	return split, nil
+}
+
+// matchFee returns the window fee that paid equals, by the rule of windowFee.
+func (env *BlockEnv) matchFee(paid *uint256.Int) (Fee, error) {
 	cur, start, err := env.windowFeeOf(env.Header)
 	if err != nil {
 		return Fee{}, fmt.Errorf("%w: %w", ErrRevealFee, err)

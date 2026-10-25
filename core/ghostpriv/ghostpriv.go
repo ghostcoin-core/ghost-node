@@ -238,22 +238,58 @@ func receiptLocation(res ghosttree.AppendResult) ([]byte, error) {
 	return loc, nil
 }
 
-// Fee is the fee of a reveal in one fee window.
+// FeeSteps is the number of worst-case growth steps of the base fee above
+// the window's reference base fee in the window price (spec 07, section 4).
+const FeeSteps = 1
+
+// Fee is the fee of a reveal in one fee window. WindowFee gives the nominal
+// split, Burn the base part and Tip the nominal tip; Cover gives the split of
+// one including block.
 type Fee struct {
-	Price    *uint256.Int // U3, the price per gas
-	BasePart *uint256.Int // G_PRIV times the price, burned
-	Tip      *uint256.Int // a tenth of the base part rounded up, to the coinbase
-	Total    *uint256.Int // base part plus tip, the payload's fee field
+	Price    *uint256.Int // U_FeeSteps, the price per gas
+	BasePart *uint256.Int // G_PRIV times the price
+	Burn     *uint256.Int // credited to nobody: G_PRIV * max(price, base fee)
+	Tip      *uint256.Int // to the coinbase: the total less the burn
+	Total    *uint256.Int // base part plus nominal tip, the payload's fee field
 }
 
 // ErrBaseFee is returned for a reference base fee that is missing, negative
 // or too large to price.
 var ErrBaseFee = errors.New("reference base fee out of range")
 
+// ErrRevealCover is returned, wrapped in ErrRevealFee, for a reveal whose
+// fee cannot pay G_PRIV times the including block's base fee.
+var ErrRevealCover = errors.New("fee below the cover limit of the base fee")
+
+// Cover applies the cover rule of spec 07, section 5, to the window fee f
+// in a block with base fee beta: burn = G_PRIV * max(price, beta) and tip =
+// total - burn. A negative tip is ErrRevealCover; a missing or unpriceable
+// base fee is ErrBaseFee. The tip is never above the nominal tip.
+func (f Fee) Cover(beta *big.Int) (Fee, error) {
+	if beta == nil || beta.Sign() < 0 {
+		return Fee{}, ErrBaseFee
+	}
+	b, overflow := uint256.FromBig(beta)
+	if overflow {
+		return Fee{}, fmt.Errorf("%w: base fee %v", ErrRevealCover, beta)
+	}
+	if b.Lt(f.Price) {
+		b = f.Price
+	}
+	burn, overflow := new(uint256.Int).MulOverflow(uint256.NewInt(GasPriv), b)
+	if overflow || burn.Gt(f.Total) {
+		return Fee{}, fmt.Errorf("%w: base fee %v, fee %v", ErrRevealCover, beta, f.Total)
+	}
+	out := f
+	out.Burn = burn
+	out.Tip = new(uint256.Int).Sub(f.Total, burn)
+	return out, nil
+}
+
 // WindowFee returns the fee of every reveal in a window whose first block has
 // the base fee bRef: U0 = bRef, U(j+1) = U(j) + floor(U(j)/8) +
-// floor(U(j)/20000) + 1, price = U3, base part = G_PRIV * price, tip =
-// ceil(base part / 10), fee = base part + tip.
+// floor(U(j)/20000) + 1, price = U(FeeSteps), base part = G_PRIV * price,
+// tip = ceil(base part / 10), fee = base part + tip.
 func WindowFee(bRef *big.Int) (Fee, error) {
 	if bRef == nil || bRef.Sign() < 0 {
 		return Fee{}, ErrBaseFee
@@ -267,7 +303,7 @@ func WindowFee(bRef *big.Int) (Fee, error) {
 		div   = uint256.NewInt(20000)
 		one   = uint256.NewInt(1)
 	)
-	for range 3 {
+	for range FeeSteps {
 		next, o1 := new(uint256.Int).AddOverflow(u, new(uint256.Int).Div(u, eight))
 		next, o2 := next.AddOverflow(next, new(uint256.Int).Div(u, div))
 		next, o3 := next.AddOverflow(next, one)
@@ -288,7 +324,7 @@ func WindowFee(bRef *big.Int) (Fee, error) {
 	if overflow {
 		return Fee{}, ErrBaseFee
 	}
-	return Fee{Price: u, BasePart: base, Tip: tip, Total: total}, nil
+	return Fee{Price: u, BasePart: base, Burn: base, Tip: tip, Total: total}, nil
 }
 
 // WindowStart returns the height of the first block of the fee window of a
