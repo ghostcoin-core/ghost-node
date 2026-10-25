@@ -228,10 +228,11 @@ func (h *hop) decodeAccountTx(raw []byte) error {
 			}
 			h.put(seg, name, start, len(val), el.role, false)
 		}
-		if el.name == "data" && len(val) == ghostpriv.CommitDataSize {
+		if el.name == "data" && len(val) == ghostpriv.SaltedCommitDataSize {
 			h.put(seg, "transaction.data.version", start, 2, roleVersion, true)
 			h.put(seg, "transaction.data.F", start+2, 32, roleNone, false)
-			h.putNote(seg, "transaction.data.note", start+34)
+			h.put(seg, "transaction.data.salt", start+34, ghostpriv.SaltSize, roleNone, false)
+			h.putNote(seg, "transaction.data.note", start+34+ghostpriv.SaltSize)
 		}
 	}
 	if len(content) != 0 {
@@ -248,7 +249,7 @@ var (
 )
 
 const (
-	commitLogSize = 8 + 32 + 32 + ghostpriv.NoteSize
+	commitLogSize = 8 + 32 + 32 + ghostpriv.NoteSize + ghostpriv.SaltSize
 	revealLogSize = 8 + 32 + ghostpriv.NoteSize + 20 + 32
 )
 

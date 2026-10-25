@@ -857,7 +857,7 @@ func TestWorkerIncludesPendingReveal(t *testing.T) {
 			Data:      data,
 		})
 	}
-	commitData, err := ghostpriv.CommitData(ghosttree.K("ghost/test-coin-f", []byte("worker")), make([]byte, ghostpriv.NoteSize))
+	commitData, err := ghostpriv.SaltedCommitData(ghosttree.K("ghost/test-coin-f", []byte("worker")), make([]byte, ghostpriv.SaltSize), make([]byte, ghostpriv.NoteSize))
 	if err != nil {
 		t.Fatal(err)
 	}

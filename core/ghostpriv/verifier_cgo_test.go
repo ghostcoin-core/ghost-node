@@ -54,17 +54,15 @@ type knownAnswer struct {
 }
 
 // knownAnswerFiles are the known-answer fixtures by commitment format: a
-// version 1 coin and a salted (version 2) coin. The statement layout is the
-// same for both; the verifier tells them apart by the proof alone.
+// salted (version 2) coin only, since the node takes no version 1 coin.
 var knownAnswerFiles = []struct{ name, file string }{
-	{"version 1", "coin_reveal.bin.gz"},
 	{"salted version 2", "salted_coin_reveal.bin.gz"},
 }
 
-// loadKnownAnswer loads the version 1 fixture.
+// loadKnownAnswer loads the salted fixture.
 func loadKnownAnswer(t *testing.T) knownAnswer {
 	t.Helper()
-	return loadKnownAnswerFile(t, "coin_reveal.bin.gz")
+	return loadKnownAnswerFile(t, "salted_coin_reveal.bin.gz")
 }
 
 func loadKnownAnswerFile(t *testing.T, name string) knownAnswer {

@@ -94,7 +94,7 @@ func (s *scenario) dataCommitTx(n *node, data []byte, value *big.Int) *types.Tra
 func commitData(t *testing.T, w *wallet, plaintext []byte) []byte {
 	t.Helper()
 	note := w.note(plaintext)
-	data, err := ghostpriv.CommitData(w.fingerprint(contentFingerprint(plaintext)), note[:])
+	data, err := ghostpriv.SaltedCommitData(w.fingerprint(contentFingerprint(plaintext)), make([]byte, ghostpriv.SaltSize), note[:])
 	if err != nil {
 		t.Fatal(err)
 	}

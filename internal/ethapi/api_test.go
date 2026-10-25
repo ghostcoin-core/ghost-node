@@ -1962,7 +1962,7 @@ func TestSendRawRevealTransaction(t *testing.T) {
 		chainID      = gspec.Config.GetChainID()
 	)
 	gspec.Alloc = genesisT.GenesisAlloc{addr: {Balance: new(big.Int).Mul(oneGhost, big.NewInt(100))}}
-	data, err := ghostpriv.CommitData(ghosttree.K("ghost/test-coin-f", []byte("rpc")), make([]byte, ghostpriv.NoteSize))
+	data, err := ghostpriv.SaltedCommitData(ghosttree.K("ghost/test-coin-f", []byte("rpc")), make([]byte, ghostpriv.SaltSize), make([]byte, ghostpriv.NoteSize))
 	if err != nil {
 		t.Fatal(err)
 	}

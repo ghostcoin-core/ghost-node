@@ -119,7 +119,7 @@ func (w *wallet) fingerprint(cf common.Hash) common.Hash {
 
 // commitment is C for cf, the leaf the node appends.
 func (w *wallet) commitment(cf common.Hash) common.Hash {
-	return ghostpriv.DataCommitment(w.fingerprint(cf))
+	return ghostpriv.DataCommitmentVersion(ghostpriv.SaltedCommitVersion, w.fingerprint(cf))
 }
 
 // marker is the commitment's one marker.

@@ -29,8 +29,10 @@ import (
 )
 
 const (
-	// CommitDataSize is the length of version 1 commit data: the version (2
-	// bytes), F (32) and the note (156).
+	// CommitDataSize is the length of the old version 1 commit data: the
+	// version (2 bytes), F (32) and the note (156). The node refuses it from
+	// genesis: two version 1 commits to one key share a marker, so the
+	// second coin could never be revealed.
 	CommitDataSize = 2 + 32 + NoteSize
 
 	// SaltedCommitDataSize is the length of salted commit data, version 2:
@@ -39,10 +41,10 @@ const (
 )
 
 var (
-	// ErrCommitData is returned for commit data that is neither exactly
-	// CommitDataSize bytes of version 1 nor exactly SaltedCommitDataSize
-	// bytes of SaltedCommitVersion.
-	ErrCommitData = errors.New("commit data is not 190 bytes of version 1 or 206 bytes of version 2")
+	// ErrCommitData is returned for commit data that is not exactly
+	// SaltedCommitDataSize bytes of SaltedCommitVersion, the version 1
+	// layout included.
+	ErrCommitData = errors.New("commit data is not 206 bytes of version 2")
 
 	// ErrCommitZeroF is returned for an all-zero F.
 	ErrCommitZeroF = errors.New("commit F is zero")
@@ -88,18 +90,6 @@ func commitVersion(salt *[SaltSize]byte) uint16 {
 	return Version
 }
 
-// CommitData returns the data of a commit transaction: version 1, F and the
-// note, exactly CommitDataSize bytes.
-func CommitData(f common.Hash, note []byte) ([]byte, error) {
-	if len(note) != NoteSize {
-		return nil, fmt.Errorf("note of %d bytes, want %d", len(note), NoteSize)
-	}
-	data := make([]byte, 0, CommitDataSize)
-	data = binary.BigEndian.AppendUint16(data, Version)
-	data = append(data, f[:]...)
-	return append(data, note...), nil
-}
-
 // SaltedCommitData returns the salted data of a commit or data commit
 // transaction: SaltedCommitVersion, F, the salt and the note, exactly
 // SaltedCommitDataSize bytes.
@@ -117,18 +107,15 @@ func SaltedCommitData(f common.Hash, salt []byte, note []byte) ([]byte, error) {
 	return append(data, note...), nil
 }
 
-// parseCommitData splits commit data of either layout into F, the salt (nil
-// for version 1) and the note: exactly CommitDataSize bytes of Version, or
-// exactly SaltedCommitDataSize bytes of SaltedCommitVersion. Anything else is
-// ErrCommitData.
+// parseCommitData splits commit data into F, the salt and the note: exactly
+// SaltedCommitDataSize bytes of SaltedCommitVersion. Anything else, the 190
+// bytes of version 1 included, is ErrCommitData.
 func parseCommitData(data []byte) (f common.Hash, salt *[SaltSize]byte, note [NoteSize]byte, err error) {
 	var version uint16
 	if len(data) >= 2 {
 		version = binary.BigEndian.Uint16(data[:2])
 	}
 	switch {
-	case len(data) == CommitDataSize && version == Version:
-		copy(note[:], data[34:])
 	case len(data) == SaltedCommitDataSize && version == SaltedCommitVersion:
 		salt = new([SaltSize]byte)
 		copy(salt[:], data[34:34+SaltSize])
@@ -140,8 +127,8 @@ func parseCommitData(data []byte) (f common.Hash, salt *[SaltSize]byte, note [No
 }
 
 // ParseCommit checks the data and value of a top-level call to the commit
-// entry address, in the order of the coin rules: exactly 190 bytes of
-// version 1 or exactly 206 bytes of version 2 (ErrCommitData), F not zero
+// entry address, in the order of the coin rules: exactly 206 bytes of
+// version 2 (ErrCommitData), F not zero
 // (ErrCommitZeroF), then 1 <= value <= V_MAX (ErrCommitAmount). The
 // commitment is computed from F and the value; nothing in the data can set
 // it, and the salt only rides along to the receipt and the history.
@@ -242,9 +229,8 @@ func (c *DataCommit) Commitment() common.Hash {
 }
 
 // ParseDataCommit checks the data and value of a top-level call to the data
-// commit entry address, in this order: exactly 190 bytes of version 1 or
-// exactly 206 bytes of version 2, the layouts of a coin commit
-// (ErrCommitData), F not zero (ErrCommitZeroF), then a value of exactly 0
+// commit entry address, in this order: exactly 206 bytes of version 2, the
+// layout of a coin commit (ErrCommitData), F not zero (ErrCommitZeroF), then a value of exactly 0
 // (ErrDataCommitValue). The commitment is computed from F; nothing in the
 // data can set it.
 func ParseDataCommit(data []byte, value *big.Int) (*DataCommit, error) {

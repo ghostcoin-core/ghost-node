@@ -332,7 +332,9 @@ type coin struct {
 
 func (c coin) fingerprint() common.Hash { return c.w.secret(tagFingerprint, c.index) }
 
-func (c coin) leaf() common.Hash { return ghostpriv.Commitment(c.fingerprint(), c.value) }
+func (c coin) leaf() common.Hash {
+	return ghostpriv.CommitmentVersion(ghostpriv.SaltedCommitVersion, c.fingerprint(), c.value)
+}
 
 func (c coin) marker() common.Hash {
 	r, b := c.w.secret(tagRevealKey, c.index), c.w.secret(tagBlinding, c.index)
@@ -401,7 +403,7 @@ func buildFixture(t *testing.T) *fixture {
 	}
 	coin0 := coin{w: w, index: 0, value: value}
 	note0 := coin0.note()
-	data, err := ghostpriv.CommitData(coin0.fingerprint(), note0[:])
+	data, err := ghostpriv.SaltedCommitData(coin0.fingerprint(), make([]byte, ghostpriv.SaltSize), note0[:])
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -43,23 +43,18 @@ bytes, version 2:
 | 50 | 156 | note |
 
 The salt is the coin's 16-byte per-coin salt, carried in the clear so that a
-wallet can read it back with the leaf and note. Version 1 data of exactly 190
-bytes, without a salt, is still accepted unchanged, because version 1
-commitments stay valid:
-
-| Offset | Length | Field |
-|---|---|---|
-| 0 | 2 | version, `0x0001` |
-| 2 | 32 | `F` |
-| 34 | 156 | note |
+wallet can read it back with the leaf and note. The node refuses the old
+190 bytes of version 1 data without a salt from genesis: a new chain has no
+version 1 leaves, and two version 1 commits to one key share a marker, so the
+second coin could never be revealed.
 
 The node computes the commitment itself,
 `C = K("ghost/coin-commitment/v1", COIN, F, v)`, from `F` and `v` only, with
-the `COIN` of the data's version: `0x02 0x01` for the 206 bytes of version 2,
-`0x01 0x01` for the 190 bytes of version 1 (`ghostpriv.CommitmentVersion`).
+the `COIN` of the data's version, `0x02 0x01` for the 206 bytes of version 2
+(`ghostpriv.CommitmentVersion`).
 The salt is already in `F` and the node never uses it. The sender chooses
 neither the type nor the commitment. For `F = b44338ab…0c4d8b` and
-`v = 10^18` at version 1 it is `562d92a9…029458`; the salted vectors of spec 01
+`v = 10^18` at the version 1 tag it is `562d92a9…029458`; the salted vectors of spec 01
 are checked the same way (`TestLeafMatchesProofCrateVectors` has the full
 values).
 
@@ -67,9 +62,9 @@ The checks run in this order and stop at the first failure; each failure makes
 the transaction invalid, so a block carrying it is invalid:
 
 1. ordinary validity: nonce, sender without code, fee caps, intrinsic gas;
-2. data of exactly 206 bytes with version 2, or of exactly 190 bytes with
-   version 1 (`ErrCommitData`); anything else, an extra field, another
-   version or a version with the other length included, is rejected;
+2. data of exactly 206 bytes with version 2 (`ErrCommitData`); anything
+   else, the 190 bytes of version 1, an extra field or another version
+   included, is rejected;
 3. `F` not all zero (`ErrCommitZeroF`);
 4. `1 <= v <= V_MAX` (`ErrCommitAmount`);
 5. the sender's funds cover `v` plus the gas (`core.ErrInsufficientFunds`);
@@ -196,7 +191,7 @@ each, 193 bytes in all with `cf` at 161 to 193. `cf` rides in the first 32
 bytes of the data reveal's note slot (see `docs/data-commitments.md`); for a
 coin reveal `VerifyInputs.Cf` is zero and the coin statement is unchanged. The
 crate pins ghost-proofs at revision
-`3eab17cf3128518946d04e8ea7c9b01450ab07d2` of the ghost repository in
+`f33169c62708e71ad31040b06b78cd3801fc9d0b` of the ghost repository in
 `ghostverifier/Cargo.toml` and `Cargo.lock`. A kind or purpose it
 does not verify is `ErrProofStatement`, without calling it; every answer but
 acceptance is `ErrProofRejected`.
@@ -259,8 +254,7 @@ For the wallet and the tests that build on this:
 - `ghostpriv.Reveal` with `MarshalBinary` (the envelope), `BindingDigest` and
   `BindingInput`; `ghostpriv.DecodeReveal` (checks 1 to 3);
 - `ghostpriv.SaltedCommitData(F, salt, note)`, the 206 bytes of a salted
-  commit (`SaltedCommitVersion`, `SaltedCommitDataSize`), and
-  `ghostpriv.CommitData(F, note)`, the 190 bytes of a version 1 commit;
+  commit (`SaltedCommitVersion`, `SaltedCommitDataSize`);
 - `ghostpriv.Commitment(F, v)`;
 - `ghostpriv.WindowFee(b_ref)` and `ghostpriv.WindowStart(H)`;
 - `ghostpriv.CheckReveal` and `ghostpriv.ApplyReveal`, which block processing

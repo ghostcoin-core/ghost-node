@@ -213,7 +213,7 @@ func TestDataLifecycleRestore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("restore from the digits: %v", err)
 	}
-	want := ghostpriv.DataCommitment(clean.fingerprint(contentFingerprint(plaintext)))
+	want := ghostpriv.DataCommitmentVersion(ghostpriv.SaltedCommitVersion, clean.fingerprint(contentFingerprint(plaintext)))
 	if r.leaf != want || r.position != 1 || r.spent || r.block != h.block.NumberU64() {
 		t.Fatalf("restored leaf %x at %d in block %d, spent %v; want %x at 1 in block %d, unspent", r.leaf, r.position, r.block, r.spent, want, h.block.NumberU64())
 	}
