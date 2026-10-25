@@ -24,7 +24,8 @@
 // the block that would come next on the current head, with the active
 // verifier, at a cost bounded per reveal: the root rule is answered by the
 // chain's tree-root index for the pool's head, the other checks read at most
-// the headers of the fee window, and the proof is verified last, only for a
+// the headers of the fee window and of the window before it, whose fee is
+// accepted too, and the proof is verified last, only for a
 // reveal every other check passed. A reveal refused for a reason no head can
 // change, a bad proof among them, is remembered by its hash in a bounded set
 // and refused again without any check. It holds at most one
@@ -199,7 +200,7 @@ type BlockChain interface {
 	// CurrentBlock returns the current head of the chain.
 	CurrentBlock() *types.Header
 
-	// GetHeader returns a header by hash and number, for the fee window and
+	// GetHeader returns a header by hash and number, for the fee windows and
 	// the tree-root index.
 	GetHeader(hash common.Hash, number uint64) *types.Header
 
@@ -237,8 +238,8 @@ type peerBudget struct {
 // a time, against a snapshot of the head: they verify the proof, and the
 // lock must not be held through that. Their cost is bounded per reveal
 // whatever the age of its root: one lookup in the tree-root index, then the
-// other checks, which read at most the headers of the fee window, then the
-// proof. A reveal being checked holds its marker and a place under
+// other checks, which read at most the headers of the fee window and of the
+// window before it, then the proof. A reveal being checked holds its marker and a place under
 // the caps, so that the first seen of two competing reveals is still the
 // one kept.
 //
@@ -256,6 +257,7 @@ type Pool struct {
 	head       *types.Header
 	state      *state.StateDB
 	fee        *uint256.Int // the coin reveal fee of the next block, nil if unknown
+	prevFee    *uint256.Int // that of the window before, nil if none or unknown
 	all        map[common.Hash]*entry
 	order      []common.Hash // hashes of the held reveals, first seen first
 	markers    map[markerKey]common.Hash
@@ -308,10 +310,10 @@ func (p *Pool) Init(gasTip uint64, head *types.Header, reserve txpool.AddressRes
 	if err != nil {
 		return err
 	}
-	fee := p.windowFee(head)
+	fee, prevFee := p.windowFees(head)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.head, p.state, p.fee = head, st, fee
+	p.head, p.state, p.fee, p.prevFee = head, st, fee, prevFee
 	return nil
 }
 
@@ -338,9 +340,9 @@ func (p *Pool) Reset(oldHead, newHead *types.Header) {
 		log.Error("Reveal pool cannot reset to the new head", "number", newHead.Number, "hash", newHead.Hash(), "err", err)
 		return
 	}
-	fee := p.windowFee(newHead)
+	fee, prevFee := p.windowFees(newHead)
 	p.mu.Lock()
-	p.head, p.state, p.fee = newHead, st, fee
+	p.head, p.state, p.fee, p.prevFee = newHead, st, fee, prevFee
 	now := time.Now()
 	for _, b := range p.peers {
 		b.tokens = PeerRevealsPerBlock
@@ -637,8 +639,10 @@ func (p *Pool) cheapRules(r revealFields) error {
 		return fmt.Errorf("%w: have %d, chain %v", ghostpriv.ErrDataRevealChainID, r.chainID, id)
 	}
 	switch {
-	case coin && p.fee != nil && !p.fee.Eq(r.fee):
+	case coin && p.fee != nil && !p.fee.Eq(r.fee) && p.prevFee == nil:
 		return fmt.Errorf("%w: have %v, want %v", ghostpriv.ErrRevealFee, r.fee, p.fee)
+	case coin && p.fee != nil && !p.fee.Eq(r.fee) && !p.prevFee.Eq(r.fee):
+		return fmt.Errorf("%w: have %v, want %v or %v", ghostpriv.ErrRevealFee, r.fee, p.fee, p.prevFee)
 	case !coin && !r.fee.IsZero():
 		// A data reveal pays no fee or is refused by the chain rules.
 		return fmt.Errorf("%w: have %v, want 0", ghostpriv.ErrDataRevealFee, r.fee)
@@ -676,17 +680,40 @@ func (p *Pool) eligibleRoot(head *types.Header, kind ghosttree.Kind, root common
 	return false, err
 }
 
-// windowFee is the coin reveal fee of the block that would come next on
-// head, nil when an ancestor it needs is not available: the reveal checks
-// then refuse the reveal themselves. The walk reads at most three headers.
-func (p *Pool) windowFee(head *types.Header) *uint256.Int {
-	h := p.nextHeader(head)
-	start := ghostpriv.WindowStart(h.Number.Uint64())
-	if h.Number.Uint64() > start {
-		for h = head; h != nil && h.Number.Uint64() > start; {
-			h = p.chain.GetHeader(h.ParentHash, h.Number.Uint64()-1)
-		}
+// windowFees are the coin reveal fees the block that would come next on head
+// accepts: that of its fee window and that of the window before it, nil when
+// the window does not exist, for the first window, or an ancestor it needs
+// is not available: the reveal checks then refuse the reveal themselves. The
+// walk reads at most the headers of the two windows, seven of them.
+func (p *Pool) windowFees(head *types.Header) (cur, prev *uint256.Int) {
+	next := p.nextHeader(head)
+	start := ghostpriv.WindowStart(next.Number.Uint64())
+	h := next
+	if next.Number.Uint64() > start {
+		h = p.ancestor(head, start)
 	}
+	if cur = feeTotal(h); cur == nil || start == 0 {
+		return cur, nil
+	}
+	from := h
+	if h == next {
+		from = head
+	}
+	return cur, feeTotal(p.ancestor(from, start-4))
+}
+
+// ancestor returns the header at height n of h's ancestry, h itself at its
+// own height, by walking the parent links; nil if one is not available.
+func (p *Pool) ancestor(h *types.Header, n uint64) *types.Header {
+	for h != nil && h.Number.Uint64() > n {
+		h = p.chain.GetHeader(h.ParentHash, h.Number.Uint64()-1)
+	}
+	return h
+}
+
+// feeTotal is the window fee of a window whose first block is h, nil when h
+// or its base fee is missing or cannot be priced.
+func feeTotal(h *types.Header) *uint256.Int {
 	if h == nil || h.BaseFee == nil {
 		return nil
 	}
@@ -861,9 +888,9 @@ func (p *Pool) snapshot() (*types.Header, *state.StateDB, error) {
 //     walk of the ancestry;
 //  2. the other checks of core/ghostpriv but the proof, among them the
 //     chain id, the fee, the marker and the backstop, on a view of the
-//     chain that holds only the headers of the fee window, so that their
-//     own root check stops there; a root the index found below the window
-//     is refused by that check, and the checks that come after the root,
+//     chain that holds only the headers of the fee window and of the window
+//     before it, so that their own root check stops there; a root the index
+//     found below those windows is refused by that check, and the checks that come after the root,
 //     the marker and the backstop, are then run here;
 //  3. the proof, for the inputs the node computes, last, so that a reveal
 //     refused by any other check costs no proof verification.
@@ -908,7 +935,7 @@ func (p *Pool) checkRules(head *types.Header, st *state.StateDB, rv *checkedReve
 	if !eligible {
 		return fmt.Errorf("%w: %x", rv.errRoot, rv.in.Root)
 	}
-	env.Chain = windowChain{chain: p.chain, min: ghostpriv.WindowStart(next.Number.Uint64())}
+	env.Chain = windowChain{chain: p.chain, min: feeWindowsStart(next.Number.Uint64())}
 	if err = rv.rules(st, env, pendingProof{rv.in}); !errors.Is(err, rv.errRoot) {
 		return err
 	}
@@ -1032,8 +1059,9 @@ func (v pendingProof) VerifyReveal(in *ghostpriv.VerifyInputs, proof []byte) err
 }
 
 // windowChain is the chain as the checks of core/ghostpriv read it in the
-// pool: the headers from height min up, those of the fee window, and none
-// below, so that their walk for the root reads at most the window.
+// pool: the headers from height min up, those of the fee window and of the
+// window before it, whose fee is accepted too, and none below, so that their
+// walk for the fee and the root reads at most the two windows.
 type windowChain struct {
 	chain ghostpriv.ChainReader
 	min   uint64
@@ -1044,6 +1072,16 @@ func (c windowChain) GetHeader(hash common.Hash, number uint64) *types.Header {
 		return nil
 	}
 	return c.chain.GetHeader(hash, number)
+}
+
+// feeWindowsStart is the height of the first block of the fee window before
+// that of a block at height h, or of its own window when it is the first.
+func feeWindowsStart(h uint64) uint64 {
+	start := ghostpriv.WindowStart(h)
+	if start < 4 {
+		return 0
+	}
+	return start - 4
 }
 
 // nextHeader is the header of the block that would come next on head, as

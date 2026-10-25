@@ -474,7 +474,7 @@ func TestGhostPoolCapsAndRecheck(t *testing.T) {
 	if MaxBytes != MaxReveals*types.GhostRevealEnvelopeSize {
 		t.Fatalf("byte cap %d is not %d envelopes", MaxBytes, MaxReveals)
 	}
-	f := newFixture(t, 3, nil)
+	f := newFixture(t, 7, nil)
 	p := f.newPool()
 
 	reveals := make([]*types.Transaction, MaxReveals+1)
@@ -506,20 +506,35 @@ func TestGhostPoolCapsAndRecheck(t *testing.T) {
 		t.Fatalf("pool holds %d reveals after a head in the same window, want %d", run, MaxReveals)
 	}
 
-	// The next block starts a new fee window with another base fee: the
-	// recheck drops every reveal priced for the old one.
+	// The next block starts a new fee window with another base fee: the old
+	// window is the one before it, whose fee is still accepted.
 	old = f.chain.CurrentBlock()
 	f.insert(3)
-	if ghostpriv.WindowStart(4) != 4 {
-		t.Fatal("block 4 does not start a fee window")
+	if ghostpriv.WindowStart(4) != 4 || ghostpriv.WindowStart(8) != 8 {
+		t.Fatal("blocks 4 and 8 do not start fee windows")
 	}
-	newFee := f.windowFee(4)
-	if oldFee := f.windowFee(2); newFee.Eq(oldFee) {
-		t.Fatalf("the fee of the new window equals the old one, %v", newFee)
+	oldFee := f.windowFee(2)
+	if f.windowFee(4).Eq(oldFee) {
+		t.Fatalf("the fee of the next window equals the old one, %v", oldFee)
 	}
 	f.reset(p, old)
+	if run, _ := p.Stats(); run != MaxReveals {
+		t.Fatalf("pool holds %d reveals in the window after theirs, want %d", run, MaxReveals)
+	}
+
+	// Block 8 starts the window after that: the recheck drops every reveal
+	// priced for the old one.
+	for n := 4; n <= 7; n++ {
+		old = f.chain.CurrentBlock()
+		f.insert(n)
+		f.reset(p, old)
+	}
+	newFee := f.windowFee(8)
+	if newFee.Eq(oldFee) {
+		t.Fatalf("the fee of the new window equals the old one, %v", newFee)
+	}
 	if run, _ := p.Stats(); run != 0 {
-		t.Fatalf("pool holds %d reveals after the window changed, want none", run)
+		t.Fatalf("pool holds %d reveals two windows after theirs, want none", run)
 	}
 	if p.bytes != 0 || len(p.markers) != 0 || len(p.order) != 0 {
 		t.Fatalf("pool keeps %d bytes, %d markers and %d hashes after the recheck", p.bytes, len(p.markers), len(p.order))
@@ -528,6 +543,86 @@ func TestGhostPoolCapsAndRecheck(t *testing.T) {
 	fresh := f.revealWithFee(testMarker(0), recipient(0), newFee)
 	if err := p.Add([]*types.Transaction{fresh}, true, true)[0]; err != nil {
 		t.Fatalf("reveal priced for the new window refused: %v", err)
+	}
+}
+
+// TestGhostPoolAcceptsPreviousWindowFee checks that the pool admits a reveal
+// at the fee of the next block's window or of the window before it, and no
+// other: the first window has none before it, a reveal priced for window j
+// is admitted and kept in window j+1 and refused and dropped in window j+2,
+// and admitting it reads at most the headers of the two windows.
+func TestGhostPoolAcceptsPreviousWindowFee(t *testing.T) {
+	f := newFixture(t, 8, nil)
+	chain := &countChain{BlockChain: f.chain}
+	verifier := new(countVerifier)
+	p := f.newCountedPool(chain, verifier)
+	fee0, fee4, fee8 := f.windowFee(2), f.windowFee(4), f.windowFee(8)
+	if fee0.Eq(fee4) || fee4.Eq(fee8) || fee0.Eq(fee8) {
+		t.Fatalf("window fees are not distinct: %v, %v, %v", fee0, fee4, fee8)
+	}
+	unrelated := new(uint256.Int).Add(fee0, uint256.NewInt(1))
+	add := func(marker int, fee *uint256.Int) error {
+		return addOne(p, "", f.revealWithFee(testMarker(marker), recipient(marker), fee))
+	}
+	advance := func(to int) {
+		for n := int(f.chain.CurrentBlock().Number.Uint64()) + 1; n <= to; n++ {
+			old := f.chain.CurrentBlock()
+			f.insert(n)
+			f.reset(p, old)
+		}
+	}
+
+	// Block 2 is in the first window: only its own fee.
+	held := f.revealWithFee(testMarker(1), recipient(1), fee0)
+	if err := addOne(p, "", held); err != nil {
+		t.Fatalf("first window at its own fee: %v", err)
+	}
+	requireErr(t, add(2, fee4), ghostpriv.ErrRevealFee, "first window at the next window's fee")
+	requireErr(t, add(3, unrelated), ghostpriv.ErrRevealFee, "first window at an unrelated fee")
+	requireErr(t, add(4, new(uint256.Int)), ghostpriv.ErrRevealFee, "first window at a zero fee")
+
+	// Block 4 starts window 4: the fee of window 0 is still admitted, and the
+	// reveal held at it is kept.
+	advance(3)
+	if !p.Has(held.Hash()) {
+		t.Fatal("the reveal priced for the previous window was dropped")
+	}
+	chain.reset()
+	if err := add(10, fee0); err != nil {
+		t.Fatalf("window 4 at the previous window's fee: %v", err)
+	}
+	// The cheap checks, the window view and the root rule: at most the two
+	// windows and the header the index names.
+	if reads := chain.reads.Load(); reads > 2*4+1 {
+		t.Fatalf("admitting a previous-window reveal read %d headers, want at most %d", reads, 2*4+1)
+	}
+	if err := add(11, fee4); err != nil {
+		t.Fatalf("window 4 at its own fee: %v", err)
+	}
+	requireErr(t, add(12, unrelated), ghostpriv.ErrRevealFee, "window 4 at an unrelated fee")
+	requireErr(t, add(13, fee8), ghostpriv.ErrRevealFee, "window 4 at the next window's fee")
+
+	// Block 7 is still in window 4.
+	advance(6)
+	if err := add(20, fee0); err != nil {
+		t.Fatalf("block 7 at the previous window's fee: %v", err)
+	}
+
+	// Block 8 starts window 8: the fee of window 0 is two windows back, and
+	// every reveal held at it is dropped.
+	advance(7)
+	if p.Has(held.Hash()) {
+		t.Fatal("a reveal two windows old is still held")
+	}
+	if run, _ := p.Stats(); run != 1 {
+		t.Fatalf("pool holds %d reveals in window 8, want only the one at window 4's fee", run)
+	}
+	requireErr(t, add(30, fee0), ghostpriv.ErrRevealFee, "window 8 at the fee of two windows back")
+	if err := add(31, fee4); err != nil {
+		t.Fatalf("window 8 at the previous window's fee: %v", err)
+	}
+	if err := add(32, fee8); err != nil {
+		t.Fatalf("window 8 at its own fee: %v", err)
 	}
 }
 

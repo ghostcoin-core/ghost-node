@@ -481,7 +481,9 @@ func TestBlockWithTwoRevealsOfOneMarkerIsInvalid(t *testing.T) {
 // TestRevealFeeMustEqualWindowFee checks the fee formula's known answers and
 // that a reveal must pay exactly the fee of its window, priced from the
 // base fee of the window's first block: the including block itself when it
-// starts the window, an ancestor otherwise, never the parent as such.
+// starts the window, an ancestor otherwise, never the parent as such. The
+// fee of the window before is accepted too, see
+// TestRevealAcceptsPreviousWindowFee.
 func TestRevealFeeMustEqualWindowFee(t *testing.T) {
 	type answer struct {
 		bRef                       int64
@@ -566,6 +568,112 @@ func TestRevealFeeMustEqualWindowFee(t *testing.T) {
 		if err := check(env7, st7, price(bRef)); !errors.Is(err, ghostpriv.ErrRevealFee) {
 			t.Errorf("block 7 at %s fee: %v", name, err)
 		}
+	}
+}
+
+// TestRevealAcceptsPreviousWindowFee checks that a reveal may pay the fee of
+// its block's window or of the window before it, and no other: a reveal
+// proved for window j is accepted in window j+1 and refused in window j+2,
+// the first window accepts only its own fee, and the tip and the burned base
+// part are those of the window whose fee matched.
+func TestRevealAcceptsPreviousWindowFee(t *testing.T) {
+	useStub(t)
+	s := newScenario(t, 11)
+	miner := common.Address{0xcb, 0x9}
+	feeOf := func(bRef *big.Int) ghostpriv.Fee {
+		fee, err := ghostpriv.WindowFee(bRef)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fee
+	}
+	// at is the environment of the block at height n, on block n-1.
+	at := func(n int) (*ghostpriv.BlockEnv, *state.StateDB) {
+		return nextEnv(t, s.chain, s.blocks[n-2].Header(), miner)
+	}
+	check := func(n int, fee *uint256.Int) (ghostpriv.Fee, error) {
+		env, st := at(n)
+		_, paid, err := ghostpriv.CheckReveal(st.Copy(), env, stub, envelope(t, s.reveal(t, "previous window", u256(ghostAmount(1, 10)), fee)))
+		return paid, err
+	}
+	var (
+		fee0 = feeOf(s.f.genesis.BaseFee())
+		fee4 = feeOf(s.blocks[3].BaseFee())
+		fee8 = feeOf(s.blocks[7].BaseFee())
+	)
+	if fee0.Total.Eq(fee4.Total) || fee4.Total.Eq(fee8.Total) || fee0.Total.Eq(fee8.Total) || fee4.Tip.Eq(fee8.Tip) {
+		t.Fatalf("window fees are not distinct: %v, %v, %v", fee0.Total, fee4.Total, fee8.Total)
+	}
+
+	// The first window has no window before it: only its own fee.
+	if _, err := check(3, fee0.Total); err != nil {
+		t.Fatalf("block 3 at the first window's fee: %v", err)
+	}
+	for name, fee := range map[string]*uint256.Int{
+		"window 4's":   fee4.Total,
+		"one wei more": new(uint256.Int).Add(fee0.Total, uint256.NewInt(1)),
+		"zero":         new(uint256.Int),
+	} {
+		if _, err := check(3, fee); !errors.Is(err, ghostpriv.ErrRevealFee) {
+			t.Errorf("block 3 at %s fee: %v", name, err)
+		}
+	}
+
+	// A reveal proved for window 4 is accepted in window 4 and in window 8,
+	// and refused in window 12.
+	for _, n := range []int{5, 7, 8, 9, 11} {
+		paid, err := check(n, fee4.Total)
+		if err != nil {
+			t.Fatalf("block %d at window 4's fee: %v", n, err)
+		}
+		if !paid.Total.Eq(fee4.Total) || !paid.Tip.Eq(fee4.Tip) || !paid.BasePart.Eq(fee4.BasePart) {
+			t.Errorf("block %d paid %+v, want window 4's %+v", n, paid, fee4)
+		}
+	}
+	if _, err := check(12, fee4.Total); !errors.Is(err, ghostpriv.ErrRevealFee) {
+		t.Errorf("block 12 at window 4's fee: %v", err)
+	}
+	// Window 8 takes its own fee and window 4's, nothing else.
+	if _, err := check(9, fee8.Total); err != nil {
+		t.Errorf("block 9 at its own window's fee: %v", err)
+	}
+	for name, fee := range map[string]*uint256.Int{
+		"window 0's":             fee0.Total,
+		"window 4's plus one":    new(uint256.Int).Add(fee4.Total, uint256.NewInt(1)),
+		"window 4's minus one":   new(uint256.Int).Sub(fee4.Total, uint256.NewInt(1)),
+		"window 4's base part":   fee4.BasePart,
+		"block 5's base fee":     feeOf(s.blocks[4].BaseFee()).Total,
+		"between the two prices": new(uint256.Int).Rsh(new(uint256.Int).Add(fee4.Total, fee8.Total), 1),
+	} {
+		if _, err := check(9, fee); !errors.Is(err, ghostpriv.ErrRevealFee) {
+			t.Errorf("block 9 at %s fee: %v", name, err)
+		}
+	}
+
+	// Applied in window 8, a reveal at window 4's fee pays window 4's tip to
+	// the coinbase and burns window 4's base part.
+	env, st := at(10)
+	out := u256(ghostAmount(1, 10))
+	_, outBefore := totals(st)
+	coinbaseBefore := st.GetBalance(miner).Clone()
+	recipientBefore := st.GetBalance(addrB).Clone()
+	if err := ghostpriv.ApplyReveal(st, env, stub, envelope(t, s.reveal(t, "previous window", out, fee4.Total))); err != nil {
+		t.Fatalf("block 10 applying window 4's fee: %v", err)
+	}
+	if got := new(uint256.Int).Sub(st.GetBalance(miner), coinbaseBefore); !got.Eq(fee4.Tip) {
+		t.Errorf("coinbase got %v, want window 4's tip %v (window 8's is %v)", got, fee4.Tip, fee8.Tip)
+	}
+	_, outAfter := totals(st)
+	if got, want := new(big.Int).Sub(outAfter, outBefore), new(big.Int).Add(out.ToBig(), fee4.Total.ToBig()); got.Cmp(want) != 0 {
+		t.Errorf("total out grew by %v, want out plus window 4's fee %v", got, want)
+	}
+	// Out and the tip are credited; the rest of the fee, the base part, is
+	// credited to nobody.
+	if got := new(uint256.Int).Sub(st.GetBalance(addrB), recipientBefore); !got.Eq(out) {
+		t.Errorf("recipient got %v, want %v", got, out)
+	}
+	if burned := new(uint256.Int).Sub(fee4.Total, fee4.Tip); !burned.Eq(fee4.BasePart) {
+		t.Errorf("burned %v, want window 4's base part %v", burned, fee4.BasePart)
 	}
 }
 
