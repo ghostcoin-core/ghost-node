@@ -355,7 +355,6 @@ func TestCommitRejections(t *testing.T) {
 	}
 }
 
-// testSalt is a synthetic per-coin salt.
 // versionOneCommitData is the old 190-byte version 1 layout, the version, F
 // and the note, which the node refuses.
 func versionOneCommitData(f common.Hash, note []byte) []byte {
@@ -363,6 +362,7 @@ func versionOneCommitData(f common.Hash, note []byte) []byte {
 	return append(append(data, f[:]...), note...)
 }
 
+// testSalt is a synthetic per-coin salt.
 func testSalt(seed byte) []byte {
 	salt := make([]byte, ghostpriv.SaltSize)
 	for i := range salt {
@@ -695,11 +695,12 @@ type logState struct {
 
 func (s *logState) AddLog(l *types.Log) { s.logs = append(s.logs, l) }
 
-// TestCommitLeafTagFollowsVersion sends 206 bytes of salted version 2 data through ParseCommit and ApplyCommit, and
-// through ParseDataCommit and ApplyDataCommit, and checks that the leaf the
-// tree takes and the receipt log carries has the type of the data's version:
-// K(tag, 0x01 0x01, F, v) and K(tag, 0x02 0x01, F, v) for a coin,
-// K(tag, 0x01 0x02, F_d) and K(tag, 0x02 0x02, F_d) for data (spec 01).
+// TestCommitLeafTagFollowsVersion sends 206 bytes of salted version 2 data
+// through ParseCommit and ApplyCommit, and through ParseDataCommit and
+// ApplyDataCommit, and checks that the leaf the tree takes and the receipt
+// log carries has the type of the data's version: K(tag, 0x02 0x01, F, v) for
+// a coin and K(tag, 0x02 0x02, F_d) for data (spec 01). The version 1 tags
+// 0x01 0x01 and 0x01 0x02 stay defined, but version 1 data is refused.
 func TestCommitLeafTagFollowsVersion(t *testing.T) {
 	if ghostpriv.Coin != [2]byte{0x01, 0x01} || ghostpriv.CoinV2 != [2]byte{0x02, 0x01} ||
 		ghostpriv.Data != [2]byte{0x01, 0x02} || ghostpriv.DataV2 != [2]byte{0x02, 0x02} {
