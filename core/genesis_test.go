@@ -31,6 +31,7 @@ import (
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/params/confp"
+	"github.com/ethereum/go-ethereum/params/ghost"
 	"github.com/ethereum/go-ethereum/params/types/ctypes"
 	"github.com/ethereum/go-ethereum/params/types/genesisT"
 	"github.com/ethereum/go-ethereum/params/types/goethereum"
@@ -92,11 +93,13 @@ func testSetupGenesis(t *testing.T, scheme string) {
 			wantConfig: params.AllEthashProtocolChanges,
 		},
 		{
+			// An empty database starts the built-in public test network.
 			name: "no block in DB, genesis == nil",
 			fn: func(db ethdb.Database) (ctypes.ChainConfigurator, common.Hash, error) {
 				return SetupGenesisBlock(db, triedb.NewDatabase(db, newDbConfig(scheme)), nil)
 			},
-			wantErr: ErrGenesisNotGiven,
+			wantHash:   ghost.TestNetGenesisHash,
+			wantConfig: ghost.TestNetGenesis().Config,
 		},
 		{
 			name: "mainnet block in DB, genesis == nil",
@@ -187,6 +190,60 @@ func testSetupGenesis(t *testing.T, scheme string) {
 				t.Errorf("%s: block in DB has hash %s, want %s", test.name, stored.Hash(), test.wantHash)
 			}
 		}
+	}
+}
+
+// TestBuiltInTestNetOnlyOnEmptyDatabase checks that a database holding no
+// chain starts the built-in public test network, and that one holding another
+// chain keeps it: the built-in genesis never replaces a stored one.
+func TestBuiltInTestNetOnlyOnEmptyDatabase(t *testing.T) {
+	db := rawdb.NewMemoryDatabase()
+	tdb := triedb.NewDatabase(db, nil)
+	config, hash, err := SetupGenesisBlock(db, tdb, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hash != ghost.TestNetGenesisHash || rawdb.ReadCanonicalHash(db, 0) != ghost.TestNetGenesisHash {
+		t.Errorf("empty database starts genesis %x, want the test network's %x", hash, ghost.TestNetGenesisHash)
+	}
+	if id := config.GetChainID(); id == nil || id.Uint64() != ghost.TestNetChainID {
+		t.Errorf("empty database starts chain ID %v, want %d", id, ghost.TestNetChainID)
+	}
+	if loaded, err := LoadChainConfig(rawdb.NewMemoryDatabase(), nil); err != nil || loaded.GetChainID().Uint64() != ghost.TestNetChainID {
+		t.Errorf("LoadChainConfig on an empty database: %v, %v", loaded, err)
+	}
+
+	internal := GenesisToBlock(ghost.InternalNetGenesis(), nil).Hash()
+	db = rawdb.NewMemoryDatabase()
+	tdb = triedb.NewDatabase(db, nil)
+	MustCommitGenesis(db, tdb, ghost.InternalNetGenesis())
+	for i := 0; i < 2; i++ {
+		config, hash, err = SetupGenesisBlock(db, tdb, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if hash != internal || rawdb.ReadCanonicalHash(db, 0) != internal {
+			t.Errorf("stored internal network replaced: genesis %x, want %x", hash, internal)
+		}
+		if id := config.GetChainID(); id == nil || id.Uint64() != ghost.InternalNetChainID {
+			t.Errorf("stored internal network runs chain ID %v", id)
+		}
+	}
+	if loaded, err := LoadChainConfig(db, nil); err != nil || loaded.GetChainID().Uint64() != ghost.InternalNetChainID {
+		t.Errorf("LoadChainConfig on the internal network: %v, %v", loaded, err)
+	}
+	// Given the test network's genesis, a database holding another chain
+	// refuses it.
+	if _, _, err := SetupGenesisBlock(db, tdb, ghost.TestNetGenesis()); err == nil {
+		t.Error("the test network genesis replaced a stored chain")
+	}
+
+	// A genesis block whose configuration is lost is not taken for the test
+	// network's.
+	db = rawdb.NewMemoryDatabase()
+	rawdb.WriteCanonicalHash(db, internal, 0)
+	if loaded, err := LoadChainConfig(db, nil); err == nil {
+		t.Errorf("LoadChainConfig without a stored configuration gives %v, want an error", loaded)
 	}
 }
 

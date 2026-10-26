@@ -16,5 +16,6 @@
 
 package params
 
-// Ghost has no public network yet, so no bootstrap nodes or DNS node lists
-// are built in. Pass them with --bootnodes or the config file.
+// The only built-in bootstrap nodes are the seed nodes of the public test
+// network, ghost.TestNetBootnodes in params/ghost/testnet.go. No DNS node
+// lists are built in. --bootnodes or the config file replace the seeds.

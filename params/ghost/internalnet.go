@@ -74,10 +74,23 @@ func InternalNetParams() ghostrules.Params {
 //
 // This is an internal-test genesis, not the launch genesis.
 func InternalNetGenesis() *genesisT.Genesis {
+	return &genesisT.Genesis{
+		Config:     profileChainConfig(InternalNetChainID),
+		Timestamp:  InternalNetTimestamp,
+		GasLimit:   InternalNetGasLimit,
+		Difficulty: InternalNetParams().StartDifficulty,
+		BaseFee:    big.NewInt(vars.InitialBaseFee),
+		Alloc:      genesisT.GenesisAlloc{},
+	}
+}
+
+// profileChainConfig returns the chain configuration of the Ghost EVM
+// profile from block 0, with the given chain ID as chain and network ID.
+func profileChainConfig(chainID uint64) *coregeth.CoreGethChainConfig {
 	zero := func() *big.Int { return big.NewInt(0) }
-	config := &coregeth.CoreGethChainConfig{
-		NetworkID: InternalNetChainID,
-		ChainID:   big.NewInt(InternalNetChainID),
+	return &coregeth.CoreGethChainConfig{
+		NetworkID: chainID,
+		ChainID:   new(big.Int).SetUint64(chainID),
 		Ethash:    new(ctypes.EthashConfig),
 
 		// Frontier to Petersburg.
@@ -134,13 +147,5 @@ func InternalNetGenesis() *genesisT.Genesis {
 		EIP6780FBlock: zero(),
 
 		DisposalBlock: zero(),
-	}
-	return &genesisT.Genesis{
-		Config:     config,
-		Timestamp:  InternalNetTimestamp,
-		GasLimit:   InternalNetGasLimit,
-		Difficulty: InternalNetParams().StartDifficulty,
-		BaseFee:    big.NewInt(vars.InitialBaseFee),
-		Alloc:      genesisT.GenesisAlloc{},
 	}
 }

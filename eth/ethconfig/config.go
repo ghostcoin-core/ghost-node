@@ -230,16 +230,18 @@ func ConsensusChainID(config ctypes.ChainConfigurator, networkID uint64) *big.In
 }
 
 // consensusParams returns the RandomX consensus constants of a chain, by its
-// chain ID. Only the internal test network and developer mode have them; the
-// launch genesis adds its own entry with the built-in network.
+// chain ID. Only the public test network, the internal test network and
+// developer mode have them; the launch genesis adds its own entry.
 func consensusParams(chainID *big.Int) (ghostrules.Params, error) {
 	if chainID != nil && chainID.IsUint64() {
 		switch chainID.Uint64() {
+		case ghost.TestNetChainID:
+			return ghost.TestNetParams(), nil
 		case ghost.InternalNetChainID, ghost.DeveloperChainID:
 			return ghost.InternalNetParams(), nil
 		}
 	}
-	return ghostrules.Params{}, fmt.Errorf("no consensus parameters for chain ID %v: this node runs only the internal network (%d) and developer mode (%d)", chainID, ghost.InternalNetChainID, ghost.DeveloperChainID)
+	return ghostrules.Params{}, fmt.Errorf("no consensus parameters for chain ID %v: this node runs only the public test network (%d), the internal network (%d) and developer mode (%d)", chainID, ghost.TestNetChainID, ghost.InternalNetChainID, ghost.DeveloperChainID)
 }
 
 // CreateConsensusEngine creates a consensus engine for the given chain

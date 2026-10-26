@@ -2,8 +2,11 @@
 
 The internal network is a private proof-of-work chain for testing the node:
 two `geth` processes on one machine, one mining blocks with RandomX and the
-other syncing them. It is not a Ghost network and never will be; the launch
-genesis comes with the built-in network in phase 5.
+other syncing them. It is not a Ghost network and never will be. The shared
+network built into the node is the public test network
+([public-testnet.md](public-testnet.md)), chain ID 6777972; the internal
+network keeps its own chain ID 6777971, and a data directory initialised with
+its genesis stays on it. The launch genesis comes later.
 
 ## One command
 
