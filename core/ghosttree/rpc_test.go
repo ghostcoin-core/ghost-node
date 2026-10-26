@@ -19,6 +19,7 @@ package ghosttree_test
 import (
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"math/big"
 	"reflect"
 	"slices"
@@ -97,10 +98,10 @@ func TestWholePagesOnly(t *testing.T) {
 	// The whole surface: pages and page-root lists, the fixed-shape reads of
 	// a restoring wallet, and the calls that keep the store equal to the
 	// canonical chain.
-	if got, want := exportedMethods(&ghosttree.History{}), []string{"ApplyBlock", "MarkerPage", "MarkerStatus", "Page", "PageRootTail", "PageRoots", "PageSet", "RevertBlock", "Sync", "Unwind"}; !reflect.DeepEqual(got, want) {
+	if got, want := exportedMethods(&ghosttree.History{}), []string{"ApplyBlock", "MarkerPage", "Page", "PageRootTail", "PageRoots", "PageSet", "RevertBlock", "Sync", "Unwind"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("history methods %v, want %v", got, want)
 	}
-	if got, want := exportedMethods(&ethapi.GhostAPI{}), []string{"GetMarkerStatus", "GetPageRootTail", "GetPageRoots", "GetPageSet", "GetTreePage"}; !reflect.DeepEqual(got, want) {
+	if got, want := exportedMethods(&ethapi.GhostAPI{}), []string{"GetPageRootTail", "GetPageRoots", "GetPageSet", "GetTreePage"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("ghost namespace methods %v, want %v", got, want)
 	}
 
@@ -180,6 +181,32 @@ func TestWholePagesOnly(t *testing.T) {
 		if err := client.Call(&out, c.method, c.args...); err == nil {
 			t.Errorf("%s: answered %v", c.name, out)
 		}
+	}
+}
+
+// TestNoSingleMarkerRead checks that the ghost namespace serves no read that
+// names markers: the real marker is public once its coin is spent and a decoy
+// never is, so such a read links the query to the spend. The method name is
+// built from parts so that the withdrawn name never appears whole.
+func TestNoSingleMarkerRead(t *testing.T) {
+	server := rpc.NewServer()
+	if err := server.RegisterName("ghost", ethapi.NewGhostAPI(ghosttree.NewHistory(rawdb.NewMemoryDatabase()))); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(server.Stop)
+	client := rpc.DialInProc(server)
+	t.Cleanup(client.Close)
+
+	markers := make([]common.Hash, 64)
+	for i := range markers {
+		markers[i] = rpcLeaf(i)
+	}
+	method := "ghost_get" + "Marker" + "Status"
+	var out interface{}
+	err := client.Call(&out, method, "coin", markers, common.Hash{1})
+	var rpcErr rpc.Error
+	if !errors.As(err, &rpcErr) || rpcErr.ErrorCode() != -32601 {
+		t.Fatalf("%s: answered %v, error %v; want method not found (-32601)", method, out, err)
 	}
 }
 

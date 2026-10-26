@@ -138,45 +138,6 @@ func TestGhostRestoreReadsOverRPC(t *testing.T) {
 		}
 	}
 
-	// The status query: decoy 3 is spent as a coin marker in block 1, decoy
-	// 9 as a data marker; every other answer is not spent, without a block.
-	query := make([]common.Hash, ghosttree.StatusMarkers)
-	for i := range query {
-		query[i] = restoreDecoy(i)
-	}
-	for _, c := range []struct {
-		kind  string
-		spent int
-	}{{"coin", 3}, {"data", 9}} {
-		var raw []map[string]json.RawMessage
-		if err := client.Call(&raw, "ghost_getMarkerStatus", c.kind, query, anchor); err != nil {
-			t.Fatalf("%s status: %v", c.kind, err)
-		}
-		if len(raw) != ghosttree.StatusMarkers {
-			t.Fatalf("%s status: %d answers", c.kind, len(raw))
-		}
-		for i, a := range raw {
-			if i == c.spent {
-				if len(a) != 2 || string(a["spent"]) != "true" || string(a["block"]) != `"0x1"` {
-					t.Errorf("%s status of marker %d: %v, want spent in block 1", c.kind, i, a)
-				}
-				continue
-			}
-			if len(a) != 1 || string(a["spent"]) != "false" {
-				t.Errorf("%s status of marker %d: %v, want only spent false", c.kind, i, a)
-			}
-		}
-		var typed []ethapi.RPCMarkerStatus
-		if err := client.Call(&typed, "ghost_getMarkerStatus", c.kind, query, headers[0].Hash()); err != nil {
-			t.Fatal(err)
-		}
-		for i, s := range typed {
-			if s.Spent || s.Block != nil {
-				t.Errorf("%s status of marker %d at genesis: %+v", c.kind, i, s)
-			}
-		}
-	}
-
 	// Refused over the wire.
 	sevenPages := []string{"0x0", "0x1", "0x2", "0x3", "0x4", "0x5", "0x6"}
 	var out interface{}
@@ -188,14 +149,10 @@ func TestGhostRestoreReadsOverRPC(t *testing.T) {
 		{"tail start 1", "ghost_getPageRootTail", []interface{}{"coin", "0x0", "0x1", anchor}},
 		{"tail start beyond 32 bits", "ghost_getPageRootTail", []interface{}{"coin", "0x0", "0x100000000", anchor}},
 		{"tail of a marker list", "ghost_getPageRootTail", []interface{}{"coin-markers", "0x0", "0x0", anchor}},
-		{"63 markers", "ghost_getMarkerStatus", []interface{}{"coin", query[:63], anchor}},
-		{"status of a marker kind", "ghost_getMarkerStatus", []interface{}{"data-markers", query, anchor}},
 		{"7-page set", "ghost_getPageSet", []interface{}{"coin", "0x0", sevenPages, anchor}},
 		{"one page of a 2-page tree", "ghost_getPageSet", []interface{}{"coin", "0x0", []string{"0x1"}, anchor}},
 		{"empty page set", "ghost_getPageSet", []interface{}{"coin", "0x0", []string{}, anchor}},
 		{"one page as a number", "ghost_getPageSet", []interface{}{"coin", "0x0", "0x0", anchor}},
-		{"one marker as a hash", "ghost_getMarkerStatus", []interface{}{"coin", restoreDecoy(3), anchor}},
-		{"status without anchor", "ghost_getMarkerStatus", []interface{}{"coin", query}},
 	} {
 		if err := client.Call(&out, c.method, c.args...); err == nil {
 			t.Errorf("%s: answered %v", c.name, out)

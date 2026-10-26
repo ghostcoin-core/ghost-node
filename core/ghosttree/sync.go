@@ -72,7 +72,9 @@ func (h *History) readHead() (uint64, common.Hash, bool, error) {
 }
 
 // writeHead stores the head with the markers that the history keeps the tag
-// index (see ReadNoteBucket) and the spent-marker index (see MarkerStatus).
+// index (see ReadNoteBucket) and the spent-marker index, which serves the
+// reorg and rebuild bookkeeping: it is written when a block is applied and
+// read when a block is reverted.
 func writeHead(w ethdb.KeyValueWriter, number uint64, hash common.Hash) error {
 	enc := make([]byte, headSize)
 	binary.BigEndian.PutUint64(enc, number)
