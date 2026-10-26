@@ -250,7 +250,11 @@ func (e treeRootEngine) FinalizeAndAssemble(chain consensus.ChainHeaderReader, h
 	if err != nil {
 		return nil, err
 	}
-	header.CoinTreeRoot, header.DataTreeRoot = &coin, &data
+	marker, err := ghosttree.DataMarkerRoot(st)
+	if err != nil {
+		return nil, err
+	}
+	header.CoinTreeRoot, header.DataTreeRoot, header.DataMarkerRoot = &coin, &data, &marker
 	header.Root = st.IntermediateRoot(true)
 	return types.NewBlock(header, txs, uncles, receipts, trie.NewStackTrie(nil)), nil
 }

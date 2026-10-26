@@ -54,37 +54,49 @@ transaction-format specification and replace them in a constants-only change.
 
 ## Header layout
 
-`Header` has two fields, `CoinTreeRoot` and `DataTreeRoot`, encoded by the
-hand-written `EncodeRLP` and `DecodeRLP` of `core/types/header_ghost.go`:
+`Header` has three fields, `CoinTreeRoot`, `DataTreeRoot` and
+`DataMarkerRoot`, encoded by the hand-written `EncodeRLP` and `DecodeRLP` of
+`core/types/header_ghost.go`:
 
-- With both roots nil, a header encodes exactly as before, with the base
+- With all three roots nil, a header encodes exactly as before, with the base
   client's optional fields.
-- With both roots set, the base fee set and no withdrawals root, blob gas
-  fields or parent beacon root, a header is the 18-item list of spec 05,
-  section 10: fields 0 to 14, the base fee, the coin tree root and the data
-  tree root.
-- Any other combination does not encode.
+- With all three roots set, the base fee set and no withdrawals root, blob gas
+  fields or parent beacon root, a header is the 19-item list of spec 05,
+  section 10: fields 0 to 14, the base fee, the coin tree root, the data tree
+  root and the data marker root.
+- Any other combination, including one or two of the three roots, does not
+  encode.
 
-The decoder reads a list of exactly 18 items with a 32-byte string at index 17
-as the Ghost layout, and anything else as before; in the base layout index 17
-is the blob gas used, an integer of at most 8 bytes. `DecodeGhostHeader` is
+The decoder reads a list of exactly 19 items with a 32-byte string at index 18
+as the Ghost layout, and anything else as before; in the base layout index 18
+is the excess blob gas, an integer of at most 8 bytes. The 18-item layout
+before the marker root is not a Ghost header: `DecodeGhostHeader` rejects it
+with `item-count`. `DecodeGhostHeader` is
 the strict reference decoder of the specification, which rejects with the
 reasons `non-canonical-rlp`, `trailing-bytes`, `item-count`, `field-size`,
 `non-canonical-integer` and `integer-range`. The JSON encoding of
 `types.Header` is unchanged.
 
-The RandomX engine sets both roots from the final state in
+The data marker root is the root of the data spent-marker set of spec 05,
+section 6. `ghosttree.DataMarkerRoot` (`core/ghosttree/markerroot.go`)
+returns it for a state. The node does not keep the marker-set tree yet, so
+it is `ghosttree.EmptyMarkerSetRoot`
+(`0ef484d17824d5fefb2533c70af81a3267af1169dd091395ad7607762aeee0a3`, vector
+`marker-set-empty`) for every state; a repeat data marker is still refused by
+its storage slot in the marker account.
+
+The RandomX engine sets the three roots from the final state in
 `FinalizeAndAssemble`, after the block reward and before the state root,
 requires them in every header with a base fee, and covers them with the seal
-hash. Block validation recomputes both roots after execution and rejects a
-block whose roots differ. The genesis of the internal network and of
-developer mode carries the empty roots; the genesis state root stays that of
+hash. Block validation recomputes the three roots after execution and rejects
+a block whose roots differ. The genesis of the internal network and of
+developer mode carries the empty roots and the empty marker-set root; the genesis state root stays that of
 the allocation. Developer mode's configuration has no EIP-1559, so its later
 blocks have no base fee and carry no roots.
 
 The JSON header of `eth_getBlockByNumber`, `eth_getBlockByHash` and the
-header methods carries `coinTreeRoot` and `dataTreeRoot` when the header has
-them, and leaves them out otherwise.
+header methods carries `coinTreeRoot`, `dataTreeRoot` and `dataMarkerRoot`
+when the header has them, and leaves them out otherwise.
 
 ## Pages
 
@@ -372,7 +384,7 @@ removed branch, and so does the index.
 
 ## Decisions
 
-- Existing headers keep their exact bytes; only a header with both roots takes
+- Existing headers keep their exact bytes; only a header with all three roots takes
   the Ghost layout. Rejecting a header without roots is the engine's check,
   not the decoder's.
 - The tree-state account holds one slot beyond the specification's table, the

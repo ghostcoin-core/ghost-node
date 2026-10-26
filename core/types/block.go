@@ -94,10 +94,12 @@ type Header struct {
 	ParentBeaconRoot *common.Hash `json:"parentBeaconBlockRoot" rlp:"optional"`
 
 	// CoinTreeRoot and DataTreeRoot are the roots of the current coin tree
-	// and data tree after the block. A Ghost header sets both, other headers
-	// neither; header_ghost.go encodes them.
-	CoinTreeRoot *common.Hash `json:"-" rlp:"-"`
-	DataTreeRoot *common.Hash `json:"-" rlp:"-"`
+	// and data tree after the block, and DataMarkerRoot the root of the data
+	// spent-marker set. A Ghost header sets all three, other headers none;
+	// header_ghost.go encodes them.
+	CoinTreeRoot   *common.Hash `json:"-" rlp:"-"`
+	DataTreeRoot   *common.Hash `json:"-" rlp:"-"`
+	DataMarkerRoot *common.Hash `json:"-" rlp:"-"`
 }
 
 // field type overrides for gencodec
@@ -134,6 +136,9 @@ func (h *Header) Size() common.StorageSize {
 		roots += common.HashLength
 	}
 	if h.DataTreeRoot != nil {
+		roots += common.HashLength
+	}
+	if h.DataMarkerRoot != nil {
 		roots += common.HashLength
 	}
 	return headerSize + common.StorageSize(len(h.Extra)+roots+(h.Difficulty.BitLen()+h.Number.BitLen()+baseFeeBits)/8)
@@ -323,6 +328,10 @@ func CopyHeader(h *Header) *Header {
 	if h.DataTreeRoot != nil {
 		cpy.DataTreeRoot = new(common.Hash)
 		*cpy.DataTreeRoot = *h.DataTreeRoot
+	}
+	if h.DataMarkerRoot != nil {
+		cpy.DataMarkerRoot = new(common.Hash)
+		*cpy.DataMarkerRoot = *h.DataMarkerRoot
 	}
 	return &cpy
 }

@@ -152,11 +152,12 @@ func (v *BlockValidator) ValidateState(block *types.Block, statedb *state.StateD
 	return nil
 }
 
-// validateTreeRoots checks the coin and data tree roots of a header that
-// carries either against the roots of the executed state. A header without
+// validateTreeRoots checks the coin and data tree roots and the data marker
+// root of a header that carries any of them against the roots of the
+// executed state. A header without
 // roots is left to the consensus engine, which rejects it on Ghost chains.
 func validateTreeRoots(header *types.Header, statedb *state.StateDB) error {
-	if header.CoinTreeRoot == nil && header.DataTreeRoot == nil {
+	if header.CoinTreeRoot == nil && header.DataTreeRoot == nil && header.DataMarkerRoot == nil {
 		return nil
 	}
 	for _, f := range []struct {
@@ -177,6 +178,16 @@ func validateTreeRoots(header *types.Header, statedb *state.StateDB) error {
 		if *f.remote != local {
 			return fmt.Errorf("invalid %s (remote: %x local: %x)", f.name, *f.remote, local)
 		}
+	}
+	local, err := ghosttree.DataMarkerRoot(statedb)
+	if err != nil {
+		return fmt.Errorf("invalid dataMarkerRoot: %w", err)
+	}
+	if header.DataMarkerRoot == nil {
+		return fmt.Errorf("invalid dataMarkerRoot (remote: missing local: %x)", local)
+	}
+	if *header.DataMarkerRoot != local {
+		return fmt.Errorf("invalid dataMarkerRoot (remote: %x local: %x)", *header.DataMarkerRoot, local)
 	}
 	return nil
 }

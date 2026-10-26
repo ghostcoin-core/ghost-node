@@ -80,13 +80,15 @@ func testRoot(kind Kind, i int) common.Hash {
 
 // add stores a header on parent, nil for the genesis, with the given roots.
 func (c *stubChain) add(parent *types.Header, coin, data common.Hash) *types.Header {
+	marker := EmptyMarkerSetRoot
 	h := &types.Header{
-		Number:       big.NewInt(0),
-		Difficulty:   big.NewInt(1),
-		BaseFee:      big.NewInt(1),
-		CoinTreeRoot: &coin,
-		DataTreeRoot: &data,
-		Extra:        []byte(fmt.Sprintf("stub %d", len(c.headers))),
+		Number:         big.NewInt(0),
+		Difficulty:     big.NewInt(1),
+		BaseFee:        big.NewInt(1),
+		CoinTreeRoot:   &coin,
+		DataTreeRoot:   &data,
+		DataMarkerRoot: &marker,
+		Extra:          []byte(fmt.Sprintf("stub %d", len(c.headers))),
 	}
 	if parent != nil {
 		h.ParentHash = parent.Hash()
@@ -336,5 +338,28 @@ func TestRootIndexAfterReorgEqualsFreshIndex(t *testing.T) {
 				t.Errorf("%s: %s at %d, fresh index %d", step.name, k, got[k], n)
 			}
 		}
+	}
+}
+
+// TestEmptyMarkerSetRoot checks the root of the empty data marker set
+// against spec 05 vector marker-set-empty, and that DataMarkerRoot gives it
+// for every state until the node keeps the marker-set tree.
+func TestEmptyMarkerSetRoot(t *testing.T) {
+	want := common.HexToHash("0ef484d17824d5fefb2533c70af81a3267af1169dd091395ad7607762aeee0a3")
+	if EmptyMarkerSetRoot != want {
+		t.Fatalf("EmptyMarkerSetRoot %x, want %x", EmptyMarkerSetRoot, want)
+	}
+	st := newState(t)
+	if got, err := DataMarkerRoot(st); err != nil || got != want {
+		t.Errorf("empty state: %x, %v; want %x", got, err, want)
+	}
+	if _, err := Append(st, Coin, 1, testLeaf(1)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Append(st, Data, 1, testLeaf(2)); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := DataMarkerRoot(st); err != nil || got != want {
+		t.Errorf("one coin and one data leaf: %x, %v; want %x", got, err, want)
 	}
 }
