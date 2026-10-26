@@ -250,8 +250,12 @@ func (s *setup) dataDir() string    { return filepath.Join(s.home, "data") }
 func (s *setup) password() string   { return filepath.Join(s.home, "password") }
 func (s *setup) stampPath() string  { return filepath.Join(s.home, "update.checked") }
 func (s *setup) assetName() string  { return "ghost-node-windows-" + s.arch + ".tar.gz" }
-func (s *setup) updateCmd() string  { return winsvc.JoinCommandLine(s.setupPath(), "--update", "--daily") }
 func (s *setup) configPath() string { return s.service().ConfigPath() }
+
+// updateCmd is the command line of the daily update in the Run key.
+func (s *setup) updateCmd() string {
+	return winsvc.JoinCommandLine(s.setupPath(), "--update", "--daily")
+}
 
 // service is the node's per-user service.
 func (s *setup) service() *winsvc.Service {
