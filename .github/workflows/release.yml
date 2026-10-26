@@ -67,6 +67,35 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+      # The windows-11-arm runner's gcc is an x86-64 mingw toolchain, which
+      # cannot assemble the arm64 cgo files. Build windows-arm64 with
+      # llvm-mingw's native aarch64 clang instead, pinned by version and
+      # checksum.
+      - name: Install the aarch64 Windows C toolchain
+        if: matrix.os == 'windows' && matrix.arch == 'arm64'
+        env:
+          LLVM_MINGW_VERSION: '20261020'
+          LLVM_MINGW_SHA256: 8f24fedd0b75c674c6c83dec2d76a7ac31a690120212843a17e465ef49854f69
+        run: |
+          set -euo pipefail
+          name="llvm-mingw-$LLVM_MINGW_VERSION-ucrt-aarch64"
+          zip="$RUNNER_TEMP/$name.zip"
+          curl -fsSL --retry 3 -o "$zip" \
+            "https://github.com/mstorsjo/llvm-mingw/releases/download/$LLVM_MINGW_VERSION/$name.zip"
+          echo "$LLVM_MINGW_SHA256  $zip" | sha256sum -c -
+          unzip -q "$zip" -d "$RUNNER_TEMP"
+          cygpath -w "$RUNNER_TEMP/$name/bin" >>"$GITHUB_PATH"
+          {
+            echo "CC=aarch64-w64-mingw32-clang"
+            echo "CXX=aarch64-w64-mingw32-clang++"
+            echo "CGO_ENABLED=1"
+          } >>"$GITHUB_ENV"
+      - name: Show the aarch64 Windows C toolchain
+        if: matrix.os == 'windows' && matrix.arch == 'arm64'
+        run: |
+          set -euo pipefail
+          "$CC" --version
+          "$CC" -dumpmachine | grep -q '^aarch64-w64-'
       - name: Build geth
         run: go run build/ci.go install ./cmd/geth
       - name: Package
