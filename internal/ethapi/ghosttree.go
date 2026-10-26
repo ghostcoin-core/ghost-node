@@ -28,8 +28,9 @@ import (
 )
 
 // GhostAPI serves the commitment tree history in whole pages and whole
-// page-root lists as of an anchor block, and the spent markers in whole
-// pages, and nothing else.
+// page-root lists as of an anchor block, the spent markers in whole pages,
+// and the fixed-shape reads of a restoring wallet (a page-root tail, a set of
+// 8 pages, the status of 64 markers), and nothing else.
 type GhostAPI struct {
 	history *ghosttree.History
 }
@@ -118,10 +119,15 @@ func (api *GhostAPI) GetTreePage(kind TreeKind, treeIndex hexutil.Uint64, page h
 	if err != nil {
 		return nil, err
 	}
+	return rpcTreePage(p), nil
+}
+
+// rpcTreePage is a page of a tree in JSON.
+func rpcTreePage(p *ghosttree.TreePage) *RPCTreePage {
 	out := &RPCTreePage{
-		Kind:      kind,
-		TreeIndex: treeIndex,
-		Page:      page,
+		Kind:      TreeKind(p.Kind),
+		TreeIndex: hexutil.Uint64(p.TreeIndex),
+		Page:      hexutil.Uint64(p.Page),
 		Filled:    hexutil.Uint64(p.Filled),
 		Entries:   make([]RPCPageEntry, len(p.Entries)),
 	}
@@ -129,6 +135,76 @@ func (api *GhostAPI) GetTreePage(kind TreeKind, treeIndex hexutil.Uint64, page h
 		out.Entries[i] = RPCPageEntry{Leaf: e.Leaf, Note: append(hexutil.Bytes(nil), e.Note[:]...)}
 		if e.Salt != nil {
 			out.Entries[i].Salt = append(hexutil.Bytes(nil), e.Salt[:]...)
+		}
+	}
+	return out
+}
+
+// RPCMarkerStatus is the status of one marker as of an anchor: spent, with
+// the number of the block whose reveal spent it, or not, without a block.
+type RPCMarkerStatus struct {
+	Spent bool            `json:"spent"`
+	Block *hexutil.Uint64 `json:"block,omitempty"`
+}
+
+// GetPageRootTail returns the page roots of a tree (kind "coin" or "data")
+// as of the anchor block from page start to the last page with a leaf. start
+// must be a multiple of 65,536 pages below the pages of a full tree; a start
+// past the last page gives an empty list.
+func (api *GhostAPI) GetPageRootTail(kind TreeKind, treeIndex hexutil.Uint64, start hexutil.Uint64, anchorHash common.Hash) ([]common.Hash, error) {
+	if api.history == nil {
+		return nil, errNoTreeHistory
+	}
+	if start > math.MaxUint32 {
+		return nil, fmt.Errorf("%w: page %d", ghosttree.ErrTailStart, uint64(start))
+	}
+	return api.history.PageRootTail(ghosttree.Kind(kind), uint64(treeIndex), uint32(start), anchorHash)
+}
+
+// GetPageSet returns whole pages of a tree (kind "coin" or "data") as of the
+// anchor block, as ghost_getTreePage returns one: exactly 8 distinct pages in
+// ascending order, or every page of a tree of 8 pages or fewer.
+func (api *GhostAPI) GetPageSet(kind TreeKind, treeIndex hexutil.Uint64, pages []hexutil.Uint64, anchorHash common.Hash) ([]*RPCTreePage, error) {
+	if api.history == nil {
+		return nil, errNoTreeHistory
+	}
+	if len(pages) == 0 || len(pages) > ghosttree.PageSetPages {
+		return nil, fmt.Errorf("%w: %d pages", ghosttree.ErrPageSetShape, len(pages))
+	}
+	numbers := make([]uint32, len(pages))
+	for i, p := range pages {
+		if p > math.MaxUint32 {
+			return nil, fmt.Errorf("%w: page %d", ghosttree.ErrPageSetShape, uint64(p))
+		}
+		numbers[i] = uint32(p)
+	}
+	set, err := api.history.PageSet(ghosttree.Kind(kind), uint64(treeIndex), numbers, anchorHash)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*RPCTreePage, len(set))
+	for i, p := range set {
+		out[i] = rpcTreePage(p)
+	}
+	return out, nil
+}
+
+// GetMarkerStatus returns, for each of exactly 64 distinct markers in request
+// order, whether the chain up to the anchor block spent it in the marker list
+// of a type ("coin" or "data"), and the block that did.
+func (api *GhostAPI) GetMarkerStatus(kind TreeKind, markers []common.Hash, anchorHash common.Hash) ([]RPCMarkerStatus, error) {
+	if api.history == nil {
+		return nil, errNoTreeHistory
+	}
+	status, err := api.history.MarkerStatus(ghosttree.Kind(kind), markers, anchorHash)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]RPCMarkerStatus, len(status))
+	for i, s := range status {
+		if s.Spent {
+			block := hexutil.Uint64(s.Block)
+			out[i] = RPCMarkerStatus{Spent: true, Block: &block}
 		}
 	}
 	return out, nil

@@ -144,6 +144,11 @@ var (
 	ghostTreeTagPrefix      = []byte("ghost-tree-tag-")   // ghostTreeTagPrefix + level << 1 | kind (1 byte) + tree index (uint64 big endian) + tag (3 bytes) + position (uint32 big endian) -> empty
 	ghostTreeTaggedKey      = []byte("ghost-tree-tagged") // 1 once the history keeps the tag index
 
+	// The spent-marker index of the history: for each spent marker, the slot
+	// of the record that spent it.
+	ghostTreeMarkerPrefix = []byte("ghost-tree-marker-") // ghostTreeMarkerPrefix + kind (1 byte, a marker list) + marker (32 bytes) -> tree index (uint64 big endian) + position (uint32 big endian) of the record that spent it
+	ghostTreeMarkedKey    = []byte("ghost-tree-marked")  // 1 once the history keeps the spent-marker index
+
 	// Index of the tree roots carried by the headers of the canonical chain:
 	// for each root, the height of the first canonical header carrying it,
 	// and the block whose ancestry the index holds. Neither key is 32 bytes
@@ -287,6 +292,16 @@ func ghostTreeTagKey(kind, level uint8, treeIndex uint64, tag [GhostTreeTagBytes
 	key := ghostTreeTagTreeKey(kind, level, treeIndex)
 	key = append(key, tag[:]...)
 	return binary.BigEndian.AppendUint32(key, position)
+}
+
+// ghostTreeMarkerKey = ghostTreeMarkerPrefix + kind + marker. It is 51 bytes
+// long.
+func ghostTreeMarkerKey(kind uint8, marker common.Hash) []byte {
+	key := make([]byte, len(ghostTreeMarkerPrefix)+1+common.HashLength)
+	copy(key, ghostTreeMarkerPrefix)
+	key[len(ghostTreeMarkerPrefix)] = kind
+	copy(key[len(ghostTreeMarkerPrefix)+1:], marker[:])
+	return key
 }
 
 // ghostTreeBlockKey = ghostTreeBlockPrefix + block hash

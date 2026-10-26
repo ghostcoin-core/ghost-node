@@ -136,6 +136,12 @@ type slot struct {
 
 const slotSize = 1 + 8 + 4
 
+// spentMarker is one marker of one marker list.
+type spentMarker struct {
+	kind   Kind
+	marker common.Hash
+}
+
 // encodeBlock is the block entry: its number and the slots it wrote.
 func encodeBlock(number uint64, slots []slot) []byte {
 	enc := make([]byte, 8, 8+len(slots)*slotSize)
@@ -179,7 +185,9 @@ func (h *History) lastPosition() uint32 { return uint32(h.p.capacity() - 1) }
 // position, or position 0 of the next index after a tree that filled in an
 // earlier block. A record of a marker list (CoinMarkers, DataMarkers) takes
 // the next position of its list, whatever its TreeIndex and Position say,
-// and carries the marker as its leaf. On an error nothing is written.
+// and carries the marker as its leaf; the spent-marker index then points the
+// marker at that slot, unless an earlier spend already has. On an error
+// nothing is written.
 func (h *History) ApplyBlock(blockHash common.Hash, number uint64, records []Record) error {
 	if err := h.p.pageable(); err != nil {
 		return err
@@ -212,6 +220,8 @@ func (h *History) applyBlock(batch ethdb.KeyValueWriter, blockHash common.Hash, 
 	}
 	// The next free slot of each marker list.
 	nextMarker := make(map[Kind]slot)
+	// The markers the block indexes, so that the first spend in it wins.
+	indexed := make(map[spentMarker]bool)
 	slots := make([]slot, 0, len(records))
 	for i, r := range records {
 		if r.Kind.IsMarkers() {
@@ -272,6 +282,20 @@ func (h *History) applyBlock(batch ethdb.KeyValueWriter, blockHash common.Hash, 
 			if err := rawdb.WriteGhostTreeTag(batch, uint8(r.Kind), tagLevel(r.Position), r.TreeIndex, noteTag(&rec.note), r.Position); err != nil {
 				return err
 			}
+		}
+		// A marker is indexed by its value, at the slot of the first record
+		// that spent it: the chain never spends a marker twice.
+		if r.Kind.IsMarkers() && !indexed[spentMarker{r.Kind, r.Leaf}] {
+			_, _, ok, err := rawdb.ReadGhostTreeMarker(h.db, uint8(r.Kind), r.Leaf)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				if err := rawdb.WriteGhostTreeMarker(batch, uint8(r.Kind), r.Leaf, s.treeIndex, s.position); err != nil {
+					return err
+				}
+			}
+			indexed[spentMarker{r.Kind, r.Leaf}] = true
 		}
 		// The record that completes a page of a tree also stores the page's
 		// root.
@@ -376,6 +400,18 @@ func (h *History) revertBlock(batch ethdb.KeyValueWriter, blockHash common.Hash)
 		if s.kind.valid() {
 			if err := rawdb.DeleteGhostTreeTag(batch, uint8(s.kind), tagLevel(s.position), s.treeIndex, noteTag(&rec.note), s.position); err != nil {
 				return err
+			}
+		}
+		// The index entry of a marker goes with the record it points at.
+		if s.kind.IsMarkers() {
+			index, position, ok, err := rawdb.ReadGhostTreeMarker(h.db, uint8(s.kind), rec.leaf)
+			if err != nil {
+				return err
+			}
+			if ok && index == s.treeIndex && position == s.position {
+				if err := rawdb.DeleteGhostTreeMarker(batch, uint8(s.kind), rec.leaf); err != nil {
+					return err
+				}
 			}
 		}
 		if s.kind.valid() && (uint64(s.position)+1)%PageLeaves == 0 {

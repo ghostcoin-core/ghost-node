@@ -94,12 +94,13 @@ func rpcFixture(t *testing.T) (*rpc.Client, *types.Header) {
 }
 
 func TestWholePagesOnly(t *testing.T) {
-	// The whole surface: pages and page-root lists, and the two calls that
-	// keep the store equal to the canonical chain.
-	if got, want := exportedMethods(&ghosttree.History{}), []string{"ApplyBlock", "MarkerPage", "Page", "PageRoots", "RevertBlock", "Sync", "Unwind"}; !reflect.DeepEqual(got, want) {
+	// The whole surface: pages and page-root lists, the fixed-shape reads of
+	// a restoring wallet, and the calls that keep the store equal to the
+	// canonical chain.
+	if got, want := exportedMethods(&ghosttree.History{}), []string{"ApplyBlock", "MarkerPage", "MarkerStatus", "Page", "PageRootTail", "PageRoots", "PageSet", "RevertBlock", "Sync", "Unwind"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("history methods %v, want %v", got, want)
 	}
-	if got, want := exportedMethods(&ethapi.GhostAPI{}), []string{"GetPageRoots", "GetTreePage"}; !reflect.DeepEqual(got, want) {
+	if got, want := exportedMethods(&ethapi.GhostAPI{}), []string{"GetMarkerStatus", "GetPageRootTail", "GetPageRoots", "GetPageSet", "GetTreePage"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("ghost namespace methods %v, want %v", got, want)
 	}
 
