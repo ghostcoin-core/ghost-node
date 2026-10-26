@@ -34,9 +34,8 @@ import (
 	"github.com/holiman/uint256"
 )
 
-// errDefaultDataVerifier is the default verifier's answer to a data reveal:
-// the linked proof verifier rejects every one until the data reveal fee is
-// settled, or as malformed.
+// errDefaultDataVerifier is the default verifier's answer to a data reveal
+// whose proof is not its own: the linked proof verifier rejects it.
 var errDefaultDataVerifier = ghostpriv.ErrProofRejected
 
 // Lengths of the chain parameters and of the coin reveal statement in the
@@ -115,13 +114,16 @@ func (ka knownAnswer) inputs(t *testing.T) *ghostpriv.VerifyInputs {
 	return in
 }
 
-// TestGhostDataVerifier checks that data reveals and revokes reach the linked
-// proof verifier through ghost_data.h and that it rejects every one, naming
-// the unsettled fee, whatever the proof: the accept path is in the
-// ghostverifier crate's tests (ghostverifier/tests/data_reveal.rs) only. A
-// well-formed proof here is the coin fixture's; a malformed one is rejected
-// as malformed, not for the fee.
-func TestGhostDataVerifier(t *testing.T) {
+// TestGhostDataVerifierPlainRejection checks that data reveals and revokes
+// reach the linked proof verifier through ghost_data.h and that a proof that
+// is not theirs is ErrProofRejected and never an acceptance, whatever the fee
+// or rule: a zero fee, a fee at the data reserve, a fee above it and a
+// non-empty rule. A fee above the reserve and a non-empty rule are plain
+// rejections, the status "rejected", whatever the proof. The accept
+// path for real data proofs is in the ghostverifier crate's tests
+// (ghostverifier/tests/data_reveal.rs). The well-formed proof here is the coin
+// fixture's; a malformed one is still ErrProofRejected.
+func TestGhostDataVerifierPlainRejection(t *testing.T) {
 	ka := loadKnownAnswer(t)
 	coin := ka.inputs(t)
 	v := ghostpriv.DefaultVerifier()
@@ -140,22 +142,41 @@ func TestGhostDataVerifier(t *testing.T) {
 		}
 	}
 	proof := func() []byte { return common.CopyBytes(ka.proof) }
+	atReserve := new(uint256.Int).Set(ghostpriv.DataReserve)
+	aboveReserve := new(uint256.Int).AddUint64(ghostpriv.DataReserve, 1)
+	// Each statement and, for those the verifier rejects before it reads the
+	// proof, the status it names: the coin proof does not decode as a data
+	// proof, so for the others it may be "malformed input".
+	statements := map[string]struct {
+		change func(in *ghostpriv.VerifyInputs)
+		status string
+	}{
+		"zero fee":              {func(*ghostpriv.VerifyInputs) {}, ""},
+		"fee at the reserve":    {func(in *ghostpriv.VerifyInputs) { in.Fee = atReserve }, ""},
+		"fee above the reserve": {func(in *ghostpriv.VerifyInputs) { in.Fee = aboveReserve }, "rejected"},
+		"non-empty rule":        {func(in *ghostpriv.VerifyInputs) { in.Rule = common.Hash{31: 1} }, "rejected"},
+	}
 
 	for _, purpose := range []byte{ghostpriv.PurposeReveal, ghostpriv.PurposeRevoke} {
-		for name, p := range map[string][]byte{
-			"proof":              proof(),
-			"proof and zeros":    append(proof(), make([]byte, 4096)...),
-			"proof field":        append(proof(), make([]byte, ghostpriv.ProofSize-len(ka.proof))...),
-			"fee-carrying input": proof(),
-		} {
-			in := data(purpose)
-			if name == "fee-carrying input" {
-				in.Fee = uint256.NewInt(21)
-			}
-			for vname, verifier := range map[string]ghostpriv.Verifier{"default": v, "active": ghostpriv.ActiveVerifier()} {
-				err := verifier.VerifyReveal(in, p)
-				if !errors.Is(err, ghostpriv.ErrProofRejected) || !errors.Is(err, ghostpriv.ErrProofDataFeeUnsettled) {
-					t.Errorf("purpose %#x, %s, %s verifier: %v, want %v", purpose, name, vname, err, ghostpriv.ErrProofDataFeeUnsettled)
+		for sname, st := range statements {
+			for pname, p := range map[string][]byte{
+				"proof":           proof(),
+				"proof and zeros": append(proof(), make([]byte, 4096)...),
+				"proof field":     append(proof(), make([]byte, ghostpriv.ProofSize-len(ka.proof))...),
+			} {
+				for vname, verifier := range map[string]ghostpriv.Verifier{"default": v, "active": ghostpriv.ActiveVerifier()} {
+					in := data(purpose)
+					st.change(in)
+					err := verifier.VerifyReveal(in, p)
+					if err == nil {
+						t.Fatalf("purpose %#x, %s, %s, %s verifier: accepted", purpose, sname, pname, vname)
+					}
+					if !errors.Is(err, ghostpriv.ErrProofRejected) {
+						t.Errorf("purpose %#x, %s, %s, %s verifier: %v, want %v", purpose, sname, pname, vname, err, ghostpriv.ErrProofRejected)
+					}
+					if st.status != "" && err.Error() != ghostpriv.ErrProofRejected.Error()+": "+st.status {
+						t.Errorf("purpose %#x, %s, %s, %s verifier: %v, want status %q", purpose, sname, pname, vname, err, st.status)
+					}
 				}
 			}
 		}
@@ -169,9 +190,8 @@ func TestGhostDataVerifier(t *testing.T) {
 			"empty":            nil,
 			"oversized":        make([]byte, 2<<20+1),
 		} {
-			err := v.VerifyReveal(data(purpose), p)
-			if !errors.Is(err, ghostpriv.ErrProofRejected) || errors.Is(err, ghostpriv.ErrProofDataFeeUnsettled) {
-				t.Errorf("purpose %#x, %s: %v, want %v and not the fee", purpose, name, err, ghostpriv.ErrProofRejected)
+			if err := v.VerifyReveal(data(purpose), p); !errors.Is(err, ghostpriv.ErrProofRejected) {
+				t.Errorf("purpose %#x, %s: %v, want %v", purpose, name, err, ghostpriv.ErrProofRejected)
 			}
 		}
 	}

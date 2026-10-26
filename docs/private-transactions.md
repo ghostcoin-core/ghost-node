@@ -191,23 +191,28 @@ each, 193 bytes in all with `cf` at 161 to 193. `cf` rides in the first 32
 bytes of the data reveal's note slot (see `docs/data-commitments.md`); for a
 coin reveal `VerifyInputs.Cf` is zero and the coin statement is unchanged. The
 crate pins ghost-proofs at revision
-`eafd108bc745d588b7dd13929adcfc0cf72b8fae` of the ghost repository in
+`450b6e1786e346c883af1009abce398b02bf1660` of the ghost repository in
 `ghostverifier/Cargo.toml` and `Cargo.lock`. A kind or purpose it
 does not verify is `ErrProofStatement`, without calling it; every answer but
 acceptance is `ErrProofRejected`.
 
 The node settles a data reveal's fee from the fee reserve its data commit
-burned (see `docs/data-commitments.md`), but the pinned ghost-proofs still
-rejects every data reveal and revoke with `DataFeeUnsettled`, whatever the
-proof. The release node therefore rejects all of them at the proof, with
-`ErrProofDataFeeUnsettled` wrapped by `ErrProofRejected` for a well-formed
-proof, after its own fee checks pass. The accept path with real proofs
-is proved only in the crate's own tests, `ghostverifier/tests/data_reveal.rs`,
-with the test-only cargo feature `unsettled-points-test`, which adds
-`ghost_verify_data_reveal_unsettled`. That feature is off by default, never
-enabled by `build/ci.go` or the release build, and its function is not in the
-release node. The data lifecycle with real proofs on a release node needs a
-ghost-proofs revision whose shipped data verifier accepts them.
+burned (see `docs/data-commitments.md`), and the shipped data verifier of the
+pinned ghost-proofs accepts a real proof of a data reveal or revoke whose fee
+is at most that reserve, `DATA_RESERVE`, and whose rule is empty. A release
+node therefore verifies data reveals and revokes with real proofs, through the
+same library and with no cargo feature. A fee above the reserve
+(`FeeAboveReserve`) or a non-empty rule (`RuleNotEmpty`, checked before the
+proof) is a plain rejection, `GHOST_PROOFS_REJECTED`, which the node reports
+as `ErrProofRejected` like any other failed proof; the node's own fee check
+refuses a fee above the reserve before the proof in any case. The crate's
+tests, `ghostverifier/tests/data_reveal.rs`, prove a real data reveal and
+revoke with the pinned prover and check the shipped verifier accepts them,
+through the C function too. The cargo feature `unsettled-points-test` stays
+declared for the test-only prover of the proof of holding; no test of the data
+reveal needs it, and `build/ci.go` and the release build never enable it.
+There is no C interface for the proof of holding yet. A test of the data
+lifecycle with real proofs on a release node follows in a later change.
 
 `core/ghostpriv/ghostprivtest` holds the stub verifier for tests: it accepts
 exactly a proof field whose first 32 bytes are

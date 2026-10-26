@@ -67,12 +67,6 @@ var (
 	// ErrProofRejected is returned for every answer of the proof verifier
 	// but acceptance; the error names the status.
 	ErrProofRejected = errors.New("reveal proof not accepted")
-
-	// ErrProofDataFeeUnsettled is wrapped by ErrProofRejected for the
-	// verifier's answer to every well-formed data reveal and revoke: the
-	// linked ghost-proofs rejects them all until the data reveal fee is
-	// settled, whatever the proof.
-	ErrProofDataFeeUnsettled = errors.New("data reveal fee not settled in the proof verifier")
 )
 
 // ghostVerifier is the reveal verifier of the ghost repository's
@@ -82,9 +76,10 @@ type ghostVerifier struct{}
 
 // DefaultVerifier returns the verifier the node uses until another is set:
 // the proof verifier of the ghost repository. It accepts a coin reveal whose
-// proof verifies against the inputs and rejects everything else. A data
-// reveal or revoke goes to the proof verifier too, which rejects every one
-// with ErrProofDataFeeUnsettled until the data reveal fee is settled.
+// proof verifies against the inputs and rejects everything else, and so for
+// a data reveal or revoke: it accepts one whose proof verifies, with a fee of
+// at most the data reserve and the empty rule. A fee above the reserve or a
+// non-empty rule is ErrProofRejected, like any other proof that fails.
 func DefaultVerifier() Verifier { return ghostVerifier{} }
 
 // VerifyReveal verifies the proof of a coin reveal, data reveal or data
@@ -125,8 +120,6 @@ func (ghostVerifier) VerifyReveal(in *VerifyInputs, proof []byte) error {
 	switch status {
 	case C.GHOST_PROOFS_ACCEPTED:
 		return nil
-	case C.GHOST_DATA_FEE_UNSETTLED:
-		return fmt.Errorf("%w: %w", ErrProofRejected, ErrProofDataFeeUnsettled)
 	default:
 		return fmt.Errorf("%w: %s", ErrProofRejected, ghostStatusName(status))
 	}
@@ -190,8 +183,6 @@ func ghostDataStatement(in *VerifyInputs) []byte {
 
 func ghostStatusName(status C.int32_t) string {
 	switch status {
-	case C.GHOST_DATA_FEE_UNSETTLED:
-		return "data fee unsettled"
 	case C.GHOST_PROOFS_REJECTED:
 		return "rejected"
 	case C.GHOST_PROOFS_MALFORMED_INPUT:
