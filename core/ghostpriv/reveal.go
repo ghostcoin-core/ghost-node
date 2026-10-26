@@ -468,15 +468,15 @@ const DataBindingSize = 196
 // The errors of the data reveal checks, one per check, in the order they
 // run. Check 8 computes the binding digest and cannot fail.
 var (
-	ErrDataRevealLength  = errors.New("data reveal is not a 0x51 envelope of 1,311,067 bytes")
-	ErrDataRevealVersion = errors.New("data reveal version is not 1")
-	ErrDataRevealAmount  = errors.New("data reveal out or fee not below 2^96")
-	ErrDataRevealChainID = errors.New("data reveal chain id is not this chain's")
-	ErrDataRevealFee     = errors.New("data reveal fee rejected")
-	ErrDataRevealPurpose = errors.New("data reveal purpose is neither reveal nor revoke")
-	ErrDataRevealShape   = errors.New("data reveal carries a value or a remainder")
-	ErrDataRevealRoot    = errors.New("data reveal root is not an ancestor's data tree root")
-	ErrDataRevealMarker  = errors.New("data reveal marker already used")
+	ErrDataRevealLength   = errors.New("data reveal is not a 0x51 envelope of 1,311,067 bytes")
+	ErrDataRevealVersion  = errors.New("data reveal version is not 1")
+	ErrDataRevealAmount   = errors.New("data reveal out or fee not below 2^96")
+	ErrDataRevealChainID  = errors.New("data reveal chain id is not this chain's")
+	ErrDataRevealFee      = errors.New("data reveal fee rejected")
+	ErrDataRevealPurpose  = errors.New("data reveal purpose is neither reveal nor revoke")
+	ErrDataRevealShape    = errors.New("data reveal carries a value or a remainder")
+	ErrDataRevealRoot     = errors.New("data reveal root is not an ancestor's data tree root")
+	ErrDataRevealMarker   = errors.New("data reveal marker already used")
 	ErrDataRevealBackstop = errors.New("data reveal reserve is more than the hidden set holds")
 	ErrDataRevealProof    = errors.New("data reveal proof rejected")
 
