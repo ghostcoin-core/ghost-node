@@ -542,7 +542,7 @@ func TestSaltedCommitDataLengthIsExact(t *testing.T) {
 		t.Fatalf("parsed salted commit %+v", c)
 	}
 	checkSalt(t, "parsed salted commit", c.Salt, salt)
-	dc, err := ghostpriv.ParseDataCommit(data, new(big.Int))
+	dc, err := ghostpriv.ParseDataCommit(data, ghostpriv.DataReserve.ToBig())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -699,7 +699,7 @@ func (s *logState) AddLog(l *types.Log) { s.logs = append(s.logs, l) }
 // through ParseCommit and ApplyCommit, and through ParseDataCommit and
 // ApplyDataCommit, and checks that the leaf the tree takes and the receipt
 // log carries has the type of the data's version: K(tag, 0x02 0x01, F, v) for
-// a coin and K(tag, 0x02 0x02, F_d) for data (spec 01). The version 1 tags
+// a coin and K(tag, 0x02 0x02, DATA_RESERVE, F_d) for data (spec 01). The version 1 tags
 // 0x01 0x01 and 0x01 0x02 stay defined, but version 1 data is refused.
 func TestCommitLeafTagFollowsVersion(t *testing.T) {
 	if ghostpriv.Coin != [2]byte{0x01, 0x01} || ghostpriv.CoinV2 != [2]byte{0x02, 0x01} ||
@@ -716,7 +716,7 @@ func TestCommitLeafTagFollowsVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	word := c.value.Bytes32()
+	word, reserveWord := c.value.Bytes32(), ghostpriv.DataReserve.Bytes32()
 	for _, tc := range []struct {
 		name     string
 		data     []byte
@@ -726,7 +726,7 @@ func TestCommitLeafTagFollowsVersion(t *testing.T) {
 	}{
 		{"206 bytes, version 2", v2, ghostpriv.SaltedCommitVersion,
 			ghosttree.K("ghost/coin-commitment/v1", []byte{0x02, 0x01}, c.f[:], word[:]),
-			ghosttree.K("ghost/data-commitment/v1", []byte{0x02, 0x02}, c.f[:])},
+			ghosttree.K("ghost/data-commitment/v1", []byte{0x02, 0x02}, reserveWord[:], c.f[:])},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// The coin commit.
@@ -744,7 +744,7 @@ func TestCommitLeafTagFollowsVersion(t *testing.T) {
 			checkAppended(t, "coin", ls, ghosttree.Coin, tc.coinLeaf)
 
 			// The data commit of the same data.
-			dc, err := ghostpriv.ParseDataCommit(tc.data, new(big.Int))
+			dc, err := ghostpriv.ParseDataCommit(tc.data, ghostpriv.DataReserve.ToBig())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -752,7 +752,7 @@ func TestCommitLeafTagFollowsVersion(t *testing.T) {
 				t.Fatalf("data commit version %d, want %d", dc.CommitVersion(), tc.version)
 			}
 			ls = &logState{StateDB: st.Copy()}
-			if err := ghostpriv.ApplyDataCommit(ls, height, dc); err != nil {
+			if err := ghostpriv.ApplyDataCommit(ls, height, addrA, dc); err != nil {
 				t.Fatal(err)
 			}
 			checkAppended(t, "data", ls, ghosttree.Data, tc.dataLeaf)
@@ -810,8 +810,8 @@ func TestLeafMatchesProofCrateVectors(t *testing.T) {
 		want    string
 	}{
 		{"data-commit", 1, "a7450331b78ed2a6cf4864e6fdf58c1147e0cb4c8608e0dc0b37ec94f67e5b41", "39c4e1e8edca6f366db5125e1bc9484063fa9f35da539638207f03732d913b06"},
-		{"data-commit-salted", 2, "c5248f5ae13e74d2ecd2ee324068ae947012a76b5a44d66bf6f59830a366a7e2", "324c90dbad0fbecfd82331d087ea216b525e68b8dcb64891aa59322565ebb8b5"},
-		{"data-commit-salted-other", 2, "72ac806d9e8c49284e2cc0e10fff283fadeff8d0345954770960f68b1d0df358", "91e0e4460c6ffd42b5efcbd8a94e4fa91eb6a5e4aa17b1e8faf8eb38c6779f2f"},
+		{"data-commit-salted", 2, "c5248f5ae13e74d2ecd2ee324068ae947012a76b5a44d66bf6f59830a366a7e2", "c54cb7930a533b26ca2366b72da474b8740d75cd18b71075db10cdabf492daa9"},
+		{"data-commit-salted-other", 2, "72ac806d9e8c49284e2cc0e10fff283fadeff8d0345954770960f68b1d0df358", "8b5ae89a800468c408b5dd282c554767ccf04820e2ba66d6e964f46f1edd3d91"},
 	}
 	// commitData is commit data of F at a version, as a wallet sends it. The
 	// node refuses version 1 data, so a version 1 vector stops at the
@@ -852,7 +852,7 @@ func TestLeafMatchesProofCrateVectors(t *testing.T) {
 		if got := ghostpriv.DataCommitmentVersion(v.version, f); got != want {
 			t.Errorf("%s: data commitment %x, want %x", v.name, got, want)
 		}
-		c, err := ghostpriv.ParseDataCommit(commitData(t, v.version, f), new(big.Int))
+		c, err := ghostpriv.ParseDataCommit(commitData(t, v.version, f), ghostpriv.DataReserve.ToBig())
 		if v.version != ghostpriv.SaltedCommitVersion {
 			if !errors.Is(err, ghostpriv.ErrCommitData) {
 				t.Errorf("%s: version 1 data commit %v, want %v", v.name, err, ghostpriv.ErrCommitData)

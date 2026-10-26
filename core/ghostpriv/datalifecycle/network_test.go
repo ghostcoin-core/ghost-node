@@ -25,7 +25,7 @@
 // are sealed by the RandomX engine and handed from node to node with
 // InsertChain. Data commits and data reveals go through the node's own
 // block processing; reveals carry stub proofs (core/ghostpriv/ghostprivtest)
-// and the data reveal fee is settled as zero by the test switch.
+// and pay the window fee from the reserve their data commit burned.
 //
 // Everything that is not the node is a test-local stand-in: the wallet
 // (wallet_test.go), the encrypted off-chain host and the endpoint that
@@ -52,6 +52,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/params/ghost"
+	"github.com/holiman/uint256"
 )
 
 const (
@@ -254,6 +255,37 @@ func (n *node) env(header *types.Header) *ghostpriv.BlockEnv {
 	}
 }
 
+// revealFee is the reveal fee of the block with header on this node, split
+// by the cover rule for its base fee: the fee of its window, whose first
+// block is header itself or an ancestor on the node's chain.
+func (n *node) revealFee(header *types.Header) ghostpriv.Fee {
+	n.t.Helper()
+	bRef := header.BaseFee
+	if start := ghostpriv.WindowStart(header.Number.Uint64()); start != header.Number.Uint64() {
+		h := header
+		for h.Number.Uint64() > start {
+			if h = n.chain.GetHeader(h.ParentHash, h.Number.Uint64()-1); h == nil {
+				n.t.Fatalf("node %s: no ancestor at height %d", n.name, start)
+			}
+		}
+		bRef = h.BaseFee
+	}
+	fee, err := ghostpriv.WindowFee(bRef)
+	if err != nil {
+		n.t.Fatal(err)
+	}
+	if fee, err = fee.Cover(header.BaseFee); err != nil {
+		n.t.Fatal(err)
+	}
+	return fee
+}
+
+// nextRevealFee is the reveal fee of a block on the node's head.
+func (n *node) nextRevealFee() *uint256.Int {
+	n.t.Helper()
+	return n.revealFee(n.nextHeader(n.head(), common.Address{})).Total
+}
+
 // checkNextData runs the data reveal checks for a block on the node's head
 // against a copy of the head state, changing nothing.
 func (n *node) checkNextData(r *ghostpriv.DataReveal) error {
@@ -287,14 +319,13 @@ type network struct {
 }
 
 // newNetwork starts size nodes, at least three, with the stub verifier active
-// and the data reveal fee settled as zero for the test.
+// for the test.
 func newNetwork(t *testing.T, size int) *network {
 	t.Helper()
 	if size < 3 {
 		t.Fatalf("a network of %d nodes, want at least 3", size)
 	}
 	t.Cleanup(ghostpriv.SetVerifier(ghostprivtest.Verifier{}))
-	t.Cleanup(ghostpriv.SetDataRevealZeroFee(true))
 	net := &network{t: t}
 	for i := 0; i < size; i++ {
 		net.nodes = append(net.nodes, newNode(t, string(rune('a'+i))))

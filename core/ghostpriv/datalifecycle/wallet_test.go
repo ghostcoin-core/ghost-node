@@ -238,8 +238,9 @@ func (w *wallet) read(h *host, want noteContent) ([]byte, error) {
 }
 
 // dataReveal is a data reveal of the commitment for purpose, made for
-// verifier, against a data tree root, with the stub proof of its binding
-// digest on the network's chain.
+// verifier, against a data tree root, paying the window fee of a block on
+// n's head, with the stub proof of its binding digest on the network's
+// chain.
 func (w *wallet) dataReveal(n *node, root common.Hash, purpose byte, verifier common.Address) *ghostpriv.DataReveal {
 	r := &ghostpriv.DataReveal{
 		Version:  ghostpriv.Version,
@@ -248,6 +249,7 @@ func (w *wallet) dataReveal(n *node, root common.Hash, purpose byte, verifier co
 		Root:     root,
 		Purpose:  ghostpriv.PurposeField(purpose),
 		Verifier: verifier,
+		Fee:      n.nextRevealFee(),
 	}
 	stubProve(n, r)
 	return r

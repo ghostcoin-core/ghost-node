@@ -881,7 +881,7 @@ func TestRevealRootLookupUsesIndex(t *testing.T) {
 	main, _ := f.generate(rootLookupChainLength, func(i int, b *core.BlockGen) {
 		if i == 0 {
 			b.AddTx(f.commitTx(keyA, 0, c1))
-			b.AddTx(f.dataCommitTx(keyC, 0, testDataFile("indexed data"), new(big.Int)))
+			b.AddTx(f.dataCommitTx(keyC, 0, testDataFile("indexed data"), reserve()))
 		}
 	})
 	side, _ := f.generate(1, func(i int, b *core.BlockGen) {
@@ -979,7 +979,6 @@ func TestRevealRootLookupUsesIndex(t *testing.T) {
 	}
 
 	// The data reveal's root check asks the index the same way.
-	useZeroDataFee(t)
 	oldData := *f.genesis.Header().DataTreeRoot
 	for _, b := range main {
 		if *b.Header().DataTreeRoot == oldData {
@@ -987,7 +986,7 @@ func TestRevealRootLookupUsesIndex(t *testing.T) {
 		}
 	}
 	checkData := func(chainReader ghostpriv.ChainReader, root common.Hash) error {
-		r := f.newDataReveal(root, testDataMarker("lookup"), ghostpriv.PurposeReveal, addrC)
+		r := f.newDataReveal(root, testDataMarker("lookup"), ghostpriv.PurposeReveal, addrC, chainWindowFee(t, chain, env.Header).Total)
 		e := *env
 		e.Chain = chainReader
 		_, _, err := ghostpriv.CheckDataReveal(st.Copy(), &e, stub, dataEnvelope(t, r))

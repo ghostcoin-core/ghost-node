@@ -200,8 +200,8 @@ func ApplyCommit(st StateDB, height uint64, from common.Address, c *Commit) erro
 
 var (
 	// ErrDataCommitValue is returned for a data commit with a value other
-	// than 0: a data commit moves no value.
-	ErrDataCommitValue = errors.New("data commit value is not 0")
+	// than DataReserve: a data commit burns exactly the fee reserve.
+	ErrDataCommitValue = errors.New("data commit value is not the data reserve")
 
 	// ErrDataCommitTree is returned when the data tree cannot take the
 	// commitment.
@@ -210,7 +210,8 @@ var (
 
 // DataCommit is a parsed data commit: the F_d the commitment binds, the note
 // stored with the leaf and, for salted commit data, the salt stored with it
-// (nil for version 1 data). It holds no amount.
+// (nil for version 1 data). It holds no amount: the value of every data
+// commit is DataReserve.
 type DataCommit struct {
 	F    common.Hash
 	Note [NoteSize]byte
@@ -231,8 +232,8 @@ func (c *DataCommit) Commitment() common.Hash {
 // ParseDataCommit checks the data and value of a top-level call to the data
 // commit entry address, in this order: exactly 206 bytes of version 2, the
 // layout of a coin commit (ErrCommitData), F not zero (ErrCommitZeroF), then
-// a value of exactly 0 (ErrDataCommitValue). The commitment is computed from F; nothing in the
-// data can set it.
+// a value of exactly DataReserve (ErrDataCommitValue). The commitment is
+// computed from F and the reserve; nothing in the data can set it.
 func ParseDataCommit(data []byte, value *big.Int) (*DataCommit, error) {
 	f, salt, note, err := parseCommitData(data)
 	if err != nil {
@@ -242,20 +243,24 @@ func ParseDataCommit(data []byte, value *big.Int) (*DataCommit, error) {
 	if c.F == (common.Hash{}) {
 		return nil, ErrCommitZeroF
 	}
-	if value == nil || value.Sign() != 0 {
+	if value == nil || value.Cmp(DataReserve.ToBig()) != 0 {
 		return nil, fmt.Errorf("%w: %v", ErrDataCommitValue, value)
 	}
 	return c, nil
 }
 
-// ApplyDataCommit makes the one change of a data commit in the block at
-// height: it appends the data commitment to the data tree with the receipt
-// log. It moves no value and touches neither the coin tree nor the totals.
-// The caller has checked the data commit with ParseDataCommit and taken the
-// gas. On an error nothing is changed.
-func ApplyDataCommit(st StateDB, height uint64, c *DataCommit) error {
+// ApplyDataCommit makes the one atomic change of a data commit sent by from
+// in the block at height: it debits DataReserve from the sender and credits
+// it to nobody, appends the data commitment to the data tree with the receipt
+// log, and adds the reserve to the total in. It touches no coin tree. The
+// caller has checked the data commit with ParseDataCommit and taken the gas.
+// On an error nothing is changed.
+func ApplyDataCommit(st StateDB, height uint64, from common.Address, c *DataCommit) error {
 	if c == nil {
 		return ErrCommitData
+	}
+	if st.GetBalance(from).Lt(DataReserve) {
+		return fmt.Errorf("%w: address %v", ErrCommitFunds, from.Hex())
 	}
 	leaf := c.Commitment()
 	snap := st.Snapshot()
@@ -268,6 +273,11 @@ func ApplyDataCommit(st StateDB, height uint64, c *DataCommit) error {
 		st.RevertToSnapshot(snap)
 		return fmt.Errorf("%w: %w", ErrDataCommitTree, err)
 	}
+	if err := addTotal(st, SlotTotalIn, DataReserve); err != nil {
+		st.RevertToSnapshot(snap)
+		return err
+	}
+	st.SubBalance(from, DataReserve)
 
 	data := make([]byte, 0, 8+32+NoteSize+SaltSize)
 	data = append(data, loc...)

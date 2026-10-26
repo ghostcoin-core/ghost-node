@@ -256,7 +256,7 @@ type Pool struct {
 	mu         sync.RWMutex
 	head       *types.Header
 	state      *state.StateDB
-	fee        *uint256.Int // the coin reveal fee of the next block, nil if unknown
+	fee        *uint256.Int // the reveal fee of the next block, nil if unknown
 	prevFee    *uint256.Int // that of the window before, nil if none or unknown
 	all        map[common.Hash]*entry
 	order      []common.Hash // hashes of the held reveals, first seen first
@@ -638,14 +638,16 @@ func (p *Pool) cheapRules(r revealFields) error {
 		}
 		return fmt.Errorf("%w: have %d, chain %v", ghostpriv.ErrDataRevealChainID, r.chainID, id)
 	}
+	// A data reveal pays the window fee of a coin reveal, from its reserve.
+	errFee := ghostpriv.ErrRevealFee
+	if !coin {
+		errFee = ghostpriv.ErrDataRevealFee
+	}
 	switch {
-	case coin && p.fee != nil && !p.fee.Eq(r.fee) && p.prevFee == nil:
-		return fmt.Errorf("%w: have %v, want %v", ghostpriv.ErrRevealFee, r.fee, p.fee)
-	case coin && p.fee != nil && !p.fee.Eq(r.fee) && !p.prevFee.Eq(r.fee):
-		return fmt.Errorf("%w: have %v, want %v or %v", ghostpriv.ErrRevealFee, r.fee, p.fee, p.prevFee)
-	case !coin && !r.fee.IsZero():
-		// A data reveal pays no fee or is refused by the chain rules.
-		return fmt.Errorf("%w: have %v, want 0", ghostpriv.ErrDataRevealFee, r.fee)
+	case p.fee != nil && !p.fee.Eq(r.fee) && p.prevFee == nil:
+		return fmt.Errorf("%w: have %v, want %v", errFee, r.fee, p.fee)
+	case p.fee != nil && !p.fee.Eq(r.fee) && !p.prevFee.Eq(r.fee):
+		return fmt.Errorf("%w: have %v, want %v or %v", errFee, r.fee, p.fee, p.prevFee)
 	}
 	if p.state != nil && ghosttree.IsSpent(p.state, r.key.kind, r.key.marker) {
 		if coin {
@@ -680,7 +682,7 @@ func (p *Pool) eligibleRoot(head *types.Header, kind ghosttree.Kind, root common
 	return false, err
 }
 
-// windowFees are the coin reveal fees the block that would come next on head
+// windowFees are the coin and data reveal fees the block that would come next on head
 // accepts: that of its fee window and that of the window before it, nil when
 // the window does not exist, for the first window, or an ancestor it needs
 // is not available: the reveal checks then refuse the reveal themselves. The
@@ -940,19 +942,23 @@ func (p *Pool) checkRules(head *types.Header, st *state.StateDB, rv *checkedReve
 		return err
 	}
 	// Every check before the root passed and the index found the root: what
-	// is left is the marker and, for a coin reveal, the backstop.
+	// is left is the marker and the backstop: out plus fee for a coin reveal,
+	// the reserve for a data reveal.
 	if ghosttree.IsSpent(st, rv.in.Kind, rv.in.Marker) {
 		return fmt.Errorf("%w: %x", rv.errMarker, rv.in.Marker)
 	}
-	if rv.in.Kind != ghosttree.Coin {
-		return nil
-	}
 	hidden, err := ghostpriv.Hidden(st)
 	if err != nil {
-		return fmt.Errorf("%w: %w", ghostpriv.ErrRevealBackstop, err)
+		return fmt.Errorf("%w: %w", rv.errBackstop, err)
+	}
+	if rv.in.Kind != ghosttree.Coin {
+		if ghostpriv.DataReserve.Gt(hidden) {
+			return fmt.Errorf("%w: reserve %v, hidden %v", rv.errBackstop, ghostpriv.DataReserve, hidden)
+		}
+		return nil
 	}
 	if need := new(uint256.Int).Add(rv.in.Out, rv.in.Fee); need.Gt(hidden) {
-		return fmt.Errorf("%w: out plus fee %v, hidden %v", ghostpriv.ErrRevealBackstop, need, hidden)
+		return fmt.Errorf("%w: out plus fee %v, hidden %v", rv.errBackstop, need, hidden)
 	}
 	return nil
 }
@@ -960,12 +966,13 @@ func (p *Pool) checkRules(head *types.Header, st *state.StateDB, rv *checkedReve
 // checkedReveal is a reveal decoded for check: the inputs of its proof, the
 // proof, the errors of its type and its checks in core/ghostpriv.
 type checkedReveal struct {
-	in        *ghostpriv.VerifyInputs
-	proof     []byte
-	errProof  error
-	errRoot   error
-	errMarker error
-	rules     func(st *state.StateDB, env *ghostpriv.BlockEnv, verifier ghostpriv.Verifier) error
+	in          *ghostpriv.VerifyInputs
+	proof       []byte
+	errProof    error
+	errRoot     error
+	errMarker   error
+	errBackstop error
+	rules       func(st *state.StateDB, env *ghostpriv.BlockEnv, verifier ghostpriv.Verifier) error
 }
 
 // decodeForCheck decodes a reveal and computes the public inputs of its
@@ -995,10 +1002,11 @@ func decodeForCheck(tx *types.Transaction, genesis common.Hash) (*checkedReveal,
 				Fee:       new(uint256.Int).Set(r.Fee),
 				Note:      r.Note,
 			},
-			proof:     common.CopyBytes(r.Proof),
-			errProof:  ghostpriv.ErrRevealProof,
-			errRoot:   ghostpriv.ErrRevealRoot,
-			errMarker: ghostpriv.ErrRevealMarker,
+			proof:       common.CopyBytes(r.Proof),
+			errProof:    ghostpriv.ErrRevealProof,
+			errRoot:     ghostpriv.ErrRevealRoot,
+			errMarker:   ghostpriv.ErrRevealMarker,
+			errBackstop: ghostpriv.ErrRevealBackstop,
 			rules: func(st *state.StateDB, env *ghostpriv.BlockEnv, verifier ghostpriv.Verifier) error {
 				_, _, err := ghostpriv.CheckReveal(st, env, verifier, envelope)
 				return err
@@ -1013,11 +1021,12 @@ func decodeForCheck(tx *types.Transaction, genesis common.Hash) (*checkedReveal,
 		// A purpose field other than reveal or revoke is refused by the
 		// chain rules whatever the proof.
 		return &checkedReveal{
-			in:        r.VerifyInputs(r.Purpose[31], r.ChainID, genesis),
-			proof:     common.CopyBytes(r.Proof),
-			errProof:  ghostpriv.ErrDataRevealProof,
-			errRoot:   ghostpriv.ErrDataRevealRoot,
-			errMarker: ghostpriv.ErrDataRevealMarker,
+			in:          r.VerifyInputs(r.Purpose[31], r.ChainID, genesis),
+			proof:       common.CopyBytes(r.Proof),
+			errProof:    ghostpriv.ErrDataRevealProof,
+			errRoot:     ghostpriv.ErrDataRevealRoot,
+			errMarker:   ghostpriv.ErrDataRevealMarker,
+			errBackstop: ghostpriv.ErrDataRevealBackstop,
 			rules: func(st *state.StateDB, env *ghostpriv.BlockEnv, verifier ghostpriv.Verifier) error {
 				_, _, err := ghostpriv.CheckDataReveal(st, env, verifier, envelope)
 				return err

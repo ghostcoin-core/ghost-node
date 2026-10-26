@@ -18,9 +18,9 @@
 // ordinary transaction that burns public value into a coin commitment, and
 // the reveal, the native transaction without an account that mints public
 // value out of the hidden set against a proof (docs/private-transactions.md).
-// It also holds the data rules: the data commit, which appends a data
-// commitment without moving value, and the data reveal, which spends a data
-// marker once against a proof and moves no value
+// It also holds the data rules: the data commit, which burns the fee reserve
+// into a data commitment, and the data reveal, which spends a data marker once
+// against a proof and settles its fee from that reserve
 // (docs/data-commitments.md).
 package ghostpriv
 
@@ -172,15 +172,21 @@ func DataCommitment(f common.Hash) common.Hash {
 	return DataCommitmentVersion(Version, f)
 }
 
+// DataReserve is DATA_RESERVE, the fee reserve every data commit burns,
+// 2.5 x 10^17 wei (spec 04, section 3). The data reveal or revoke that spends
+// the commitment settles its fee from it; the rest is forfeited.
+var DataReserve = uint256.NewInt(250_000_000_000_000_000)
+
 // DataCommitmentVersion returns the data commitment of F_d at a commitment
-// format version, K("ghost/data-commitment/v1", DATA, F_d), with DATA of that
-// version: DataV2 for SaltedCommitVersion, Data for version 1.
+// format version. For SaltedCommitVersion it is K("ghost/data-commitment/v1",
+// DataV2, DATA_RESERVE as a 32-byte word, F_d), which binds the reserve the
+// data commit burned. For version 1, which no data commit can create, it is
+// K("ghost/data-commitment/v1", Data, F_d).
 func DataCommitmentVersion(version uint16, f common.Hash) common.Hash {
-	typ := Data
 	if version == SaltedCommitVersion {
-		typ = DataV2
+		return ghosttree.K(TagDataCommitment, DataV2[:], amountWord(DataReserve), f[:])
 	}
-	return ghosttree.K(TagDataCommitment, typ[:], f[:])
+	return ghosttree.K(TagDataCommitment, Data[:], f[:])
 }
 
 // Slots of the totals account.

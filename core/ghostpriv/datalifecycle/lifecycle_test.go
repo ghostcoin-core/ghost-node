@@ -26,6 +26,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/ghostpriv"
 	"github.com/ethereum/go-ethereum/core/ghosttree"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/holiman/uint256"
 )
 
 // testFile is the plaintext of a synthetic file; each label gives other
@@ -285,6 +286,58 @@ func TestDataLifecycleRevoke(t *testing.T) {
 	// The bystander still proves holding.
 	for _, n := range s.net.nodes {
 		s.requireHold(n, keep, v)
+	}
+}
+
+// TestDataLifecycleSettlesFromReserve commits two files, each burning the
+// reserve, reveals one with the window fee and revokes the other, on the
+// three-node network with the stub verifier and no test-only switch. A
+// reveal at a fee of zero or of the window fee plus one is refused by every
+// node. Each spend adds the reserve to the total out and pays its miner the
+// tip, and every node agrees on the totals: two reserves in, two out.
+func TestDataLifecycleSettlesFromReserve(t *testing.T) {
+	s := newScenario(t)
+	inBefore, outBefore := ghostpriv.Totals(s.node(0).headState())
+	a := s.commitFile(s.node(0), "settles A", testFile("settles A"))
+	b := s.commitFile(s.node(1), "settles B", testFile("settles B"))
+	verifier := address("settles verifier")
+
+	// A fee other than the window fee is refused by every node.
+	miner := s.node(2)
+	root := *miner.head().DataTreeRoot
+	for name, fee := range map[string]*uint256.Int{
+		"zero":              new(uint256.Int),
+		"window fee plus 1": new(uint256.Int).AddUint64(miner.nextRevealFee(), 1),
+	} {
+		r := s.wallet(a).dataReveal(miner, root, ghostpriv.PurposeReveal, verifier)
+		r.Fee = fee
+		stubProve(miner, r)
+		for _, n := range s.net.nodes {
+			requireErr(t, n.checkNextData(r), ghostpriv.ErrDataRevealFee, "node "+n.name+" checking a data reveal at a fee of "+name)
+		}
+		s.rejectTx(miner, ghostpriv.ErrDataRevealFee, nil, dataRevealTx(t, r))
+	}
+
+	// The reveal and the revoke at the window fee, each checked on every
+	// node by checkDataReveal: the reserve out and the tip to the miner.
+	s.reveal(s.node(2), a, ghostpriv.PurposeReveal, verifier)
+	s.reveal(s.node(0), b, ghostpriv.PurposeRevoke, common.Address{})
+	s.net.converged()
+	reserves := new(uint256.Int).Mul(ghostpriv.DataReserve, uint256.NewInt(2))
+	for _, n := range s.net.nodes {
+		in, out := ghostpriv.Totals(n.headState())
+		if gotIn, gotOut := new(uint256.Int).Sub(in, inBefore), new(uint256.Int).Sub(out, outBefore); !gotIn.Eq(reserves) || !gotOut.Eq(reserves) {
+			t.Fatalf("node %s: totals grew by %v in and %v out, want %v each", n.name, gotIn, gotOut, reserves)
+		}
+		hidden, err := ghostpriv.Hidden(n.headState())
+		if err != nil || !hidden.IsZero() {
+			t.Fatalf("node %s: hidden %v, %v", n.name, hidden, err)
+		}
+		for _, h := range []*held{a, b} {
+			if !ghosttree.IsSpent(n.headState(), ghosttree.Data, s.wallet(h).marker()) {
+				t.Fatalf("node %s: a marker is not spent", n.name)
+			}
+		}
 	}
 }
 

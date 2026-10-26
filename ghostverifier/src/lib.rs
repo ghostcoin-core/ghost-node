@@ -7,12 +7,13 @@
 //! function is the one the ghost repository's prover is checked against.
 //!
 //! ghost-proofs has no C interface for data reveals, so this crate adds one
-//! around its one data verifier, `verify_data_reveal`, which checks a reveal
-//! and a revoke alike: the purpose is the first byte of the statement. At the
-//! pinned revision that verifier rejects every data reveal with
-//! `DataFeeUnsettled`, whatever the proof, until the data reveal fee is
-//! settled; [`ghost_verify_data_reveal`] answers [`GHOST_DATA_FEE_UNSETTLED`]
-//! for it. The accept path, [`ghost_verify_data_reveal_unsettled`], exists
+//! around its one data verifier, `verify_salted_data_reveal`, which checks a
+//! reveal and a revoke of a salted data commitment alike: the purpose is the
+//! first byte of the statement. The commitment binds the fee reserve with
+//! F_d. At the pinned revision that verifier rejects every data reveal with
+//! `DataFeeUnsettled`, whatever the proof, though the node settles the fee
+//! from the reserve; [`ghost_verify_data_reveal`] answers
+//! [`GHOST_DATA_FEE_UNSETTLED`] for it. The accept path, [`ghost_verify_data_reveal_unsettled`], exists
 //! only with the test-only feature `unsettled-points-test`, which neither
 //! `build/ci.go` nor the release build enables.
 
@@ -23,7 +24,7 @@ use ghost_proofs::ffi::{
     GHOST_PROOFS_MALFORMED_INPUT, GHOST_PROOFS_PANICKED, GHOST_PROOFS_REJECTED, PROOF_MAX_BYTES,
     chain_params_from_bytes, verify_coin_reveal_bytes,
 };
-use ghost_proofs::{ChainParams, DataPurpose, DataReveal, Proof, ProofError, verify_data_reveal};
+use ghost_proofs::{ChainParams, DataPurpose, DataReveal, Proof, ProofError, verify_salted_data_reveal};
 
 pub use ghost_proofs::ffi::ghost_verify_coin_reveal;
 pub use ghost_proofs::{PURPOSE_REVEAL, PURPOSE_REVOKE};
@@ -181,7 +182,7 @@ unsafe fn verify_data_raw(
 /// Verifies a data reveal or revoke proof given as bytes in the layout of
 /// ghost_data.h with the shipped verifier of ghost-proofs. Never panics.
 pub fn verify_data_reveal_bytes(params: &[u8], statement: &[u8], proof: &[u8]) -> i32 {
-    verify_data_guarded(params, statement, proof, verify_data_reveal)
+    verify_data_guarded(params, statement, proof, verify_salted_data_reveal)
 }
 
 /// Verifies a data reveal or revoke proof against the statement and the
@@ -200,14 +201,16 @@ pub unsafe extern "C" fn ghost_verify_data_reveal(
     proof_len: usize,
 ) -> i32 {
     // SAFETY: the caller's guarantee, passed on.
-    unsafe { verify_data_raw(params, params_len, statement, statement_len, proof, proof_len, verify_data_reveal) }
+    unsafe {
+        verify_data_raw(params, params_len, statement, statement_len, proof, proof_len, verify_salted_data_reveal)
+    }
 }
 
 /// [`verify_data_reveal_bytes`] with the test-only verifier that skips the
 /// unsettled fee. Not in the release library.
 #[cfg(feature = "unsettled-points-test")]
 pub fn verify_data_reveal_unsettled_bytes(params: &[u8], statement: &[u8], proof: &[u8]) -> i32 {
-    verify_data_guarded(params, statement, proof, ghost_proofs::verify_data_reveal_unsettled)
+    verify_data_guarded(params, statement, proof, ghost_proofs::verify_salted_data_reveal_unsettled)
 }
 
 /// [`ghost_verify_data_reveal`] with the test-only verifier of ghost-proofs
@@ -237,7 +240,7 @@ pub unsafe extern "C" fn ghost_verify_data_reveal_unsettled(
             statement_len,
             proof,
             proof_len,
-            ghost_proofs::verify_data_reveal_unsettled,
+            ghost_proofs::verify_salted_data_reveal_unsettled,
         )
     }
 }

@@ -333,7 +333,7 @@ func TestGhostTreeRealNodePagesAndReorg(t *testing.T) {
 		t.Fatal(err)
 	}
 	coinTx := send(ghost.CommitEntryAddress, value, coinData)
-	dataTx := send(ghost.DataCommitEntryAddress, new(big.Int), dataData)
+	dataTx := send(ghost.DataCommitEntryAddress, ghostpriv.DataReserve.ToBig(), dataData)
 	coinBlock, dataBlock := waitReceipt(t, a, coinTx), waitReceipt(t, a, dataTx)
 	t.Logf("coin commit in block %d, data commit in block %d", coinBlock.Number, dataBlock.Number)
 

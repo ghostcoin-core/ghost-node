@@ -37,19 +37,13 @@ import (
 	"github.com/holiman/uint256"
 )
 
-// useZeroDataFee turns the test-only zero data reveal fee on for the test.
-func useZeroDataFee(t *testing.T) {
-	restore := ghostpriv.SetDataRevealZeroFee(true)
-	t.Cleanup(restore)
-}
-
 func testDataMarker(name string) common.Hash {
 	return ghosttree.K(ghostpriv.TagDataMarker, []byte("synthetic data marker "+name))
 }
 
-// newDataReveal is a data reveal of the given fields, zero fee, with the stub
+// newDataReveal is a data reveal of the given fields and fee, with the stub
 // proof of its binding digest on this chain.
-func (f *fixture) newDataReveal(root, marker common.Hash, purpose byte, verifier common.Address) *ghostpriv.DataReveal {
+func (f *fixture) newDataReveal(root, marker common.Hash, purpose byte, verifier common.Address, fee *uint256.Int) *ghostpriv.DataReveal {
 	r := &ghostpriv.DataReveal{
 		Version:  ghostpriv.Version,
 		ChainID:  f.chainID,
@@ -58,7 +52,7 @@ func (f *fixture) newDataReveal(root, marker common.Hash, purpose byte, verifier
 		Purpose:  ghostpriv.PurposeField(purpose),
 		Verifier: verifier,
 		Out:      new(uint256.Int),
-		Fee:      new(uint256.Int),
+		Fee:      new(uint256.Int).Set(fee),
 	}
 	f.proveData(r)
 	return r
@@ -354,19 +348,26 @@ func testCf(name string) common.Hash {
 
 // dataRevealChain builds three blocks on the internal network, the first with
 // a data commit, and returns the fixture, the environment and state of the
-// next block and the data root of block 1.
-func dataRevealChain(t *testing.T, name string) (*fixture, *ghostpriv.BlockEnv, *state.StateDB, common.Hash) {
+// next block, the data root of block 1 and the window fee of the next block.
+func dataRevealChain(t *testing.T, name string) (*fixture, *ghostpriv.BlockEnv, *state.StateDB, common.Hash, *uint256.Int) {
 	t.Helper()
 	f := newFixture(t, ghost.InternalNetGasLimit, nil)
 	blocks, _ := f.generate(3, func(i int, b *core.BlockGen) {
 		if i == 0 {
-			b.AddTx(f.dataCommitTx(keyA, 0, testDataFile(name), new(big.Int)))
+			b.AddTx(f.dataCommitTx(keyA, 0, testDataFile(name), reserve()))
 		}
 	})
 	chain := f.newChain()
 	f.insert(chain, blocks)
 	env, st := nextEnv(t, chain, blocks[2].Header(), common.Address{0xcb})
-	return f, env, st, *blocks[0].Header().DataTreeRoot
+	return f, env, st, *blocks[0].Header().DataTreeRoot, chainWindowFee(t, chain, env.Header).Total
+}
+
+// genDataFee is the window fee of a data reveal in the block being
+// generated.
+func genDataFee(t *testing.T, b *core.BlockGen) *uint256.Int {
+	t.Helper()
+	return genWindowFee(t, b).Total
 }
 
 // TestDataRevealCarriesFingerprint checks that cf rides in the first 32 bytes
@@ -377,10 +378,9 @@ func dataRevealChain(t *testing.T, name string) (*fixture, *ghostpriv.BlockEnv, 
 func TestDataRevealCarriesFingerprint(t *testing.T) {
 	checkDataEnvelopeLayout(t)
 	useStub(t)
-	useZeroDataFee(t)
-	f, env, st, root := dataRevealChain(t, "fingerprint")
+	f, env, st, root, fee := dataRevealChain(t, "fingerprint")
 	cf := testCf("carried")
-	r := f.newDataReveal(root, testDataMarker("fingerprint"), ghostpriv.PurposeReveal, common.Address{0x7e, 0xcf})
+	r := f.newDataReveal(root, testDataMarker("fingerprint"), ghostpriv.PurposeReveal, common.Address{0x7e, 0xcf}, fee)
 	r.Cf = cf
 	f.proveData(r)
 
@@ -431,10 +431,9 @@ func TestDataRevealCarriesFingerprint(t *testing.T) {
 // refused at the proof check.
 func TestDataRevealBindsFingerprint(t *testing.T) {
 	useStub(t)
-	useZeroDataFee(t)
-	f, env, st, root := dataRevealChain(t, "binds")
+	f, env, st, root, fee := dataRevealChain(t, "binds")
 	for _, purpose := range []byte{ghostpriv.PurposeReveal, ghostpriv.PurposeRevoke} {
-		r := f.newDataReveal(root, testDataMarker("binds"), purpose, common.Address{0x7e, 0xb1})
+		r := f.newDataReveal(root, testDataMarker("binds"), purpose, common.Address{0x7e, 0xb1}, fee)
 		r.Cf = testCf("bound")
 		f.proveData(r)
 		other := cloneData(r)
@@ -467,11 +466,10 @@ func TestDataRevealBindsFingerprint(t *testing.T) {
 // DataReveal.VerifyInputs, which the pool uses too, gives the same inputs.
 func TestDataRevealVerifyInputsCarryFingerprint(t *testing.T) {
 	useStub(t)
-	useZeroDataFee(t)
-	f, env, st, root := dataRevealChain(t, "inputs")
+	f, env, st, root, fee := dataRevealChain(t, "inputs")
 	for _, purpose := range []byte{ghostpriv.PurposeReveal, ghostpriv.PurposeRevoke} {
 		for _, cf := range []common.Hash{testCf("inputs one"), testCf("inputs two")} {
-			r := f.newDataReveal(root, testDataMarker("inputs"), purpose, common.Address{0x7e, 0x1f})
+			r := f.newDataReveal(root, testDataMarker("inputs"), purpose, common.Address{0x7e, 0x1f}, fee)
 			r.Cf = cf
 			f.proveData(r)
 			counter := &countingVerifier{}
@@ -497,21 +495,24 @@ func TestDataRevealVerifyInputsCarryFingerprint(t *testing.T) {
 // block: each second use is rejected and the block carrying it is invalid.
 func TestDataRevealOnceThenSecondRejected(t *testing.T) {
 	useStub(t)
-	useZeroDataFee(t)
 	f := newFixture(t, 50_000_000, nil)
 	var (
 		file     = testDataFile("once")
+		other    = testDataFile("once, other")
 		marker   = testDataMarker("once")
 		verifier = common.Address{0x7e, 0x01}
 		first    *types.Transaction
 		again    *types.Transaction
 	)
+	// Two data commits, so that the hidden set holds a reserve for a second
+	// data reveal.
 	gen := func(i int, b *core.BlockGen) {
 		switch i {
 		case 0:
-			b.AddTx(f.dataCommitTx(keyA, 0, file, new(big.Int)))
+			b.AddTx(f.dataCommitTx(keyA, 0, file, reserve()))
+			b.AddTx(f.dataCommitTx(keyB, 0, other, reserve()))
 		case 2:
-			first = dataRevealTx(t, f.newDataReveal(genParentDataRoot(b), marker, ghostpriv.PurposeReveal, verifier))
+			first = dataRevealTx(t, f.newDataReveal(genParentDataRoot(b), marker, ghostpriv.PurposeReveal, verifier, genDataFee(t, b)))
 			b.AddTx(first)
 		case 4:
 			b.AddUncheckedTx(again)
@@ -553,7 +554,7 @@ func TestDataRevealOnceThenSecondRejected(t *testing.T) {
 	// with a proof valid for its own fields, is rejected.
 	env, stHead := nextEnv(t, chain, blocks[3].Header(), common.Address{0xcb})
 	root := *blocks[0].Header().DataTreeRoot
-	r := f.newDataReveal(root, marker, ghostpriv.PurposeReveal, common.Address{0x7e, 0x02})
+	r := f.newDataReveal(root, marker, ghostpriv.PurposeReveal, common.Address{0x7e, 0x02}, chainWindowFee(t, chain, env.Header).Total)
 	if _, _, err := ghostpriv.CheckDataReveal(stHead.Copy(), env, stub, dataEnvelope(t, r)); !errors.Is(err, ghostpriv.ErrDataRevealMarker) {
 		t.Fatalf("second reveal: %v, want %v", err, ghostpriv.ErrDataRevealMarker)
 	}
@@ -584,11 +585,12 @@ func TestDataRevealOnceThenSecondRejected(t *testing.T) {
 		blocks, _ := f.generate(3, func(i int, b *core.BlockGen) {
 			switch i {
 			case 0:
-				b.AddTx(f.dataCommitTx(keyA, 0, file, new(big.Int)))
+				b.AddTx(f.dataCommitTx(keyA, 0, file, reserve()))
+				b.AddTx(f.dataCommitTx(keyB, 0, other, reserve()))
 			case 2:
-				root := genParentDataRoot(b)
-				b.AddTx(dataRevealTx(t, f.newDataReveal(root, marker, ghostpriv.PurposeReveal, verifier)))
-				tx := dataRevealTx(t, f.newDataReveal(root, second, ghostpriv.PurposeReveal, common.Address{0x7e, 0x03}))
+				root, fee := genParentDataRoot(b), genDataFee(t, b)
+				b.AddTx(dataRevealTx(t, f.newDataReveal(root, marker, ghostpriv.PurposeReveal, verifier, fee)))
+				tx := dataRevealTx(t, f.newDataReveal(root, second, ghostpriv.PurposeReveal, common.Address{0x7e, 0x03}, fee))
 				if unchecked {
 					b.AddUncheckedTx(tx)
 				} else {
@@ -636,21 +638,24 @@ func TestDataRevealOnceThenSecondRejected(t *testing.T) {
 func TestDataRevealRevokePurposeSeparate(t *testing.T) {
 	checkDataBindingLayout(t)
 	useStub(t)
-	useZeroDataFee(t)
 	f := newFixture(t, ghost.InternalNetGasLimit, nil)
 	var (
 		file     = testDataFile("purpose")
+		other    = testDataFile("purpose, other")
 		marker   = testDataMarker("purpose")
 		verifier = common.Address{0x7e, 0x0f}
 		later    *types.Transaction
 		revokeTx *types.Transaction
 	)
+	// Two data commits, so that after the revoke the hidden set still holds
+	// a reserve and a later reveal fails at the marker.
 	gen := func(i int, b *core.BlockGen) {
 		switch i {
 		case 0:
-			b.AddTx(f.dataCommitTx(keyA, 0, file, new(big.Int)))
+			b.AddTx(f.dataCommitTx(keyA, 0, file, reserve()))
+			b.AddTx(f.dataCommitTx(keyB, 0, other, reserve()))
 		case 3:
-			revokeTx = dataRevealTx(t, f.newDataReveal(genParentDataRoot(b), marker, ghostpriv.PurposeRevoke, verifier))
+			revokeTx = dataRevealTx(t, f.newDataReveal(genParentDataRoot(b), marker, ghostpriv.PurposeRevoke, verifier, genDataFee(t, b)))
 			b.AddTx(revokeTx)
 		case 4:
 			b.AddUncheckedTx(later)
@@ -667,8 +672,9 @@ func TestDataRevealRevokePurposeSeparate(t *testing.T) {
 		return err
 	}
 
-	reveal := f.newDataReveal(root, marker, ghostpriv.PurposeReveal, verifier)
-	revoke := f.newDataReveal(root, marker, ghostpriv.PurposeRevoke, verifier)
+	fee := chainWindowFee(t, chain, env.Header).Total
+	reveal := f.newDataReveal(root, marker, ghostpriv.PurposeReveal, verifier, fee)
+	revoke := f.newDataReveal(root, marker, ghostpriv.PurposeRevoke, verifier, fee)
 	if reveal.BindingDigest(f.chainID, f.genesis.Hash()) == revoke.BindingDigest(f.chainID, f.genesis.Hash()) {
 		t.Fatal("a reveal and a revoke share a binding digest")
 	}
@@ -749,13 +755,13 @@ func TestDataRevealRevokePurposeSeparate(t *testing.T) {
 	}
 	// Any later reveal, or a second revoke, of the marker is rejected.
 	for _, p := range []byte{ghostpriv.PurposeReveal, ghostpriv.PurposeRevoke} {
-		r := f.newDataReveal(root, marker, p, common.Address{0x7e, p})
+		r := f.newDataReveal(root, marker, p, common.Address{0x7e, p}, chainWindowFee(t, chain, env5.Header).Total)
 		if _, _, err := ghostpriv.CheckDataReveal(st5.Copy(), env5, stub, dataEnvelope(t, r)); !errors.Is(err, ghostpriv.ErrDataRevealMarker) {
 			t.Errorf("purpose %d after the revoke: %v, want %v", p, err, ghostpriv.ErrDataRevealMarker)
 		}
 	}
 	// A block carrying the later reveal is invalid.
-	later = dataRevealTx(t, f.newDataReveal(root, marker, ghostpriv.PurposeReveal, verifier))
+	later = dataRevealTx(t, f.newDataReveal(root, marker, ghostpriv.PurposeReveal, verifier, chainWindowFee(t, chain, env5.Header).Total))
 	withLater, _ := f.generate(5, gen)
 	if withLater[3].Hash() != withRevoke[3].Hash() {
 		t.Fatal("the chain did not rebuild identically")
@@ -768,92 +774,81 @@ func TestDataRevealRevokePurposeSeparate(t *testing.T) {
 	}
 }
 
-// TestDataRevealRejectedByDefaultFee checks that while the data reveal fee
-// is not settled every data reveal is rejected at the fee check, with no
-// proof verified and nothing changed, and a block carrying one is invalid;
-// that the test-only switch settles it as zero, rejecting any other fee;
-// and that the default verifier still rejects every data reveal.
-func TestDataRevealRejectedByDefaultFee(t *testing.T) {
+// TestDataRevealSettlesWindowFeeFromReserve includes a data reveal and a data
+// revoke paying the window fee, as a coin reveal does, on the internal
+// network with no test-only switch: both are accepted, the coinbase gains
+// their tips, and the total out grows by a reserve each. A fee of zero, or of
+// the window fee plus one, is rejected at the fee check with no proof
+// verified and nothing changed, and a block carrying one is invalid. The
+// default verifier still rejects every data reveal.
+func TestDataRevealSettlesWindowFeeFromReserve(t *testing.T) {
 	useStub(t)
-	f := newFixture(t, ghost.InternalNetGasLimit, nil)
+	f := newFixture(t, 50_000_000, nil)
 	var (
-		file   = testDataFile("fee")
-		marker = testDataMarker("fee")
-		bad    *types.Transaction
+		fileA    = testDataFile("settles A")
+		fileB    = testDataFile("settles B")
+		mReveal  = testDataMarker("settles")
+		mRevoke  = testDataMarker("settles, revoked")
+		miner    = common.Address{0xcb, 0x5e}
+		verifier = common.Address{0x7e, 0x5e}
+		fee      ghostpriv.Fee
+		bad      *types.Transaction
 	)
 	gen := func(i int, b *core.BlockGen) {
 		switch i {
 		case 0:
-			b.AddTx(f.dataCommitTx(keyA, 0, file, new(big.Int)))
-		case 3:
-			b.AddUncheckedTx(bad)
+			b.AddTx(f.dataCommitTx(keyA, 0, fileA, reserve()))
+			b.AddTx(f.dataCommitTx(keyB, 0, fileB, reserve()))
+		case 2:
+			if bad != nil {
+				b.AddUncheckedTx(bad)
+				return
+			}
+			b.SetCoinbase(miner)
+			fee = genWindowFee(t, b)
+			root := genParentDataRoot(b)
+			b.AddTx(dataRevealTx(t, f.newDataReveal(root, mReveal, ghostpriv.PurposeReveal, verifier, fee.Total)))
+			b.AddTx(dataRevealTx(t, f.newDataReveal(root, mRevoke, ghostpriv.PurposeRevoke, verifier, fee.Total)))
 		}
 	}
 	blocks, _ := f.generate(3, gen)
 	chain := f.newChain()
-	f.insert(chain, blocks)
-	env, st := nextEnv(t, chain, blocks[2].Header(), common.Address{0xcb})
+	f.insert(chain, blocks[:2])
+
+	// The rejections, against the state before the reveals.
+	env, st := nextEnv(t, chain, blocks[1].Header(), miner)
+	if want := chainWindowFee(t, chain, env.Header); !want.Total.Eq(fee.Total) {
+		t.Fatalf("window fee %v, the generated block's %v", want.Total, fee.Total)
+	}
 	root := *blocks[0].Header().DataTreeRoot
 	counter := &countingVerifier{}
-	reveal := f.newDataReveal(root, marker, ghostpriv.PurposeReveal, addrC)
-	revoke := f.newDataReveal(root, marker, ghostpriv.PurposeRevoke, addrC)
-	windowFee := cloneData(reveal)
-	windowFee.Fee = chainWindowFee(t, chain, env.Header).Total
-	f.proveData(windowFee)
+	for _, p := range []byte{ghostpriv.PurposeReveal, ghostpriv.PurposeRevoke} {
+		for name, paid := range map[string]*uint256.Int{
+			"zero":              new(uint256.Int),
+			"window fee plus 1": new(uint256.Int).AddUint64(fee.Total, 1),
+			"window fee less 1": new(uint256.Int).SubUint64(fee.Total, 1),
+		} {
+			r := f.newDataReveal(root, mReveal, p, verifier, paid)
+			cp := st.Copy()
+			rootBefore := cp.IntermediateRoot(true)
+			if _, _, err := ghostpriv.CheckDataReveal(cp, env, counter, dataEnvelope(t, r)); !errors.Is(err, ghostpriv.ErrDataRevealFee) {
+				t.Errorf("purpose %d, fee %s: %v, want %v", p, name, err, ghostpriv.ErrDataRevealFee)
+			}
+			if err := ghostpriv.ApplyDataReveal(cp, env, counter, dataEnvelope(t, r)); !errors.Is(err, ghostpriv.ErrDataRevealFee) {
+				t.Errorf("purpose %d, fee %s applied: %v, want %v", p, name, err, ghostpriv.ErrDataRevealFee)
+			}
+			if cp.IntermediateRoot(true) != rootBefore || len(cp.Logs()) != 0 {
+				t.Errorf("purpose %d, fee %s: a rejected data reveal changed the state", p, name)
+			}
+		}
+	}
+	noProofVerified(t, counter, "a fee other than the window fee")
 
-	// The default: every data reveal, whatever its fee, is rejected.
-	for name, r := range map[string]*ghostpriv.DataReveal{"reveal": reveal, "revoke": revoke, "window fee": windowFee} {
-		cp := st.Copy()
-		rootBefore := cp.IntermediateRoot(true)
-		_, _, err := ghostpriv.CheckDataReveal(cp, env, counter, dataEnvelope(t, r))
-		if !errors.Is(err, ghostpriv.ErrDataRevealFee) || !errors.Is(err, ghostpriv.ErrDataRevealFeeUnsettled) {
-			t.Fatalf("%s by default: %v, want %v", name, err, ghostpriv.ErrDataRevealFeeUnsettled)
-		}
-		if err := ghostpriv.ApplyDataReveal(cp, env, counter, dataEnvelope(t, r)); !errors.Is(err, ghostpriv.ErrDataRevealFee) {
-			t.Fatalf("%s applied by default: %v", name, err)
-		}
-		if cp.IntermediateRoot(true) != rootBefore || ghosttree.IsSpent(cp, ghosttree.Data, marker) || len(cp.Logs()) != 0 {
-			t.Fatalf("%s: a rejected data reveal changed the state", name)
-		}
-	}
-	noProofVerified(t, counter, "the default fee")
-
-	// A block carrying a data reveal is invalid by default.
-	bad = dataRevealTx(t, reveal)
-	withBad, _ := f.generate(4, gen)
-	if withBad[2].Hash() != blocks[2].Hash() {
-		t.Fatal("the chain did not rebuild identically")
-	}
-	if _, err := chain.InsertChain(withBad[3:]); !errors.Is(err, ghostpriv.ErrDataRevealFeeUnsettled) {
-		t.Fatalf("block with a data reveal by default: %v, want %v", err, ghostpriv.ErrDataRevealFeeUnsettled)
-	}
-	if chain.CurrentBlock().Hash() != blocks[2].Hash() {
-		t.Fatal("the head moved")
-	}
-
-	// With the test-only switch the fee is zero: a zero fee passes and any
-	// other is rejected at the fee check, with no proof verified.
-	restore := ghostpriv.SetDataRevealZeroFee(true)
-	for name, r := range map[string]*ghostpriv.DataReveal{"reveal": reveal, "revoke": revoke} {
-		if _, _, err := ghostpriv.CheckDataReveal(st.Copy(), env, stub, dataEnvelope(t, r)); err != nil {
-			t.Fatalf("%s with the zero fee: %v", name, err)
-		}
-	}
-	oneWei := cloneData(reveal)
-	oneWei.Fee = uint256.NewInt(1)
-	f.proveData(oneWei)
-	counter.calls = 0
-	for name, r := range map[string]*ghostpriv.DataReveal{"one wei": oneWei, "window fee": windowFee} {
-		_, _, err := ghostpriv.CheckDataReveal(st.Copy(), env, counter, dataEnvelope(t, r))
-		if !errors.Is(err, ghostpriv.ErrDataRevealFee) || errors.Is(err, ghostpriv.ErrDataRevealFeeUnsettled) {
-			t.Errorf("fee of %s with the zero fee: %v, want %v", name, err, ghostpriv.ErrDataRevealFee)
-		}
-	}
-	noProofVerified(t, counter, "a non-zero fee")
-
-	// The default verifier rejects every data reveal, the stub's included:
-	// the reject-all one, or the linked proof verifier, which verifies only
-	// coin reveals.
+	// The default verifier rejects every data reveal with the window fee: the
+	// reject-all one, or the linked proof verifier, which verifies only coin
+	// reveals.
+	reveal := f.newDataReveal(root, mReveal, ghostpriv.PurposeReveal, verifier, fee.Total)
+	revoke := f.newDataReveal(root, mRevoke, ghostpriv.PurposeRevoke, verifier, fee.Total)
 	if _, _, err := ghostpriv.CheckDataReveal(st.Copy(), env, ghostpriv.DefaultVerifier(), dataEnvelope(t, reveal)); !errors.Is(err, errDefaultDataVerifier) {
 		t.Fatalf("default verifier: %v, want %v", err, errDefaultDataVerifier)
 	}
@@ -861,23 +856,339 @@ func TestDataRevealRejectedByDefaultFee(t *testing.T) {
 		t.Fatalf("nil verifier: %v, want %v", err, errDefaultDataVerifier)
 	}
 
-	// Turned off again, the default holds.
-	restore()
-	if _, _, err := ghostpriv.CheckDataReveal(st.Copy(), env, stub, dataEnvelope(t, reveal)); !errors.Is(err, ghostpriv.ErrDataRevealFeeUnsettled) {
-		t.Fatalf("after the switch: %v, want %v", err, ghostpriv.ErrDataRevealFeeUnsettled)
+	// A block carrying a zero-fee data reveal is invalid.
+	bad = dataRevealTx(t, f.newDataReveal(root, mReveal, ghostpriv.PurposeReveal, verifier, new(uint256.Int)))
+	withBad, _ := f.generate(3, gen)
+	if withBad[1].Hash() != blocks[1].Hash() {
+		t.Fatal("the chain did not rebuild identically")
+	}
+	if _, err := chain.InsertChain(withBad[2:]); !errors.Is(err, ghostpriv.ErrDataRevealFee) {
+		t.Fatalf("block with a zero-fee data reveal: %v, want %v", err, ghostpriv.ErrDataRevealFee)
+	}
+	if chain.CurrentBlock().Hash() != blocks[1].Hash() {
+		t.Fatal("the head moved")
+	}
+
+	// The reveal and the revoke with the window fee are included.
+	bad = nil
+	f.insert(chain, blocks[2:])
+	receipts := chain.GetReceiptsByHash(blocks[2].Hash())
+	if len(receipts) != 2 {
+		t.Fatalf("%d receipts", len(receipts))
+	}
+	checkDataReceipt(t, receipts[0], blocks[2].Transactions()[0], mReveal, ghostpriv.PurposeReveal, verifier)
+	checkDataReceipt(t, receipts[1], blocks[2].Transactions()[1], mRevoke, ghostpriv.PurposeRevoke, verifier)
+	after, err := chain.StateAt(blocks[2].Root())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ghosttree.IsSpent(after, ghosttree.Data, mReveal) || !ghosttree.IsSpent(after, ghosttree.Data, mRevoke) {
+		t.Fatal("the markers are not spent")
+	}
+	reserves := new(big.Int).Mul(reserve(), big.NewInt(2))
+	if in, out := totals(after); in.Cmp(reserves) != 0 || out.Cmp(reserves) != 0 {
+		t.Errorf("totals in %v out %v, want %v each", in, out, reserves)
+	}
+	wantMiner := new(big.Int).Add(f.engine.params.BlockReward(3).ToBig(), new(big.Int).Mul(fee.Tip.ToBig(), big.NewInt(2)))
+	if got := after.GetBalance(miner).ToBig(); got.Cmp(wantMiner) != 0 {
+		t.Errorf("coinbase %v, want the reward and two tips %v", got, wantMiner)
+	}
+	if !after.GetBalance(verifier).IsZero() {
+		t.Error("the verifier field was paid")
+	}
+}
+
+// headerChain is a ChainReader of the given headers, by hash.
+type headerChain map[common.Hash]*types.Header
+
+func (c headerChain) GetHeader(hash common.Hash, number uint64) *types.Header {
+	if h := c[hash]; h != nil && h.Number.Uint64() == number {
+		return h
+	}
+	return nil
+}
+
+// TestDataRevealFeeAboveReserveRejectedBeforeProof checks a data reveal in a
+// block whose window fee is above the reserve: it is rejected with
+// ErrDataRevealFeeAboveReserve before any proof is verified, and nothing
+// changes. The fee rule gives no window fee of exactly the reserve, so the
+// boundary is the reference base fee whose window fee is the largest not
+// above it: that one is accepted, the reserve pays it and forfeits less than
+// one step of the fee, and one wei of reference base fee more is refused.
+func TestDataRevealFeeAboveReserveRejectedBeforeProof(t *testing.T) {
+	useStub(t)
+	f, env, st, root, _ := dataRevealChain(t, "above")
+	windowFee := func(bRef *big.Int) ghostpriv.Fee {
+		fee, err := ghostpriv.WindowFee(bRef)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fee
+	}
+	// The largest reference base fee whose window fee the reserve pays.
+	lo, hi := big.NewInt(1), big.NewInt(1_000_000_000_000)
+	for new(big.Int).Sub(hi, lo).Cmp(common.Big1) > 0 {
+		mid := new(big.Int).Rsh(new(big.Int).Add(lo, hi), 1)
+		if windowFee(mid).Total.Gt(ghostpriv.DataReserve) {
+			hi = mid
+		} else {
+			lo = mid
+		}
+	}
+	at, above := windowFee(lo), windowFee(hi)
+	if at.Total.Gt(ghostpriv.DataReserve) || !above.Total.Gt(ghostpriv.DataReserve) {
+		t.Fatalf("window fees %v and %v around the reserve", at.Total, above.Total)
+	}
+
+	// A chain of the real headers of blocks 0 to 2 but with the given
+	// reference base fee, the base fee of each.
+	chain := env.Chain.(*core.BlockChain)
+	envAt := func(bRef *big.Int) *ghostpriv.BlockEnv {
+		hc := headerChain{}
+		var parent *types.Header
+		for n := uint64(0); n < 3; n++ {
+			h := types.CopyHeader(chain.GetHeaderByNumber(n))
+			h.BaseFee = new(big.Int).Set(bRef)
+			if parent != nil {
+				h.ParentHash = parent.Hash()
+			}
+			hc[h.Hash()] = h
+			parent = h
+		}
+		header := types.CopyHeader(env.Header)
+		header.Number = big.NewInt(3)
+		header.ParentHash = parent.Hash()
+		header.BaseFee = new(big.Int).Set(bRef)
+		return &ghostpriv.BlockEnv{Header: header, Chain: hc, ChainID: env.ChainID, Genesis: env.Genesis}
+	}
+
+	counter := &countingVerifier{}
+	marker := testDataMarker("above")
+	for _, p := range []byte{ghostpriv.PurposeReveal, ghostpriv.PurposeRevoke} {
+		r := f.newDataReveal(root, marker, p, common.Address{0x7e, 0xab}, above.Total)
+		cp := st.Copy()
+		rootBefore := cp.IntermediateRoot(true)
+		e := envAt(hi)
+		_, _, err := ghostpriv.CheckDataReveal(cp, e, counter, dataEnvelope(t, r))
+		if !errors.Is(err, ghostpriv.ErrDataRevealFeeAboveReserve) || !errors.Is(err, ghostpriv.ErrDataRevealFee) {
+			t.Fatalf("purpose %d, fee %v above the reserve: %v, want %v", p, above.Total, err, ghostpriv.ErrDataRevealFeeAboveReserve)
+		}
+		if err := ghostpriv.ApplyDataReveal(cp, e, counter, dataEnvelope(t, r)); !errors.Is(err, ghostpriv.ErrDataRevealFeeAboveReserve) {
+			t.Fatalf("purpose %d applied: %v, want %v", p, err, ghostpriv.ErrDataRevealFeeAboveReserve)
+		}
+		if cp.IntermediateRoot(true) != rootBefore || len(cp.Logs()) != 0 || ghosttree.IsSpent(cp, ghosttree.Data, marker) {
+			t.Fatalf("purpose %d: a rejected data reveal changed the state", p)
+		}
+	}
+	noProofVerified(t, counter, "a fee above the reserve")
+
+	// The largest window fee the reserve pays is accepted.
+	for _, p := range []byte{ghostpriv.PurposeReveal, ghostpriv.PurposeRevoke} {
+		r := f.newDataReveal(root, marker, p, common.Address{0x7e, 0xab}, at.Total)
+		e := envAt(lo)
+		cp := st.Copy()
+		if err := ghostpriv.ApplyDataReveal(cp, e, counter, dataEnvelope(t, r)); err != nil || counter.calls != 1 {
+			t.Fatalf("purpose %d, fee %v: %v, %d proofs verified", p, at.Total, err, counter.calls)
+		}
+		counter.calls = 0
+		if got := cp.GetBalance(e.Header.Coinbase); !got.Eq(at.Tip) {
+			t.Errorf("purpose %d: coinbase %v, want the tip %v", p, got, at.Tip)
+		}
+		if _, out := totals(cp); out.Cmp(reserve()) != 0 {
+			t.Errorf("purpose %d: total out %v, want the reserve", p, out)
+		}
+		forfeited := new(uint256.Int).Sub(ghostpriv.DataReserve, at.Total)
+		if step := new(uint256.Int).Sub(above.Total, at.Total); !forfeited.Lt(step) {
+			t.Errorf("purpose %d: %v forfeited, a fee step is %v", p, forfeited, step)
+		}
+	}
+}
+
+// TestDataRevealAccountingMatchesWorkedExample follows the worked example of
+// spec 04, section 6: two data commits, A and B, then a reveal of A in the
+// first fee window and a revoke of B in the next. The totals after each step,
+// and the fee, burn and tip of the first window at its reference base fee of
+// 1,000,000,000 wei, are the spec's; each coinbase gains exactly the tip,
+// nobody else gains, and the burn, the tip and the forfeited rest make up the
+// reserve.
+func TestDataRevealAccountingMatchesWorkedExample(t *testing.T) {
+	useStub(t)
+	f := newFixture(t, ghost.InternalNetGasLimit, nil)
+	if bRef := f.genesis.BaseFee(); bRef == nil || bRef.Cmp(gwei) != 0 {
+		t.Fatalf("genesis base fee %v, the worked example's is 1,000,000,000", bRef)
+	}
+	var (
+		fileA    = testDataFile("worked example A")
+		fileB    = testDataFile("worked example B")
+		mA       = testDataMarker("worked example A")
+		mB       = testDataMarker("worked example B")
+		verifier = common.Address{0x7e, 0x04}
+		miner2   = common.Address{0xcb, 0x02}
+		miner5   = common.Address{0xcb, 0x05}
+		fees     = map[int]ghostpriv.Fee{}
+	)
+	blocks, _ := f.generate(5, func(i int, b *core.BlockGen) {
+		switch i {
+		case 0:
+			b.AddTx(f.dataCommitTx(keyA, 0, fileA, reserve()))
+			b.AddTx(f.dataCommitTx(keyB, 0, fileB, reserve()))
+		case 1:
+			// Block 2, in the window that starts at the genesis.
+			b.SetCoinbase(miner2)
+			fees[2] = genWindowFee(t, b)
+			b.AddTx(dataRevealTx(t, f.newDataReveal(genParentDataRoot(b), mA, ghostpriv.PurposeReveal, verifier, fees[2].Total)))
+		case 4:
+			// Block 5, in the window that starts at block 4.
+			b.SetCoinbase(miner5)
+			fees[5] = genWindowFee(t, b)
+			b.AddTx(dataRevealTx(t, f.newDataReveal(*b.PrevBlock(0).Header().DataTreeRoot, mB, ghostpriv.PurposeRevoke, verifier, fees[5].Total)))
+		}
+	})
+	chain := f.newChain()
+	f.insert(chain, blocks)
+	stateAt := func(n int) *state.StateDB {
+		st, err := chain.StateAt(blocks[n-1].Root())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+
+	// The spec's numbers for the first window.
+	want := ghostpriv.Fee{
+		Total: uint256.MustFromDecimal("26100495343659410"),
+		Burn:  uint256.MustFromDecimal("23727723039690372"),
+		Tip:   uint256.MustFromDecimal("2372772303969038"),
+	}
+	if got := fees[2]; !got.Total.Eq(want.Total) || !got.Burn.Eq(want.Burn) || !got.Tip.Eq(want.Tip) {
+		t.Fatalf("fee of the first window: total %v burn %v tip %v, want %v %v %v", got.Total, got.Burn, got.Tip, want.Total, want.Burn, want.Tip)
+	}
+
+	// The totals after each step.
+	half := reserve()
+	whole := new(big.Int).Mul(half, big.NewInt(2))
+	for _, step := range []struct {
+		block   int
+		in, out *big.Int
+	}{
+		{1, whole, new(big.Int)},
+		{2, whole, half},
+		{4, whole, half},
+		{5, whole, whole},
+	} {
+		if in, out := totals(stateAt(step.block)); in.Cmp(step.in) != 0 || out.Cmp(step.out) != 0 {
+			t.Errorf("after block %d: totals in %v out %v, want %v and %v", step.block, in, out, step.in, step.out)
+		}
+	}
+	if in, _ := totals(stateAt(1)); in.Cmp(uint256.MustFromDecimal("500000000000000000").ToBig()) != 0 {
+		t.Errorf("total in %v", in)
+	}
+
+	// Each spend: the coinbase gains its reward and exactly the tip, nobody
+	// else gains, and the burn, the tip and the forfeited rest are the
+	// reserve.
+	accounts := []common.Address{addrA, addrB, addrC, verifier, miner2, miner5, ghost.PrivTotalsAccount,
+		ghost.DataCommitEntryAddress, ghosttree.TreeAccount(ghosttree.Data), ghosttree.MarkerAccount(ghosttree.Data)}
+	for _, spend := range []struct {
+		block int
+		miner common.Address
+	}{{2, miner2}, {5, miner5}} {
+		before, after := stateAt(spend.block-1), stateAt(spend.block)
+		fee := fees[spend.block]
+		reward := f.engine.params.BlockReward(uint64(spend.block))
+		for _, a := range accounts {
+			gain := new(big.Int).Sub(after.GetBalance(a).ToBig(), before.GetBalance(a).ToBig())
+			wantGain := new(big.Int)
+			if a == spend.miner {
+				wantGain.Add(reward.ToBig(), fee.Tip.ToBig())
+			}
+			if gain.Cmp(wantGain) != 0 {
+				t.Errorf("block %d: %x gained %v, want %v", spend.block, a, gain, wantGain)
+			}
+		}
+		forfeited := new(uint256.Int).Sub(ghostpriv.DataReserve, fee.Total)
+		sum := new(uint256.Int).Add(fee.Burn, fee.Tip)
+		if sum.Add(sum, forfeited); !sum.Eq(ghostpriv.DataReserve) {
+			t.Errorf("block %d: burn %v, tip %v and forfeited %v make %v", spend.block, fee.Burn, fee.Tip, forfeited, sum)
+		}
+		if !fee.Burn.Eq(new(uint256.Int).Mul(uint256.NewInt(ghostpriv.GasPriv), fee.Price)) {
+			t.Errorf("block %d: burn %v is not G_PRIV times the price %v", spend.block, fee.Burn, fee.Price)
+		}
+	}
+}
+
+// TestDataRevealBackstopReserve checks that a data reveal whose reserve is
+// more than the hidden set holds is rejected with ErrDataRevealBackstop
+// before its proof is verified, and that one with the hidden set holding
+// exactly the reserve passes.
+func TestDataRevealBackstopReserve(t *testing.T) {
+	useStub(t)
+	// Block 1 commits a file, block 2 reveals it, emptying the hidden set,
+	// and block 3 commits a coin of the given value.
+	build := func(coinValue *big.Int) (*fixture, *ghostpriv.BlockEnv, *state.StateDB, common.Hash) {
+		f := newFixture(t, ghost.InternalNetGasLimit, nil)
+		var root common.Hash
+		blocks, _ := f.generate(3, func(i int, b *core.BlockGen) {
+			switch i {
+			case 0:
+				b.AddTx(f.dataCommitTx(keyA, 0, testDataFile("backstop"), reserve()))
+			case 1:
+				root = genParentDataRoot(b)
+				b.AddTx(dataRevealTx(t, f.newDataReveal(root, testDataMarker("backstop, spent"), ghostpriv.PurposeReveal, addrC, genDataFee(t, b))))
+			case 2:
+				b.AddTx(f.commitTx(keyB, 0, testCoin("backstop coin", coinValue)))
+			}
+		})
+		chain := f.newChain()
+		f.insert(chain, blocks)
+		env, st := nextEnv(t, chain, blocks[2].Header(), common.Address{0xcb})
+		return f, env, st, root
+	}
+	below := new(big.Int).Sub(reserve(), common.Big1)
+	for _, tt := range []struct {
+		name  string
+		coin  *big.Int
+		want  error
+		calls int
+	}{
+		{"hidden one wei below the reserve", below, ghostpriv.ErrDataRevealBackstop, 0},
+		{"hidden exactly the reserve", reserve(), nil, 1},
+	} {
+		f, env, st, root := build(tt.coin)
+		if hidden, err := ghostpriv.Hidden(st); err != nil || hidden.ToBig().Cmp(tt.coin) != 0 {
+			t.Fatalf("%s: hidden %v, %v", tt.name, hidden, err)
+		}
+		fee := chainWindowFee(t, env.Chain.(*core.BlockChain), env.Header).Total
+		counter := &countingVerifier{}
+		for _, p := range []byte{ghostpriv.PurposeReveal, ghostpriv.PurposeRevoke} {
+			r := f.newDataReveal(root, testDataMarker("backstop, fresh"), p, addrC, fee)
+			cp := st.Copy()
+			rootBefore := cp.IntermediateRoot(true)
+			err := ghostpriv.ApplyDataReveal(cp, env, counter, dataEnvelope(t, r))
+			if !errors.Is(err, tt.want) || (tt.want == nil) != (err == nil) {
+				t.Fatalf("%s, purpose %d: %v, want %v", tt.name, p, err, tt.want)
+			}
+			if counter.calls != tt.calls {
+				t.Errorf("%s, purpose %d: %d proofs verified, want %d", tt.name, p, counter.calls, tt.calls)
+			}
+			counter.calls = 0
+			if tt.want != nil && cp.IntermediateRoot(true) != rootBefore {
+				t.Errorf("%s, purpose %d: a rejected data reveal changed the state", tt.name, p)
+			}
+		}
 	}
 }
 
 // TestDataRevealNeverMintsOrTouchesCoinSets reveals and revokes in one block
-// next to a coin commit and checks that nothing but the data marker set
-// changes: no balance, no total, neither tree, no coin marker. A data reveal
+// next to a coin commit and checks that nothing but the data marker set, the
+// total out and the coinbase changes: no other balance, neither tree, no coin
+// marker. A data reveal
 // relabelled as a coin reveal and a coin reveal relabelled as a data reveal
 // are rejected with no proof verified, and a coin tree root, the root of
 // another kind or one seen only on a side branch is no data reveal's root.
 func TestDataRevealNeverMintsOrTouchesCoinSets(t *testing.T) {
 	checkDataEnvelopeLayout(t)
 	useStub(t)
-	useZeroDataFee(t)
 	trap := common.Address{0x7a, 0x0d}
 	f := newFixture(t, 50_000_000, genesisT.GenesisAlloc{
 		trap: {Code: []byte{0xfe}, Balance: new(big.Int)}, // INVALID: any run of it fails
@@ -885,21 +1196,25 @@ func TestDataRevealNeverMintsOrTouchesCoinSets(t *testing.T) {
 	var (
 		c       = testCoin("data never mints", oneGhost)
 		file    = testDataFile("never mints")
+		file2   = testDataFile("never mints, second")
 		mReveal = testDataMarker("never mints")
 		mRevoke = testDataMarker("never mints, revoked")
 		miner   = common.Address{0xcb, 0x0d}
 		extra   *types.Transaction
+		spent   ghostpriv.Fee
 	)
 	gen := func(i int, b *core.BlockGen) {
 		switch i {
 		case 0:
 			b.AddTx(f.commitTx(keyA, 0, c))
-			b.AddTx(f.dataCommitTx(keyB, 0, file, new(big.Int)))
+			b.AddTx(f.dataCommitTx(keyB, 0, file, reserve()))
+			b.AddTx(f.dataCommitTx(keyC, 0, file2, reserve()))
 		case 3:
 			b.SetCoinbase(miner)
 			root := genParentDataRoot(b)
-			b.AddTx(dataRevealTx(t, f.newDataReveal(root, mReveal, ghostpriv.PurposeReveal, addrC)))
-			b.AddTx(dataRevealTx(t, f.newDataReveal(root, mRevoke, ghostpriv.PurposeRevoke, trap)))
+			spent = genWindowFee(t, b)
+			b.AddTx(dataRevealTx(t, f.newDataReveal(root, mReveal, ghostpriv.PurposeReveal, addrC, spent.Total)))
+			b.AddTx(dataRevealTx(t, f.newDataReveal(root, mRevoke, ghostpriv.PurposeRevoke, trap, spent.Total)))
 		case 4:
 			b.AddUncheckedTx(extra)
 		}
@@ -909,7 +1224,8 @@ func TestDataRevealNeverMintsOrTouchesCoinSets(t *testing.T) {
 	f.insert(chain, blocks)
 	parent, block := blocks[2], blocks[3]
 
-	// Nothing but the data marker set changed.
+	// Nothing but the data marker set and the total out changed: the two
+	// reserves left the hidden set, and only the coinbase was paid.
 	addrs := []common.Address{
 		addrA, addrB, addrC, trap, ghost.CommitEntryAddress, ghost.DataCommitEntryAddress, ghost.PrivTotalsAccount,
 		ghosttree.TreeAccount(ghosttree.Coin), ghosttree.TreeAccount(ghosttree.Data), ghosttree.MarkerAccount(ghosttree.Coin),
@@ -924,6 +1240,13 @@ func TestDataRevealNeverMintsOrTouchesCoinSets(t *testing.T) {
 			}
 			continue
 		}
+		if k == "total out" {
+			out, _ := new(big.Int).SetString(v, 10)
+			if want := out.Add(out, new(big.Int).Mul(reserve(), big.NewInt(2))); after[k] != want.String() {
+				t.Errorf("total out %s then %s, want %v", v, after[k], want)
+			}
+			continue
+		}
 		if after[k] != v {
 			t.Errorf("%s: %s then %s", k, v, after[k])
 		}
@@ -932,8 +1255,9 @@ func TestDataRevealNeverMintsOrTouchesCoinSets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := st.GetBalance(miner), f.engine.params.BlockReward(4); !got.Eq(want) {
-		t.Errorf("coinbase %v, want the block reward %v alone", got, want)
+	tips := new(uint256.Int).Mul(spent.Tip, uint256.NewInt(2))
+	if got, want := st.GetBalance(miner), new(uint256.Int).Add(f.engine.params.BlockReward(4), tips); !got.Eq(want) {
+		t.Errorf("coinbase %v, want the block reward and the two tips %v", got, want)
 	}
 	if len(st.GetCode(trap)) != 1 || !st.GetBalance(trap).IsZero() {
 		t.Error("the revoke's verifier field was paid or run")
@@ -969,11 +1293,11 @@ func TestDataRevealNeverMintsOrTouchesCoinSets(t *testing.T) {
 
 	// A data reveal relabelled 0x50 fails the coin checks: its zero fee is
 	// not the window fee, and with the window fee its data root is no coin
-	// root. A coin reveal relabelled 0x51 fails the data checks: its fee is
-	// not zero, and with a zero fee its remainder is no purpose. No proof is
-	// verified and nothing changes.
+	// root. A coin reveal relabelled 0x51 fails the data checks: with the
+	// window fee its remainder is no purpose, and with a zero fee its fee is
+	// not the window fee. No proof is verified and nothing changes.
 	counter := &countingVerifier{}
-	dataReveal := f.newDataReveal(dataRoot, testDataMarker("relabelled"), ghostpriv.PurposeReveal, addrC)
+	dataReveal := f.newDataReveal(dataRoot, testDataMarker("relabelled"), ghostpriv.PurposeReveal, addrC, new(uint256.Int))
 	dataWithFee := cloneData(dataReveal)
 	dataWithFee.Fee = fee.Clone()
 	f.proveData(dataWithFee)
@@ -988,7 +1312,7 @@ func TestDataRevealNeverMintsOrTouchesCoinSets(t *testing.T) {
 		"coin reveal of nothing": relabel(envelope(t, coinNoFee), types.GhostDataRevealTxType),
 	}
 	wantCoin := map[string]error{"data reveal": ghostpriv.ErrRevealFee, "data reveal with window fee": ghostpriv.ErrRevealRoot}
-	wantData := map[string]error{"coin reveal": ghostpriv.ErrDataRevealFee, "coin reveal of nothing": ghostpriv.ErrDataRevealPurpose}
+	wantData := map[string]error{"coin reveal": ghostpriv.ErrDataRevealPurpose, "coin reveal of nothing": ghostpriv.ErrDataRevealFee}
 	rootBefore := stHead.Copy().IntermediateRoot(true)
 	for name, e := range asCoin {
 		cp := stHead.Copy()
@@ -1049,7 +1373,7 @@ func TestDataRevealNeverMintsOrTouchesCoinSets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stAfter.GetBalance(addrC).ToBig().Cmp(startBal) != 0 {
+	if !stAfter.GetBalance(addrC).Eq(st.GetBalance(addrC)) {
 		t.Fatal("a relabelled reveal paid out")
 	}
 
@@ -1057,7 +1381,7 @@ func TestDataRevealNeverMintsOrTouchesCoinSets(t *testing.T) {
 	// genesis's included; never a coin tree root, a root of another kind or
 	// a root seen only on a side branch.
 	check := func(root common.Hash) error {
-		r := f.newDataReveal(root, testDataMarker("roots"), ghostpriv.PurposeReveal, addrC)
+		r := f.newDataReveal(root, testDataMarker("roots"), ghostpriv.PurposeReveal, addrC, fee)
 		_, _, err := ghostpriv.CheckDataReveal(stHead.Copy(), env, stub, dataEnvelope(t, r))
 		return err
 	}
@@ -1068,7 +1392,7 @@ func TestDataRevealNeverMintsOrTouchesCoinSets(t *testing.T) {
 	}
 	side, _ := f.generate(1, func(i int, b *core.BlockGen) {
 		b.SetCoinbase(common.Address{0x5e})
-		b.AddTx(f.dataCommitTx(keyC, 0, testDataFile("side only"), new(big.Int)))
+		b.AddTx(f.dataCommitTx(keyC, 0, testDataFile("side only"), reserve()))
 	})
 	f.insert(chain, side)
 	if chain.CurrentBlock().Hash() != block.Hash() || chain.GetHeader(side[0].Hash(), 1) == nil {
@@ -1090,18 +1414,16 @@ func TestDataRevealNeverMintsOrTouchesCoinSets(t *testing.T) {
 		}
 	}
 	// The including block's own data root is not below it: block 1 carries
-	// the data commit and its root.
-	st0, err := chain.StateAt(f.genesis.Root())
-	if err != nil {
-		t.Fatal(err)
-	}
+	// the data commit and its root. The state is the head's, whose hidden
+	// set holds a reserve: only the root is in question.
 	self := &ghostpriv.BlockEnv{Header: blocks[0].Header(), Chain: chain, ChainID: chain.Config().GetChainID(), Genesis: chain.Genesis().Hash()}
-	selfReveal := f.newDataReveal(dataRoot, testDataMarker("self"), ghostpriv.PurposeReveal, addrC)
-	if _, _, err := ghostpriv.CheckDataReveal(st0.Copy(), self, stub, dataEnvelope(t, selfReveal)); !errors.Is(err, ghostpriv.ErrDataRevealRoot) {
+	selfFee := chainWindowFee(t, chain, self.Header).Total
+	selfReveal := f.newDataReveal(dataRoot, testDataMarker("self"), ghostpriv.PurposeReveal, addrC, selfFee)
+	if _, _, err := ghostpriv.CheckDataReveal(stHead.Copy(), self, stub, dataEnvelope(t, selfReveal)); !errors.Is(err, ghostpriv.ErrDataRevealRoot) {
 		t.Errorf("the including block's own data root: %v", err)
 	}
-	parentReveal := f.newDataReveal(*f.genesis.Header().DataTreeRoot, testDataMarker("self"), ghostpriv.PurposeReveal, addrC)
-	if _, _, err := ghostpriv.CheckDataReveal(st0.Copy(), self, stub, dataEnvelope(t, parentReveal)); err != nil {
+	parentReveal := f.newDataReveal(*f.genesis.Header().DataTreeRoot, testDataMarker("self"), ghostpriv.PurposeReveal, addrC, selfFee)
+	if _, _, err := ghostpriv.CheckDataReveal(stHead.Copy(), self, stub, dataEnvelope(t, parentReveal)); err != nil {
 		t.Errorf("the parent's data root from block 1: %v", err)
 	}
 }
@@ -1114,10 +1436,10 @@ func TestDataRevealNeverMintsOrTouchesCoinSets(t *testing.T) {
 // the new branch.
 func TestDataRevealReorgRestoresMarker(t *testing.T) {
 	useStub(t)
-	useZeroDataFee(t)
 	f := newFixture(t, 50_000_000, nil)
 	var (
 		file     = testDataFile("reorg")
+		second   = testDataFile("reorg, second")
 		extra    = testDataFile("reorg, branch A only")
 		mReveal  = testDataMarker("reorg")
 		mRevoke  = testDataMarker("reorg, revoked")
@@ -1126,20 +1448,21 @@ func TestDataRevealReorgRestoresMarker(t *testing.T) {
 		minerB   = common.Address{0xb0}
 	)
 	spend := func(b *core.BlockGen) {
-		root := genParentDataRoot(b)
-		b.AddTx(dataRevealTx(t, f.newDataReveal(root, mReveal, ghostpriv.PurposeReveal, verifier)))
-		b.AddTx(dataRevealTx(t, f.newDataReveal(root, mRevoke, ghostpriv.PurposeRevoke, verifier)))
+		root, fee := genParentDataRoot(b), genDataFee(t, b)
+		b.AddTx(dataRevealTx(t, f.newDataReveal(root, mReveal, ghostpriv.PurposeReveal, verifier, fee)))
+		b.AddTx(dataRevealTx(t, f.newDataReveal(root, mRevoke, ghostpriv.PurposeRevoke, verifier, fee)))
 	}
 	branch := func(n int, spendAt int) []*types.Block {
 		blocks, _ := f.generate(n, func(i int, b *core.BlockGen) {
 			switch {
 			case i == 0:
-				b.AddTx(f.dataCommitTx(keyA, 0, file, new(big.Int)))
+				b.AddTx(f.dataCommitTx(keyA, 0, file, reserve()))
+				b.AddTx(f.dataCommitTx(keyB, 0, second, reserve()))
 			case i >= 4 && spendAt == 4:
 				b.SetCoinbase(minerA)
 				if i == spendAt {
 					spend(b)
-					b.AddTx(f.dataCommitTx(keyC, 0, extra, new(big.Int)))
+					b.AddTx(f.dataCommitTx(keyC, 0, extra, reserve()))
 				}
 			case i >= 4:
 				b.SetCoinbase(minerB)
@@ -1189,7 +1512,7 @@ func TestDataRevealReorgRestoresMarker(t *testing.T) {
 	if ghosttree.IsSpent(st, ghosttree.Data, mReveal) || ghosttree.IsSpent(st, ghosttree.Data, mRevoke) {
 		t.Fatal("a marker stayed spent after the reorganisation")
 	}
-	if n := dataLeafCount(st); n != 1 {
+	if n := dataLeafCount(st); n != 2 {
 		t.Fatalf("data tree has %d leaves after the reorganisation", n)
 	}
 
@@ -1197,13 +1520,14 @@ func TestDataRevealReorgRestoresMarker(t *testing.T) {
 	// branch A is not eligible.
 	env, stB := nextEnv(t, reorged, b[6].Header(), minerB)
 	root := *b[0].Header().DataTreeRoot
+	fee := chainWindowFee(t, reorged, env.Header).Total
 	for _, p := range []byte{ghostpriv.PurposeReveal, ghostpriv.PurposeRevoke} {
 		marker := map[byte]common.Hash{ghostpriv.PurposeReveal: mReveal, ghostpriv.PurposeRevoke: mRevoke}[p]
-		r := f.newDataReveal(root, marker, p, verifier)
+		r := f.newDataReveal(root, marker, p, verifier, fee)
 		if _, _, err := ghostpriv.CheckDataReveal(stB.Copy(), env, stub, dataEnvelope(t, r)); err != nil {
 			t.Errorf("purpose %d on branch B: %v", p, err)
 		}
-		r = f.newDataReveal(onlyA, marker, p, verifier)
+		r = f.newDataReveal(onlyA, marker, p, verifier, fee)
 		if _, _, err := ghostpriv.CheckDataReveal(stB.Copy(), env, stub, dataEnvelope(t, r)); !errors.Is(err, ghostpriv.ErrDataRevealRoot) {
 			t.Errorf("purpose %d against branch A's data root: %v, want %v", p, err, ghostpriv.ErrDataRevealRoot)
 		}
