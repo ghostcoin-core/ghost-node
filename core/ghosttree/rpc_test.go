@@ -74,7 +74,8 @@ func rpcFixture(t *testing.T) (*rpc.Client, *types.Header) {
 		}
 		coin, _ := ghosttree.Root(st, ghosttree.Coin)
 		data, _ := ghosttree.Root(st, ghosttree.Data)
-		header := &types.Header{ParentHash: parent, Number: new(big.Int).SetUint64(number), Difficulty: big.NewInt(1), BaseFee: big.NewInt(1), CoinTreeRoot: &coin, DataTreeRoot: &data}
+		marker, _ := ghosttree.DataMarkerRoot(st)
+		header := &types.Header{ParentHash: parent, Number: new(big.Int).SetUint64(number), Difficulty: big.NewInt(1), BaseFee: big.NewInt(1), CoinTreeRoot: &coin, DataTreeRoot: &data, DataMarkerRoot: &marker}
 		rawdb.WriteHeader(db, header)
 		rawdb.WriteCanonicalHash(db, header.Hash(), number)
 		if err := history.ApplyBlock(header.Hash(), number, records); err != nil {
@@ -223,7 +224,8 @@ func TestPageOverRPCReturnsTheSalt(t *testing.T) {
 		}
 		coin, _ := ghosttree.Root(st, ghosttree.Coin)
 		data, _ := ghosttree.Root(st, ghosttree.Data)
-		head = &types.Header{ParentHash: parent, Number: new(big.Int).SetUint64(number), Difficulty: big.NewInt(1), BaseFee: big.NewInt(1), CoinTreeRoot: &coin, DataTreeRoot: &data}
+		marker, _ := ghosttree.DataMarkerRoot(st)
+		head = &types.Header{ParentHash: parent, Number: new(big.Int).SetUint64(number), Difficulty: big.NewInt(1), BaseFee: big.NewInt(1), CoinTreeRoot: &coin, DataTreeRoot: &data, DataMarkerRoot: &marker}
 		rawdb.WriteHeader(db, head)
 		rawdb.WriteCanonicalHash(db, head.Hash(), number)
 		if err := history.ApplyBlock(head.Hash(), number, records); err != nil {
@@ -295,13 +297,13 @@ func TestMarkerPagesOverRPC(t *testing.T) {
 	db := rawdb.NewMemoryDatabase()
 	history := ghosttree.NewHistory(db)
 	records := make(map[common.Hash][]ghosttree.Record)
-	coin, data := ghosttree.EmptyRoot(ghosttree.Coin), ghosttree.EmptyRoot(ghosttree.Data)
+	coin, data, marker := ghosttree.EmptyRoot(ghosttree.Coin), ghosttree.EmptyRoot(ghosttree.Data), ghosttree.EmptyMarkerSetRoot
 	var (
 		parent  common.Hash
 		headers []*types.Header
 	)
 	for number := uint64(0); number < 3; number++ {
-		header := &types.Header{ParentHash: parent, Number: new(big.Int).SetUint64(number), Difficulty: big.NewInt(1), BaseFee: big.NewInt(1), CoinTreeRoot: &coin, DataTreeRoot: &data}
+		header := &types.Header{ParentHash: parent, Number: new(big.Int).SetUint64(number), Difficulty: big.NewInt(1), BaseFee: big.NewInt(1), CoinTreeRoot: &coin, DataTreeRoot: &data, DataMarkerRoot: &marker}
 		rawdb.WriteHeader(db, header)
 		rawdb.WriteCanonicalHash(db, header.Hash(), number)
 		if number == 1 {

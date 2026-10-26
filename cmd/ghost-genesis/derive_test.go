@@ -114,8 +114,8 @@ func requireGenesis(t *testing.T, name string, out output, want fixtureHeader, h
 		t.Errorf("genesis gas limit %d, want %d", h.GasLimit, GenesisGasLimit)
 	case h.Root != types.EmptyRootHash:
 		t.Errorf("genesis state root %x, want the empty root", h.Root)
-	case h.CoinTreeRoot == nil || h.DataTreeRoot == nil:
-		t.Errorf("genesis without the coin and data tree roots")
+	case h.CoinTreeRoot == nil || h.DataTreeRoot == nil || h.DataMarkerRoot == nil:
+		t.Errorf("genesis without the coin and data tree roots and the data marker root")
 	case len(block.Transactions()) != 0 || len(block.Uncles()) != 0:
 		t.Errorf("genesis with a body")
 	}
@@ -336,5 +336,37 @@ func TestDeriveGenesisRefusesBadHeaders(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if err := run([]string{"derive", "-headers", "unused"}, &stdout, &stderr); !errors.Is(err, errUsage) {
 		t.Errorf("no T_L: error %v, want the usage", err)
+	}
+}
+
+// TestGenesisDataMarkerRoot checks that the golden genesis blocks carry the
+// root of the empty data marker set, and that their headers are in the
+// Ghost layout the strict decoder takes.
+func TestGenesisDataMarkerRoot(t *testing.T) {
+	want := common.HexToHash("0ef484d17824d5fefb2533c70af81a3267af1169dd091395ad7607762aeee0a3")
+	for _, name := range []string{"normal", "reorg"} {
+		golden, err := os.ReadFile(filepath.Join("testdata", name+".genesis.hex"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		enc, err := hex.DecodeString(strings.TrimSpace(string(golden)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		block := new(types.Block)
+		if err := rlp.DecodeBytes(enc, block); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		h := block.Header()
+		if h.DataMarkerRoot == nil || *h.DataMarkerRoot != want {
+			t.Errorf("%s: data marker root %v, want %x", name, h.DataMarkerRoot, want)
+		}
+		headerRLP, err := rlp.EncodeToBytes(h)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if _, err := types.DecodeGhostHeader(headerRLP); err != nil {
+			t.Errorf("%s: header is not in the Ghost layout: %v", name, err)
+		}
 	}
 }
