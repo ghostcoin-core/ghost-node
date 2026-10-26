@@ -17,7 +17,7 @@
 // Package randomx implements Ghost's proof-of-work seal engine on RandomX.
 //
 // The RandomX library is vendored in librandomx/ and built from source with
-// cgo; the only change to it is Ghost's Argon2 salt. The engine hashes in
+// cgo; its only consensus change is Ghost's Argon2 salt. The engine hashes in
 // light mode: every verifier and sealer shares a 256 MiB cache per key, and
 // at most three caches are resident in the process.
 //

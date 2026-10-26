@@ -1,0 +1,34 @@
+Ghost's build fix to the vendored RandomX library for Windows on arm64.
+
+On aarch64, src/intrin_portable.h allocates aligned memory with
+posix_memalign, which Windows does not have. Under _WIN32 it uses
+_aligned_malloc and _aligned_free instead, as upstream already does on x86.
+Every other platform compiles the same code as upstream, and hashes are
+unchanged. Apply from consensus/randomx/librandomx with `patch -p1`.
+
+--- a/src/intrin_portable.h
++++ b/src/intrin_portable.h
+@@ -417,6 +417,15 @@ FORCE_INLINE rx_vec_f128 rx_cvt_packed_int_vec_f128(const void* addr) {
+ typedef uint8x16_t rx_vec_i128;
+ typedef float64x2_t rx_vec_f128;
+ 
++#if defined(_WIN32)
++#include <malloc.h>
++
++inline void* rx_aligned_alloc(size_t size, size_t align) {
++	return _aligned_malloc(size, align);
++};
++
++#define rx_aligned_free(a) _aligned_free(a)
++#else
+ inline void* rx_aligned_alloc(size_t size, size_t align) {
+ 	void* p;
+ 	if (posix_memalign(&p, align, size) == 0)
+@@ -426,6 +435,7 @@ inline void* rx_aligned_alloc(size_t size, size_t align) {
+ };
+ 
+ #define rx_aligned_free(a) free(a)
++#endif
+ 
+ inline void rx_prefetch_nta(void* ptr) {
+ 	asm volatile ("prfm pldl1strm, [%0]\n" : : "r" (ptr));

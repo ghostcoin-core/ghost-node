@@ -1,4 +1,4 @@
-Ghost's only change to the vendored RandomX library: its Argon2 salt.
+Ghost's consensus change to the vendored RandomX library: its Argon2 salt.
 
 The salt is the 14 bytes "Ghost-RandomX" followed by the byte 0x01. It keys
 every cache, so Ghost's RandomX hashes differ from Monero's and from any other
