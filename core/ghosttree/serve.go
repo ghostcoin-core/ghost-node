@@ -27,9 +27,12 @@ import (
 )
 
 // The history is served in whole pages and whole page-root lists, as of an
-// anchor block, and nothing else: no lookup by commitment, position, marker,
-// note or transaction, and no witness. A wallet asks for everything from its
-// scan start and computes its own witnesses.
+// anchor block, and in the fixed shapes a restoring wallet reads (spec 05,
+// section 8): the tail of a page-root list from a multiple of TailPages, a
+// set of PageSetPages pages, and the status of exactly StatusMarkers
+// markers. Nothing else: no lookup by commitment, single position, single
+// marker, note or transaction, and no witness. A wallet asks for everything
+// from its scan start and computes its own witnesses.
 
 var (
 	// ErrUnknownAnchor is returned for an anchor block the node does not have.
@@ -52,7 +55,39 @@ var (
 	// ErrRootMismatch is returned when the stored history does not reproduce
 	// the header root.
 	ErrRootMismatch = errors.New("tree history does not match the header root")
+
+	// ErrTailStart is returned for a page-root tail whose first page is not
+	// a multiple of TailPages below the pages of a full tree.
+	ErrTailStart = errors.New("page-root tail must start at a multiple of 65536 pages")
+
+	// ErrPageSetShape is returned for a page set that is not 8 distinct
+	// pages of the tree in ascending order, or every page of a tree of 8
+	// pages or fewer.
+	ErrPageSetShape = errors.New("page set must be 8 distinct pages in order, or every page of a smaller tree")
+
+	// ErrStatusQuery is returned for a marker status query that is not
+	// exactly 64 distinct markers.
+	ErrStatusQuery = errors.New("marker status query must be exactly 64 distinct markers")
 )
+
+const (
+	// TailPages is the step of the first page of a page-root tail.
+	TailPages = 65536
+
+	// PageSetPages is the number of pages of a page set: one page of the
+	// wallet and seven decoys.
+	PageSetPages = 8
+
+	// StatusMarkers is the number of markers of a status query.
+	StatusMarkers = 64
+)
+
+// MarkerStatus is the status of one marker as of an anchor: spent, with the
+// number of the block whose reveal spent it, or not (Block 0).
+type MarkerStatus struct {
+	Spent bool
+	Block uint64
+}
 
 // PageEntry is one filled position of a page: the leaf, its note and, for a
 // salted commit, its salt (nil for a leaf without one).
@@ -157,6 +192,12 @@ func (h *History) Page(kind Kind, treeIndex uint64, page uint32, anchor common.H
 	if err != nil {
 		return nil, err
 	}
+	return h.readPage(kind, treeIndex, page, v)
+}
+
+// readPage reads one page of a tree view and checks it against the view's
+// page root. The caller holds the lock.
+func (h *History) readPage(kind Kind, treeIndex uint64, page uint32, v *treeView) (*TreePage, error) {
 	out := &TreePage{Kind: kind, TreeIndex: treeIndex, Page: page, Entries: []PageEntry{}}
 	if uint64(page) >= uint64(len(v.roots)) {
 		return out, nil
@@ -193,6 +234,151 @@ func (h *History) PageRoots(kind Kind, treeIndex uint64, anchor common.Hash) ([]
 		return nil, err
 	}
 	return v.roots, nil
+}
+
+// PageRootTail returns the page roots of a tree as of the anchor block from
+// page start to the last page with a leaf, checked like PageRoots: the whole
+// list must reproduce the header root. start must be a multiple of TailPages
+// below the pages of a full tree; a start past the last page gives an empty
+// list. The tail is at most the page-root list of a full tree.
+func (h *History) PageRootTail(kind Kind, treeIndex uint64, start uint32, anchor common.Hash) ([]common.Hash, error) {
+	if !kind.valid() {
+		return nil, ErrUnknownKind
+	}
+	if err := h.p.pageable(); err != nil {
+		return nil, err
+	}
+	if start%TailPages != 0 || uint64(start) >= h.p.pagesPerTree() {
+		return nil, fmt.Errorf("%w: page %d", ErrTailStart, start)
+	}
+	h.lock.RLock()
+	defer h.lock.RUnlock()
+
+	v, err := h.view(kind, treeIndex, anchor)
+	if err != nil {
+		return nil, err
+	}
+	if uint64(start) >= uint64(len(v.roots)) {
+		return []common.Hash{}, nil
+	}
+	return v.roots[start:], nil
+}
+
+// PageSet returns whole pages of a tree as of the anchor block, each read
+// and checked against its page root as Page does, all from one view of the
+// tree. The tree must have a leaf at the anchor. A tree of PageSetPages
+// pages or fewer is asked for every page, 0 to the last, in order; a larger
+// one for exactly PageSetPages distinct pages in ascending order, each below
+// its page count. Any other shape is ErrPageSetShape, and one that no tree
+// accepts is refused before the store is read.
+func (h *History) PageSet(kind Kind, treeIndex uint64, pages []uint32, anchor common.Hash) ([]*TreePage, error) {
+	if !kind.valid() {
+		return nil, ErrUnknownKind
+	}
+	if err := h.p.pageable(); err != nil {
+		return nil, err
+	}
+	if len(pages) == 0 || len(pages) > PageSetPages {
+		return nil, fmt.Errorf("%w: %d pages", ErrPageSetShape, len(pages))
+	}
+	for i, p := range pages {
+		if uint64(p) >= h.p.pagesPerTree() || (i > 0 && p <= pages[i-1]) {
+			return nil, fmt.Errorf("%w: page %d at %d", ErrPageSetShape, p, i)
+		}
+	}
+	h.lock.RLock()
+	defer h.lock.RUnlock()
+
+	v, err := h.view(kind, treeIndex, anchor)
+	if err != nil {
+		return nil, err
+	}
+	count := uint64(len(v.roots))
+	if count == 0 {
+		return nil, fmt.Errorf("%w: %v tree %d has no page", ErrPageSetShape, kind, treeIndex)
+	}
+	if count <= PageSetPages {
+		// Every page of the tree: with the pages ascending from 0, the
+		// last is the last page.
+		if uint64(len(pages)) != count || pages[0] != 0 || uint64(pages[len(pages)-1]) != count-1 {
+			return nil, fmt.Errorf("%w: %d pages asked, the tree has %d", ErrPageSetShape, len(pages), count)
+		}
+	} else if len(pages) != PageSetPages || uint64(pages[len(pages)-1]) >= count {
+		return nil, fmt.Errorf("%w: %d pages up to %d asked, the tree has %d", ErrPageSetShape, len(pages), pages[len(pages)-1], count)
+	}
+	out := make([]*TreePage, 0, len(pages))
+	for _, p := range pages {
+		page, err := h.readPage(kind, treeIndex, p, v)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, page)
+	}
+	return out, nil
+}
+
+// MarkerStatus returns, for each of exactly StatusMarkers distinct markers in
+// request order, whether the chain up to the anchor block spent it in the
+// marker list of a type (Coin reads CoinMarkers, Data reads DataMarkers),
+// and the number of the block that did. Each is one lookup in the
+// spent-marker index; no list is scanned. The anchor must be canonical and
+// applied to a history whose head is canonical and that keeps the index.
+// The coin and data lists are separate: a value spent in one is not spent
+// in the other.
+func (h *History) MarkerStatus(kind Kind, markers []common.Hash, anchor common.Hash) ([]MarkerStatus, error) {
+	if !kind.valid() {
+		return nil, ErrUnknownKind
+	}
+	if len(markers) != StatusMarkers {
+		return nil, fmt.Errorf("%w: %d markers", ErrStatusQuery, len(markers))
+	}
+	seen := make(map[common.Hash]bool, len(markers))
+	for _, m := range markers {
+		if seen[m] {
+			return nil, fmt.Errorf("%w: marker %x repeated", ErrStatusQuery, m)
+		}
+		seen[m] = true
+	}
+	list := CoinMarkers
+	if kind == Data {
+		list = DataMarkers
+	}
+	h.lock.RLock()
+	defer h.lock.RUnlock()
+
+	number, _, err := h.canonicalHeader(anchor)
+	if err != nil {
+		return nil, err
+	}
+	if err := h.covers(anchor, number); err != nil {
+		return nil, err
+	}
+	if marked, err := rawdb.ReadGhostTreeMarked(h.db); err != nil {
+		return nil, err
+	} else if !marked {
+		return nil, fmt.Errorf("%w: history without the spent-marker index", ErrHistoryNotReady)
+	}
+	out := make([]MarkerStatus, len(markers))
+	for i, m := range markers {
+		index, position, ok, err := rawdb.ReadGhostTreeMarker(h.db, uint8(list), m)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrCorruptHistory, err)
+		}
+		if !ok {
+			continue
+		}
+		rec, err := h.mustRead(slot{list, index, position})
+		if err != nil {
+			return nil, err
+		}
+		if rec.leaf != m {
+			return nil, fmt.Errorf("%w: %v marker %x indexed at list %d position %d of another", ErrCorruptHistory, list, m, index, position)
+		}
+		if rec.number <= number {
+			out[i] = MarkerStatus{Spent: true, Block: rec.number}
+		}
+	}
+	return out, nil
 }
 
 // view finds the leaf count of a tree at a canonical anchor, builds its page

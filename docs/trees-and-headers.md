@@ -187,7 +187,8 @@ Leaves and notes are history, not state (spec 05, section 9).
 `ghosttree.History` (`core/ghosttree/history.go`) keeps every leaf and note of
 every tree index of both kinds on the canonical chain, and every spent marker
 of both kinds in the order the chain spent it, in the chain database under
-three key prefixes of its own (`core/rawdb/accessors_ghosttree_history.go`):
+key prefixes of its own (`core/rawdb/accessors_ghosttree_history.go`, and
+`core/rawdb/accessors_ghosttree_markers.go` for the spent-marker index):
 
 | Prefix | Key | Value |
 |---|---|---|
@@ -195,6 +196,12 @@ three key prefixes of its own (`core/rawdb/accessors_ghosttree_history.go`):
 | `ghost-tree-block-` | block hash | block number, positions the block wrote |
 | `ghost-tree-block-` | the zero hash | number and hash of the history's head |
 | `ghost-tree-page-` | kind, tree index, page | root of the full page |
+| `ghost-tree-marker-` | kind (2 or 3), marker (32 bytes) | tree index (8 bytes) and position (4 bytes) of the record that spent it |
+| `ghost-tree-marked` | none (the whole key) | 1, once the history keeps the spent-marker index |
+
+The spent-marker index answers the marker status query of a restoring wallet
+in one lookup per marker, without a scan of a list; its keys are 51 bytes
+long. See [wallet-restore-reads.md](wallet-restore-reads.md).
 
 The kind byte is 0 for the coin tree, 1 for the data tree, 2 for the coin
 marker list and 3 for the data marker list. A marker list is stored like a
