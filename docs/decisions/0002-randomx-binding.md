@@ -85,8 +85,9 @@ tests cover the library instead.
 
 `Ghost-RandomX` followed by `0x01`, 14 bytes, the value the survey measured.
 The salt keys every cache, so Ghost hashes cannot be reused on Monero or on
-any other RandomX chain, nor theirs on Ghost. It is the only change to the
-library: one line of `src/configuration.h`, recorded in
+any other RandomX chain, nor theirs on Ghost. It is the only consensus change
+to the library (the other, `windows-arm64-alloc.patch`, is a Windows arm64
+build fix): one line of `src/configuration.h`, recorded in
 `librandomx/ghost-salt.patch`. The Go constant `randomx.Salt` holds the same
 bytes, and `TestSaltMatchesVendoredHeader` keeps the two equal.
 

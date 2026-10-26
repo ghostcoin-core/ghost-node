@@ -1,7 +1,7 @@
 name: Release
 
-# Builds the node for linux and darwin on amd64 and arm64, and for windows on
-# amd64 (windows-arm64 waits on a RandomX port), on every push to main, signs each archive with the release key, and publishes a
+# Builds the node for linux, darwin and windows on amd64 and arm64 on every
+# push to main, signs each archive with the release key, and publishes a
 # GitHub release marked latest. install/install.sh downloads from
 # releases/latest/download, so the newest release is the stable pointer.
 #
@@ -56,6 +56,7 @@ jobs:
           - { os: darwin, arch: amd64, runner: macos-15-intel }
           - { os: darwin, arch: arm64, runner: macos-15 }
           - { os: windows, arch: amd64, runner: windows-2025 }
+          - { os: windows, arch: arm64, runner: windows-11-arm }
     defaults:
       run:
         shell: bash
@@ -66,8 +67,42 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+      # The windows-11-arm runner's gcc is an x86-64 mingw toolchain, which
+      # cannot assemble the arm64 cgo files. Build windows-arm64 with
+      # llvm-mingw's native aarch64 clang instead, pinned by version and
+      # checksum.
+      - name: Install the aarch64 Windows C toolchain
+        if: matrix.os == 'windows' && matrix.arch == 'arm64'
+        env:
+          LLVM_MINGW_VERSION: '20261020'
+          LLVM_MINGW_SHA256: 8f24fedd0b75c674c6c83dec2d76a7ac31a690120212843a17e465ef49854f69
+        run: |
+          set -euo pipefail
+          name="llvm-mingw-$LLVM_MINGW_VERSION-ucrt-aarch64"
+          zip="$RUNNER_TEMP/$name.zip"
+          curl -fsSL --retry 3 -o "$zip" \
+            "https://github.com/mstorsjo/llvm-mingw/releases/download/$LLVM_MINGW_VERSION/$name.zip"
+          echo "$LLVM_MINGW_SHA256  $zip" | sha256sum -c -
+          unzip -q "$zip" -d "$RUNNER_TEMP"
+          cygpath -w "$RUNNER_TEMP/$name/bin" >>"$GITHUB_PATH"
+          {
+            echo "CC=aarch64-w64-mingw32-clang"
+            echo "CXX=aarch64-w64-mingw32-clang++"
+            echo "CGO_ENABLED=1"
+          } >>"$GITHUB_ENV"
+      - name: Show the aarch64 Windows C toolchain
+        if: matrix.os == 'windows' && matrix.arch == 'arm64'
+        run: |
+          set -euo pipefail
+          "$CC" --version
+          "$CC" -dumpmachine | grep -q '^aarch64-w64-'
       - name: Build geth
         run: go run build/ci.go install ./cmd/geth
+      # RandomX's arm64 JIT and Windows memory code meet only on this target,
+      # and no other workflow runs there, so its tests run here.
+      - name: Test RandomX
+        if: matrix.os == 'windows' && matrix.arch == 'arm64'
+        run: go test -count=1 -timeout 20m ./consensus/randomx
       - name: Package
         env:
           OS: ${{ matrix.os }}
@@ -148,7 +183,7 @@ jobs:
             openssl pkeyutl -verify -pubin -inkey install/release-key.pub -rawin -in "$archive" -sigfile "$archive.sig"
             count=$((count + 1))
           done
-          test "$count" -eq 5
+          test "$count" -eq 6
           (cd dist && sha256sum ghost-node-*.tar.gz >SHA256SUMS)
           ls -l dist
       - name: Publish the release
