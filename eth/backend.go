@@ -342,7 +342,10 @@ func (s *Ethereum) APIs() []rpc.API {
 
 	// The ghost namespace is opt-in, so the default module set is unchanged.
 	if s.ghostAPI {
-		apis = append(apis, rpc.API{Namespace: "ghost", Service: ethapi.NewGhostAPI(s.treeHistory)})
+		apis = append(apis,
+			rpc.API{Namespace: "ghost", Service: ethapi.NewGhostAPI(s.treeHistory)},
+			rpc.API{Namespace: "ghost", Service: ethapi.NewGhostBucketAPI(s.treeHistory)},
+		)
 	}
 
 	// Append all the local APIs and return

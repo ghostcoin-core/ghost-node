@@ -71,10 +71,15 @@ func (h *History) readHead() (uint64, common.Hash, bool, error) {
 	return binary.BigEndian.Uint64(enc), common.BytesToHash(enc[8:]), true, nil
 }
 
+// writeHead stores the head with the marker that the history keeps the tag
+// index (see ReadNoteBucket).
 func writeHead(w ethdb.KeyValueWriter, number uint64, hash common.Hash) error {
 	enc := make([]byte, headSize)
 	binary.BigEndian.PutUint64(enc, number)
 	copy(enc[8:], hash[:])
+	if err := rawdb.WriteGhostTreeTagged(w); err != nil {
+		return err
+	}
 	return rawdb.WriteGhostTreeBlock(w, headKey, enc)
 }
 
@@ -113,7 +118,14 @@ func (h *History) sync(head *types.Header, records RecordsFunc, rebuild bool) er
 			return fmt.Errorf("%w: %w", errStaleHistory, err)
 		case !ok:
 			return fmt.Errorf("%w: no head", errStaleHistory)
-		case hash == head.Hash():
+		}
+		// A history built before the tag index has none: built again.
+		if tagged, err := rawdb.ReadGhostTreeTagged(h.db); err != nil {
+			return fmt.Errorf("%w: %w", errStaleHistory, err)
+		} else if !tagged {
+			return fmt.Errorf("%w: no tag index", errStaleHistory)
+		}
+		if hash == head.Hash() {
 			return nil
 		}
 		if revert, apply, err = h.plan(number, hash, head); err != nil {
@@ -233,11 +245,15 @@ func (h *History) ancestry(head *types.Header) ([]blockID, error) {
 	}
 }
 
-// reset removes the head and every record and page root. Block entries stay
-// behind, as no list of them is kept; applying a block replaces its entry.
+// reset removes the head, the tag index marker and every record, page root
+// and tag key. Block entries stay behind, as no list of them is kept;
+// applying a block replaces its entry.
 func (h *History) reset() error {
 	batch := h.db.NewBatch()
 	if err := rawdb.DeleteGhostTreeBlock(batch, headKey); err != nil {
+		return err
+	}
+	if err := rawdb.DeleteGhostTreeTagged(batch); err != nil {
 		return err
 	}
 	flush := func(force bool) error {
@@ -277,6 +293,11 @@ func (h *History) reset() error {
 				break
 			}
 		}
+	}
+	// Tag keys are removed by their own range, which also takes any left
+	// without a record.
+	if err := rawdb.DeleteGhostTreeTags(h.db, batch, func() error { return flush(false) }); err != nil {
+		return err
 	}
 	return flush(true)
 }

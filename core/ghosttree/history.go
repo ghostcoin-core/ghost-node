@@ -266,6 +266,13 @@ func (h *History) applyBlock(batch ethdb.KeyValueWriter, blockHash common.Hash, 
 		if err := rawdb.WriteGhostTreeLeaf(batch, uint8(r.Kind), r.TreeIndex, r.Position, rec.encode()); err != nil {
 			return err
 		}
+		// A leaf of a tree is indexed by the tag its note starts with; a
+		// marker has no note and no tag.
+		if r.Kind.valid() {
+			if err := rawdb.WriteGhostTreeTag(batch, uint8(r.Kind), r.TreeIndex, noteTag(&rec.note), r.Position); err != nil {
+				return err
+			}
+		}
 		// The record that completes a page of a tree also stores the page's
 		// root.
 		if r.Kind.valid() && (uint64(r.Position)+1)%PageLeaves == 0 {
@@ -365,6 +372,11 @@ func (h *History) revertBlock(batch ethdb.KeyValueWriter, blockHash common.Hash)
 		}
 		if err := rawdb.DeleteGhostTreeLeaf(batch, uint8(s.kind), s.treeIndex, s.position); err != nil {
 			return err
+		}
+		if s.kind.valid() {
+			if err := rawdb.DeleteGhostTreeTag(batch, uint8(s.kind), s.treeIndex, noteTag(&rec.note), s.position); err != nil {
+				return err
+			}
 		}
 		if s.kind.valid() && (uint64(s.position)+1)%PageLeaves == 0 {
 			if err := rawdb.DeleteGhostTreePageRoot(batch, uint8(s.kind), s.treeIndex, s.position/PageLeaves); err != nil {
