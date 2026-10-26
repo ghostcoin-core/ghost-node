@@ -28,6 +28,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/params/ghost"
+	"github.com/holiman/uint256"
 )
 
 const dataCommitGas = 60_000
@@ -109,7 +110,7 @@ func (s *scenario) commitFile(miner *node, label string, plaintext []byte) *held
 	key := newPhantomKey(label)
 	w := openWallet(key, s.chainID())
 	s.host.put(w.locator(), w.encryptFile(plaintext))
-	tx := s.dataCommitTx(miner, commitData(s.t, w, plaintext), new(big.Int))
+	tx := s.dataCommitTx(miner, commitData(s.t, w, plaintext), ghostpriv.DataReserve.ToBig())
 	block := s.net.mine(miner, blockPlan{coinbase: address("miner " + miner.name), txs: []*types.Transaction{tx}})
 	h := &held{key: key, plaintext: common.CopyBytes(plaintext), block: block, tx: tx}
 	for _, n := range s.net.nodes {
@@ -121,8 +122,8 @@ func (s *scenario) commitFile(miner *node, label string, plaintext []byte) *held
 // checkDataCommit checks the block of a data commit on a node: one
 // successful receipt with one data commit log of C and the note at the next
 // position, the data tree one leaf longer with its root in the header, the
-// marker unspent, and the coin tree, the totals and every balance but the
-// payer's gas untouched.
+// marker unspent, the coin tree untouched, the payer charged the reserve and
+// its gas, credited to nobody, and the total in grown by the reserve.
 func (s *scenario) checkDataCommit(n *node, h *held) {
 	t := s.t
 	t.Helper()
@@ -162,13 +163,13 @@ func (s *scenario) checkDataCommit(n *node, h *held) {
 	if *header.CoinTreeRoot != *parent.CoinTreeRoot {
 		t.Fatalf("node %s: a data commit changed the coin tree root", n.name)
 	}
-	requireTotalsUnchanged(t, n, pre, post)
+	requireTotalsMoved(t, n, pre, post, ghostpriv.DataReserve, new(uint256.Int))
 	if ghosttree.IsSpent(post, ghosttree.Data, w.marker()) {
 		t.Fatalf("node %s: the marker of a fresh data commitment is spent", n.name)
 	}
 	gas := new(big.Int).Mul(new(big.Int).SetUint64(receipts[0].GasUsed), receipts[0].EffectiveGasPrice)
-	if spent := new(big.Int).Neg(delta(pre, post, s.payer)); spent.Cmp(gas) != 0 {
-		t.Fatalf("node %s: the payer paid %v, want only the gas %v", n.name, spent, gas)
+	if spent, want := new(big.Int).Neg(delta(pre, post, s.payer)), gas.Add(gas, ghostpriv.DataReserve.ToBig()); spent.Cmp(want) != 0 {
+		t.Fatalf("node %s: the payer paid %v, want the reserve and the gas %v", n.name, spent, want)
 	}
 	if post.Exist(ghost.DataCommitEntryAddress) {
 		t.Fatalf("node %s: the data commit entry address holds an account", n.name)
@@ -189,8 +190,9 @@ func (s *scenario) reveal(miner *node, h *held, purpose byte, verifier common.Ad
 }
 
 // checkDataReveal checks a block holding one data reveal on a node: the
-// receipt and its log, the marker spent, and nothing else changed: no tree,
-// no total, no balance but the block reward.
+// receipt and its log, the marker spent, the reserve added to the total out,
+// the coinbase paid the block reward and the reveal's tip, and nothing else
+// changed: no tree, no other balance.
 func checkDataReveal(t *testing.T, n *node, block *types.Block, marker common.Hash, purpose byte, verifier common.Address) {
 	t.Helper()
 	header := block.Header()
@@ -217,13 +219,14 @@ func checkDataReveal(t *testing.T, n *node, block *types.Block, marker common.Ha
 	if *header.DataTreeRoot != *parent.DataTreeRoot || *header.CoinTreeRoot != *parent.CoinTreeRoot {
 		t.Fatalf("node %s: a data reveal changed a tree root", n.name)
 	}
-	requireTotalsUnchanged(t, n, pre, post)
+	requireTotalsMoved(t, n, pre, post, new(uint256.Int), ghostpriv.DataReserve)
 	if got := delta(pre, post, verifier); got.Sign() != 0 {
 		t.Fatalf("node %s: the verifier field was credited %v", n.name, got)
 	}
-	want := ghost.InternalNetParams().BlockReward(header.Number.Uint64()).ToBig()
+	tip := n.revealFee(header).Tip
+	want := new(big.Int).Add(ghost.InternalNetParams().BlockReward(header.Number.Uint64()).ToBig(), tip.ToBig())
 	if got := delta(pre, post, header.Coinbase); got.Cmp(want) != 0 {
-		t.Fatalf("node %s: the coinbase got %v, want the block reward %v alone", n.name, got, want)
+		t.Fatalf("node %s: the coinbase got %v, want the block reward and the tip %v", n.name, got, want)
 	}
 }
 
@@ -240,13 +243,13 @@ func dataLeafCount(st ghosttree.StateDB) uint64 {
 	return new(big.Int).SetBytes(st.GetState(dataTreeAccount, ghosttree.Slot(ghosttree.SlotLeafCount)).Bytes()).Uint64()
 }
 
-// requireTotalsUnchanged checks that the coin totals did not move.
-func requireTotalsUnchanged(t *testing.T, n *node, pre, post *state.StateDB) {
+// requireTotalsMoved checks that the totals grew by exactly in and out.
+func requireTotalsMoved(t *testing.T, n *node, pre, post *state.StateDB, in, out *uint256.Int) {
 	t.Helper()
 	inPre, outPre := ghostpriv.Totals(pre)
 	inPost, outPost := ghostpriv.Totals(post)
-	if !inPre.Eq(inPost) || !outPre.Eq(outPost) {
-		t.Fatalf("node %s: totals %v/%v to %v/%v, want unchanged", n.name, inPre, outPre, inPost, outPost)
+	if wantIn, wantOut := new(uint256.Int).Add(inPre, in), new(uint256.Int).Add(outPre, out); !inPost.Eq(wantIn) || !outPost.Eq(wantOut) {
+		t.Fatalf("node %s: totals %v/%v to %v/%v, want %v/%v", n.name, inPre, outPre, inPost, outPost, wantIn, wantOut)
 	}
 }
 

@@ -626,6 +626,52 @@ func TestGhostPoolAcceptsPreviousWindowFee(t *testing.T) {
 	}
 }
 
+// TestGhostPoolDataRevealWindowFee checks the pool's cheap fee rule for data
+// reveals, which pay the window fee of a coin reveal from their reserve: in
+// window 4 a data reveal at the window's fee or at the previous window's is
+// admitted, and one at a zero fee or any other fee is refused with
+// ErrDataRevealFee.
+func TestGhostPoolDataRevealWindowFee(t *testing.T) {
+	f := newFixture(t, 6, nil)
+	p := f.newPool()
+	for n := 2; n <= 6; n++ {
+		old := f.chain.CurrentBlock()
+		f.insert(n)
+		f.reset(p, old)
+	}
+	fee0, fee4 := f.windowFee(3), f.windowFee(7)
+	if fee0.Eq(fee4) {
+		t.Fatalf("window fees are not distinct: %v", fee0)
+	}
+	chainID := f.gspec.Config.GetChainID().Uint64()
+	fields := func(i int, fee *uint256.Int) revealFields {
+		marker := ghosttree.K(ghostpriv.TagDataMarker, []byte(fmt.Sprintf("synthetic data marker %d", i)))
+		return revealFields{key: markerKey{kind: ghosttree.Data, marker: marker}, chainID: chainID, fee: fee}
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for name, fee := range map[string]*uint256.Int{"the window's fee": fee4, "the previous window's fee": fee0} {
+		if err := p.cheapRules(fields(1, fee)); err != nil {
+			t.Errorf("data reveal at %s: %v", name, err)
+		}
+	}
+	for name, fee := range map[string]*uint256.Int{
+		"a zero fee":           new(uint256.Int),
+		"the window's fee + 1": new(uint256.Int).AddUint64(fee4, 1),
+		"the previous fee - 1": new(uint256.Int).SubUint64(fee0, 1),
+		"the data reserve":     ghostpriv.DataReserve,
+	} {
+		err := p.cheapRules(fields(2, fee))
+		if !errors.Is(err, ghostpriv.ErrDataRevealFee) || errors.Is(err, ghostpriv.ErrRevealFee) {
+			t.Errorf("data reveal at %s: %v, want %v", name, err, ghostpriv.ErrDataRevealFee)
+		}
+	}
+	// A coin reveal's fee is still refused under its own error.
+	coin := fields(3, new(uint256.Int))
+	coin.key.kind = ghosttree.Coin
+	requireErr(t, p.cheapRules(coin), ghostpriv.ErrRevealFee, "coin reveal at a zero fee")
+}
+
 // gatedVerifier is the stub verifier with its first proof check after
 // arming held until the test releases it, standing in for a proof whose
 // verification takes long.

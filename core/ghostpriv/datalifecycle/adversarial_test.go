@@ -33,6 +33,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params/ghost"
+	"github.com/holiman/uint256"
 )
 
 // The conformance cases of the data commitment specification (spec 04,
@@ -303,13 +304,14 @@ func (c *countingVerifier) VerifyReveal(in *ghostpriv.VerifyInputs, proof []byte
 }
 
 // TestDataLifecycleCRD5 shows a data commitment mints nothing: its commit
-// moves no value; a data reveal presented to the coin reveal is refused at
-// the type check with no proof verified, no marker recorded and no balance
-// changed, and refused by every node under the coin type byte; a data
-// commit with a value is refused at the value check and burns nothing.
+// burns the reserve and nothing more; a data reveal presented to the coin
+// reveal is refused at the type check with no proof verified, no marker
+// recorded and no balance changed, and refused by every node under the coin
+// type byte, where its data root is no coin root; a data commit with a value
+// other than the reserve is refused at the value check and burns nothing.
 func TestDataLifecycleCRD5(t *testing.T) {
 	s := newScenario(t)
-	h := s.commitFile(s.node(0), "CR-D5", testFile("CR-D5")) // checkDataCommit: gas only, no totals
+	h := s.commitFile(s.node(0), "CR-D5", testFile("CR-D5")) // checkDataCommit: the reserve and the gas
 	w := s.wallet(h)
 	n := s.node(1)
 	head := n.head()
@@ -338,9 +340,10 @@ func TestDataLifecycleCRD5(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.rejectTx(n, ghostpriv.ErrRevealFee, nil, coinTx)
+	s.rejectTx(n, ghostpriv.ErrRevealRoot, nil, coinTx)
 
-	// A data commit with a value is refused and nothing is burned.
+	// A data commit with a value other than the reserve is refused and
+	// nothing is burned.
 	payer := n.headState().GetBalance(s.payer)
 	in, out := ghostpriv.Totals(n.headState())
 	w2 := openWallet(newPhantomKey("CR-D5 value"), s.chainID())
@@ -674,7 +677,7 @@ func TestDataLifecycleCRD12(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.net.mine(s.node(1), blockPlan{coinbase: address("CR-D12 miner"), txs: []*types.Transaction{s.dataCommitTx(s.node(1), data, new(big.Int))}})
+	s.net.mine(s.node(1), blockPlan{coinbase: address("CR-D12 miner"), txs: []*types.Transaction{s.dataCommitTx(s.node(1), data, ghostpriv.DataReserve.ToBig())}})
 	if _, err := forger.restore(newEndpoint(t, s.node(2))); !errors.Is(err, errRestoreMismatch) {
 		t.Fatalf("restore of a note with a changed cf: %v, want %v", err, errRestoreMismatch)
 	}
@@ -691,7 +694,7 @@ func TestDataLifecycleCRD13(t *testing.T) {
 	a, b, c := s.node(0), s.node(1), s.node(2)
 
 	side := openWallet(newPhantomKey("CR-D13 side"), s.chainID())
-	sideTx := s.dataCommitTx(a, commitData(t, side, testFile("CR-D13 side")), new(big.Int))
+	sideTx := s.dataCommitTx(a, commitData(t, side, testFile("CR-D13 side")), ghostpriv.DataReserve.ToBig())
 	blockX := a.mine(blockPlan{coinbase: address("CR-D13 side miner"), txs: []*types.Transaction{sideTx}})
 	s.net.shareWith([]*node{a, c}, blockX)
 	sideRoot := *blockX.Header().DataTreeRoot
@@ -849,16 +852,62 @@ func TestDataLifecycleCRD17(t *testing.T) {
 	}
 }
 
-// TestDataLifecycleCRD18 refuses, while the fee source is not settled, a
-// data reveal that passes every other check, at the fee check; the same
-// reveal goes through once the test switch settles the fee as zero.
+// TestDataLifecycleCRD18 settles the data reveal fee from the reserve: a
+// data reveal paying more than the reserve is refused by every node, at the
+// fee check, and in a block whose window fee is above the reserve the window
+// fee itself is refused before any proof is verified; a data commit of any
+// value but the reserve is refused at the value check. The holder's reveal at
+// the window fee goes through.
 func TestDataLifecycleCRD18(t *testing.T) {
 	s := newScenario(t)
 	h := s.commitFile(s.node(0), "CR-D18", testFile("CR-D18"))
+	w := s.wallet(h)
 	n := s.node(1)
-	tx := dataRevealTx(t, s.wallet(h).dataReveal(n, *n.head().DataTreeRoot, ghostpriv.PurposeReveal, address("CR-D18 verifier")))
-	restore := ghostpriv.SetDataRevealZeroFee(false)
-	s.rejectTx(n, ghostpriv.ErrDataRevealFeeUnsettled, nil, tx)
-	restore()
-	s.net.mine(n, blockPlan{coinbase: address("CR-D18 miner"), txs: []*types.Transaction{tx}})
+	root := *n.head().DataTreeRoot
+	verifier := address("CR-D18 verifier")
+
+	// A fee of the reserve plus one wei, carried in a block.
+	above := w.dataReveal(n, root, ghostpriv.PurposeReveal, verifier)
+	above.Fee = new(uint256.Int).AddUint64(ghostpriv.DataReserve, 1)
+	stubProve(n, above)
+	s.rejectTx(n, ghostpriv.ErrDataRevealFee, nil, dataRevealTx(t, above))
+
+	// A block that starts a fee window with a base fee whose window fee is
+	// above the reserve: the reserve cannot pay that fee.
+	for next := n.head().Number.Uint64() + 1; ghostpriv.WindowStart(next) != next; next++ {
+		s.net.mine(n, blockPlan{coinbase: address("CR-D18 filler")})
+	}
+	header := n.nextHeader(n.head(), address("CR-D18 coinbase"))
+	header.BaseFee = new(big.Int).Mul(gwei, big.NewInt(20))
+	fee, err := ghostpriv.WindowFee(header.BaseFee)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fee.Total.Gt(ghostpriv.DataReserve) {
+		t.Fatalf("window fee %v is not above the reserve", fee.Total)
+	}
+	r := w.dataReveal(n, root, ghostpriv.PurposeReveal, verifier)
+	r.Fee = fee.Total
+	stubProve(n, r)
+	for _, m := range s.net.nodes {
+		counter := &countingVerifier{inner: ghostpriv.ActiveVerifier()}
+		st := m.headState().Copy()
+		before := st.IntermediateRoot(true)
+		err := ghostpriv.ApplyDataReveal(st, m.env(header), counter, dataEnvelope(t, r))
+		requireErr(t, err, ghostpriv.ErrDataRevealFeeAboveReserve, "node "+m.name+" applying a data reveal whose window fee is above the reserve")
+		if counter.calls != 0 || st.IntermediateRoot(true) != before {
+			t.Fatalf("node %s: %d proofs verified, state changed %v", m.name, counter.calls, st.IntermediateRoot(true) != before)
+		}
+	}
+
+	// A data commit of any value but the reserve.
+	w2 := openWallet(newPhantomKey("CR-D18 value"), s.chainID())
+	data := commitData(t, w2, testFile("CR-D18 value"))
+	one := big.NewInt(1)
+	for _, value := range []*big.Int{new(big.Int), new(big.Int).Sub(ghostpriv.DataReserve.ToBig(), one), new(big.Int).Add(ghostpriv.DataReserve.ToBig(), one)} {
+		s.rejectTx(n, ghostpriv.ErrDataCommitValue, nil, s.dataCommitTx(n, data, value))
+	}
+
+	// The holder's reveal at the window fee.
+	s.reveal(n, h, ghostpriv.PurposeReveal, verifier)
 }

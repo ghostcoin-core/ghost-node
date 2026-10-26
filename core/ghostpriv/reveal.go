@@ -21,7 +21,6 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"sync/atomic"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/ghosttree"
@@ -478,27 +477,13 @@ var (
 	ErrDataRevealShape   = errors.New("data reveal carries a value or a remainder")
 	ErrDataRevealRoot    = errors.New("data reveal root is not an ancestor's data tree root")
 	ErrDataRevealMarker  = errors.New("data reveal marker already used")
-	ErrDataRevealProof   = errors.New("data reveal proof rejected")
+	ErrDataRevealBackstop = errors.New("data reveal reserve is more than the hidden set holds")
+	ErrDataRevealProof    = errors.New("data reveal proof rejected")
 
-	// ErrDataRevealFeeUnsettled is wrapped by ErrDataRevealFee for every
-	// data reveal while the fee source is not settled.
-	ErrDataRevealFeeUnsettled = errors.New("data reveal fee source not settled")
+	// ErrDataRevealFeeAboveReserve is wrapped by ErrDataRevealFee for a
+	// window fee above DataReserve, which the reserve cannot pay.
+	ErrDataRevealFeeAboveReserve = errors.New("data reveal fee above the data reserve")
 )
-
-// dataRevealZeroFee is the test-only switch that settles the data reveal fee
-// as zero. It is off by default, and then every data reveal is rejected at
-// the fee check.
-var dataRevealZeroFee atomic.Bool
-
-// SetDataRevealZeroFee turns the test-only zero data reveal fee on or off and
-// returns a function that restores the setting before. With it on, a data
-// reveal's fee must be zero; with it off, the default, every data reveal is
-// rejected. It is for tests, like SetVerifier; nothing else calls it, and it
-// does not settle the fee for a network.
-func SetDataRevealZeroFee(on bool) (restore func()) {
-	prev := dataRevealZeroFee.Swap(on)
-	return func() { dataRevealZeroFee.Store(prev) }
-}
 
 // PurposeField returns the 32-byte purpose field of a data reveal, 31 zero
 // bytes then the purpose.
@@ -669,73 +654,101 @@ func (r *DataReveal) VerifyInputs(purpose byte, chainID uint64, genesis common.H
 // before it and returns the decoded data reveal and its purpose. It changes
 // nothing.
 func CheckDataReveal(st StateDB, env *BlockEnv, verifier Verifier, envelope []byte) (*DataReveal, byte, error) {
+	r, purpose, _, err := checkDataReveal(st, env, verifier, envelope)
+	return r, purpose, err
+}
+
+// checkDataReveal is CheckDataReveal that also returns the window fee the
+// data reveal pays, split by the cover rule.
+func checkDataReveal(st StateDB, env *BlockEnv, verifier Verifier, envelope []byte) (*DataReveal, byte, Fee, error) {
 	// Checks 1 to 3: type, length, version and amount words.
 	r, err := DecodeDataReveal(envelope)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, Fee{}, err
 	}
 	if env == nil || env.Header == nil || env.Header.Number == nil {
-		return nil, 0, fmt.Errorf("%w: no including block", ErrRevealChainInfo)
+		return nil, 0, Fee{}, fmt.Errorf("%w: no including block", ErrRevealChainInfo)
 	}
 	// Check 4: the chain id.
 	if env.ChainID == nil || !env.ChainID.IsUint64() || env.ChainID.Uint64() != r.ChainID {
-		return nil, 0, fmt.Errorf("%w: have %d, chain %v", ErrDataRevealChainID, r.ChainID, env.ChainID)
+		return nil, 0, Fee{}, fmt.Errorf("%w: have %d, chain %v", ErrDataRevealChainID, r.ChainID, env.ChainID)
 	}
 	chainID := env.ChainID.Uint64()
-	// Check 5: the fee. Its source is not settled, so every data reveal is
-	// rejected unless a test has settled it as zero.
-	if !dataRevealZeroFee.Load() {
-		return nil, 0, fmt.Errorf("%w: %w", ErrDataRevealFee, ErrDataRevealFeeUnsettled)
+	// Check 5: the fee, as a coin reveal's: the fee of the including block's
+	// window or of the window before it, which must cover G_PRIV times the
+	// including block's base fee. The reserve the data commit burned pays
+	// it, so it can be no more than DataReserve.
+	fee, err := env.windowFee(r.Fee)
+	if err != nil {
+		return nil, 0, Fee{}, fmt.Errorf("%w: %w", ErrDataRevealFee, err)
 	}
-	if !r.Fee.IsZero() {
-		return nil, 0, fmt.Errorf("%w: have %v, want 0", ErrDataRevealFee, r.Fee)
+	if fee.Total.Gt(DataReserve) {
+		return nil, 0, Fee{}, fmt.Errorf("%w: %w: fee %v, reserve %v", ErrDataRevealFee, ErrDataRevealFeeAboveReserve, fee.Total, DataReserve)
 	}
 	// Check 6: the purpose.
 	purpose, err := r.purpose()
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, Fee{}, err
 	}
 	// Check 7: no value and no remainder: out and the note slot after cf
 	// are zero.
 	if !r.Out.IsZero() {
-		return nil, 0, fmt.Errorf("%w: out %v", ErrDataRevealShape, r.Out)
+		return nil, 0, Fee{}, fmt.Errorf("%w: out %v", ErrDataRevealShape, r.Out)
 	}
 	if r.Note != ([NoteSize - 32]byte{}) {
-		return nil, 0, fmt.Errorf("%w: a note", ErrDataRevealShape)
+		return nil, 0, Fee{}, fmt.Errorf("%w: a note", ErrDataRevealShape)
 	}
 	// Check 8: the node's own binding digest, in the verifier's inputs.
 	in := r.VerifyInputs(purpose, chainID, env.Genesis)
 	// Check 9: the root, a data tree root of the ancestry.
 	if !env.rootEligible(ghosttree.Data, r.Root) {
-		return nil, 0, fmt.Errorf("%w: %x", ErrDataRevealRoot, r.Root)
+		return nil, 0, Fee{}, fmt.Errorf("%w: %x", ErrDataRevealRoot, r.Root)
 	}
 	// Check 10: the marker, against the data marker set, which holds the
 	// markers of earlier data reveals and revokes of this block too.
 	if ghosttree.IsSpent(st, ghosttree.Data, r.Marker) {
-		return nil, 0, fmt.Errorf("%w: %x", ErrDataRevealMarker, r.Marker)
+		return nil, 0, Fee{}, fmt.Errorf("%w: %x", ErrDataRevealMarker, r.Marker)
+	}
+	// The backstop: the reserve leaves the hidden set, so it must hold it.
+	hidden, err := Hidden(st)
+	if err != nil {
+		return nil, 0, Fee{}, fmt.Errorf("%w: %w", ErrDataRevealBackstop, err)
+	}
+	if DataReserve.Gt(hidden) {
+		return nil, 0, Fee{}, fmt.Errorf("%w: reserve %v, hidden %v", ErrDataRevealBackstop, DataReserve, hidden)
 	}
 	// Check 11: the proof, for the inputs the node computed.
 	if verifier == nil {
 		verifier = DefaultVerifier()
 	}
 	if err := verifier.VerifyReveal(in, common.CopyBytes(r.Proof)); err != nil {
-		return nil, 0, fmt.Errorf("%w: %w", ErrDataRevealProof, err)
+		return nil, 0, Fee{}, fmt.Errorf("%w: %w", ErrDataRevealProof, err)
 	}
-	return r, purpose, nil
+	return r, purpose, fee, nil
 }
 
-// ApplyDataReveal checks a data reveal and makes its one change: it adds the
-// marker to the data marker set and writes the receipt log. It appends to
-// neither tree, mints nothing, moves no balance and leaves the totals as
-// they are. The gas is the caller's. On an error nothing is changed.
+// ApplyDataReveal checks a data reveal or revoke and makes its one atomic
+// change: it adds the marker to the data marker set, adds DataReserve to the
+// total out, settles the fee from the reserve as a coin reveal's (the burn
+// credited to nobody, the tip to the coinbase), forfeits the rest of the
+// reserve, credited to nobody, and writes the receipt log. It appends to
+// neither tree and credits nothing else. The gas is the caller's. On an
+// error nothing is changed.
 func ApplyDataReveal(st StateDB, env *BlockEnv, verifier Verifier, envelope []byte) error {
-	r, purpose, err := CheckDataReveal(st, env, verifier, envelope)
+	r, purpose, fee, err := checkDataReveal(st, env, verifier, envelope)
 	if err != nil {
 		return err
 	}
+	snap := st.Snapshot()
 	if err := ghosttree.MarkSpent(st, ghosttree.Data, r.Marker); err != nil {
+		st.RevertToSnapshot(snap)
 		return fmt.Errorf("%w: %w", ErrDataRevealMarker, err)
 	}
+	if err := addTotal(st, SlotTotalOut, DataReserve); err != nil {
+		st.RevertToSnapshot(snap)
+		return err
+	}
+	st.AddBalance(env.Header.Coinbase, fee.Tip)
 	data := make([]byte, 0, 1+20)
 	data = append(data, purpose)
 	data = append(data, r.Verifier[:]...)

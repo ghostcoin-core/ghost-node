@@ -9,10 +9,13 @@ rules ([commit and reveal](private-transactions.md),
 `core/types/tx_ghost_private.go`.
 
 - A **data commit** is an ordinary transaction from a public account with
-  value 0. It appends a data commitment to the data tree and moves no value.
+  value exactly `DATA_RESERVE`, 2.5 x 10^17 wei (`ghostpriv.DataReserve`). It
+  burns that fee reserve into the hidden set and appends a data commitment
+  that binds it to the data tree.
 - A **data reveal** is a native transaction with no account, type `0x51`.
-  Against a proof it adds one marker to the data marker set, once. It moves
-  no value, appends to no tree and mints nothing.
+  Against a proof it adds one marker to the data marker set, once, and
+  settles its fee from the reserve. It credits no recipient, appends to no
+  tree and mints nothing.
 
 The node never sees the file, its key, its digits, its plaintext or a
 fingerprint of its content, and nothing about them is stored, derived or
@@ -47,7 +50,7 @@ those of [trees and headers](trees-and-headers.md).
 ## Data commit
 
 A data commit is any transaction type the node already accepts, sent top level
-to the data commit entry address with value exactly 0 and the data of a coin
+to the data commit entry address with value exactly `DATA_RESERVE` and the data of a coin
 commit: the 206 bytes of salted commit data, version 2
 (`ghostpriv.SaltedCommitData`):
 
@@ -64,10 +67,12 @@ key would share a marker.
 
 The salt is carried in the clear so that a wallet can read it back with the
 leaf and note. The node computes the commitment itself,
-`D = K("ghost/data-commitment/v1", DATA, F_d)`
-(`ghostpriv.DataCommitmentVersion`), from `F_d` only, with the `DATA` of the
-data's version, `0x02 0x02` for the 206 bytes of version 2. The salt is already in `F_d` and the node never uses it. The
-commitment carries no amount and never equals a coin commitment.
+`D = K("ghost/data-commitment/v1", DATA, DATA_RESERVE, F_d)`
+(`ghostpriv.DataCommitmentVersion`), with `DATA` `0x02 0x02` for the 206
+bytes of version 2 and `DATA_RESERVE` as a 32-byte word
+(`00..0003782dace9d90000`), so the leaf binds the reserve the commit burned.
+The salt is already in `F_d` and the node never uses it. The commitment never
+equals a coin commitment.
 
 The checks run in this order and stop at the first failure; each failure makes
 the transaction invalid, so a block carrying it is invalid:
@@ -77,15 +82,19 @@ the transaction invalid, so a block carrying it is invalid:
    else, the 190 bytes of version 1, an extra field or another version
    included, is rejected;
 3. `F_d` not all zero (`ErrCommitZeroF`);
-4. value exactly 0 (`ErrDataCommitValue`);
-5. the sender's funds cover the gas (`core.ErrInsufficientFunds`);
+4. value exactly `DATA_RESERVE` (`ErrDataCommitValue`); 0, one wei more or
+   less, or any other value is rejected;
+5. the sender's funds cover the reserve and the gas
+   (`core.ErrInsufficientFunds`; `ApplyDataCommit` itself refuses a sender
+   below the reserve with `ErrCommitFunds`);
 6. the data tree takes one more leaf (`ErrDataCommitTree`, wrapping
    `ghosttree.ErrFillingBlock` when the tree filled in this block).
 
-Then one change: `D` is appended to the data tree with the receipt log. No
-code runs, the entry address never holds an account, and the coin tree, the
-totals account and every balance but the gas payment stay as they were. The
-gas is the intrinsic gas, paid and burned as for any transaction.
+Then one atomic change: the reserve is debited from the sender and credited
+to nobody, it is added to `total_in`, and `D` is appended to the data tree
+with the receipt log. No code runs, the entry address never holds an account,
+and the coin tree stays as it was. The gas is the intrinsic gas, paid and
+burned as for any transaction.
 
 Every call to the data commit entry address from inside the EVM (`CALL`,
 `CALLCODE`, `DELEGATECALL`, `STATICCALL`) fails with `vm.ErrCommitEntryCall`
@@ -107,7 +116,7 @@ other. The payload has the coin reveal's offsets:
 | 74 | 32 | purpose: 31 zero bytes, then `0x01` or `0x02` |
 | 106 | 20 | verifier-or-recipient field |
 | 126 | 32 | out, must be zero |
-| 158 | 32 | fee, must be zero (see [fee](#fee)) |
+| 158 | 32 | fee, the window fee (see [fee](#fee)) |
 | 190 | 1,310,720 | proof, then zeros |
 | 1,310,910 | 32 | cf, the content fingerprint |
 | 1,310,942 | 124 | rest of the note slot, must be all zero |
@@ -167,12 +176,17 @@ the block invalid:
    root, or a root seen only on a side branch, is not eligible;
 10. the marker is not in the data marker set, which holds the markers of
     earlier data reveals of the same block too (`ErrDataRevealMarker`);
+    then the backstop: `DATA_RESERVE` is not more than the hidden total,
+    `total_in - total_out` (`ErrDataRevealBackstop`);
 11. the verifier accepts the proof for the inputs the node computed
     (`ErrDataRevealProof`).
 
-Then one change: the marker is added to the data marker set and the receipt
-log is written. Nothing is appended to either tree, nothing is minted, no
-balance and no running total changes.
+Then one atomic change: the marker is added to the data marker set,
+`DATA_RESERVE` is added to `total_out`, the fee is settled as a coin reveal's
+(the burn credited to nobody, the tip to the block's coinbase), the rest of
+the reserve, `DATA_RESERVE - fee`, is forfeited and credited to nobody, and the
+receipt log is written. A revoke settles the same way. Nothing is appended to
+either tree, nothing is minted and no other balance changes.
 
 ### Binding digest
 
@@ -204,16 +218,27 @@ reveal never verifies a data reveal.
 
 ### Fee
 
-Where a data reveal's fee comes from is not settled (spec 04, question 1).
-Until it is, every data reveal is rejected at the fee check with
-`ErrDataRevealFee` wrapping `ErrDataRevealFeeUnsettled`, whatever its fee
-field holds, and nothing changes. A node built from this tree therefore
-rejects every block that carries a data reveal.
+A data reveal or revoke pays its fee from the reserve its data commit burned
+(spec 04, sections 3 and 6). The fee check is the coin reveal's (spec 07,
+section 5): the fee field must equal the window fee of the including block's
+window or of the window before it, and must cover `G_PRIV` times the including
+block's base fee (the cover rule); any other fee, zero included, is
+`ErrDataRevealFee`. A window fee above `DATA_RESERVE` cannot be paid and is
+`ErrDataRevealFeeAboveReserve`, wrapped by `ErrDataRevealFee`. Both run
+before the proof is verified. No public account pays a data reveal's fee and
+the unused rest of the reserve is not refunded.
 
-`ghostpriv.SetDataRevealZeroFee(true)` is a switch for tests only, off by
-default, like `ghostpriv.SetVerifier`: with it on, the fee is zero and any
-other fee is rejected. It does not settle the fee for any network, and no
-public account ever pays a data reveal's fee.
+In the spec's worked example, files A and B are committed (`total_in`
+500,000,000,000,000,000 wei), A is revealed in the first window, whose
+reference base fee is 1,000,000,000 wei: fee 26,100,495,343,659,410, burned
+23,727,723,039,690,372, tip 2,372,772,303,969,038, and `total_out` becomes
+250,000,000,000,000,000; B is revoked in the next window and `total_out`
+becomes 500,000,000,000,000,000.
+
+The shipped ghost verifier still answers `DataFeeUnsettled` for every data
+proof at the pinned revision, so a release node rejects every data reveal at
+the proof check with `ErrProofDataFeeUnsettled` after its fee checks pass; the
+data lifecycle tests use the stub verifier.
 
 ## Receipts
 
@@ -244,7 +269,7 @@ rejected.
   `ghostpriv.PurposeRevoke`;
 - `ghostpriv.CheckDataReveal` and `ghostpriv.ApplyDataReveal`, which block
   processing calls;
-- `ghostpriv.SetDataRevealZeroFee`, for tests only;
+- `ghostpriv.DataReserve`, the reserve every data commit burns;
 - `types.NewGhostDataRevealTx(envelope)`, which wraps an envelope into a
   transaction of type `0x51`, `Transaction.GhostDataRevealEnvelope` and
   `Transaction.IsGhostReveal`, true for both reveal types.
@@ -259,8 +284,7 @@ rejected.
   from these receipts.
 - There is no real proof verifier: the default rejects every data reveal, and
   only the stub of the tests accepts one.
-- The data reveal fee is not settled; the zero fee exists only behind the test
-  switch.
+- No refund of the unused reserve.
 - The root of the data spent-marker set is not in the block header; there is
   no header change.
 - There are no remainder commitments on a data reveal, no

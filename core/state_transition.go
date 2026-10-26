@@ -584,10 +584,11 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 			return nil, err
 		}
 	case st.dataCommit != nil:
-		// A data commit runs no code and moves no value: the data
-		// commitment the node computes is appended to the data tree.
+		// A data commit runs no code: its value, the fee reserve, is
+		// debited and credited to nobody, and the data commitment the node
+		// computes is appended to the data tree.
 		st.state.SetNonce(msg.From, st.state.GetNonce(msg.From)+1)
-		if err := ghostpriv.ApplyDataCommit(st.state, st.evm.Context.BlockNumber.Uint64(), st.dataCommit); err != nil {
+		if err := ghostpriv.ApplyDataCommit(st.state, st.evm.Context.BlockNumber.Uint64(), msg.From, st.dataCommit); err != nil {
 			return nil, err
 		}
 	case contractCreation:

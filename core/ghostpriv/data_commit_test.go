@@ -53,6 +53,9 @@ func (d dataFile) commitment() common.Hash {
 	return ghostpriv.DataCommitmentVersion(d.version, d.f)
 }
 
+// reserve is DATA_RESERVE, the value of every data commit, as a big.Int.
+func reserve() *big.Int { return ghostpriv.DataReserve.ToBig() }
+
 func testDataFile(name string) dataFile {
 	return dataFile{
 		f:    ghosttree.K("ghost/test-data-f", []byte(name)),
@@ -60,8 +63,9 @@ func testDataFile(name string) dataFile {
 	}
 }
 
-// dataCommitTx is a data commit of d from key with the given value, a
-// account transaction to the data commit entry address.
+// dataCommitTx is a data commit of d from key with the given value, an
+// account transaction to the data commit entry address. A valid data commit
+// sends reserve().
 func (f *fixture) dataCommitTx(key *mldsa44.PrivateKey, nonce uint64, d dataFile, value *big.Int) *types.Transaction {
 	f.t.Helper()
 	data, err := ghostpriv.SaltedCommitData(d.f, make([]byte, ghostpriv.SaltSize), d.note)
@@ -94,14 +98,15 @@ func dataLeafCount(st *state.StateDB) uint64 {
 // TestDataCommitAppendsToDataTree commits two files, from two account
 // transactions of two accounts, in one block on the internal network and checks that
 // the data tree holds the commitments the node computed under the header's
-// data root, the receipt logs with leaf, tree index, position and note, and
-// that the coin tree, the totals and every balance but the gas are as they
-// were.
+// data root, the receipt logs with leaf, tree index, position and note, that
+// the coin tree is as it was, that each sender paid the reserve and its gas
+// and nobody received the reserve, and that the total in grew by the
+// reserves.
 func TestDataCommitAppendsToDataTree(t *testing.T) {
-	// The commitment is K over DATA at version 2 and F_d, and never a coin
-	// commitment.
+	// The commitment is K over DATA at version 2, the reserve and F_d, and
+	// never a coin commitment.
 	known := testDataFile("known")
-	want := ghosttree.K("ghost/data-commitment/v1", []byte{0x02, 0x02}, known.f[:])
+	want := ghosttree.K("ghost/data-commitment/v1", []byte{0x02, 0x02}, common.BigToHash(reserve()).Bytes(), known.f[:])
 	if known.commitment() != want {
 		t.Fatalf("data commitment %x, want %x", known.commitment(), want)
 	}
@@ -123,7 +128,7 @@ func TestDataCommitAppendsToDataTree(t *testing.T) {
 	)
 	blocks, _ := f.generate(1, func(i int, b *core.BlockGen) {
 		b.SetCoinbase(miner)
-		txs = append(txs, f.dataCommitTx(keyA, 0, first, new(big.Int)))
+		txs = append(txs, f.dataCommitTx(keyA, 0, first, reserve()))
 		data, err := ghostpriv.SaltedCommitData(second.f, make([]byte, ghostpriv.SaltSize), second.note)
 		if err != nil {
 			t.Fatal(err)
@@ -136,7 +141,7 @@ func TestDataCommitAppendsToDataTree(t *testing.T) {
 			GasFeeCap: new(big.Int).Mul(gwei, big.NewInt(100)),
 			Gas:       60_000 + accountExtraGas,
 			To:        &ghost.DataCommitEntryAddress,
-			Value:     new(big.Int),
+			Value:     reserve(),
 			Data:      data,
 		}))
 		for _, tx := range txs {
@@ -155,7 +160,7 @@ func TestDataCommitAppendsToDataTree(t *testing.T) {
 		t.Fatalf("%d receipts", len(receipts))
 	}
 
-	// Each sender paid its gas and nothing else; the coinbase got the reward
+	// Each sender paid the reserve and its gas; the coinbase got the reward
 	// and the tips.
 	tips := new(big.Int)
 	for i, sender := range []common.Address{addrA, addrB} {
@@ -164,7 +169,7 @@ func TestDataCommitAppendsToDataTree(t *testing.T) {
 			t.Fatalf("data commit %d failed", i)
 		}
 		gasCost := new(big.Int).Mul(new(big.Int).SetUint64(r.GasUsed), r.EffectiveGasPrice)
-		if got, want := st.GetBalance(sender).ToBig(), new(big.Int).Sub(startBal, gasCost); got.Cmp(want) != 0 {
+		if got, want := st.GetBalance(sender).ToBig(), new(big.Int).Sub(startBal, gasCost.Add(gasCost, reserve())); got.Cmp(want) != 0 {
 			t.Errorf("sender %d balance %v, want %v", i, got, want)
 		}
 		if st.GetNonce(sender) != 1 {
@@ -226,12 +231,9 @@ func TestDataCommitAppendsToDataTree(t *testing.T) {
 		}
 	}
 
-	// No value entered or left the hidden set.
-	if in, out := totals(st); in.Sign() != 0 || out.Sign() != 0 {
+	// The two reserves entered the hidden set and none left it.
+	if in, out := totals(st); in.Cmp(new(big.Int).Mul(reserve(), big.NewInt(2))) != 0 || out.Sign() != 0 {
 		t.Errorf("totals in %v out %v after data commits", in, out)
-	}
-	if st.Exist(ghost.PrivTotalsAccount) {
-		t.Error("a data commit created the totals account")
 	}
 
 	// A later block appends after them.
@@ -243,7 +245,7 @@ func TestDataCommitAppendsToDataTree(t *testing.T) {
 				b.AddTx(tx)
 			}
 		} else {
-			b.AddTx(f.dataCommitTx(keyA, 1, third, new(big.Int)))
+			b.AddTx(f.dataCommitTx(keyA, 1, third, reserve()))
 		}
 	})
 	if more[0].Hash() != block.Hash() {
@@ -273,14 +275,15 @@ func TestSaltedDataCommitCarriesSaltToHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	saltedTx := f.callTx(keyB, 0, ghost.DataCommitEntryAddress, new(big.Int), saltedData, 60_000)
+	saltedTx := f.callTx(keyB, 0, ghost.DataCommitEntryAddress, reserve(), saltedData, 60_000)
 	blocks, _ := f.generate(1, func(i int, b *core.BlockGen) {
-		b.AddTx(f.dataCommitTx(keyA, 0, plain, new(big.Int)))
+		b.AddTx(f.dataCommitTx(keyA, 0, plain, reserve()))
 		b.AddTx(saltedTx)
 	})
 	chain, history := f.historyChain()
 
-	// With a value the salted data commit is refused like any other.
+	// With a value other than the reserve the salted data commit is refused
+	// like any other.
 	env, st := nextEnv(t, chain, chain.CurrentBlock(), common.Address{0xcb})
 	valued := f.callTx(keyB, 0, ghost.DataCommitEntryAddress, big.NewInt(1), saltedData, 60_000)
 	if _, err := applyTx(chain, st.Copy(), env.Header, valued); !errors.Is(err, ghostpriv.ErrDataCommitValue) {
@@ -344,8 +347,8 @@ func TestSaltedDataCommitCarriesSaltToHistory(t *testing.T) {
 	}
 }
 
-// TestDataCommitRejectsValueAndWrongLength sends data commits with a value,
-// with data of every wrong length and version and with a zero F, and calls
+// TestDataCommitRejectsValueAndWrongLength sends data commits with a value
+// other than the reserve, with data of every wrong length and version and with a zero F, and calls
 // the data commit entry address from contracts: each is rejected and nothing
 // changes. A block carrying a rejected data commit is invalid.
 func TestDataCommitRejectsValueAndWrongLength(t *testing.T) {
@@ -369,6 +372,7 @@ func TestDataCommitRejectsValueAndWrongLength(t *testing.T) {
 		tx   *types.Transaction
 		want error
 	}{
+		{"zero", f.callTx(keyA, 0, to, zero, goodData, 60_000), ghostpriv.ErrDataCommitValue},
 		{"one wei", f.callTx(keyA, 0, to, big.NewInt(1), goodData, 60_000), ghostpriv.ErrDataCommitValue},
 		{"one GHOST", f.callTx(keyA, 0, to, oneGhost, goodData, 60_000), ghostpriv.ErrDataCommitValue},
 		{"V_MAX", f.callTx(keyA, 0, to, ghostpriv.VMax.ToBig(), goodData, 60_000), ghostpriv.ErrDataCommitValue},
@@ -418,11 +422,11 @@ func TestDataCommitRejectsValueAndWrongLength(t *testing.T) {
 		t.Fatal("the head moved")
 	}
 
-	// The control: value 0 and the exact 190 bytes are accepted. The same
-	// data with value 0 to the coin commit entry is a coin commit of
+	// The control: the reserve and the exact 206 bytes are accepted. The
+	// same data with value 0 to the coin commit entry is a coin commit of
 	// nothing, rejected as before.
 	cp := st.Copy()
-	if r, err := applyTx(chain, cp, env.Header, f.dataCommitTx(keyA, 0, good, zero)); err != nil || r.Status != types.ReceiptStatusSuccessful {
+	if r, err := applyTx(chain, cp, env.Header, f.dataCommitTx(keyA, 0, good, reserve())); err != nil || r.Status != types.ReceiptStatusSuccessful {
 		t.Fatalf("data commit: %v", err)
 	}
 	if n := dataLeafCount(cp); n != 1 {
@@ -484,4 +488,152 @@ func TestDataCommitRejectsValueAndWrongLength(t *testing.T) {
 			t.Errorf("transaction %d: status %d, %d logs", i, r.Status, len(r.Logs))
 		}
 	}
+}
+
+// TestDataCommitValueMustBeTheReserve checks that a data commit's value is
+// exactly DATA_RESERVE, 2.5 x 10^17 wei: 0, one wei less or more and one
+// GHOST are each ErrDataCommitValue, through ParseDataCommit and in a block,
+// which is then invalid; the reserve itself is accepted both ways.
+func TestDataCommitValueMustBeTheReserve(t *testing.T) {
+	if want, _ := new(big.Int).SetString("250000000000000000", 10); reserve().Cmp(want) != 0 {
+		t.Fatalf("DATA_RESERVE %v, want %v", reserve(), want)
+	}
+	if got := common.BigToHash(reserve()); got != common.HexToHash("0x3782dace9d90000") {
+		t.Fatalf("DATA_RESERVE word %x", got)
+	}
+	file := testDataFile("reserve value")
+	data, err := ghostpriv.SaltedCommitData(file.f, make([]byte, ghostpriv.SaltSize), file.note)
+	if err != nil {
+		t.Fatal(err)
+	}
+	one := big.NewInt(1)
+	for name, value := range map[string]*big.Int{
+		"zero":               new(big.Int),
+		"the reserve less 1": new(big.Int).Sub(reserve(), one),
+		"the reserve plus 1": new(big.Int).Add(reserve(), one),
+		"one GHOST":          new(big.Int).Set(oneGhost),
+	} {
+		if _, err := ghostpriv.ParseDataCommit(data, value); !errors.Is(err, ghostpriv.ErrDataCommitValue) {
+			t.Errorf("%s: %v, want %v", name, err, ghostpriv.ErrDataCommitValue)
+		}
+		f := newFixture(t, ghost.InternalNetGasLimit, nil)
+		chain := f.newChain()
+		bad, _ := f.generate(1, func(i int, b *core.BlockGen) {
+			b.AddUncheckedTx(f.dataCommitTx(keyA, 0, file, value))
+		})
+		if _, err := chain.InsertChain(bad); !errors.Is(err, ghostpriv.ErrDataCommitValue) {
+			t.Errorf("block with a data commit of %s: %v, want %v", name, err, ghostpriv.ErrDataCommitValue)
+		}
+		if chain.CurrentBlock().Hash() != f.genesis.Hash() {
+			t.Errorf("%s: the head moved", name)
+		}
+	}
+	if _, err := ghostpriv.ParseDataCommit(data, nil); !errors.Is(err, ghostpriv.ErrDataCommitValue) {
+		t.Errorf("no value: %v, want %v", err, ghostpriv.ErrDataCommitValue)
+	}
+
+	// Exactly the reserve.
+	dc, err := ghostpriv.ParseDataCommit(data, reserve())
+	if err != nil || dc.F != file.f {
+		t.Fatalf("data commit of the reserve: %v", err)
+	}
+	f := newFixture(t, ghost.InternalNetGasLimit, nil)
+	chain := f.newChain()
+	good, _ := f.generate(1, func(i int, b *core.BlockGen) {
+		b.AddTx(f.dataCommitTx(keyA, 0, file, reserve()))
+	})
+	f.insert(chain, good)
+	if r := chain.GetReceiptsByHash(good[0].Hash()); len(r) != 1 || r[0].Status != types.ReceiptStatusSuccessful {
+		t.Fatal("the data commit of the reserve did not apply")
+	}
+}
+
+// TestDataCommitBurnsTheReserve checks that a data commit debits the sender
+// the reserve and its gas, credits the reserve to nobody, adds it to the
+// total in and records the leaf K(tag, DATA version 2, the reserve, F_d),
+// recomputed here, which is not the leaf without the reserve. A sender
+// holding less than the reserve is refused and nothing changes.
+func TestDataCommitBurnsTheReserve(t *testing.T) {
+	poorKey, _, poor := testAccount(0xd5)
+	poorBal := new(big.Int).Sub(reserve(), common.Big1)
+	f := newFixture(t, ghost.InternalNetGasLimit, genesisT.GenesisAlloc{poor: {Balance: poorBal}})
+	chain := f.newChain()
+	env, st := nextEnv(t, chain, chain.CurrentBlock(), common.Address{0xcb})
+	file := testDataFile("burns the reserve")
+
+	cp := st.Copy()
+	tx := f.dataCommitTx(keyA, 0, file, reserve())
+	r, err := applyTx(chain, cp, env.Header, tx)
+	if err != nil || r.Status != types.ReceiptStatusSuccessful {
+		t.Fatalf("data commit: %v", err)
+	}
+	price := new(big.Int).Add(tx.GasTipCap(), env.Header.BaseFee)
+	if price.Cmp(tx.GasFeeCap()) > 0 {
+		price.Set(tx.GasFeeCap())
+	}
+	r.EffectiveGasPrice = price
+	gasCost := new(big.Int).Mul(new(big.Int).SetUint64(r.GasUsed), r.EffectiveGasPrice)
+	if got, want := cp.GetBalance(addrA).ToBig(), new(big.Int).Sub(startBal, new(big.Int).Add(reserve(), gasCost)); got.Cmp(want) != 0 {
+		t.Errorf("sender balance %v, want %v", got, want)
+	}
+	tip := new(big.Int).Sub(r.EffectiveGasPrice, env.Header.BaseFee)
+	if got, want := cp.GetBalance(env.Header.Coinbase).ToBig(), tip.Mul(tip, new(big.Int).SetUint64(r.GasUsed)); got.Cmp(want) != 0 {
+		t.Errorf("coinbase %v, want only the gas tip %v", got, want)
+	}
+	for _, acc := range []common.Address{ghost.DataCommitEntryAddress, ghost.PrivTotalsAccount, ghosttree.TreeAccount(ghosttree.Data)} {
+		if !cp.GetBalance(acc).IsZero() {
+			t.Errorf("%x received the reserve", acc)
+		}
+	}
+	if in, out := totals(cp); in.Cmp(reserve()) != 0 || out.Sign() != 0 {
+		t.Errorf("totals in %v out %v, want the reserve in", in, out)
+	}
+	word := common.BigToHash(reserve())
+	wantLeaf := ghosttree.K("ghost/data-commitment/v1", []byte{0x02, 0x02}, word[:], file.f[:])
+	oldLeaf := ghosttree.K("ghost/data-commitment/v1", []byte{0x02, 0x02}, file.f[:])
+	if wantLeaf == oldLeaf || file.commitment() != wantLeaf {
+		t.Fatalf("leaf %x, want %x", file.commitment(), wantLeaf)
+	}
+	if len(r.Logs) != 1 || !bytes.Equal(r.Logs[0].Data[8:40], wantLeaf[:]) {
+		t.Fatalf("the receipt does not record the leaf %x", wantLeaf)
+	}
+	if n := dataLeafCount(cp); n != 1 {
+		t.Fatalf("data tree has %d leaves", n)
+	}
+
+	// A sender below the reserve: the transaction cannot pay its value, and
+	// ApplyDataCommit itself refuses it, changing nothing.
+	cp = st.Copy()
+	if _, err := applyTx(chain, cp, env.Header, f.dataCommitTx(poorKey, 0, file, reserve())); !errors.Is(err, core.ErrInsufficientFunds) {
+		t.Fatalf("data commit from a sender below the reserve: %v, want %v", err, core.ErrInsufficientFunds)
+	}
+	dc, err := ghostpriv.ParseDataCommit(mustSaltedData(t, file), reserve())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cp = st.Copy()
+	rootBefore := cp.IntermediateRoot(true)
+	if err := ghostpriv.ApplyDataCommit(cp, 1, poor, dc); !errors.Is(err, ghostpriv.ErrCommitFunds) {
+		t.Fatalf("ApplyDataCommit below the reserve: %v, want %v", err, ghostpriv.ErrCommitFunds)
+	}
+	if cp.IntermediateRoot(true) != rootBefore || len(cp.Logs()) != 0 || cp.GetBalance(poor).ToBig().Cmp(poorBal) != 0 {
+		t.Fatal("a refused data commit changed the state")
+	}
+	// With the reserve, ApplyDataCommit makes the change.
+	if err := ghostpriv.ApplyDataCommit(cp, 1, addrA, dc); err != nil {
+		t.Fatal(err)
+	}
+	if in, _ := totals(cp); in.Cmp(reserve()) != 0 || cp.GetBalance(addrA).ToBig().Cmp(new(big.Int).Sub(startBal, reserve())) != 0 {
+		t.Fatalf("ApplyDataCommit: total in %v, sender %v", in, cp.GetBalance(addrA))
+	}
+}
+
+// mustSaltedData is the zero-salt commit data of d.
+func mustSaltedData(t *testing.T, d dataFile) []byte {
+	t.Helper()
+	data, err := ghostpriv.SaltedCommitData(d.f, make([]byte, ghostpriv.SaltSize), d.note)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }

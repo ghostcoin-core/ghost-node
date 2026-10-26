@@ -182,7 +182,7 @@ built by `go run build/ci.go ghostverifier`).
 The linked verifier checks coin reveals through `ghost_proofs.h`, the pinned
 ghost-proofs header, and data reveals and revokes through
 `ghostverifier/ghost_data.h`, which the `ghostverifier` crate adds around the
-one data verifier of ghost-proofs, `verify_data_reveal`. A data reveal and a
+one data verifier of ghost-proofs, `verify_salted_data_reveal`. A data reveal and a
 data revoke differ only in the purpose byte that starts the statement: `0x02`
 or `0x03` in the codes of ghost-proofs, to which the node maps its own
 `PurposeReveal` (`0x01`) and `PurposeRevoke` (`0x02`), then the root, marker, party (the verifier-or-recipient address
@@ -191,22 +191,23 @@ each, 193 bytes in all with `cf` at 161 to 193. `cf` rides in the first 32
 bytes of the data reveal's note slot (see `docs/data-commitments.md`); for a
 coin reveal `VerifyInputs.Cf` is zero and the coin statement is unchanged. The
 crate pins ghost-proofs at revision
-`f33169c62708e71ad31040b06b78cd3801fc9d0b` of the ghost repository in
+`eafd108bc745d588b7dd13929adcfc0cf72b8fae` of the ghost repository in
 `ghostverifier/Cargo.toml` and `Cargo.lock`. A kind or purpose it
 does not verify is `ErrProofStatement`, without calling it; every answer but
 acceptance is `ErrProofRejected`.
 
-The data reveal fee is not settled, and the pinned ghost-proofs rejects every
-data reveal and revoke with `DataFeeUnsettled`, whatever the proof. The
-release node therefore rejects all of them, with `ErrProofDataFeeUnsettled`
-wrapped by `ErrProofRejected` for a well-formed proof (and its own data fee
-check rejects them before that by default). The accept path with real proofs
+The node settles a data reveal's fee from the fee reserve its data commit
+burned (see `docs/data-commitments.md`), but the pinned ghost-proofs still
+rejects every data reveal and revoke with `DataFeeUnsettled`, whatever the
+proof. The release node therefore rejects all of them at the proof, with
+`ErrProofDataFeeUnsettled` wrapped by `ErrProofRejected` for a well-formed
+proof, after its own fee checks pass. The accept path with real proofs
 is proved only in the crate's own tests, `ghostverifier/tests/data_reveal.rs`,
 with the test-only cargo feature `unsettled-points-test`, which adds
 `ghost_verify_data_reveal_unsettled`. That feature is off by default, never
 enabled by `build/ci.go` or the release build, and its function is not in the
-release node. The data lifecycle with real proofs on a release node needs the
-fee settled first.
+release node. The data lifecycle with real proofs on a release node needs a
+ghost-proofs revision whose shipped data verifier accepts them.
 
 `core/ghostpriv/ghostprivtest` holds the stub verifier for tests: it accepts
 exactly a proof field whose first 32 bytes are

@@ -16,9 +16,9 @@ use ghost_proofs::ffi::{
     GHOST_PROOFS_PANICKED, GHOST_PROOFS_REJECTED, PROOF_MAX_BYTES, chain_params_to_bytes,
 };
 use ghost_proofs::{
-    ChainParams, DataOpening, DataPurpose, DataRevealRequest, EMPTY_RULE, PROTOCOL_VERSION_1, TREE_DEPTH, Tree,
-    amount_word, data_commitment, data_fingerprint, empty_leaf, merkle_root, prove_data_reveal, tree_node,
-    verify_data_reveal_unsettled,
+    ChainParams, DataPurpose, DataRevealRequest, EMPTY_RULE, PROTOCOL_VERSION_1, SaltedDataOpening, TREE_DEPTH, Tree,
+    amount_word, data_commitment_v2, data_fingerprint_v2, empty_leaf, merkle_root, prove_salted_data_reveal,
+    tree_node, verify_salted_data_reveal_unsettled,
 };
 use ghostverifier::{
     DATA_REVEAL_BYTES, GHOST_DATA_FEE_UNSETTLED, PURPOSE_REVEAL, PURPOSE_REVOKE, data_reveal_from_bytes,
@@ -54,8 +54,9 @@ struct Fixture {
     proof: Vec<u8>,
 }
 
-/// Proves the purpose for one data commitment at position 3 of a data tree
-/// whose other leaves are empty but one, with a zero fee and the empty rule.
+/// Proves the purpose for one salted data commitment at position 3 of a data
+/// tree whose other leaves are empty but one, with a zero fee and the empty
+/// rule. The leaf binds the fee reserve with F_d.
 fn prove(purpose: DataPurpose) -> Fixture {
     let mut path = [[0u8; 32]; TREE_DEPTH];
     let mut empty = empty_leaf();
@@ -64,15 +65,23 @@ fn prove(purpose: DataPurpose) -> Fixture {
         empty = tree_node(Tree::Data, level as u8, &empty, &empty);
     }
     path[0] = [9; 32];
-    let opening = DataOpening {
+    let opening = SaltedDataOpening {
         s: [1; 32],
         r: [2; 32],
         b: [3; 32],
+        salt: [0x5a; 16],
         cf: TEST_CF,
         position: 3,
         path,
     };
-    let leaf = data_commitment(&data_fingerprint(&opening.s, &opening.r, &opening.b, &opening.cf, &EMPTY_RULE));
+    let leaf = data_commitment_v2(&data_fingerprint_v2(
+        &opening.s,
+        &opening.r,
+        &opening.b,
+        &opening.salt,
+        &opening.cf,
+        &EMPTY_RULE,
+    ));
     let request = DataRevealRequest {
         purpose,
         root: merkle_root(Tree::Data, &leaf, opening.position, &opening.path),
@@ -80,8 +89,9 @@ fn prove(purpose: DataPurpose) -> Fixture {
         fee: amount_word(0),
         rule: EMPTY_RULE,
     };
-    let (tx, proof) = prove_data_reveal(&params(), &opening, &request, TEST_ZK_RANDOMNESS).expect("honest proof");
-    assert_eq!(verify_data_reveal_unsettled(&params(), &tx, &proof), Ok(()));
+    let (tx, proof) =
+        prove_salted_data_reveal(&params(), &opening, &request, TEST_ZK_RANDOMNESS).expect("honest proof");
+    assert_eq!(verify_salted_data_reveal_unsettled(&params(), &tx, &proof), Ok(()));
     let statement = data_reveal_to_bytes(&tx);
     assert_eq!(data_reveal_from_bytes(&statement), Ok(tx));
     Fixture {

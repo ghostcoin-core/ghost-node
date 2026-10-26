@@ -27,9 +27,10 @@
  * Proof: as ghost_proofs.h, 1 to GHOST_PROOFS_PROOF_MAX_BYTES bytes, one
  * serialized proof optionally followed by zero bytes.
  *
- * The data reveal fee is not settled, and the verifier of the pinned
- * ghost-proofs rejects every data reveal for it, whatever the proof: a
- * well-formed call returns GHOST_DATA_FEE_UNSETTLED.
+ * The node settles the data reveal fee from the data commit's reserve, but
+ * the verifier of the pinned ghost-proofs still rejects every data reveal as
+ * unsettled, whatever the proof: a well-formed call returns
+ * GHOST_DATA_FEE_UNSETTLED.
  */
 #ifndef GHOST_DATA_H
 #define GHOST_DATA_H
