@@ -10,12 +10,12 @@
 //! around its one data verifier, `verify_salted_data_reveal`, which checks a
 //! reveal and a revoke of a salted data commitment alike: the purpose is the
 //! first byte of the statement. The commitment binds the fee reserve with
-//! F_d. At the pinned revision that verifier rejects every data reveal with
-//! `DataFeeUnsettled`, whatever the proof, though the node settles the fee
-//! from the reserve; [`ghost_verify_data_reveal`] answers
-//! [`GHOST_DATA_FEE_UNSETTLED`] for it. The accept path, [`ghost_verify_data_reveal_unsettled`], exists
-//! only with the test-only feature `unsettled-points-test`, which neither
-//! `build/ci.go` nor the release build enables.
+//! F_d. The verifier accepts a real proof of a data reveal or revoke whose fee
+//! is at most the reserve `DATA_RESERVE` and whose rule is empty; a fee above
+//! the reserve (`FeeAboveReserve`) or a non-empty rule (`RuleNotEmpty`) is a
+//! plain rejection, `GHOST_PROOFS_REJECTED`, like any other proof that does
+//! not verify. The library needs no cargo feature: neither `build/ci.go` nor
+//! the release build enables one.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -24,7 +24,7 @@ use ghost_proofs::ffi::{
     GHOST_PROOFS_MALFORMED_INPUT, GHOST_PROOFS_PANICKED, GHOST_PROOFS_REJECTED, PROOF_MAX_BYTES,
     chain_params_from_bytes, verify_coin_reveal_bytes,
 };
-use ghost_proofs::{ChainParams, DataPurpose, DataReveal, Proof, ProofError, verify_salted_data_reveal};
+use ghost_proofs::{DataPurpose, DataReveal, Proof, ProofError, verify_salted_data_reveal};
 
 pub use ghost_proofs::ffi::ghost_verify_coin_reveal;
 pub use ghost_proofs::{PURPOSE_REVEAL, PURPOSE_REVOKE};
@@ -33,14 +33,6 @@ pub use ghost_proofs::{PURPOSE_REVEAL, PURPOSE_REVOKE};
 /// party, fee, rule and content fingerprint `cf` (32 each), in that order, so
 /// `cf` sits at 161..193.
 pub const DATA_REVEAL_BYTES: usize = 1 + 6 * 32;
-
-/// The status of a data reveal the verifier rejects because the data reveal
-/// fee is not settled. It rejects, like every status but
-/// `GHOST_PROOFS_ACCEPTED`.
-pub const GHOST_DATA_FEE_UNSETTLED: i32 = 5;
-
-/// Signature of the ghost-proofs data verifiers.
-type DataVerify = fn(&ChainParams, &DataReveal, &Proof) -> Result<(), ProofError>;
 
 /// Decodes a data reveal statement. A purpose other than `PURPOSE_REVEAL` or
 /// `PURPOSE_REVOKE` is `ProofError::UnknownPurpose`.
@@ -111,7 +103,7 @@ fn serialized_len(proof: &[u8]) -> Option<usize> {
     Some(hi)
 }
 
-fn verify_data_unguarded(params: &[u8], statement: &[u8], proof: &[u8], verify: DataVerify) -> i32 {
+fn verify_data_unguarded(params: &[u8], statement: &[u8], proof: &[u8]) -> i32 {
     let (Ok(params), Ok(statement)) = (
         <&[u8; CHAIN_PARAMS_BYTES]>::try_from(params),
         <&[u8; DATA_REVEAL_BYTES]>::try_from(statement),
@@ -128,32 +120,35 @@ fn verify_data_unguarded(params: &[u8], statement: &[u8], proof: &[u8], verify: 
         return GHOST_PROOFS_MALFORMED_INPUT;
     };
     let params = chain_params_from_bytes(params);
-    match verify(&params, &tx, &Proof::from_bytes(proof[..len].to_vec())) {
+    // A fee above the reserve, a non-empty rule and every other failure but
+    // a malformed proof are plain rejections.
+    match verify_salted_data_reveal(&params, &tx, &Proof::from_bytes(proof[..len].to_vec())) {
         Ok(()) => GHOST_PROOFS_ACCEPTED,
         Err(ProofError::MalformedProof) => GHOST_PROOFS_MALFORMED_INPUT,
-        Err(ProofError::DataFeeUnsettled) => GHOST_DATA_FEE_UNSETTLED,
         Err(_) => GHOST_PROOFS_REJECTED,
     }
 }
 
-fn verify_data_guarded(params: &[u8], statement: &[u8], proof: &[u8], verify: DataVerify) -> i32 {
-    catch_unwind(AssertUnwindSafe(|| verify_data_unguarded(params, statement, proof, verify)))
-        .unwrap_or(GHOST_PROOFS_PANICKED)
+/// Verifies a data reveal or revoke proof given as bytes in the layout of
+/// ghost_data.h with the shipped verifier of ghost-proofs. Never panics.
+pub fn verify_data_reveal_bytes(params: &[u8], statement: &[u8], proof: &[u8]) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| verify_data_unguarded(params, statement, proof))).unwrap_or(GHOST_PROOFS_PANICKED)
 }
 
-/// The checks of the C functions, then the verifier on the buffers.
+/// Verifies a data reveal or revoke proof against the statement and the
+/// chain parameters, as declared in ghost_data.h.
 ///
 /// # Safety
 ///
 /// Each non-null pointer must point to at least its length of readable bytes.
-unsafe fn verify_data_raw(
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ghost_verify_data_reveal(
     params: *const u8,
     params_len: usize,
     statement: *const u8,
     statement_len: usize,
     proof: *const u8,
     proof_len: usize,
-    verify: DataVerify,
 ) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
         if params.is_null() || statement.is_null() || proof.is_null() {
@@ -174,73 +169,7 @@ unsafe fn verify_data_raw(
                 std::slice::from_raw_parts(proof, proof_len),
             )
         };
-        verify_data_guarded(params, statement, proof, verify)
+        verify_data_reveal_bytes(params, statement, proof)
     }))
     .unwrap_or(GHOST_PROOFS_PANICKED)
-}
-
-/// Verifies a data reveal or revoke proof given as bytes in the layout of
-/// ghost_data.h with the shipped verifier of ghost-proofs. Never panics.
-pub fn verify_data_reveal_bytes(params: &[u8], statement: &[u8], proof: &[u8]) -> i32 {
-    verify_data_guarded(params, statement, proof, verify_salted_data_reveal)
-}
-
-/// Verifies a data reveal or revoke proof against the statement and the
-/// chain parameters, as declared in ghost_data.h.
-///
-/// # Safety
-///
-/// Each non-null pointer must point to at least its length of readable bytes.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn ghost_verify_data_reveal(
-    params: *const u8,
-    params_len: usize,
-    statement: *const u8,
-    statement_len: usize,
-    proof: *const u8,
-    proof_len: usize,
-) -> i32 {
-    // SAFETY: the caller's guarantee, passed on.
-    unsafe {
-        verify_data_raw(params, params_len, statement, statement_len, proof, proof_len, verify_salted_data_reveal)
-    }
-}
-
-/// [`verify_data_reveal_bytes`] with the test-only verifier that skips the
-/// unsettled fee. Not in the release library.
-#[cfg(feature = "unsettled-points-test")]
-pub fn verify_data_reveal_unsettled_bytes(params: &[u8], statement: &[u8], proof: &[u8]) -> i32 {
-    verify_data_guarded(params, statement, proof, ghost_proofs::verify_salted_data_reveal_unsettled)
-}
-
-/// [`ghost_verify_data_reveal`] with the test-only verifier of ghost-proofs
-/// that skips the unsettled fee, so a test can see a real data proof
-/// accepted. Not in the release library: it exists only with the feature
-/// `unsettled-points-test`.
-///
-/// # Safety
-///
-/// Each non-null pointer must point to at least its length of readable bytes.
-#[cfg(feature = "unsettled-points-test")]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn ghost_verify_data_reveal_unsettled(
-    params: *const u8,
-    params_len: usize,
-    statement: *const u8,
-    statement_len: usize,
-    proof: *const u8,
-    proof_len: usize,
-) -> i32 {
-    // SAFETY: the caller's guarantee, passed on.
-    unsafe {
-        verify_data_raw(
-            params,
-            params_len,
-            statement,
-            statement_len,
-            proof,
-            proof_len,
-            ghost_proofs::verify_salted_data_reveal_unsettled,
-        )
-    }
 }

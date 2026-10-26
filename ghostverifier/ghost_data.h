@@ -27,17 +27,16 @@
  * Proof: as ghost_proofs.h, 1 to GHOST_PROOFS_PROOF_MAX_BYTES bytes, one
  * serialized proof optionally followed by zero bytes.
  *
- * The node settles the data reveal fee from the data commit's reserve, but
- * the verifier of the pinned ghost-proofs still rejects every data reveal as
- * unsettled, whatever the proof: a well-formed call returns
- * GHOST_DATA_FEE_UNSETTLED.
+ * The node settles the data reveal fee from the data commit's reserve, and
+ * the verifier of the pinned ghost-proofs accepts a real proof whose fee is at
+ * most that reserve, DATA_RESERVE, and whose rule is empty. A fee above the
+ * reserve or a non-empty rule returns GHOST_PROOFS_REJECTED, as does any other
+ * proof that does not verify.
  */
 #ifndef GHOST_DATA_H
 #define GHOST_DATA_H
 
 #include "ghost_proofs.h"
-
-#define GHOST_DATA_FEE_UNSETTLED 5
 
 #define GHOST_DATA_PURPOSE_REVEAL 0x02
 #define GHOST_DATA_PURPOSE_REVOKE 0x03
@@ -54,7 +53,8 @@ extern "C" {
  * readable bytes. A null pointer, parameters or a statement of the wrong
  * length, or an unknown purpose returns GHOST_PROOFS_BAD_ARGUMENT; an empty
  * or oversized proof, or one that is not a serialized proof followed only by
- * zero bytes, returns GHOST_PROOFS_MALFORMED_INPUT.
+ * zero bytes, returns GHOST_PROOFS_MALFORMED_INPUT. A fee above the reserve or
+ * a non-empty rule returns GHOST_PROOFS_REJECTED.
  */
 int32_t ghost_verify_data_reveal(const uint8_t *params, size_t params_len,
                                  const uint8_t *statement, size_t statement_len,

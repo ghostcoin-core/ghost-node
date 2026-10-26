@@ -235,10 +235,15 @@ reference base fee is 1,000,000,000 wei: fee 26,100,495,343,659,410, burned
 250,000,000,000,000,000; B is revoked in the next window and `total_out`
 becomes 500,000,000,000,000,000.
 
-The shipped ghost verifier still answers `DataFeeUnsettled` for every data
-proof at the pinned revision, so a release node rejects every data reveal at
-the proof check with `ErrProofDataFeeUnsettled` after its fee checks pass; the
-data lifecycle tests use the stub verifier.
+The shipped ghost verifier at the pinned revision,
+`450b6e1786e346c883af1009abce398b02bf1660` of the ghost repository, accepts a
+real data reveal or revoke proof whose fee is at most the reserve and whose
+rule is empty, so a release node verifies data reveals and revokes with real
+proofs after its fee checks pass. A fee above the reserve or a non-empty rule
+is a plain proof rejection, `ErrProofRejected`. There is no C interface for
+the proof of holding yet. The data lifecycle tests still use the stub
+verifier; a test of the data lifecycle with real proofs on a release node
+follows in a later change.
 
 ## Receipts
 
