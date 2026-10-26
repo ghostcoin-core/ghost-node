@@ -24,12 +24,12 @@ import "github.com/ethereum/go-ethereum/common"
 var EmptyMarkerSetRoot = common.HexToHash("0ef484d17824d5fefb2533c70af81a3267af1169dd091395ad7607762aeee0a3")
 
 // DataMarkerRoot returns the root of the data spent-marker set of a state
-// (spec 05, section 6). The node does not keep the marker-set tree yet: a
-// repeat marker is still refused by its storage slot, and the root is that
-// of the empty set for every state.
+// (spec 05, section 6): the stored root node of the data marker-set tree
+// (markerset.go), one slot read, or EmptyMarkerSetRoot while no data marker
+// is spent.
 func DataMarkerRoot(st StateDB) (common.Hash, error) {
 	if err := Release.Check(); err != nil {
 		return common.Hash{}, err
 	}
-	return EmptyMarkerSetRoot, nil
+	return newMarkerSet(st).node(MarkerSetDepth, 0), nil
 }

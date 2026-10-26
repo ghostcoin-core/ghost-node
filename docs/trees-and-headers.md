@@ -32,6 +32,64 @@ big-endian integers or hashes.
 A marker set is the storage of its own account: the slot keyed by the 32-byte
 marker holds `1` once the marker is spent. Any non-zero value counts as spent.
 A coin marker is never looked up in the data set, or the other way round.
+The data set also keeps the data marker-set tree, below.
+
+## The data marker-set tree
+
+The data spent-marker set is also the indexed tree of spec 05, section 6
+(`core/ghosttree/markerset.go`): append-only, depth 40, each used leaf
+`(value, nextValue, nextIndex)` linking the spent data markers in ascending
+order from the sentinel leaf `(0, 0, 0)` at position 0. A leaf hashes as
+`K("ghost/data-marker-set-leaf/v1", value, nextValue, nextIndex)` with
+`nextIndex` 5 bytes big-endian, a node at level `l` as
+`K("ghost/data-marker-set-node/v1", l, left, right)`, and an unused position
+is the empty leaf. The root of the set of the sentinel alone is
+`0ef484d17824d5fefb2533c70af81a3267af1169dd091395ad7607762aeee0a3`.
+
+An insert of marker `m` finds the low leaf, the used leaf with the largest
+value below `m`, writes `(m, low.nextValue, low.nextIndex)` at the next
+position `n`, rewrites the low leaf to `(low.value, m, n)` and recomputes the
+40 nodes on each of the two paths. `ghosttree.MarkSpent(st, Data, m)` inserts
+in the same call that writes the marker slot, so a data reveal and a data
+revoke both insert; the slot check that refuses a repeat runs first
+(`ErrMarkerSpent`). The marker of 32 zero bytes is the sentinel's value and is
+refused with `ErrZeroMarker`, and a data reveal carrying it fails check 10
+with `ErrDataRevealMarker` before its proof is checked. Coin markers have no
+tree.
+
+The tree lives in the data marker account's storage, under keys
+`K("ghost/data-marker-set-slot/v1", ...)`, which no marker can be:
+
+| Key | Content |
+|---|---|
+| `0x00` | leaf count, zero meaning 1 (the sentinel alone) |
+| `0x01`, position (5), field (1) | value, nextValue and nextIndex of a used leaf |
+| `0x02`, level (1), index (5) | node at the level (0 the leaf hashes, 40 the root), zero meaning the default |
+| `0x03` | root reference of the ordered index |
+| `0x04`, id (5), field (1) | bit, left and right reference of an index node |
+
+The default of node `(l, i)` is the empty subtree `Z_l`, except on the path of
+position 0, whose default is the node over the sentinel leaf. So the genesis
+set writes no slot, the account does not exist at genesis and the genesis
+state root is unchanged; the first insert creates the account with nonce 1.
+`ghosttree.DataMarkerRoot` reads the stored root node, one slot, or gives the
+empty-set root.
+
+The low leaf is found through an ordered index of the used values, a crit-bit
+tree in the same storage: the node an insert adds takes the new leaf's
+position as its id, and a reference is `2p` for the leaf at position `p` or
+`2id + 1` for a node. A search walks at most 256 nodes, so an insert reads
+and writes a bounded number of slots whatever the size of the set. The whole
+tree is journaled state under the state root and rolls back with a
+reorganisation; none of it is in the tree history.
+
+`MarkerAbsenceWitness(st, m)` gives the 1,354-byte witness that `m` is not in
+the set: the low leaf (32 + 32 + 5 bytes), its position (5 bytes) and the 40
+siblings of its path. `VerifyMarkerAbsence(root, m, witness)` accepts it when
+it is exactly that long, `m` is not zero, the low leaf folded along the
+position's bits gives the root, `low.value < m` and `m < low.nextValue` or
+`low.nextValue` is zero. Both are Go functions only; no RPC method serves a
+witness.
 
 The root is computed from the stored state alone: the final root for a full
 tree, otherwise the fold over the frontier and the empty subtrees. A count
@@ -78,11 +136,11 @@ specification, which rejects with the reasons `non-canonical-rlp`, `trailing-byt
 
 The data marker root is the root of the data spent-marker set of spec 05,
 section 6. `ghosttree.DataMarkerRoot` (`core/ghosttree/markerroot.go`)
-returns it for a state. The node does not keep the marker-set tree yet, so
-it is `ghosttree.EmptyMarkerSetRoot`
+returns it for a state, from the data marker-set tree above: it is
+`ghosttree.EmptyMarkerSetRoot`
 (`0ef484d17824d5fefb2533c70af81a3267af1169dd091395ad7607762aeee0a3`, vector
-`marker-set-empty`) for every state; a repeat data marker is still refused by
-its storage slot in the marker account.
+`marker-set-empty`) until the first data marker is spent, and changes with
+every data reveal and revoke.
 
 The RandomX engine sets the three roots from the final state in
 `FinalizeAndAssemble`, after the block reward and before the state root,
@@ -394,7 +452,7 @@ removed branch, and so does the index.
   storage. They hold no code and no balance.
 - Only the commit and reveal transactions will append leaves and mark markers;
   nothing in this change makes a commit or a reveal valid.
-- Each header carries only the current root of each kind: no spent-marker-set
-  root and no third field.
+- Each header carries only the current root of each tree kind and the root
+  of the data spent-marker set; the coin spent-marker set has no root.
 - Uncertain means reject: unreadable or corrupt tree state, a nil root or any
   mismatch is an error or `false`.

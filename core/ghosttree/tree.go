@@ -465,8 +465,11 @@ func IsSpent(st StateDB, kind Kind, marker common.Hash) bool {
 }
 
 // MarkSpent adds marker to the spent set of the kind, writing 1 to the slot
-// keyed by the marker. A marker already spent, including by an earlier
-// transaction of the same block, is ErrMarkerSpent.
+// keyed by the marker. A data marker also goes into the data marker-set
+// tree in the same call (markerset.go), so DataMarkerRoot follows every data
+// reveal and revoke; the zero data marker is ErrZeroMarker. A marker already
+// spent, including by an earlier transaction of the same block, is
+// ErrMarkerSpent. On an error nothing is written.
 func MarkSpent(st StateDB, kind Kind, marker common.Hash) error {
 	if !kind.valid() {
 		return ErrUnknownKind
@@ -474,8 +477,18 @@ func MarkSpent(st StateDB, kind Kind, marker common.Hash) error {
 	if IsSpent(st, kind, marker) {
 		return ErrMarkerSpent
 	}
+	var set *markerSet
+	if kind == Data {
+		set = newMarkerSet(st)
+		if err := set.plan(marker); err != nil {
+			return err
+		}
+	}
 	addr := MarkerAccount(kind)
 	ensureAccount(st, addr)
 	st.SetState(addr, marker, word(1))
+	if set != nil {
+		set.commit()
+	}
 	return nil
 }

@@ -705,7 +705,12 @@ func checkDataReveal(st StateDB, env *BlockEnv, verifier Verifier, envelope []by
 		return nil, 0, Fee{}, fmt.Errorf("%w: %x", ErrDataRevealRoot, r.Root)
 	}
 	// Check 10: the marker, against the data marker set, which holds the
-	// markers of earlier data reveals and revokes of this block too.
+	// markers of earlier data reveals and revokes of this block too. The
+	// zero marker is the value of the set's sentinel leaf and is never
+	// spendable.
+	if r.Marker == (common.Hash{}) {
+		return nil, 0, Fee{}, fmt.Errorf("%w: %w", ErrDataRevealMarker, ghosttree.ErrZeroMarker)
+	}
 	if ghosttree.IsSpent(st, ghosttree.Data, r.Marker) {
 		return nil, 0, Fee{}, fmt.Errorf("%w: %x", ErrDataRevealMarker, r.Marker)
 	}

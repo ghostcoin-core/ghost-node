@@ -29,6 +29,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/ghostpriv"
 	"github.com/ethereum/go-ethereum/core/ghostpriv/ghostprivtest"
 	"github.com/ethereum/go-ethereum/core/ghosttree"
+	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -1555,4 +1556,120 @@ func TestDataRevealReorgRestoresMarker(t *testing.T) {
 	if !st.GetBalance(verifier).IsZero() {
 		t.Fatal("the verifier field was paid")
 	}
+}
+
+// twoDataCommitChain is dataRevealChain with two data commits in block 1, so
+// that the hidden set holds the reserves of two data reveals.
+func twoDataCommitChain(t *testing.T, name string) (*fixture, *ghostpriv.BlockEnv, *state.StateDB, common.Hash, *uint256.Int) {
+	t.Helper()
+	f := newFixture(t, 50_000_000, nil)
+	blocks, _ := f.generate(3, func(i int, b *core.BlockGen) {
+		if i == 0 {
+			b.AddTx(f.dataCommitTx(keyA, 0, testDataFile(name), reserve()))
+			b.AddTx(f.dataCommitTx(keyB, 0, testDataFile(name+", other"), reserve()))
+		}
+	})
+	chain := f.newChain()
+	f.insert(chain, blocks)
+	env, st := nextEnv(t, chain, blocks[2].Header(), common.Address{0xcb})
+	return f, env, st, *blocks[0].Header().DataTreeRoot, chainWindowFee(t, chain, env.Header).Total
+}
+
+func dataMarkerRoot(t *testing.T, st ghosttree.StateDB) common.Hash {
+	t.Helper()
+	root, err := ghosttree.DataMarkerRoot(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+// TestDataRevealInsertsMarkerIntoTheSet applies a data reveal and a data
+// revoke and checks that the data marker root is that of a fresh state given
+// the same two markers by MarkSpent, and that a data reveal that fails
+// changes neither the marker root nor the state.
+func TestDataRevealInsertsMarkerIntoTheSet(t *testing.T) {
+	useStub(t)
+	f, env, st, root, fee := twoDataCommitChain(t, "into the set")
+	if dataMarkerRoot(t, st) != ghosttree.EmptyMarkerSetRoot {
+		t.Fatal("the chain starts with a data marker")
+	}
+	mReveal, mRevoke := testDataMarker("set, reveal"), testDataMarker("set, revoke")
+	for _, c := range []struct {
+		marker  common.Hash
+		purpose byte
+	}{{mReveal, ghostpriv.PurposeReveal}, {mRevoke, ghostpriv.PurposeRevoke}} {
+		r := f.newDataReveal(root, c.marker, c.purpose, common.Address{0x7e, 0x5e}, fee)
+		if err := ghostpriv.ApplyDataReveal(st, env, stub, dataEnvelope(t, r)); err != nil {
+			t.Fatalf("purpose %d: %v", c.purpose, err)
+		}
+	}
+
+	fresh, err := state.New(types.EmptyRootHash, state.NewDatabase(rawdb.NewMemoryDatabase()), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range []common.Hash{mReveal, mRevoke} {
+		if err := ghosttree.MarkSpent(fresh, ghosttree.Data, m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := dataMarkerRoot(t, fresh)
+	got := dataMarkerRoot(t, st)
+	if got != want {
+		t.Errorf("marker root after a reveal and a revoke %x, want %x", got, want)
+	}
+	if got == ghosttree.EmptyMarkerSetRoot || ghosttree.MarkerSetCount(st) != 3 {
+		t.Errorf("marker root %x and count %d after two markers", got, ghosttree.MarkerSetCount(st))
+	}
+
+	// Failing data reveals: a repeat of a marker, and a fresh marker now
+	// that the two reveals took both reserves out of the hidden set.
+	repeat := f.newDataReveal(root, mReveal, ghostpriv.PurposeRevoke, common.Address{0x7e, 0x5f}, fee)
+	third := f.newDataReveal(root, testDataMarker("set, third"), ghostpriv.PurposeReveal, common.Address{0x7e, 0x5f}, fee)
+	for name, c := range map[string]struct {
+		r    *ghostpriv.DataReveal
+		want error
+	}{"repeat": {repeat, ghostpriv.ErrDataRevealMarker}, "no reserve left": {third, ghostpriv.ErrDataRevealBackstop}} {
+		cp := st.Copy()
+		stateRoot, setRoot := cp.IntermediateRoot(true), dataMarkerRoot(t, cp)
+		if err := ghostpriv.ApplyDataReveal(cp, env, stub, dataEnvelope(t, c.r)); !errors.Is(err, c.want) {
+			t.Fatalf("%s: %v, want %v", name, err, c.want)
+		}
+		if dataMarkerRoot(t, cp) != setRoot || cp.IntermediateRoot(true) != stateRoot {
+			t.Errorf("%s: a failed data reveal changed the state", name)
+		}
+	}
+}
+
+// TestDataRevealRefusesTheZeroMarker checks that a data reveal or revoke
+// whose marker is 32 zero bytes fails check 10 with ErrDataRevealMarker
+// before any proof is verified, and changes nothing.
+func TestDataRevealRefusesTheZeroMarker(t *testing.T) {
+	useStub(t)
+	f, env, st, root, fee := dataRevealChain(t, "zero marker")
+	counter := &countingVerifier{}
+	for _, p := range []byte{ghostpriv.PurposeReveal, ghostpriv.PurposeRevoke} {
+		r := f.newDataReveal(root, common.Hash{}, p, common.Address{0x7e, 0x00}, fee)
+		cp := st.Copy()
+		stateRoot := cp.IntermediateRoot(true)
+		if _, _, err := ghostpriv.CheckDataReveal(cp, env, counter, dataEnvelope(t, r)); !errors.Is(err, ghostpriv.ErrDataRevealMarker) || !errors.Is(err, ghosttree.ErrZeroMarker) {
+			t.Fatalf("purpose %d checked: %v, want %v", p, err, ghostpriv.ErrDataRevealMarker)
+		}
+		if err := ghostpriv.ApplyDataReveal(cp, env, counter, dataEnvelope(t, r)); !errors.Is(err, ghostpriv.ErrDataRevealMarker) {
+			t.Fatalf("purpose %d applied: %v, want %v", p, err, ghostpriv.ErrDataRevealMarker)
+		}
+		if cp.IntermediateRoot(true) != stateRoot || len(cp.Logs()) != 0 || dataMarkerRoot(t, cp) != ghosttree.EmptyMarkerSetRoot {
+			t.Fatalf("purpose %d: the refused zero marker changed the state", p)
+		}
+		// The same reveal with a marker passes: the zero marker is the reason.
+		ok := cloneData(r)
+		ok.Marker = testDataMarker("zero marker, control")
+		f.proveData(ok)
+		if _, _, err := ghostpriv.CheckDataReveal(cp, env, counter, dataEnvelope(t, ok)); err != nil {
+			t.Fatalf("purpose %d control: %v", p, err)
+		}
+		counter.calls--
+	}
+	noProofVerified(t, counter, "the zero marker")
 }
