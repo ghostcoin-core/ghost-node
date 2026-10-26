@@ -238,6 +238,8 @@ func init() {
 		snapshotCommand,
 		// See verkle.go
 		verkleCommand,
+		// See servicecmd.go
+		serviceCommand,
 	}
 	if logTestCommand != nil {
 		app.Commands = append(app.Commands, logTestCommand)

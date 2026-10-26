@@ -24,7 +24,7 @@ Usage: go run build/ci.go <command> <command flags/arguments>
 
 Available commands are:
 
-	install    [ -arch architecture ] [ -cc compiler ] [ packages... ]                          -- builds packages and executables
+	install    [ -os system ] [ -arch architecture ] [ -cc compiler ] [ packages... ]           -- builds packages and executables
 	ghostverifier                                                                               -- builds the reveal proof verifier's static library
 	test      [ -coverage ] [ packages... ]                                                    -- runs the tests
 	lint                                                                                        -- runs certain pre-selected linters
@@ -135,7 +135,12 @@ var (
 var GOBIN, _ = filepath.Abs(filepath.Join("build", "bin"))
 
 func executablePath(name string) string {
-	if runtime.GOOS == "windows" {
+	return targetExecutablePath(runtime.GOOS, name)
+}
+
+// targetExecutablePath is executablePath for an executable built for goos.
+func targetExecutablePath(goos, name string) string {
+	if goos == "windows" {
 		name += ".exe"
 	}
 	return filepath.Join(GOBIN, name)
@@ -181,18 +186,30 @@ func main() {
 func doInstall(cmdline []string) {
 	var (
 		dlgo       = flag.Bool("dlgo", false, "Download Go and build with it")
+		goos       = flag.String("os", runtime.GOOS, "Operating system to cross build for (windows from Linux needs -cc)")
 		arch       = flag.String("arch", "", "Architecture to cross build for")
 		cc         = flag.String("cc", "", "C compiler to cross build with")
-		staticlink = flag.Bool("static", runtime.GOOS == "linux", "Create statically-linked executable (the default on Linux, so a release is one self-contained file)")
+		staticlink = flag.Bool("static", false, "Create statically-linked executable (the default on Linux and Windows, so a release is one self-contained file)")
 	)
 	flag.CommandLine.Parse(cmdline)
 	env := build.Env()
 
+	targetArch := *arch
+	if targetArch == "" {
+		targetArch = runtime.GOARCH
+	}
+	cross := *goos != runtime.GOOS || targetArch != runtime.GOARCH
+	staticSet := false
+	flag.Visit(func(f *flag.Flag) { staticSet = staticSet || f.Name == "static" })
+	if !staticSet {
+		*staticlink = *goos == "linux" || *goos == "windows"
+	}
+
 	// A release build on Linux and macOS links the reveal proof verifier
 	// (core/ghostpriv/verifier_cgo.go), so build its static library first.
-	if ghostVerifierLinked() {
-		if *arch != "" && *arch != runtime.GOARCH {
-			log.Fatalf("the reveal proof verifier is built for the host, %s, not for %s", runtime.GOARCH, *arch)
+	if ghostVerifierLinked(*goos) {
+		if cross {
+			log.Fatalf("the reveal proof verifier is built for the host, %s/%s, not for %s/%s", runtime.GOOS, runtime.GOARCH, *goos, targetArch)
 		}
 		if os.Getenv("CGO_ENABLED") == "0" {
 			log.Fatal("a release build links the reveal proof verifier through cgo: CGO_ENABLED must not be 0")
@@ -200,8 +217,24 @@ func doInstall(cmdline []string) {
 		buildGhostVerifier()
 	}
 
+	// A Windows build has no reveal proof verifier, but RandomX and the EVM
+	// bindings are C: it needs cgo, and from another system or processor a C
+	// compiler that targets Windows on that processor (see
+	// docs/windows-service.md).
+	if *goos == "windows" {
+		if targetArch != "amd64" && targetArch != "arm64" {
+			log.Fatalf("Windows releases are built for amd64 and arm64, not %s", targetArch)
+		}
+		if os.Getenv("CGO_ENABLED") == "0" {
+			log.Fatal("a Windows build needs cgo for RandomX: CGO_ENABLED must not be 0")
+		}
+		if cross && *cc == "" && os.Getenv("CC") == "" {
+			log.Fatalf("building for windows/%s here needs a C compiler for it: give one with -cc", targetArch)
+		}
+	}
+
 	// Configure the toolchain.
-	tc := build.GoToolchain{GOARCH: *arch, CC: *cc}
+	tc := build.GoToolchain{GOOS: *goos, GOARCH: *arch, CC: *cc}
 	if *dlgo {
 		csdb := build.MustLoadChecksums("build/checksums.txt")
 		tc.Root = build.DownloadGo(csdb)
@@ -216,12 +249,18 @@ func doInstall(cmdline []string) {
 	}
 
 	// Configure the build.
-	gobuild := tc.Go("build", buildFlags(env, *staticlink, buildTags)...)
+	gobuild := tc.Go("build", buildFlags(env, *goos, *staticlink, buildTags)...)
+
+	// The toolchain turns cgo on for another processor only; another
+	// operating system needs it as well.
+	if *goos != runtime.GOOS {
+		gobuild.Env = append(gobuild.Env, "CGO_ENABLED=1")
+	}
 
 	// The C linker finds the verifier's library through LIBRARY_PATH, which
 	// leaves the executable as it is: a -L flag in the cgo directives would
 	// put the checkout's directory into it (see verifier_cgo.go).
-	if ghostVerifierLinked() {
+	if ghostVerifierLinked(*goos) {
 		gobuild.Env = append(gobuild.Env, ghostVerifierLibraryPath())
 	}
 
@@ -254,14 +293,14 @@ func doInstall(cmdline []string) {
 	for _, pkg := range packages {
 		args := make([]string, len(gobuild.Args))
 		copy(args, gobuild.Args)
-		args = append(args, "-o", executablePath(path.Base(pkg)))
+		args = append(args, "-o", targetExecutablePath(*goos, path.Base(pkg)))
 		args = append(args, pkg)
 		build.MustRun(&exec.Cmd{Path: gobuild.Path, Args: args, Env: gobuild.Env})
 	}
 }
 
 // buildFlags returns the go tool flags for building.
-func buildFlags(env build.Environment, staticLinking bool, buildTags []string) (flags []string) {
+func buildFlags(env build.Environment, goos string, staticLinking bool, buildTags []string) (flags []string) {
 	var ld []string
 	if env.Commit != "" {
 		ld = append(ld, "-X", "github.com/ethereum/go-ethereum/internal/version.gitCommit="+env.Commit)
@@ -269,10 +308,15 @@ func buildFlags(env build.Environment, staticLinking bool, buildTags []string) (
 	}
 	// Strip DWARF on darwin. This used to be required for certain things,
 	// and there is no downside to this, so we just keep doing it.
-	if runtime.GOOS == "darwin" {
+	if goos == "darwin" {
 		ld = append(ld, "-s")
 	}
-	if runtime.GOOS == "linux" {
+	// On Windows, static linking puts the C and C++ runtimes and winpthread
+	// into geth.exe, so it needs no DLL beside it.
+	if goos == "windows" && staticLinking {
+		ld = append(ld, "-extldflags", "'-static'")
+	}
+	if goos == "linux" {
 		// Enforce the stacksize to 8M, which is the case on most platforms apart from
 		// alpine Linux.
 		extld := []string{"-Wl,-z,stack-size=0x800000"}
@@ -304,10 +348,12 @@ var (
 	ghostVerifierLib   = filepath.Join("build", "cache", "ghostverifier")
 )
 
-// ghostVerifierLinked reports whether a release build for this platform links
-// the verifier: the build constraint of core/ghostpriv/verifier_cgo.go.
-func ghostVerifierLinked() bool {
-	return runtime.GOOS == "linux" || runtime.GOOS == "darwin"
+// ghostVerifierLinked reports whether a release build for the operating
+// system goos links the verifier: the build constraint of
+// core/ghostpriv/verifier_cgo.go. A Windows build does not, and rejects every
+// reveal (core/ghostpriv/verifier_nocgo.go).
+func ghostVerifierLinked(goos string) bool {
+	return goos == "linux" || goos == "darwin"
 }
 
 func doGhostVerifier(cmdline []string) {
