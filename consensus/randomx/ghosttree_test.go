@@ -29,6 +29,7 @@ import (
 	"github.com/ethereum/go-ethereum/consensus/misc/eip1559"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/ghosttree"
+	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/params"
@@ -557,6 +558,11 @@ func treeSnapshot(t *testing.T, chain *core.BlockChain, root common.Hash, marker
 		snap[fmt.Sprintf("%v tree nonce", kind)] = common.BigToHash(new(big.Int).SetUint64(st.GetNonce(ghosttree.TreeAccount(kind))))
 		snap[fmt.Sprintf("%v marker nonce", kind)] = common.BigToHash(new(big.Int).SetUint64(st.GetNonce(ghosttree.MarkerAccount(kind))))
 	}
+	markerRoot, err := ghosttree.DataMarkerRoot(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap["data marker root"] = markerRoot
 	return snap
 }
 
@@ -686,6 +692,9 @@ func TestTreeStateAndMarkersAfterForcedReorg(t *testing.T) {
 	if *headA.CoinTreeRoot == *ancestor.Header().CoinTreeRoot || *headA.DataTreeRoot == *ancestor.Header().DataTreeRoot {
 		t.Fatal("branch A's head roots equal the ancestor's")
 	}
+	if snapA := treeSnapshot(t, reorged, headA.Root, markers); snapA["data marker root"] == atAncestor["data marker root"] || *headA.DataMarkerRoot != snapA["data marker root"] {
+		t.Fatalf("branch A's data marker root %x, ancestor %x, header %x", snapA["data marker root"], atAncestor["data marker root"], *headA.DataMarkerRoot)
+	}
 
 	// The forced reorganisation.
 	if _, err := reorged.InsertChain(branchB); err != nil {
@@ -701,6 +710,9 @@ func TestTreeStateAndMarkersAfterForcedReorg(t *testing.T) {
 	}
 	for _, d := range diffSnapshots(afterReorg, atAncestor) {
 		t.Errorf("after the reorganisation, against the common ancestor: %s", d)
+	}
+	if got := head.DataMarkerRoot; got == nil || *got != afterReorg["data marker root"] || *got != *ancestor.Header().DataMarkerRoot {
+		t.Errorf("data marker root of the head header %v, state %x", got, afterReorg["data marker root"])
 	}
 	for _, kind := range []ghosttree.Kind{ghosttree.Coin, ghosttree.Data} {
 		stateRoot := afterReorg[fmt.Sprintf("%v root", kind)]
@@ -845,5 +857,58 @@ func TestDataMarkerRootChecks(t *testing.T) {
 		if *dec.DataMarkerRoot != ghosttree.EmptyMarkerSetRoot {
 			t.Errorf("%s: decoded marker root %x", name, *dec.DataMarkerRoot)
 		}
+	}
+}
+
+// TestDataMarkerRootFollowsDataMarkers seals a block that marks one data
+// marker: its header carries the root of the set holding that marker, not
+// the empty root, and a second node that re-executes the chain imports it.
+func TestDataMarkerRootFollowsDataMarkers(t *testing.T) {
+	f := sealedChain(t)
+	marker := testTreeMarker(7)
+	marking := common.Address{0xd7}
+	engine := &treeWriter{RandomX: f.engine, write: func(h *types.Header, st *state.StateDB) {
+		if h.Coinbase == marking {
+			if err := ghosttree.MarkSpent(st, ghosttree.Data, marker); err != nil {
+				t.Errorf("block %d: %v", h.Number, err)
+			}
+		}
+	}}
+	chain, err := newTestBlockChain(engine, f.gspec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer chain.Stop()
+	if _, err := chain.InsertChain(f.blocks); err != nil {
+		t.Fatal(err)
+	}
+	block := mineOn(t, engine, f.engine, chain, marking, nil, true)
+
+	fresh, err := state.New(types.EmptyRootHash, state.NewDatabase(rawdb.NewMemoryDatabase()), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ghosttree.MarkSpent(fresh, ghosttree.Data, marker); err != nil {
+		t.Fatal(err)
+	}
+	want, err := ghosttree.DataMarkerRoot(fresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := block.Header().DataMarkerRoot
+	if got == nil || *got != want || want == ghosttree.EmptyMarkerSetRoot {
+		t.Fatalf("marker root of the marking block %v, want %x (empty %x)", got, want, ghosttree.EmptyMarkerSetRoot)
+	}
+
+	second, err := newTestBlockChain(engine, f.gspec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Stop()
+	if _, err := second.InsertChain(append(append(types.Blocks{}, f.blocks...), block)); err != nil {
+		t.Fatalf("the second node refuses the chain: %v", err)
+	}
+	if second.CurrentBlock().Hash() != block.Hash() {
+		t.Fatal("the second node does not follow the marking block")
 	}
 }
