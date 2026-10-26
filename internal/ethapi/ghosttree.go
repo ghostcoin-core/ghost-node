@@ -29,8 +29,8 @@ import (
 
 // GhostAPI serves the commitment tree history in whole pages and whole
 // page-root lists as of an anchor block, the spent markers in whole pages,
-// and the fixed-shape reads of a restoring wallet (a page-root tail, a set of
-// 8 pages, the status of 64 markers), and nothing else.
+// and the fixed-shape reads of a restoring wallet (a page-root tail and a set
+// of 8 pages), and nothing else.
 type GhostAPI struct {
 	history *ghosttree.History
 }
@@ -140,13 +140,6 @@ func rpcTreePage(p *ghosttree.TreePage) *RPCTreePage {
 	return out
 }
 
-// RPCMarkerStatus is the status of one marker as of an anchor: spent, with
-// the number of the block whose reveal spent it, or not, without a block.
-type RPCMarkerStatus struct {
-	Spent bool            `json:"spent"`
-	Block *hexutil.Uint64 `json:"block,omitempty"`
-}
-
 // GetPageRootTail returns the page roots of a tree (kind "coin" or "data")
 // as of the anchor block from page start to the last page with a leaf. start
 // must be a multiple of 65,536 pages below the pages of a full tree; a start
@@ -185,27 +178,6 @@ func (api *GhostAPI) GetPageSet(kind TreeKind, treeIndex hexutil.Uint64, pages [
 	out := make([]*RPCTreePage, len(set))
 	for i, p := range set {
 		out[i] = rpcTreePage(p)
-	}
-	return out, nil
-}
-
-// GetMarkerStatus returns, for each of exactly 64 distinct markers in request
-// order, whether the chain up to the anchor block spent it in the marker list
-// of a type ("coin" or "data"), and the block that did.
-func (api *GhostAPI) GetMarkerStatus(kind TreeKind, markers []common.Hash, anchorHash common.Hash) ([]RPCMarkerStatus, error) {
-	if api.history == nil {
-		return nil, errNoTreeHistory
-	}
-	status, err := api.history.MarkerStatus(ghosttree.Kind(kind), markers, anchorHash)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]RPCMarkerStatus, len(status))
-	for i, s := range status {
-		if s.Spent {
-			block := hexutil.Uint64(s.Block)
-			out[i] = RPCMarkerStatus{Spent: true, Block: &block}
-		}
 	}
 	return out, nil
 }

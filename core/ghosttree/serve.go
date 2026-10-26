@@ -28,11 +28,10 @@ import (
 
 // The history is served in whole pages and whole page-root lists, as of an
 // anchor block, and in the fixed shapes a restoring wallet reads (spec 05,
-// section 8): the tail of a page-root list from a multiple of TailPages, a
-// set of PageSetPages pages, and the status of exactly StatusMarkers
-// markers. Nothing else: no lookup by commitment, single position, single
-// marker, note or transaction, and no witness. A wallet asks for everything
-// from its scan start and computes its own witnesses.
+// section 8): the tail of a page-root list from a multiple of TailPages and a
+// set of PageSetPages pages. Nothing else: no lookup by commitment, single
+// position, marker, note or transaction, and no witness. A wallet asks for
+// everything from its scan start and computes its own witnesses.
 
 var (
 	// ErrUnknownAnchor is returned for an anchor block the node does not have.
@@ -64,10 +63,6 @@ var (
 	// pages of the tree in ascending order, or every page of a tree of 8
 	// pages or fewer.
 	ErrPageSetShape = errors.New("page set must be 8 distinct pages in order, or every page of a smaller tree")
-
-	// ErrStatusQuery is returned for a marker status query that is not
-	// exactly 64 distinct markers.
-	ErrStatusQuery = errors.New("marker status query must be exactly 64 distinct markers")
 )
 
 const (
@@ -77,17 +72,7 @@ const (
 	// PageSetPages is the number of pages of a page set: one page of the
 	// wallet and seven decoys.
 	PageSetPages = 8
-
-	// StatusMarkers is the number of markers of a status query.
-	StatusMarkers = 64
 )
-
-// MarkerStatus is the status of one marker as of an anchor: spent, with the
-// number of the block whose reveal spent it, or not (Block 0).
-type MarkerStatus struct {
-	Spent bool
-	Block uint64
-}
 
 // PageEntry is one filled position of a page: the leaf, its note and, for a
 // salted commit, its salt (nil for a leaf without one).
@@ -313,70 +298,6 @@ func (h *History) PageSet(kind Kind, treeIndex uint64, pages []uint32, anchor co
 			return nil, err
 		}
 		out = append(out, page)
-	}
-	return out, nil
-}
-
-// MarkerStatus returns, for each of exactly StatusMarkers distinct markers in
-// request order, whether the chain up to the anchor block spent it in the
-// marker list of a type (Coin reads CoinMarkers, Data reads DataMarkers),
-// and the number of the block that did. Each is one lookup in the
-// spent-marker index; no list is scanned. The anchor must be canonical and
-// applied to a history whose head is canonical and that keeps the index.
-// The coin and data lists are separate: a value spent in one is not spent
-// in the other.
-func (h *History) MarkerStatus(kind Kind, markers []common.Hash, anchor common.Hash) ([]MarkerStatus, error) {
-	if !kind.valid() {
-		return nil, ErrUnknownKind
-	}
-	if len(markers) != StatusMarkers {
-		return nil, fmt.Errorf("%w: %d markers", ErrStatusQuery, len(markers))
-	}
-	seen := make(map[common.Hash]bool, len(markers))
-	for _, m := range markers {
-		if seen[m] {
-			return nil, fmt.Errorf("%w: marker %x repeated", ErrStatusQuery, m)
-		}
-		seen[m] = true
-	}
-	list := CoinMarkers
-	if kind == Data {
-		list = DataMarkers
-	}
-	h.lock.RLock()
-	defer h.lock.RUnlock()
-
-	number, _, err := h.canonicalHeader(anchor)
-	if err != nil {
-		return nil, err
-	}
-	if err := h.covers(anchor, number); err != nil {
-		return nil, err
-	}
-	if marked, err := rawdb.ReadGhostTreeMarked(h.db); err != nil {
-		return nil, err
-	} else if !marked {
-		return nil, fmt.Errorf("%w: history without the spent-marker index", ErrHistoryNotReady)
-	}
-	out := make([]MarkerStatus, len(markers))
-	for i, m := range markers {
-		index, position, ok, err := rawdb.ReadGhostTreeMarker(h.db, uint8(list), m)
-		if err != nil {
-			return nil, fmt.Errorf("%w: %w", ErrCorruptHistory, err)
-		}
-		if !ok {
-			continue
-		}
-		rec, err := h.mustRead(slot{list, index, position})
-		if err != nil {
-			return nil, err
-		}
-		if rec.leaf != m {
-			return nil, fmt.Errorf("%w: %v marker %x indexed at list %d position %d of another", ErrCorruptHistory, list, m, index, position)
-		}
-		if rec.number <= number {
-			out[i] = MarkerStatus{Spent: true, Block: rec.number}
-		}
 	}
 	return out, nil
 }

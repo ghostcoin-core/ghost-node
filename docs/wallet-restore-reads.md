@@ -1,14 +1,12 @@
 # Wallet restore reads
 
 A wallet restoring at scale extends the witnesses it already holds instead of
-reading every page again, and asks whether its notes were spent without
-telling the node which one it cares about. The node serves three reads for
-this (spec 05, section 8: "Reading the tail of the page roots", "A page not
-yet full", "Marker status query", "Forbidden"; TH-19, TH-20). Each has a
-fixed shape, so the node never learns which page or marker is real, and none
-returns a witness: the wallet computes its own. The code is
-`History.PageRootTail`, `History.PageSet` and `History.MarkerStatus` in
-`core/ghosttree/serve.go` and the methods of `GhostAPI` in
+reading every page again. The node serves two reads for this, the page-root
+tail and the page set (spec 05, section 8: "Reading the tail of the page
+roots", "A page not yet full", "Forbidden"; TH-19, TH-20). Each has a fixed
+shape, so the node never learns which page is real, and none returns a
+witness: the wallet computes its own. The code is `History.PageRootTail` and
+`History.PageSet` in `core/ghosttree/serve.go` and the methods of `GhostAPI` in
 `internal/ethapi/ghosttree.go`.
 
 Every read is as of an anchor block, which must be on the canonical chain:
@@ -62,30 +60,6 @@ in request order, exactly as `ghost_getTreePage` returns a page of a tree:
 `{leaf, note, salt}`. All pages are read from one view of the tree and each
 is checked against its page root, as `ghost_getTreePage` does.
 
-## Marker status query
-
-```
-ghost_getMarkerStatus(kind, markers, anchorHash)
-```
-
-`markers` is an array of exactly 64 (`ghosttree.StatusMarkers`) distinct
-32-byte markers; any other count, or a repeated marker, is refused
-(`ErrStatusQuery`). `kind` is the type: `"coin"` reads the coin spent-marker
-list, `"data"` the data list, and the two are separate (a value spent as a
-coin marker is not spent as a data marker). The response is an array of
-`RPCMarkerStatus`, one per marker in request order:
-
-| Field | Content |
-|---|---|
-| `spent` | `true` if the canonical chain up to the anchor spent the marker |
-| `block` | the number of the block whose reveal spent it, hex quantity; left out when not spent |
-
-A marker spent in a block after the anchor is not spent as of the anchor. 32
-zero bytes is a valid query value and is never spent. The anchor must also be
-covered by the history (its head canonical and at or above the anchor, and
-the anchor applied), or the query is `ErrHistoryNotReady`, as for
-`ghost_getTreePage` of a marker list.
-
 ## Limits
 
 A public node must not be made to do unbounded work by one request. Every
@@ -96,14 +70,15 @@ before any page is read):
 
 - the page set returns at most 8 pages: at most 32,768 entries, 6,160,384
   bytes of leaves and notes (plus 16 bytes of salt for a salted commit);
-- the status query does exactly 64 index lookups;
 - the tail returns at most the 1,048,576 page roots (32 MiB) of a full tree,
   the figure spec 05 section 8 gives for the whole page-root list, so it adds
   no cost beyond `ghost_getPageRoots`.
 
 ## Spent-marker index
 
-A status query never scans a marker list. The history keeps, for every
+The index serves the reorg and rebuild bookkeeping: it is written when a
+block is applied and read when a block is reverted, so that neither scans a
+marker list. The history keeps, for every
 spent marker, the slot of the record that spent it:
 
 ```
@@ -117,7 +92,7 @@ marker twice, so the first spend wins); `revertBlock` deletes it with each
 marker record it removes, only when the entry points at the removed slot; a
 reset deletes every entry. A marker is spent as of the anchor iff the index
 has it and the record at its slot has a block number at or below the
-anchor's; that number is `block`. The key is 51 bytes long, so the state
+anchor's. The key is 51 bytes long, so the state
 pruner never takes it for a trie node.
 
 ### Rebuild
@@ -127,13 +102,15 @@ second version marker, the key `ghost-tree-marked` (one byte, 1), beside the
 tag index's `ghost-tree-tagged`. `Sync` treats a stored head without it as a
 stale history and builds the history again from genesis on its first call
 after the upgrade, as it does for any stale store; a reset deletes the
-marker with the head. Until then a status query is `ErrHistoryNotReady`.
+marker with the head.
 
 ## Not served
 
 - a witness, or any part of one computed by the node;
-- a read keyed by a single leaf, position or marker, or a status query of
-  any size but 64;
+- a read keyed by a single leaf, position or marker;
+- any read that names a marker, alone or among others: the marker is public
+  once its coin is spent and a decoy never is, so such a read links the
+  query to the spend;
 - an absence witness for a marker;
 - the block-range receipts request of 8 blocks (spec 05 section 12 item 5):
   the node serves receipts per block.

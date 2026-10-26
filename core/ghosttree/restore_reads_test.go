@@ -17,7 +17,6 @@
 package ghosttree
 
 import (
-	"bytes"
 	"errors"
 	"math/big"
 	"reflect"
@@ -294,149 +293,10 @@ func decoy(i int) common.Hash {
 	return crypto.Keccak256Hash([]byte("decoy"), []byte{byte(i)})
 }
 
-// realMarker is the real marker of vector marker-query-one-real.
-var realMarker = common.BytesToHash(bytes.Repeat([]byte{0x88}, common.HashLength))
-
-// oneRealQuery is the query of vector marker-query-one-real: decoys 0 to 36,
-// the real marker, decoys 37 to 62.
-func oneRealQuery() []common.Hash {
-	q := make([]common.Hash, 0, StatusMarkers)
-	for i := 0; i <= 36; i++ {
-		q = append(q, decoy(i))
-	}
-	q = append(q, realMarker)
-	for i := 37; i <= 62; i++ {
-		q = append(q, decoy(i))
-	}
-	return q
-}
-
-// statusQuery is a query of the given markers first and decoys after.
-func statusQuery(markers ...common.Hash) []common.Hash {
-	q := append([]common.Hash(nil), markers...)
-	for i := 100; len(q) < StatusMarkers; i++ {
-		q = append(q, decoy(i))
-	}
-	return q
-}
-
-// checkStatus asks a query and compares the answers with the spent ones,
-// by query position.
-func checkStatus(t *testing.T, h *History, kind Kind, q []common.Hash, anchor common.Hash, spent map[int]uint64) {
-	t.Helper()
-	got, err := h.MarkerStatus(kind, q, anchor)
-	if err != nil {
-		t.Fatalf("%v status: %v", kind, err)
-	}
-	if len(got) != len(q) {
-		t.Fatalf("%v status: %d answers for %d markers", kind, len(got), len(q))
-	}
-	for i, s := range got {
-		block, ok := spent[i]
-		if want := (MarkerStatus{Spent: ok, Block: block}); s != want {
-			t.Errorf("%v status of marker %d (%x): %+v, want %+v", kind, i, q[i], s, want)
-		}
-	}
-}
-
 func spend(b *testBlock, kind Kind, markers ...common.Hash) {
 	for _, m := range markers {
 		b.records = append(b.records, Record{Kind: kind, Leaf: m})
 	}
-}
-
-func TestMarkerStatusAnswersAsOfTheAnchor(t *testing.T) {
-	q := oneRealQuery()
-	if len(q) != StatusMarkers {
-		t.Fatalf("query of %d markers", len(q))
-	}
-	if want := common.HexToHash("5a5972a2ed527a3d3e8a844c7dc51475add0d52f8aba4cd1a17a277216cdeec2"); q[0] != want {
-		t.Fatalf("decoy 0 %x, want %x", q[0], want)
-	}
-	if want := common.HexToHash("b0c48d43efdf1668e8e3f912e3369b062ad00f37d33b188a421f83e211dd247c"); q[63] != want {
-		t.Fatalf("decoy 62 %x, want %x", q[63], want)
-	}
-
-	// Block 1 spends other markers of both kinds; block 2 spends decoy 5 as
-	// a data marker and the real marker's value as a coin marker; block 3
-	// spends decoy 20 as a data marker.
-	s := newSyncChain(t)
-	b1 := s.child(s.genesis, 1, 3, 2, 40, 40)
-	b2 := s.child(b1, 1, 1, 1, 1, 1)
-	spend(b2, DataMarkers, decoy(5))
-	spend(b2, CoinMarkers, realMarker)
-	b3 := s.child(b2, 1, 0, 0, 0, 0)
-	spend(b3, DataMarkers, decoy(20))
-	s.setHead(b3)
-
-	// As the vector's answers line says: nothing in the query is spent on a
-	// store with other markers spent.
-	for _, kind := range []Kind{Coin, Data} {
-		checkStatus(t, s.h, kind, q, b1.hash(), nil)
-		checkStatus(t, s.h, kind, q, s.genesis.hash(), nil)
-	}
-	// The markers spent in block 1 are spent in it, and found.
-	var spentInB1 []common.Hash
-	for _, r := range b1.records {
-		if r.Kind == DataMarkers {
-			spentInB1 = append(spentInB1, r.Leaf)
-		}
-	}
-	checkStatus(t, s.h, Data, statusQuery(spentInB1[0], spentInB1[39]), b3.hash(), map[int]uint64{0: 1, 1: 1})
-	checkStatus(t, s.h, Coin, statusQuery(spentInB1[0], spentInB1[39]), b3.hash(), nil)
-
-	// Decoy 5 is query position 5, decoy 20 position 20, the real marker
-	// position 37.
-	checkStatus(t, s.h, Data, q, b2.hash(), map[int]uint64{5: 2})
-	checkStatus(t, s.h, Data, q, b3.hash(), map[int]uint64{5: 2, 20: 3})
-	checkStatus(t, s.h, Data, q, b1.hash(), nil)
-	// The coin list is separate: the real marker's value is spent as a coin
-	// marker and not as a data marker, decoy 5 the other way round.
-	checkStatus(t, s.h, Coin, q, b2.hash(), map[int]uint64{37: 2})
-	checkStatus(t, s.h, Coin, q, b3.hash(), map[int]uint64{37: 2})
-
-	// 32 zero bytes is a valid query value, never spent.
-	zero := statusQuery(common.Hash{}, decoy(5), realMarker)
-	checkStatus(t, s.h, Data, zero, b3.hash(), map[int]uint64{1: 2})
-}
-
-func TestMarkerStatusRefusesWrongQueries(t *testing.T) {
-	s := newSyncChain(t)
-	b1 := s.child(s.genesis, 1, 2, 2, 5, 5)
-	spend(b1, DataMarkers, decoy(5))
-	s.setHead(b1)
-	side := s.child(s.genesis, 2, 1, 0, 0, 0)
-	before := historyContents(t, s.db)
-
-	q := oneRealQuery()
-	repeated := append([]common.Hash(nil), q...)
-	repeated[63] = repeated[10]
-	for _, w := range []struct {
-		name    string
-		kind    Kind
-		markers []common.Hash
-		anchor  common.Hash
-		want    error
-	}{
-		{"63 markers", Data, q[:63], b1.hash(), ErrStatusQuery},
-		{"65 markers", Data, append(append([]common.Hash(nil), q...), decoy(63)), b1.hash(), ErrStatusQuery},
-		{"a repeated marker", Data, repeated, b1.hash(), ErrStatusQuery},
-		{"no markers", Data, nil, b1.hash(), ErrStatusQuery},
-		{"an empty list", Coin, []common.Hash{}, b1.hash(), ErrStatusQuery},
-		{"coin marker kind", CoinMarkers, q, b1.hash(), ErrUnknownKind},
-		{"data marker kind", DataMarkers, q, b1.hash(), ErrUnknownKind},
-		{"unknown anchor", Data, q, common.Hash{1}, ErrUnknownAnchor},
-		{"non-canonical anchor", Data, q, side.hash(), ErrNotCanonical},
-	} {
-		if got, err := s.h.MarkerStatus(w.kind, w.markers, w.anchor); !errors.Is(err, w.want) {
-			t.Errorf("%s: %v, %v, want %v", w.name, got, err, w.want)
-		}
-		if !reflect.DeepEqual(before, historyContents(t, s.db)) {
-			t.Fatalf("%s: the store changed", w.name)
-		}
-	}
-	// The vector's query of 64 is answered.
-	checkStatus(t, s.h, Data, q, b1.hash(), map[int]uint64{5: 1})
 }
 
 // markerKeys returns the keys of the spent-marker index.
@@ -461,6 +321,31 @@ func markerAt(t *testing.T, db ethdb.Database, kind Kind, m common.Hash) (uint64
 		t.Fatal(err)
 	}
 	return index, position, ok
+}
+
+// indexedAt checks that the index holds marker m of a list at the list index
+// and position of the record that spent it in block number, or, for number 0,
+// that it does not hold m.
+func indexedAt(t *testing.T, h *History, kind Kind, m common.Hash, number uint64) {
+	t.Helper()
+	index, position, ok := markerAt(t, h.db, kind, m)
+	if number == 0 {
+		if ok {
+			t.Errorf("%v marker %x indexed at %d %d, want absent", kind, m, index, position)
+		}
+		return
+	}
+	if !ok {
+		t.Errorf("%v marker %x not indexed, want spent in block %d", kind, m, number)
+		return
+	}
+	rec, err := h.read(slot{kind, index, position})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec == nil || rec.leaf != m || rec.number != number {
+		t.Errorf("%v marker %x indexed at %d %d, holding %+v; want its spend in block %d", kind, m, index, position, rec, number)
+	}
 }
 
 func TestMarkerIndexFollowsRevertAndSync(t *testing.T) {
@@ -514,7 +399,7 @@ func TestMarkerIndexFollowsRevertAndSync(t *testing.T) {
 	old := s.branch(base[1], 2, 2, 5, 1, 3, 2)
 	spend(old[0], DataMarkers, decoy(7))
 	s.setHead(old[1])
-	checkStatus(t, s.h, Data, statusQuery(decoy(7)), old[1].hash(), map[int]uint64{0: 3})
+	indexedAt(t, s.h, DataMarkers, decoy(7), 3)
 	fork := s.branch(base[1], 3, 3, 4, 0, 2, 1)
 	s.setHead(fork[2])
 	sref := newSyncChain(t)
@@ -541,17 +426,22 @@ func TestMarkerIndexFollowsRevertAndSync(t *testing.T) {
 			forkCoin = r.Leaf
 		}
 	}
-	coinQuery := statusQuery(oldCoin, forkCoin)
-	dataQuery := statusQuery(decoy(7), baseData)
-	checkStatus(t, s.h, Coin, coinQuery, fork[2].hash(), map[int]uint64{1: 4})
-	checkStatus(t, s.h, Data, dataQuery, fork[2].hash(), map[int]uint64{1: 1})
+	checkIndex := func() {
+		t.Helper()
+		indexedAt(t, s.h, CoinMarkers, oldCoin, 0)
+		indexedAt(t, s.h, CoinMarkers, forkCoin, 4)
+		indexedAt(t, s.h, DataMarkers, decoy(7), 0)
+		indexedAt(t, s.h, DataMarkers, baseData, 1)
+	}
+	checkIndex()
 	if n := len(markerKeys(t, s.db)); n != 2*(3+2)+3*(2+1) {
 		t.Errorf("%d index keys after the sync, want one per marker of the branch", n)
 	}
 
 	// A store with a head and records but without the marker of the index,
-	// as built before it, is not served and is built again by Sync.
+	// as built before it, is built again by Sync.
 	built := historyContents(t, s.db)
+	keys := len(markerKeys(t, s.db))
 	if err := rawdb.DeleteGhostTreeMarked(s.db); err != nil {
 		t.Fatal(err)
 	}
@@ -561,15 +451,20 @@ func TestMarkerIndexFollowsRevertAndSync(t *testing.T) {
 	if n := len(markerKeys(t, s.db)); n != 0 {
 		t.Fatalf("%d index keys left", n)
 	}
-	if _, err := s.h.MarkerStatus(Coin, coinQuery, fork[2].hash()); !errors.Is(err, ErrHistoryNotReady) {
-		t.Errorf("history without the index: %v, want %v", err, ErrHistoryNotReady)
+	if marked, err := rawdb.ReadGhostTreeMarked(s.db); err != nil || marked {
+		t.Fatalf("index marker after the delete: %v, %v", marked, err)
 	}
 	s.setHead(fork[2])
+	if marked, err := rawdb.ReadGhostTreeMarked(s.db); err != nil || !marked {
+		t.Errorf("index marker after the rebuilding sync: %v, %v", marked, err)
+	}
+	if n := len(markerKeys(t, s.db)); n != keys {
+		t.Errorf("%d index keys after the rebuilding sync, want %d", n, keys)
+	}
 	if got := historyContents(t, s.db); !reflect.DeepEqual(got, built) {
 		t.Errorf("rebuilt history: %d keys, %d index keys; want %d", len(got), len(markerKeys(t, s.db)), len(built))
 	}
-	checkStatus(t, s.h, Coin, coinQuery, fork[2].hash(), map[int]uint64{1: 4})
-	checkStatus(t, s.h, Data, dataQuery, fork[2].hash(), map[int]uint64{1: 1})
+	checkIndex()
 	s.checkServed(fork[2])
 
 	// reset takes the whole index and its marker.
