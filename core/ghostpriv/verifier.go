@@ -55,6 +55,22 @@ type VerifyInputs struct {
 	Cf        common.Hash // the content fingerprint, data reveals only
 }
 
+// HoldInputs are the public inputs of a proof of holding of a data
+// commitment, as its verifier chooses them: the data tree root and the data
+// marker-set root from headers it accepts, its own identity, its fresh
+// challenge and the content fingerprint it asks about. The chain id and
+// genesis hash are the chain's. A proof of holding never goes on chain and
+// block processing checks none.
+type HoldInputs struct {
+	ChainID       uint64
+	Domain        common.Hash // the genesis block hash
+	Root          common.Hash // a data tree root
+	MarkerSetRoot common.Hash // a data marker-set root, a header's DataMarkerRoot
+	Verifier      common.Hash // the holding verifier's own identity
+	Challenge     common.Hash // the holding verifier's fresh challenge
+	Cf            common.Hash // the content fingerprint
+}
+
 // Verifier checks the proof of a reveal against the inputs the node computed.
 // It returns nil only for a proof it positively accepts; any doubt is an
 // error.
@@ -66,7 +82,7 @@ type Verifier interface {
 // verifier_cgo.go for builds that link the proof verifier of the ghost
 // repository (release builds on Linux and macOS, and builds with the
 // ghostproofs tag) and in verifier_nocgo.go, which rejects every reveal, for
-// all others.
+// all others, as is VerifyHold.
 
 type verifierBox struct{ v Verifier }
 

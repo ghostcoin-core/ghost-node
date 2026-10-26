@@ -31,3 +31,9 @@ unsettled-points-test = ["ghost-proofs/unsettled-points-test"]
 [profile.release]
 opt-level = 3
 codegen-units = 1
+
+# The data lifecycle fixture needs the test-only prover of the proof of
+# holding.
+[[example]]
+name = "datalifecyclefixture"
+required-features = ["unsettled-points-test"]

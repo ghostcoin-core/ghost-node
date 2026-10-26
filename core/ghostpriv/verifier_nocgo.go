@@ -27,3 +27,8 @@ func (rejectAll) VerifyReveal(*VerifyInputs, []byte) error { return ErrNoVerifie
 // This build does not link the proof verifier of the ghost repository (see
 // verifier_cgo.go), so it rejects every reveal.
 func DefaultVerifier() Verifier { return rejectAll{} }
+
+// VerifyHold verifies a proof of holding. This build does not link the proof
+// verifier of the ghost repository (see verifier_cgo.go), so it rejects every
+// proof with ErrNoVerifier.
+func VerifyHold(*HoldInputs, []byte) error { return ErrNoVerifier }
