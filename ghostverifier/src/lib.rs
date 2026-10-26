@@ -16,6 +16,13 @@
 //! plain rejection, `GHOST_PROOFS_REJECTED`, like any other proof that does
 //! not verify. The library needs no cargo feature: neither `build/ci.go` nor
 //! the release build enables one.
+//!
+//! It also adds a C interface around the shipped verifier of the proof of
+//! holding, `verify_hold`: [`ghost_verify_hold`], declared in `ghost_hold.h`.
+//! A proof of holding never goes on chain; the node checks none. The function
+//! is for a verifier that holds the node's headers, and for the node's tests.
+//! Only the prover of a proof of holding is test-only, behind the
+//! `unsettled-points-test` feature ([`prove_salted_hold`]).
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -24,10 +31,16 @@ use ghost_proofs::ffi::{
     GHOST_PROOFS_MALFORMED_INPUT, GHOST_PROOFS_PANICKED, GHOST_PROOFS_REJECTED, PROOF_MAX_BYTES,
     chain_params_from_bytes, verify_coin_reveal_bytes,
 };
-use ghost_proofs::{DataPurpose, DataReveal, Proof, ProofError, verify_salted_data_reveal};
+use ghost_proofs::{DataPurpose, DataReveal, HoldContext, Proof, ProofError, verify_hold, verify_salted_data_reveal};
 
 pub use ghost_proofs::ffi::ghost_verify_coin_reveal;
 pub use ghost_proofs::{PURPOSE_REVEAL, PURPOSE_REVOKE};
+
+/// The test-only prover of a proof of holding and the absence witness of a
+/// marker in a marker set built from the genesis set, for tests and the
+/// fixture generators only. The release library never has them.
+#[cfg(feature = "unsettled-points-test")]
+pub use ghost_proofs::{prove_salted_hold, prove_salted_hold_claiming, test_absence_witness};
 
 /// Length of a data reveal statement: the purpose (1), then the root, marker,
 /// party, fee, rule and content fingerprint `cf` (32 each), in that order, so
@@ -170,6 +183,106 @@ pub unsafe extern "C" fn ghost_verify_data_reveal(
             )
         };
         verify_data_reveal_bytes(params, statement, proof)
+    }))
+    .unwrap_or(GHOST_PROOFS_PANICKED)
+}
+
+/// Length of a proof of holding context: the type (2), then the root, the
+/// marker-set root, the verifier, the challenge and the content fingerprint
+/// `cf` (32 each), in that order.
+pub const HOLD_CONTEXT_BYTES: usize = 2 + 5 * 32;
+
+/// Decodes a proof of holding context in the layout of ghost_hold.h. Any type
+/// decodes; the verifier refuses every type but `DATA_V2`.
+pub fn hold_context_from_bytes(bytes: &[u8; HOLD_CONTEXT_BYTES]) -> HoldContext {
+    let word = |i: usize| -> [u8; 32] { bytes[2 + 32 * i..2 + 32 * (i + 1)].try_into().expect("32 bytes") };
+    HoldContext {
+        type_tag: [bytes[0], bytes[1]],
+        root: word(0),
+        marker_set_root: word(1),
+        verifier: word(2),
+        challenge: word(3),
+        cf: word(4),
+    }
+}
+
+/// Encodes a proof of holding context in the layout of ghost_hold.h.
+pub fn hold_context_to_bytes(ctx: &HoldContext) -> [u8; HOLD_CONTEXT_BYTES] {
+    let mut b = [0u8; HOLD_CONTEXT_BYTES];
+    b[..2].copy_from_slice(&ctx.type_tag);
+    for (i, w) in [&ctx.root, &ctx.marker_set_root, &ctx.verifier, &ctx.challenge, &ctx.cf].into_iter().enumerate() {
+        b[2 + 32 * i..2 + 32 * (i + 1)].copy_from_slice(w);
+    }
+    b
+}
+
+fn verify_hold_unguarded(params: &[u8], context: &[u8], proof: &[u8]) -> i32 {
+    let (Ok(params), Ok(context)) = (
+        <&[u8; CHAIN_PARAMS_BYTES]>::try_from(params),
+        <&[u8; HOLD_CONTEXT_BYTES]>::try_from(context),
+    ) else {
+        return GHOST_PROOFS_BAD_ARGUMENT;
+    };
+    if proof.is_empty() || proof.len() > PROOF_MAX_BYTES {
+        return GHOST_PROOFS_MALFORMED_INPUT;
+    }
+    let ctx = hold_context_from_bytes(context);
+    if ctx.check().is_err() {
+        return GHOST_PROOFS_BAD_ARGUMENT;
+    }
+    let Some(len) = serialized_len(proof) else {
+        return GHOST_PROOFS_MALFORMED_INPUT;
+    };
+    let params = chain_params_from_bytes(params);
+    match verify_hold(&params, &ctx, &Proof::from_bytes(proof[..len].to_vec())) {
+        Ok(()) => GHOST_PROOFS_ACCEPTED,
+        Err(ProofError::MalformedProof) => GHOST_PROOFS_MALFORMED_INPUT,
+        Err(_) => GHOST_PROOFS_REJECTED,
+    }
+}
+
+/// Verifies a proof of holding given as bytes in the layout of ghost_hold.h
+/// with the shipped verifier of ghost-proofs. Never panics.
+pub fn verify_hold_bytes(params: &[u8], context: &[u8], proof: &[u8]) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| verify_hold_unguarded(params, context, proof))).unwrap_or(GHOST_PROOFS_PANICKED)
+}
+
+/// Verifies a proof of holding against the context and the chain parameters,
+/// as declared in ghost_hold.h. The challenge book is the caller's: this
+/// checks the proof only.
+///
+/// # Safety
+///
+/// Each non-null pointer must point to at least its length of readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ghost_verify_hold(
+    params: *const u8,
+    params_len: usize,
+    context: *const u8,
+    context_len: usize,
+    proof: *const u8,
+    proof_len: usize,
+) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| {
+        if params.is_null() || context.is_null() || proof.is_null() {
+            return GHOST_PROOFS_BAD_ARGUMENT;
+        }
+        if params_len != CHAIN_PARAMS_BYTES || context_len != HOLD_CONTEXT_BYTES {
+            return GHOST_PROOFS_BAD_ARGUMENT;
+        }
+        if proof_len == 0 || proof_len > PROOF_MAX_BYTES {
+            return GHOST_PROOFS_MALFORMED_INPUT;
+        }
+        // SAFETY: the pointers are not null and the caller guarantees each
+        // points to at least its length of readable bytes.
+        let (params, context, proof) = unsafe {
+            (
+                std::slice::from_raw_parts(params, params_len),
+                std::slice::from_raw_parts(context, context_len),
+                std::slice::from_raw_parts(proof, proof_len),
+            )
+        };
+        verify_hold_bytes(params, context, proof)
     }))
     .unwrap_or(GHOST_PROOFS_PANICKED)
 }

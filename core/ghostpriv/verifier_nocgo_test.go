@@ -96,3 +96,13 @@ func TestDefaultVerifierRejectsEveryReveal(t *testing.T) {
 		t.Fatalf("the reveal is otherwise valid: %v", err)
 	}
 }
+
+// TestVerifyHoldWithoutVerifier checks that a build without the proof
+// verifier rejects every proof of holding.
+func TestVerifyHoldWithoutVerifier(t *testing.T) {
+	for _, in := range []*ghostpriv.HoldInputs{nil, {Cf: common.Hash{1}}} {
+		if err := ghostpriv.VerifyHold(in, make([]byte, 64)); !errors.Is(err, ghostpriv.ErrNoVerifier) {
+			t.Errorf("inputs %v: %v, want %v", in, err, ghostpriv.ErrNoVerifier)
+		}
+	}
+}
