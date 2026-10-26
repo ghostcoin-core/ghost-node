@@ -8,20 +8,22 @@ consensus parts on top. The reasons are in the Ghost repository's
 [base client decision](https://github.com/ghostcoin-core/ghost/blob/main/docs/decisions/0001-base-client.md).
 
 **This project is experimental.** Nothing here has been audited by an outside
-firm and no Ghost network exists yet. Do not run this node for anything of
-value.
+firm and the Ghost network has not launched. The only shared network is a
+public test network whose coins have no value. Do not run this node for
+anything of value.
 
 ## Status
 
 The fork point is chosen and recorded, the parts of Core-Geth that Ghost does
 not use are removed or turned off, and every change is built reproducibly and
-tested in CI. The node mines with RandomX, but only on an internal test
-network and in developer mode: no Ghost network is built in yet, and a node
-refuses to start on any other chain. The security catch-up on upstream fixes
-is still to come.
+tested in CI. The node mines with RandomX on the public test network built
+into it, on the internal test network and in developer mode, and refuses to
+start on any other chain. The security catch-up on upstream fixes is still to
+come.
 
 - Fork point: [docs/decisions/0001-fork-point.md](docs/decisions/0001-fork-point.md)
 - What is removed and turned off: [docs/removed-and-turned-off.md](docs/removed-and-turned-off.md)
+- The public test network: [docs/public-testnet.md](docs/public-testnet.md)
 - The internal test network: [docs/internal-network.md](docs/internal-network.md)
 
 ## Running a node
@@ -31,15 +33,22 @@ terminal, without knowing anything about it. The node is built for that:
 
 - each release is one self-contained executable per platform, built
   reproducibly (on Linux it is statically linked);
-- when Ghost's network launches, its genesis and bootstrap nodes are built in,
-  so `geth` with no flags and no config file runs a Ghost node, with sensible
-  defaults for everything else.
+- a network's genesis and seed nodes are built in, so `geth` with no flags and
+  no config file runs a Ghost node, with sensible defaults for everything
+  else.
 
-No Ghost network exists yet, so today nothing is built in and the node will
-not start on an empty data directory rather than join some other chain. To
-try it, use developer mode (`geth --dev`), or run the two-node internal test
-network with one command, `scripts/internal-net.sh` (see
-[docs/internal-network.md](docs/internal-network.md)).
+Until Ghost launches, the network built in is the **public test network**:
+`geth` with no flags on an empty data directory writes its genesis, finds its
+seed nodes and joins it. It is a test network, not the launch network: its
+chain ID and network ID are 6777972, its coins have no value, and it may be
+reset. A data directory that already holds a chain keeps it; the built-in
+genesis is used only when the data directory holds none. `--bootnodes` or the
+config file replace the built-in seed list. See
+[docs/public-testnet.md](docs/public-testnet.md).
+
+For development, use developer mode (`geth --dev`), or run the two-node
+private internal test network with one command, `scripts/internal-net.sh`
+(see [docs/internal-network.md](docs/internal-network.md)).
 
 ### The one line
 

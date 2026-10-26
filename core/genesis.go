@@ -59,8 +59,9 @@ func CheckProofOfWorkOnly(config ctypes.ChainConfigurator) error {
 	return nil
 }
 
-// ErrGenesisNotGiven is returned when the database holds no genesis block and
-// none was given. No network is built in, so there is no default to fall back to.
+// ErrGenesisNotGiven is returned when the database holds a genesis block
+// without its state or configuration and no genesis was given to rebuild
+// them from. Only an empty database falls back to the built-in network.
 var ErrGenesisNotGiven = errors.New("no genesis block: initialise the database with a genesis file first")
 
 // ChainOverrides contains the changes to chain config.
@@ -139,10 +140,13 @@ func SetupGenesisBlockWithOverride(db ethdb.Database, triedb *triedb.Database, g
 	stored := rawdb.ReadCanonicalHash(db, 0)
 	if (stored == common.Hash{}) {
 		if genesis == nil {
-			// No network is built in: a node has to be given its genesis.
-			return nil, common.Hash{}, ErrGenesisNotGiven
+			// The database holds no chain: start the built-in public test
+			// network. A stored chain is never replaced by it.
+			log.Info("Writing the public test network's genesis block")
+			genesis = ghost.TestNetGenesis()
+		} else {
+			log.Info("Writing custom genesis block")
 		}
-		log.Info("Writing custom genesis block")
 		applyOverrides(genesis.Config)
 		block, err := CommitGenesis(genesis, db, triedb)
 		if err != nil {
@@ -331,9 +335,13 @@ func LoadChainConfig(db ethdb.Database, genesis *genesisT.Genesis) (ctypes.Chain
 		}
 		return genesis.Config, nil
 	}
-	// There is no stored chain config and no new config provided. No network
-	// is built in, so there is no default to use.
-	return nil, ErrGenesisNotGiven
+	// There is no stored chain config and no new config provided. A database
+	// holding no chain starts the built-in public test network; one holding
+	// a genesis block of its own is never taken for it.
+	if stored != (common.Hash{}) && stored != ghost.TestNetGenesisHash {
+		return nil, ErrGenesisNotGiven
+	}
+	return ghost.TestNetGenesis().Config, nil
 }
 
 func configOrDefault(g *genesisT.Genesis, ghash common.Hash) ctypes.ChainConfigurator {
@@ -538,8 +546,8 @@ func GenesisToBlock(g *genesisT.Genesis, db ethdb.Database) *types.Block {
 // the empty coin and data trees and of the empty data marker set. The genesis
 // state holds no tree state, so its state root stays that of the allocation.
 //
-// The Ghost chains are the internal test network and developer mode, both
-// Core-Geth configurations. Upstream test configurations share developer
+// The Ghost chains are the public test network, the internal test network
+// and developer mode, all Core-Geth configurations. Upstream test configurations share developer
 // mode's chain ID 1337 as go-ethereum configurations and keep their genesis
 // unchanged, as does a genesis whose header cannot take the Ghost layout
 // (no base fee, or a withdrawals, blob or beacon root field).
@@ -551,7 +559,7 @@ func setGenesisTreeRoots(g *genesisT.Genesis, head *types.Header) {
 	if id == nil || !id.IsUint64() {
 		return
 	}
-	if n := id.Uint64(); n != ghost.InternalNetChainID && n != ghost.DeveloperChainID {
+	if n := id.Uint64(); n != ghost.InternalNetChainID && n != ghost.TestNetChainID && n != ghost.DeveloperChainID {
 		return
 	}
 	if head.BaseFee == nil || head.WithdrawalsHash != nil || head.BlobGasUsed != nil || head.ExcessBlobGas != nil || head.ParentBeaconRoot != nil {

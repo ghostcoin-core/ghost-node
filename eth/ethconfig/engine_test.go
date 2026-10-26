@@ -34,7 +34,7 @@ import (
 // other chain ID is refused with a one-line message naming it.
 func TestUnknownChainIDHasNoEngine(t *testing.T) {
 	db := rawdb.NewMemoryDatabase()
-	for _, id := range []*big.Int{big.NewInt(1), big.NewInt(61), big.NewInt(7), big.NewInt(6_777_972), new(big.Int).Lsh(big.NewInt(1), 70), nil} {
+	for _, id := range []*big.Int{big.NewInt(1), big.NewInt(61), big.NewInt(7), big.NewInt(6_777_973), new(big.Int).Lsh(big.NewInt(1), 70), nil} {
 		engine, err := CreateConsensusEngine(nil, &ethash.Config{}, nil, id, nil, false, db)
 		if err == nil {
 			t.Errorf("chain ID %v: engine %T created, want a refusal", id, engine)
@@ -48,7 +48,7 @@ func TestUnknownChainIDHasNoEngine(t *testing.T) {
 			t.Errorf("chain ID %v: message is not one line naming the chain ID: %q", id, msg)
 		}
 	}
-	for _, id := range []int64{ghost.InternalNetChainID, 1337} {
+	for _, id := range []int64{ghost.TestNetChainID, ghost.InternalNetChainID, 1337} {
 		engine, err := CreateConsensusEngine(nil, &ethash.Config{}, nil, big.NewInt(id), nil, false, db)
 		if err != nil {
 			t.Fatalf("chain ID %d refused: %v", id, err)
@@ -64,11 +64,11 @@ func TestUnknownChainIDHasNoEngine(t *testing.T) {
 	}
 }
 
-// TestEngineParamsByChainID checks that the internal network and developer
-// mode use the internal network's consensus parameters.
+// TestEngineParamsByChainID checks that the public test network, the internal
+// network and developer mode use the internal network's consensus parameters.
 func TestEngineParamsByChainID(t *testing.T) {
 	want := ghost.InternalNetParams()
-	for _, id := range []int64{ghost.InternalNetChainID, ghost.DeveloperChainID} {
+	for _, id := range []int64{ghost.TestNetChainID, ghost.InternalNetChainID, ghost.DeveloperChainID} {
 		params, err := consensusParams(big.NewInt(id))
 		if err != nil {
 			t.Fatalf("chain ID %d: %v", id, err)

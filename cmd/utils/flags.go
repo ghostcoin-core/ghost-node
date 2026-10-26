@@ -1018,18 +1018,23 @@ func setNodeUserIdent(ctx *cli.Context, cfg *node.Config) {
 }
 
 // setBootstrapNodes creates a list of bootstrap nodes from the command line
-// flags or the config file. No network is built in, so there are no default
-// bootstrap nodes.
+// flags or the config file, or else the built-in seed nodes of the public test
+// network.
 //
 // Priority order for bootnodes configuration:
 //
 // 1. --bootnodes flag
 // 2. Config file
+// 3. The public test network's seed nodes
 func setBootstrapNodes(ctx *cli.Context, cfg *p2p.Config) {
-	if !ctx.IsSet(BootnodesFlag.Name) {
-		return // Keep what the config file set, if anything.
+	switch {
+	case ctx.IsSet(BootnodesFlag.Name):
+		cfg.BootstrapNodes = mustParseBootnodes(SplitAndTrim(ctx.String(BootnodesFlag.Name)))
+	case cfg.BootstrapNodes != nil:
+		// Keep what the config file set.
+	default:
+		cfg.BootstrapNodes = mustParseBootnodes(ghost.TestNetBootnodes)
 	}
-	cfg.BootstrapNodes = mustParseBootnodes(SplitAndTrim(ctx.String(BootnodesFlag.Name)))
 }
 
 func mustParseBootnodes(urls []string) []*enode.Node {

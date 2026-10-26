@@ -181,9 +181,10 @@ func TestCustomBackend(t *testing.T) {
 		{ // Reject invalid backend choice
 			initArgs:   []string{"--db.engine", "mssql"},
 			initExpect: `Fatal: Invalid choice for db.engine 'mssql', allowed 'leveldb' or 'pebble'`,
-			// Since the init fails, the data directory has no genesis, and with
-			// no network built in the node refuses to start.
-			execExpect: `no genesis block: initialise the database with a genesis file first`,
+			// Since the init fails, the data directory has no genesis, and the
+			// node starts the built-in public test network, whose genesis
+			// nonce is zero.
+			execExpect: "0x0000000000000000",
 		},
 	} {
 		if err := testfunc(t, tt); err != nil {

@@ -68,11 +68,6 @@ func TestGethFailureToLaunch(t *testing.T) {
 			expectErrorReStr: "(?ism)incorrect usage.*",
 		},
 		{
-			// No network is built in, so an empty data directory needs a genesis first.
-			flags:            []string{"--port", "0", "--maxpeers", "0", "--nodiscover", "--nat", "none"},
-			expectErrorReStr: "(?ism).*no genesis block: initialise the database with a genesis file first.*",
-		},
-		{
 			// The Ethereum network flags are gone.
 			flags:            []string{"--mainnet"},
 			expectErrorReStr: "(?ism)flag provided but not defined.*",
