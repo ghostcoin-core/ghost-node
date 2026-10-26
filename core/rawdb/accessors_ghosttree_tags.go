@@ -24,8 +24,12 @@ import (
 )
 
 // The tag index of the commitment tree history: for each leaf of a tree, a
-// key made of the first bytes of its note and its position, with no value,
-// so that the positions of one tag range are one ordered key range. It is
+// key made of its level, the first bytes of its note and its position, with
+// no value, so that the positions of one tag range in one level are one
+// ordered key range. The level of a position is the bucket bits of the tree
+// once the position is filled; a level holds positions below about twice the
+// leaf count of any tree whose bucket bits are that level, so a read as of an
+// anchor visits no level above the anchor's and few positions past it. It is
 // kept by core/ghosttree next to the records.
 
 // GhostTreeTagged is a position of a tree with the tag of its note.
@@ -34,24 +38,29 @@ type GhostTreeTagged struct {
 	Position uint32
 }
 
-// WriteGhostTreeTag stores the tag of the note at a position of a tree.
-func WriteGhostTreeTag(db ethdb.KeyValueWriter, kind uint8, treeIndex uint64, tag [GhostTreeTagBytes]byte, position uint32) error {
-	return db.Put(ghostTreeTagKey(kind, treeIndex, tag, position), []byte{})
+// WriteGhostTreeTag stores the tag of the note at a position of a tree
+// (kind 0 or 1) in its level.
+func WriteGhostTreeTag(db ethdb.KeyValueWriter, kind, level uint8, treeIndex uint64, tag [GhostTreeTagBytes]byte, position uint32) error {
+	return db.Put(ghostTreeTagKey(kind, level, treeIndex, tag, position), []byte{})
 }
 
 // DeleteGhostTreeTag removes the tag of the note at a position of a tree.
-func DeleteGhostTreeTag(db ethdb.KeyValueWriter, kind uint8, treeIndex uint64, tag [GhostTreeTagBytes]byte, position uint32) error {
-	return db.Delete(ghostTreeTagKey(kind, treeIndex, tag, position))
+func DeleteGhostTreeTag(db ethdb.KeyValueWriter, kind, level uint8, treeIndex uint64, tag [GhostTreeTagBytes]byte, position uint32) error {
+	return db.Delete(ghostTreeTagKey(kind, level, treeIndex, tag, position))
 }
 
-// ReadGhostTreeTagRange returns every stored position of a tree whose tag
-// lies in first to last, both included, in tag order and, within a tag, in
-// position order.
-func ReadGhostTreeTagRange(db ethdb.Iteratee, kind uint8, treeIndex uint64, first, last uint32) ([]GhostTreeTagged, error) {
+// ReadGhostTreeTagRange returns the stored positions below count of one
+// level of a tree whose tag lies in first to last, both included, in tag
+// order and, within a tag, in position order. Positions at or above count
+// are passed over and never kept.
+func ReadGhostTreeTagRange(db ethdb.Iteratee, kind, level uint8, treeIndex uint64, first, last uint32, count uint64) ([]GhostTreeTagged, error) {
 	if first > last || last >= 1<<(8*GhostTreeTagBytes) {
 		return nil, fmt.Errorf("tag range %#x to %#x", first, last)
 	}
-	prefix := ghostTreeTagTreeKey(kind, treeIndex)
+	if count == 0 {
+		return nil, nil
+	}
+	prefix := ghostTreeTagTreeKey(kind, level, treeIndex)
 	start := []byte{byte(first >> 16), byte(first >> 8), byte(first)}
 	it := db.NewIterator(prefix, start)
 	defer it.Release()
@@ -66,7 +75,9 @@ func ReadGhostTreeTagRange(db ethdb.Iteratee, kind uint8, treeIndex uint64, firs
 		if tag > last {
 			break
 		}
-		out = append(out, GhostTreeTagged{Tag: tag, Position: binary.BigEndian.Uint32(rest[GhostTreeTagBytes:])})
+		if position := binary.BigEndian.Uint32(rest[GhostTreeTagBytes:]); uint64(position) < count {
+			out = append(out, GhostTreeTagged{Tag: tag, Position: position})
+		}
 	}
 	return out, it.Error()
 }

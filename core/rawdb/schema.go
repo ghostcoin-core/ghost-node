@@ -141,7 +141,7 @@ var (
 	ghostTreeLeafPrefix     = []byte("ghost-tree-leaf-")  // ghostTreeLeafPrefix + kind (1 byte) + tree index (uint64 big endian) + position (uint32 big endian) -> block number, leaf, note
 	ghostTreeBlockPrefix    = []byte("ghost-tree-block-") // ghostTreeBlockPrefix + block hash -> block number, positions written by the block
 	ghostTreePageRootPrefix = []byte("ghost-tree-page-")  // ghostTreePageRootPrefix + kind (1 byte) + tree index (uint64 big endian) + page (uint32 big endian) -> root of the full page
-	ghostTreeTagPrefix      = []byte("ghost-tree-tag-")   // ghostTreeTagPrefix + kind (1 byte) + tree index (uint64 big endian) + tag (3 bytes) + position (uint32 big endian) -> empty
+	ghostTreeTagPrefix      = []byte("ghost-tree-tag-")   // ghostTreeTagPrefix + level << 1 | kind (1 byte) + tree index (uint64 big endian) + tag (3 bytes) + position (uint32 big endian) -> empty
 	ghostTreeTaggedKey      = []byte("ghost-tree-tagged") // 1 once the history keeps the tag index
 
 	// Index of the tree roots carried by the headers of the canonical chain:
@@ -271,18 +271,20 @@ func ghostTreePageRootKey(kind uint8, treeIndex uint64, page uint32) []byte {
 // GhostTreeTagBytes is the length of a note's lookup tag, its first bytes.
 const GhostTreeTagBytes = 3
 
-// ghostTreeTagTreeKey = ghostTreeTagPrefix + kind + tree index
-func ghostTreeTagTreeKey(kind uint8, treeIndex uint64) []byte {
+// ghostTreeTagTreeKey = ghostTreeTagPrefix + level << 1 | kind + tree index.
+// The kind is 0 or 1 (a tree, never a marker list) and the level at most 24,
+// so the byte keeps the key 31 bytes long.
+func ghostTreeTagTreeKey(kind, level uint8, treeIndex uint64) []byte {
 	key := make([]byte, len(ghostTreeTagPrefix)+1+8)
 	copy(key, ghostTreeTagPrefix)
-	key[len(ghostTreeTagPrefix)] = kind
+	key[len(ghostTreeTagPrefix)] = level<<1 | kind&1
 	binary.BigEndian.PutUint64(key[len(ghostTreeTagPrefix)+1:], treeIndex)
 	return key
 }
 
-// ghostTreeTagKey = ghostTreeTagPrefix + kind + tree index + tag + position
-func ghostTreeTagKey(kind uint8, treeIndex uint64, tag [GhostTreeTagBytes]byte, position uint32) []byte {
-	key := ghostTreeTagTreeKey(kind, treeIndex)
+// ghostTreeTagKey = ghostTreeTagPrefix + level << 1 | kind + tree index + tag + position
+func ghostTreeTagKey(kind, level uint8, treeIndex uint64, tag [GhostTreeTagBytes]byte, position uint32) []byte {
+	key := ghostTreeTagTreeKey(kind, level, treeIndex)
 	key = append(key, tag[:]...)
 	return binary.BigEndian.AppendUint32(key, position)
 }

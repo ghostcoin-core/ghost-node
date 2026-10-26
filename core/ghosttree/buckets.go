@@ -76,6 +76,16 @@ type NoteBucket struct {
 	Entries []BucketEntry
 }
 
+// tagLevel is the level of the tag index a position is kept in: the bucket
+// bits of the tree once the position is filled. A tree whose bucket bits are
+// m has its positions in levels 0 to m, and level m ends below twice its
+// leaf count (below 8,192 for m = 0), so a read as of an anchor visits no
+// later level and at most about as many positions past the anchor as before
+// it, however far the tree has grown since.
+func tagLevel(position uint32) uint8 {
+	return uint8(BucketBits(uint64(position) + 1))
+}
+
 // noteTag returns the tag a note starts with.
 func noteTag(note *[NoteBytes]byte) (tag [TagBytes]byte) {
 	copy(tag[:], note[:TagBytes])
@@ -138,20 +148,26 @@ func ReadNoteBucket(h *History, kind Kind, treeIndex uint64, bits uint32, prefix
 	if want := BucketBits(count); bits != want {
 		return nil, fmt.Errorf("%w: %d bits, %v tree %d of %d leaves at block %d has %d", ErrBucketBits, bits, kind, treeIndex, count, number, want)
 	}
-	first, last := tagRange(bits, prefix)
-	tagged, err := rawdb.ReadGhostTreeTagRange(h.db, uint8(kind), treeIndex, first, last)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrCorruptHistory, err)
+	out := &NoteBucket{Entries: []BucketEntry{}}
+	if count == 0 {
+		return out, nil
 	}
-	positions := make([]uint32, 0, len(tagged))
-	for _, t := range tagged {
-		if uint64(t.Position) < count {
+	// The positions below count are in levels 0 to bits; no later level is
+	// read, and the positions past the anchor in level bits are passed over.
+	first, last := tagRange(bits, prefix)
+	var positions []uint32
+	for level := uint32(0); level <= bits; level++ {
+		tagged, err := rawdb.ReadGhostTreeTagRange(h.db, uint8(kind), uint8(level), treeIndex, first, last, count)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrCorruptHistory, err)
+		}
+		for _, t := range tagged {
 			positions = append(positions, t.Position)
 		}
 	}
 	slices.Sort(positions)
 
-	out := &NoteBucket{Entries: make([]BucketEntry, 0, len(positions))}
+	out.Entries = make([]BucketEntry, 0, len(positions))
 	for _, pos := range positions {
 		rec, err := h.mustRead(slot{kind, treeIndex, pos})
 		if err != nil {

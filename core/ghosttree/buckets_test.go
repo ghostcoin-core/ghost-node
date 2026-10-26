@@ -114,6 +114,44 @@ func tagKeys(t *testing.T, db ethdb.Database) []string {
 	return out
 }
 
+// bucketWork counts what reads of the database cost: iterators opened, keys
+// they stepped over and point reads.
+type bucketWork struct {
+	iterators, steps, reads int
+}
+
+// countingDB is a database that counts the work of the reads made through
+// it.
+type countingDB struct {
+	ethdb.Database
+	work *bucketWork
+}
+
+func (d countingDB) NewIterator(prefix, start []byte) ethdb.Iterator {
+	d.work.iterators++
+	return &countingIterator{Iterator: d.Database.NewIterator(prefix, start), work: d.work}
+}
+
+func (d countingDB) Get(key []byte) ([]byte, error) {
+	d.work.reads++
+	return d.Database.Get(key)
+}
+
+func (d countingDB) Has(key []byte) (bool, error) {
+	d.work.reads++
+	return d.Database.Has(key)
+}
+
+type countingIterator struct {
+	ethdb.Iterator
+	work *bucketWork
+}
+
+func (it *countingIterator) Next() bool {
+	it.work.steps++
+	return it.Iterator.Next()
+}
+
 // checkBuckets reads every bucket of tree 0 of both kinds at an anchor and
 // compares them with the leaves of the tree.
 func checkBuckets(t *testing.T, h *History, anchor common.Hash, want map[Kind][]PageEntry) {
@@ -251,7 +289,7 @@ func TestNoteBucketReturnsTheTagPrefixInPositionOrder(t *testing.T) {
 	// The read follows the tag index: a position whose tag key is gone is
 	// not in its bucket.
 	tag := noteTag(&coin[17].Note)
-	if err := rawdb.DeleteGhostTreeTag(c.db, uint8(Coin), 0, tag, 17); err != nil {
+	if err := rawdb.DeleteGhostTreeTag(c.db, uint8(Coin), tagLevel(17), 0, tag, 17); err != nil {
 		t.Fatal(err)
 	}
 	b, err := ReadNoteBucket(c.h, Coin, 0, 1, 0, anchor)
@@ -267,7 +305,7 @@ func TestNoteBucketReturnsTheTagPrefixInPositionOrder(t *testing.T) {
 		}
 	}
 	// A tag key under a tag the note does not start with is corrupt.
-	if err := rawdb.WriteGhostTreeTag(c.db, uint8(Coin), 0, [TagBytes]byte{0, 0, 1}, 4); err != nil {
+	if err := rawdb.WriteGhostTreeTag(c.db, uint8(Coin), tagLevel(4), 0, [TagBytes]byte{0, 0, 1}, 4); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ReadNoteBucket(c.h, Coin, 0, 1, 0, anchor); !errors.Is(err, ErrCorruptHistory) {
@@ -320,6 +358,100 @@ func TestNoteBucketIsAsOfTheAnchor(t *testing.T) {
 	// Genesis has an empty tree 0 with one empty bucket.
 	if b, err := ReadNoteBucket(c.h, Coin, 0, 0, 0, c.blocks[0].hash()); err != nil || len(b.Entries) != 0 {
 		t.Errorf("genesis bucket: %v, %v", b, err)
+	}
+
+	// The work of a read as of an anchor does not grow with the history
+	// after it. The store is a real key-value store, so that its iterators
+	// cost what the keys they visit cost.
+	db, err := rawdb.NewPebbleDBDatabase(t.TempDir(), 16, 16, "", false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	g := &testChain{t: t, db: db, h: NewHistory(db)}
+	g.insert(c.blocks[0])
+	anchorBlock := g.taggedBlock(1, 8300, 0) // 1 bucket bit
+	g.insert(anchorBlock)
+	anchorCoin := treeEntries(g.blocks, Coin)
+	work := new(bucketWork)
+	counted := &History{p: Release, db: countingDB{db, work}}
+	type measured struct {
+		work    [2]bucketWork
+		entries [2][]BucketEntry
+		allocs  float64
+	}
+	measure := func(when string) measured {
+		t.Helper()
+		if err := db.Compact(nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		var m measured
+		for prefix := uint32(0); prefix < 2; prefix++ {
+			*work = bucketWork{}
+			b, err := ReadNoteBucket(counted, Coin, 0, 1, prefix, anchorBlock.hash())
+			if err != nil {
+				t.Fatalf("%s: bucket %d: %v", when, prefix, err)
+			}
+			if w := wantBucket(anchorCoin, 1, prefix); !reflect.DeepEqual(b.Entries, w) {
+				t.Fatalf("%s: bucket %d: %d entries, want %d", when, prefix, len(b.Entries), len(w))
+			}
+			m.work[prefix], m.entries[prefix] = *work, b.Entries
+		}
+		m.allocs = testing.AllocsPerRun(3, func() {
+			if _, err := ReadNoteBucket(g.h, Coin, 0, 1, 0, anchorBlock.hash()); err != nil {
+				t.Fatal(err)
+			}
+		})
+		// The empty tree at genesis is answered without reading the index.
+		*work = bucketWork{}
+		if b, err := ReadNoteBucket(counted, Coin, 0, 0, 0, g.blocks[0].hash()); err != nil || len(b.Entries) != 0 {
+			t.Fatalf("%s: genesis bucket: %v, %v", when, b, err)
+		}
+		if work.iterators != 0 || work.steps != 0 {
+			t.Errorf("%s: the empty genesis tree opened %d iterators over %d keys", when, work.iterators, work.steps)
+		}
+		return m
+	}
+	// Positions 8300 to 16382 complete the level of the anchor's bits; what
+	// comes after them is never visited.
+	g.insert(g.taggedBlock(2, 8100, 0))
+	filled := measure("level filled")
+	g.insert(g.taggedBlock(3, 20000, 0))
+	g.insert(g.taggedBlock(4, 20000, 0))
+	grown := measure("tree grown")
+	if n := len(treeEntries(g.blocks, Coin)); n != 56400 || BucketBits(uint64(n)) != 3 {
+		t.Fatalf("%d coin leaves", n)
+	}
+	for prefix := 0; prefix < 2; prefix++ {
+		// The leaf count's binary search reads a record where one now
+		// exists, so point reads may differ by its depth; nothing else.
+		f, gr := filled.work[prefix], grown.work[prefix]
+		if f.iterators != gr.iterators || f.steps != gr.steps || gr.reads > f.reads+32 {
+			t.Errorf("bucket %d: work %+v once the anchor's level is filled, %+v after 40,000 more leaves", prefix, f, gr)
+		}
+		// At most the positions of levels 0 and 1 and one step past the
+		// range of each.
+		if s := grown.work[prefix].steps; s > 16383+2 {
+			t.Errorf("bucket %d: %d index keys visited for a tree of 8300 leaves at the anchor", prefix, s)
+		}
+	}
+	if grown.allocs > filled.allocs*5/4+32 {
+		t.Errorf("allocations per read grew from %.0f to %.0f with the history after the anchor", filled.allocs, grown.allocs)
+	}
+	// The index read keeps no position past the anchor.
+	for level := uint8(0); level <= 3; level++ {
+		tagged, err := rawdb.ReadGhostTreeTagRange(db, uint8(Coin), level, 0, 0, 1<<24-1, uint64(len(anchorCoin)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range tagged {
+			if e.Position >= uint32(len(anchorCoin)) {
+				t.Fatalf("level %d: position %d past the anchor kept", level, e.Position)
+			}
+		}
+		if level >= 2 && len(tagged) != 0 {
+			t.Errorf("level %d holds %d positions below the anchor", level, len(tagged))
+		}
 	}
 }
 

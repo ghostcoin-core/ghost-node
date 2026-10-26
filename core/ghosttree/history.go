@@ -269,7 +269,7 @@ func (h *History) applyBlock(batch ethdb.KeyValueWriter, blockHash common.Hash, 
 		// A leaf of a tree is indexed by the tag its note starts with; a
 		// marker has no note and no tag.
 		if r.Kind.valid() {
-			if err := rawdb.WriteGhostTreeTag(batch, uint8(r.Kind), r.TreeIndex, noteTag(&rec.note), r.Position); err != nil {
+			if err := rawdb.WriteGhostTreeTag(batch, uint8(r.Kind), tagLevel(r.Position), r.TreeIndex, noteTag(&rec.note), r.Position); err != nil {
 				return err
 			}
 		}
@@ -374,7 +374,7 @@ func (h *History) revertBlock(batch ethdb.KeyValueWriter, blockHash common.Hash)
 			return err
 		}
 		if s.kind.valid() {
-			if err := rawdb.DeleteGhostTreeTag(batch, uint8(s.kind), s.treeIndex, noteTag(&rec.note), s.position); err != nil {
+			if err := rawdb.DeleteGhostTreeTag(batch, uint8(s.kind), tagLevel(s.position), s.treeIndex, noteTag(&rec.note), s.position); err != nil {
 				return err
 			}
 		}

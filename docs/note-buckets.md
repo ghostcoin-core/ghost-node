@@ -81,15 +81,26 @@ A bucket read does not scan the tree. Next to each record of the coin and
 data trees, `applyBlock` writes, in the same batch,
 
 ```
-"ghost-tree-tag-" + kind (1 byte) + tree index (8 bytes big endian) + tag (3 bytes) + position (4 bytes big endian) -> empty
+"ghost-tree-tag-" + (level << 1 | kind) (1 byte) + tree index (8 bytes big endian) + tag (3 bytes) + position (4 bytes big endian) -> empty
 ```
 
-A marker record writes none. `revertBlock` deletes the keys of the records
-it removes, and `reset` deletes every one. A read iterates the tag range of
-the prefix, `prefix << (24 - m)` to `((prefix + 1) << (24 - m)) - 1`, keeps
-the positions below the tree's leaf count at the anchor, sorts them by
-position and reads their records. The key is 31 bytes long, so state pruning
-never takes it for a trie node.
+The kind is 0 (coin) or 1 (data). The level of position `p` is
+`bucket_bits(p + 1)`, the bucket bits of the tree once `p` is filled. A
+marker record writes none. `revertBlock` deletes the keys of the records it
+removes, and `reset` deletes every one. The key is 31 bytes long, so state
+pruning never takes it for a trie node.
+
+A read as of an anchor with `n` leaves and `m = bucket_bits(n)` iterates,
+in levels 0 to `m` only, the tag range of the prefix, `prefix << (24 - m)`
+to `((prefix + 1) << (24 - m)) - 1`. It keeps the positions below `n`,
+sorts them by position and reads their records. Every position below `n`
+is in one of those levels. Level `m` ends below `2n` (below 8,192 for
+`m = 0`), so a read visits at most about as many positions past the anchor
+as before it, and never touches anything the tree appended once that level
+was full. Positions past the anchor are passed over and never kept. A tree
+with no leaf at the anchor is answered at once, without reading the index.
+A read as of an old anchor therefore costs what the bucket costs at that
+anchor, however far the tree has grown since.
 
 ## The rebuild
 
