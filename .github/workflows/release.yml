@@ -31,7 +31,10 @@ on:
 permissions:
   contents: read
 
-# Releases are published one at a time, in push order; none is cancelled.
+# Releases are published one at a time, in push order, so an older build never
+# replaces a newer one as latest. A running release is never cancelled; a push
+# that is still waiting when a newer one arrives is superseded by it, whose
+# release holds its changes too.
 concurrency:
   group: release-${{ github.event.pull_request.number || 'main' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
