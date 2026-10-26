@@ -71,9 +71,8 @@ The decoder reads a list of exactly 19 items with a 32-byte string at index 18
 as the Ghost layout, and anything else as before; in the base layout index 18
 is the excess blob gas, an integer of at most 8 bytes. The 18-item layout
 before the marker root is not a Ghost header: `DecodeGhostHeader` rejects it
-with `item-count`. `DecodeGhostHeader` is
-the strict reference decoder of the specification, which rejects with the
-reasons `non-canonical-rlp`, `trailing-bytes`, `item-count`, `field-size`,
+with `item-count`. `DecodeGhostHeader` is the strict reference decoder of the
+specification, which rejects with the reasons `non-canonical-rlp`, `trailing-bytes`, `item-count`, `field-size`,
 `non-canonical-integer` and `integer-range`. The JSON encoding of
 `types.Header` is unchanged.
 
@@ -90,8 +89,8 @@ The RandomX engine sets the three roots from the final state in
 requires them in every header with a base fee, and covers them with the seal
 hash. Block validation recomputes the three roots after execution and rejects
 a block whose roots differ. The genesis of the internal network and of
-developer mode carries the empty roots and the empty marker-set root; the genesis state root stays that of
-the allocation. Developer mode's configuration has no EIP-1559, so its later
+developer mode carries the empty roots and the empty marker-set root; the
+genesis state root stays that of the allocation. Developer mode's configuration has no EIP-1559, so its later
 blocks have no base fee and carry no roots.
 
 The JSON header of `eth_getBlockByNumber`, `eth_getBlockByHash` and the
@@ -384,8 +383,8 @@ removed branch, and so does the index.
 
 ## Decisions
 
-- Existing headers keep their exact bytes; only a header with all three roots takes
-  the Ghost layout. Rejecting a header without roots is the engine's check,
+- Existing headers keep their exact bytes; only a header with all three roots
+  takes the Ghost layout. Rejecting a header without roots is the engine's check,
   not the decoder's.
 - The tree-state account holds one slot beyond the specification's table, the
   final root, because a full tree's root cannot be recovered from a frontier.

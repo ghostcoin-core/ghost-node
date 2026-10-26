@@ -158,7 +158,8 @@ func fullHeader() *types.Header {
 }
 
 // ghostHeader returns a header of the Ghost layout with every field set:
-// both tree roots, the data marker root and the base fee, and none of the fields it forbids.
+// both tree roots, the data marker root and the base fee, and none of the
+// fields it forbids.
 func ghostHeader() *types.Header {
 	h := fullHeader()
 	h.WithdrawalsHash, h.BlobGasUsed, h.ExcessBlobGas, h.ParentBeaconRoot = nil, nil, nil, nil

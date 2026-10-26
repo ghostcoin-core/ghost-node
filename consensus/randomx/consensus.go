@@ -241,10 +241,10 @@ func (r *RandomX) verifyHeader(chain consensus.ChainHeaderReader, header, parent
 }
 
 // checkTreeRootFields checks that a header carries both tree roots and the
-// data marker root when its
-// chain has EIP-1559 in force, and neither otherwise. The roots take the
-// Ghost layout, which requires the base fee, so a chain without EIP-1559 (so
-// far only developer mode) cannot carry them after its genesis.
+// data marker root when its chain has EIP-1559 in force, and none of them
+// otherwise. The roots take the Ghost layout, which requires the base fee, so
+// a chain without EIP-1559 (so far only developer mode) cannot carry them
+// after its genesis.
 func checkTreeRootFields(london bool, header *types.Header) error {
 	switch {
 	case !london && (header.CoinTreeRoot != nil || header.DataTreeRoot != nil || header.DataMarkerRoot != nil):
