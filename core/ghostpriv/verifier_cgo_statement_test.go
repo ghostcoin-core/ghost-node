@@ -81,3 +81,32 @@ func TestGhostDataStatementCarriesFingerprint(t *testing.T) {
 		}
 	}
 }
+
+// TestGhostHoldContextLayout checks the proof of holding context passed
+// through ghost_hold.h: ghostHoldContextBytes, 162 bytes, the type DATA_V2,
+// then the root, marker-set root, verifier, challenge and cf.
+func TestGhostHoldContextLayout(t *testing.T) {
+	if ghostHoldContextBytes != 162 {
+		t.Fatalf("GHOST_HOLD_CONTEXT_BYTES is %d, want 162", ghostHoldContextBytes)
+	}
+	in := &HoldInputs{
+		Root:          common.Hash{0: 0x11},
+		MarkerSetRoot: common.Hash{0: 0x22},
+		Verifier:      common.Hash{0: 0x33},
+		Challenge:     common.Hash{0: 0x44},
+		Cf:            common.Hash{0: 0x55},
+	}
+	want := append([]byte{}, DataV2[:]...)
+	for _, w := range []common.Hash{in.Root, in.MarkerSetRoot, in.Verifier, in.Challenge, in.Cf} {
+		want = append(want, w[:]...)
+	}
+	if got := ghostHoldContext(in); !bytes.Equal(got, want) {
+		t.Fatalf("hold context\n%x\nwant\n%x", got, want)
+	}
+	if err := VerifyHold(in, make([]byte, 64)); err == nil {
+		t.Fatal("a zero proof of holding is accepted")
+	}
+	if err := VerifyHold(in, nil); err == nil {
+		t.Fatal("an empty proof of holding is accepted")
+	}
+}

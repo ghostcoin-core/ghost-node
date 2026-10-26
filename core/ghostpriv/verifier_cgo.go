@@ -36,6 +36,7 @@ package ghostpriv
 #cgo darwin LDFLAGS: -lm
 #include "ghost_proofs.h"
 #include "ghost_data.h"
+#include "ghost_hold.h"
 */
 import "C"
 
@@ -55,6 +56,7 @@ const (
 	ghostChainParamsBytes = C.GHOST_PROOFS_CHAIN_PARAMS_BYTES
 	ghostCoinRevealBytes  = C.GHOST_PROOFS_COIN_REVEAL_BYTES
 	ghostDataRevealBytes  = C.GHOST_DATA_REVEAL_BYTES
+	ghostHoldContextBytes = C.GHOST_HOLD_CONTEXT_BYTES
 	ghostProofMaxBytes    = C.GHOST_PROOFS_PROOF_MAX_BYTES
 )
 
@@ -123,6 +125,45 @@ func (ghostVerifier) VerifyReveal(in *VerifyInputs, proof []byte) error {
 	default:
 		return fmt.Errorf("%w: %s", ErrProofRejected, ghostStatusName(status))
 	}
+}
+
+// VerifyHold verifies a proof of holding of a data commitment against the
+// inputs with the shipped verifier of the ghost repository's ghost-proofs,
+// through ghostverifier's ghost_hold.h. The proof may be followed by zero
+// bytes. It checks the proof only: that the challenge was issued once and the
+// roots are current is the caller's. Any answer but acceptance is
+// ErrProofRejected, naming the status.
+func VerifyHold(in *HoldInputs, proof []byte) error {
+	if in == nil {
+		return fmt.Errorf("%w: no inputs", ErrProofStatement)
+	}
+	if len(proof) == 0 || len(proof) > ghostProofMaxBytes {
+		return fmt.Errorf("%w: proof of %d bytes", ErrProofRejected, len(proof))
+	}
+	params := ghostChainParams(&VerifyInputs{ChainID: in.ChainID, Domain: in.Domain})
+	ctx := ghostHoldContext(in)
+	status := C.ghost_verify_hold(
+		(*C.uint8_t)(unsafe.Pointer(&params[0])), C.size_t(len(params)),
+		(*C.uint8_t)(unsafe.Pointer(&ctx[0])), C.size_t(len(ctx)),
+		(*C.uint8_t)(unsafe.Pointer(&proof[0])), C.size_t(len(proof)),
+	)
+	if status == C.GHOST_PROOFS_ACCEPTED {
+		return nil
+	}
+	return fmt.Errorf("%w: %s", ErrProofRejected, ghostStatusName(status))
+}
+
+// ghostHoldContext returns the proof of holding context of ghost_hold.h: the
+// type DATA_V2 (2), the root, the marker-set root, the verifier, the
+// challenge and cf (32 each).
+func ghostHoldContext(in *HoldInputs) []byte {
+	b := make([]byte, 0, ghostHoldContextBytes)
+	b = append(b, C.GHOST_HOLD_TYPE_DATA_V2_0, C.GHOST_HOLD_TYPE_DATA_V2_1)
+	b = append(b, in.Root[:]...)
+	b = append(b, in.MarkerSetRoot[:]...)
+	b = append(b, in.Verifier[:]...)
+	b = append(b, in.Challenge[:]...)
+	return append(b, in.Cf[:]...)
 }
 
 // ghostChainParams returns the chain parameters: the chain id (8 bytes, big
