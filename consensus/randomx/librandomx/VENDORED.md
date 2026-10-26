@@ -11,9 +11,9 @@ used.
 | Commit | `418f5497e60215fcd8a7cff2a16be835135833e5` (master, 2026-10-17) |
 | Copied | `LICENSE` and the `src/` tree but one file, nothing else |
 | License | BSD 3-Clause, `LICENSE` |
-| Changes | one line, `src/configuration.h`, in `ghost-salt.patch` |
+| Changes | one line, `src/configuration.h`, in `ghost-salt.patch`; a Windows arm64 build fix in `src/intrin_portable.h`, in `windows-arm64-alloc.patch` |
 
-## The one change
+## The changes
 
 `ghost-salt.patch` replaces the Argon2 salt in `src/configuration.h`:
 
@@ -21,6 +21,12 @@ used.
 -#define RANDOMX_ARGON_SALT         "RandomX\x03"
 +#define RANDOMX_ARGON_SALT         "Ghost-RandomX\x01"
 ```
+
+`windows-arm64-alloc.patch` lets `src/intrin_portable.h` build for Windows
+on arm64: on aarch64 it allocated aligned memory with `posix_memalign`, which
+Windows does not have, so under `_WIN32` it now uses `_aligned_malloc` and
+`_aligned_free`, as upstream already does on x86. Other platforms compile the
+same code as before and no hash changes.
 
 Every other file is byte for byte the upstream file. The Go constant `Salt`
 in `consensus/randomx` holds the same 14 bytes, and
@@ -33,8 +39,11 @@ Each file's git blob hash below is the blob in the upstream tree at the pinned
 commit (`git ls-tree -r 418f5497e602 LICENSE src` in a clone of upstream). In
 this repository, `git ls-files -s consensus/randomx/librandomx` prints the same
 hashes for every file but `src/configuration.h`, whose patched blob is
-`03f5bbf7a4b2e3f8dfec4cf7aa7ec0dcc192a019`. Reversing `ghost-salt.patch`
-restores upstream's `aac8914e0e8a52319600169bcc64b6cd9c967565`.
+`03f5bbf7a4b2e3f8dfec4cf7aa7ec0dcc192a019`, and `src/intrin_portable.h`,
+whose patched blob is `4a7c4de08fe004d2d8c33b9ee2a1fc67ef99d2e3`. Reversing
+`ghost-salt.patch` and `windows-arm64-alloc.patch` restores upstream's
+`aac8914e0e8a52319600169bcc64b6cd9c967565` and
+`1bf7452acdeb4c80cb12ba4d40057f07f87c0603`.
 
 Some upstream files have no final newline, trailing whitespace or CRLF line
 endings (`src/jit_compiler_rv64_vector_static.h`); they are kept exactly. The
@@ -136,7 +145,7 @@ library instead. Fetch it from upstream at the pinned commit to run it.
 | `src/instruction.hpp` | `b1863b5edb2ce6ff8f2b85612ba6bc21f58e328f` |
 | `src/instruction_weights.hpp` | `f6c887349db2381a7f77110d8dbcdf60c42cc21c` |
 | `src/instructions_portable.cpp` | `5d5921feae0dff6b56bdedac4605a222dc998546` |
-| `src/intrin_portable.h` | `1bf7452acdeb4c80cb12ba4d40057f07f87c0603` |
+| `src/intrin_portable.h` | `1bf7452acdeb4c80cb12ba4d40057f07f87c0603` upstream, patched here |
 | `src/jit_compiler.hpp` | `56c0655c1297226549d8e21af65ccdac52a9a226` |
 | `src/jit_compiler_a64.cpp` | `ec879da9f4963d762dd5c5abed753bdef1bead98` |
 | `src/jit_compiler_a64.hpp` | `69dbcaaf0657ab1b1915376f368b52c1cc5cbe05` |

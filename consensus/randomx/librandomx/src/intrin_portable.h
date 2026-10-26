@@ -417,6 +417,15 @@ FORCE_INLINE rx_vec_f128 rx_cvt_packed_int_vec_f128(const void* addr) {
 typedef uint8x16_t rx_vec_i128;
 typedef float64x2_t rx_vec_f128;
 
+#if defined(_WIN32)
+#include <malloc.h>
+
+inline void* rx_aligned_alloc(size_t size, size_t align) {
+	return _aligned_malloc(size, align);
+};
+
+#define rx_aligned_free(a) _aligned_free(a)
+#else
 inline void* rx_aligned_alloc(size_t size, size_t align) {
 	void* p;
 	if (posix_memalign(&p, align, size) == 0)
@@ -426,6 +435,7 @@ inline void* rx_aligned_alloc(size_t size, size_t align) {
 };
 
 #define rx_aligned_free(a) free(a)
+#endif
 
 inline void rx_prefetch_nta(void* ptr) {
 	asm volatile ("prfm pldl1strm, [%0]\n" : : "r" (ptr));
