@@ -87,6 +87,43 @@ the installer accepts no release yet. The real key replaces the `.pub` file in
 `install/` and the same lines in `install.sh`; a test keeps the two equal. The
 release fills in the checker's hashes.
 
+On Windows (amd64 or arm64), paste this into PowerShell:
+
+```powershell
+irm https://get.ghostcoin.com/win | iex
+```
+
+or this into CMD:
+
+```bat
+curl -fsSL https://get.ghostcoin.com/win.cmd -o "%TEMP%\ghost-install.cmd" && "%TEMP%\ghost-install.cmd" && del "%TEMP%\ghost-install.cmd"
+```
+
+They run [install/install.ps1](install/install.ps1) and
+[install/install.cmd](install/install.cmd), which do the same thing and need no
+administrator rights: each downloads `ghost-setup-windows-<arch>.exe` from the
+release with `curl.exe`, over https only, and runs it only when its SHA-256
+(`Get-FileHash` or `certutil -hashfile`) is the one pinned in the script.
+`ghost-setup` ([install/winsetup](install/winsetup)) then does what
+`install.sh` does: it checks the release archive's ed25519 signature against
+the same pinned release key before anything is unpacked, installs `geth.exe`
+in `%USERPROFILE%\.ghost-node`, writes a config with a new mining address
+(HTTP RPC on `127.0.0.1:8545`, open to the Ghost web apps), and starts the node
+mining as the per-user service of `geth service`
+([docs/windows-service.md](docs/windows-service.md)), a value in the current
+user's Run key that starts it at every login. It prints the mining address and
+how to check on the node. On any doubt about a download, a hash, the signature
+or the archive it stops with nothing installed and says why.
+
+Updates are on by default: a second Run key value runs
+`ghost-setup.exe --update --daily` at login, which checks at most once a day
+and installs a newer signed release after the same checks, keeping the
+previous `geth.exe` until the node has restarted on the new one; a refused
+update changes nothing. Set `GHOST_NO_UPDATE=1` for the install to leave it
+out. The `ghost-setup` hashes pinned in the two scripts are all-zero
+placeholders until the release publishes the setup executables, so for now
+both lines refuse to install.
+
 ## Building
 
 You need Go 1.26 (the exact toolchain is pinned in `go.mod`) and a C compiler.
