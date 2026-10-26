@@ -36,22 +36,23 @@ var zeroBloom = "b90100" + strings.Repeat("00", BloomByteLength)
 
 // The items of header-block-one-example, which the negative vectors share.
 const (
-	blockOneHead       = "a0ffc501cc30c42da020a29cce3823251ca1c110c250bfed5a3d752e262bb86af7a01dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d493479400000000000000000000000000000000000004d2a01111111111111111111111111111111111111111111111111111111111111111a02222222222222222222222222222222222222222222222222222222222222222a03333333333333333333333333333333333333333333333333333333333333333"
+	blockOneHead       = "a0039d14f59db29e2e76c8ed76f90b70de42e48f8a67dba060b363501af50e3ba4a01dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d493479400000000000000000000000000000000000004d2a01111111111111111111111111111111111111111111111111111111111111111a02222222222222222222222222222222222222222222222222222222222222222a03333333333333333333333333333333333333333333333333333333333333333"
 	blockOneDifficulty = "8401000000"
 	blockOneNumber     = "01"
 	blockOneRest       = "8401c9c3808301ec30846b37040e80a04444444444444444444444444444444444444444444444444444444444444444880102030405060708"
 	blockOneFee        = "84342770c0"
 	blockOneCoin       = "a0142c6bdf0882396330f9942ddd49df5d860b05a5218dad1ce6ef8e69238b6ec5"
 	blockOneData       = "a0dfc2bf39581c30d2cf1f025586af2f821524daa2e496fea9f950731202f3237a"
+	blockOneMarker     = "a0f121b372119409a7d6fda684a14ab815c7ef9a07ba48f50ff59ea5fc62d36e4f"
 )
 
 var (
-	vectorGenesisRLP  = "f90260a00000000000000000000000000000000000000000000000000000000000000000a01dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347940000000000000000000000000000000000000000a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421" + zeroBloom + "8401000000808401c9c38080846b3703f0a0000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26fa00000000000000000000000000000000000000000000000000000000000000000880000000000000000843b9aca00a08e66512042388a7863d500c4f96861466ae48b9d64ea1e10ec382c31aa61b5a8a03d5cea4ec4750f6e39c05a6464043afed27b95090a4d93a304d88204e9a3fe03"
-	vectorGenesisHash = "ffc501cc30c42da020a29cce3823251ca1c110c250bfed5a3d752e262bb86af7"
+	vectorGenesisRLP  = "f90281a00000000000000000000000000000000000000000000000000000000000000000a01dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347940000000000000000000000000000000000000000a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421" + zeroBloom + "8401000000808401c9c38080846b3703f0a0000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26fa00000000000000000000000000000000000000000000000000000000000000000880000000000000000843b9aca00a08e66512042388a7863d500c4f96861466ae48b9d64ea1e10ec382c31aa61b5a8a03d5cea4ec4750f6e39c05a6464043afed27b95090a4d93a304d88204e9a3fe03a00ef484d17824d5fefb2533c70af81a3267af1169dd091395ad7607762aeee0a3"
+	vectorGenesisHash = "039d14f59db29e2e76c8ed76f90b70de42e48f8a67dba060b363501af50e3ba4"
 
 	blockOneBody       = blockOneHead + zeroBloom + blockOneDifficulty + blockOneNumber + blockOneRest
-	vectorBlockOneRLP  = "f90243" + blockOneBody + blockOneFee + blockOneCoin + blockOneData
-	vectorBlockOneHash = "943182f201b34dae77dc5c8efb5c84083dda907eac51f8ac3fc6f6c36a791c23"
+	vectorBlockOneRLP  = "f90264" + blockOneBody + blockOneFee + blockOneCoin + blockOneData + blockOneMarker
+	vectorBlockOneHash = "81ca961404b518ee3ded78ebee1c4e23eba18b7c86515b6471e970cfed8538f4"
 )
 
 // The negative vectors: header-block-one-example with one fault each.
@@ -59,15 +60,15 @@ var negativeHeaderVectors = []struct {
 	name, reason, rlp string
 }{
 	// A withdrawals root after the base fee.
-	{"header-forbidden-field", GhostReasonItemCount, "f90264" + blockOneBody + blockOneFee + "a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421" + blockOneCoin + blockOneData},
+	{"header-forbidden-field", GhostReasonItemCount, "f90285" + blockOneBody + blockOneFee + "a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421" + blockOneCoin + blockOneData + blockOneMarker},
 	// An empty string appended.
-	{"header-extra-trailing-field", GhostReasonItemCount, "f90244" + blockOneBody + blockOneFee + blockOneCoin + blockOneData + "80"},
+	{"header-extra-trailing-field", GhostReasonItemCount, "f90265" + blockOneBody + blockOneFee + blockOneCoin + blockOneData + blockOneMarker + "80"},
 	// No base fee.
-	{"header-missing-required-field", GhostReasonItemCount, "f9023e" + blockOneBody + blockOneCoin + blockOneData},
+	{"header-missing-required-field", GhostReasonItemCount, "f9025f" + blockOneBody + blockOneCoin + blockOneData + blockOneMarker},
 	// The block number with a leading zero byte.
-	{"header-non-canonical-integer", GhostReasonNonCanonicalInteger, "f90245" + blockOneHead + zeroBloom + blockOneDifficulty + "820001" + blockOneRest + blockOneFee + blockOneCoin + blockOneData},
+	{"header-non-canonical-integer", GhostReasonNonCanonicalInteger, "f90266" + blockOneHead + zeroBloom + blockOneDifficulty + "820001" + blockOneRest + blockOneFee + blockOneCoin + blockOneData + blockOneMarker},
 	// The coin tree root cut to 31 bytes.
-	{"header-short-tree-root", GhostReasonFieldSize, "f90242" + blockOneBody + blockOneFee + "9f142c6bdf0882396330f9942ddd49df5d860b05a5218dad1ce6ef8e69238b6e" + blockOneData},
+	{"header-short-tree-root", GhostReasonFieldSize, "f90263" + blockOneBody + blockOneFee + "9f142c6bdf0882396330f9942ddd49df5d860b05a5218dad1ce6ef8e69238b6e" + blockOneData + blockOneMarker},
 	// One byte after the list.
 	{"header-trailing-bytes", GhostReasonTrailingBytes, vectorBlockOneRLP + "00"},
 }
@@ -90,42 +91,44 @@ func hashPtr(s string) *common.Hash {
 // vectors.
 func vectorGenesis() *Header {
 	return &Header{
-		ParentHash:   common.Hash{},
-		UncleHash:    common.HexToHash("1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"),
-		Coinbase:     common.Address{},
-		Root:         common.HexToHash("56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421"),
-		TxHash:       common.HexToHash("56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421"),
-		ReceiptHash:  common.HexToHash("56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421"),
-		Difficulty:   big.NewInt(16777216),
-		Number:       big.NewInt(0),
-		GasLimit:     30000000,
-		GasUsed:      0,
-		Time:         1798767600,
-		Extra:        common.FromHex("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"),
-		BaseFee:      big.NewInt(1000000000),
-		CoinTreeRoot: hashPtr("8e66512042388a7863d500c4f96861466ae48b9d64ea1e10ec382c31aa61b5a8"),
-		DataTreeRoot: hashPtr("3d5cea4ec4750f6e39c05a6464043afed27b95090a4d93a304d88204e9a3fe03"),
+		ParentHash:     common.Hash{},
+		UncleHash:      common.HexToHash("1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"),
+		Coinbase:       common.Address{},
+		Root:           common.HexToHash("56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421"),
+		TxHash:         common.HexToHash("56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421"),
+		ReceiptHash:    common.HexToHash("56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421"),
+		Difficulty:     big.NewInt(16777216),
+		Number:         big.NewInt(0),
+		GasLimit:       30000000,
+		GasUsed:        0,
+		Time:           1798767600,
+		Extra:          common.FromHex("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"),
+		BaseFee:        big.NewInt(1000000000),
+		CoinTreeRoot:   hashPtr("8e66512042388a7863d500c4f96861466ae48b9d64ea1e10ec382c31aa61b5a8"),
+		DataTreeRoot:   hashPtr("3d5cea4ec4750f6e39c05a6464043afed27b95090a4d93a304d88204e9a3fe03"),
+		DataMarkerRoot: hashPtr("0ef484d17824d5fefb2533c70af81a3267af1169dd091395ad7607762aeee0a3"),
 	}
 }
 
 func vectorBlockOne() *Header {
 	return &Header{
-		ParentHash:   common.HexToHash("ffc501cc30c42da020a29cce3823251ca1c110c250bfed5a3d752e262bb86af7"),
-		UncleHash:    common.HexToHash("1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"),
-		Coinbase:     common.HexToAddress("00000000000000000000000000000000000004d2"),
-		Root:         common.HexToHash("1111111111111111111111111111111111111111111111111111111111111111"),
-		TxHash:       common.HexToHash("2222222222222222222222222222222222222222222222222222222222222222"),
-		ReceiptHash:  common.HexToHash("3333333333333333333333333333333333333333333333333333333333333333"),
-		Difficulty:   big.NewInt(16777216),
-		Number:       big.NewInt(1),
-		GasLimit:     30000000,
-		GasUsed:      126000,
-		Time:         1798767630,
-		MixDigest:    common.HexToHash("4444444444444444444444444444444444444444444444444444444444444444"),
-		Nonce:        BlockNonce{1, 2, 3, 4, 5, 6, 7, 8},
-		BaseFee:      big.NewInt(875000000),
-		CoinTreeRoot: hashPtr("142c6bdf0882396330f9942ddd49df5d860b05a5218dad1ce6ef8e69238b6ec5"),
-		DataTreeRoot: hashPtr("dfc2bf39581c30d2cf1f025586af2f821524daa2e496fea9f950731202f3237a"),
+		ParentHash:     common.HexToHash("039d14f59db29e2e76c8ed76f90b70de42e48f8a67dba060b363501af50e3ba4"),
+		UncleHash:      common.HexToHash("1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"),
+		Coinbase:       common.HexToAddress("00000000000000000000000000000000000004d2"),
+		Root:           common.HexToHash("1111111111111111111111111111111111111111111111111111111111111111"),
+		TxHash:         common.HexToHash("2222222222222222222222222222222222222222222222222222222222222222"),
+		ReceiptHash:    common.HexToHash("3333333333333333333333333333333333333333333333333333333333333333"),
+		Difficulty:     big.NewInt(16777216),
+		Number:         big.NewInt(1),
+		GasLimit:       30000000,
+		GasUsed:        126000,
+		Time:           1798767630,
+		MixDigest:      common.HexToHash("4444444444444444444444444444444444444444444444444444444444444444"),
+		Nonce:          BlockNonce{1, 2, 3, 4, 5, 6, 7, 8},
+		BaseFee:        big.NewInt(875000000),
+		CoinTreeRoot:   hashPtr("142c6bdf0882396330f9942ddd49df5d860b05a5218dad1ce6ef8e69238b6ec5"),
+		DataTreeRoot:   hashPtr("dfc2bf39581c30d2cf1f025586af2f821524daa2e496fea9f950731202f3237a"),
+		DataMarkerRoot: hashPtr("f121b372119409a7d6fda684a14ab815c7ef9a07ba48f50ff59ea5fc62d36e4f"),
 	}
 }
 
@@ -405,7 +408,7 @@ func TestBaseHeaderEncodingUnchanged(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: decode: %v", c.name, err)
 		}
-		if dec.CoinTreeRoot != nil || dec.DataTreeRoot != nil {
+		if dec.CoinTreeRoot != nil || dec.DataTreeRoot != nil || dec.DataMarkerRoot != nil {
 			t.Errorf("%s: decoded with tree roots", c.name)
 		}
 		if re, _ := rlp.EncodeToBytes(&dec); !bytes.Equal(re, got) {
@@ -424,8 +427,12 @@ func TestGhostHeaderRejectsPartialOrMixedFields(t *testing.T) {
 	blobGas := uint64(1)
 	withdrawals := EmptyWithdrawalsHash
 	for name, mutate := range map[string]func(h *Header){
-		"coin root only":                  func(h *Header) { h.DataTreeRoot = nil },
-		"data root only":                  func(h *Header) { h.CoinTreeRoot = nil },
+		"coin root only":                  func(h *Header) { h.DataTreeRoot, h.DataMarkerRoot = nil, nil },
+		"data root only":                  func(h *Header) { h.CoinTreeRoot, h.DataMarkerRoot = nil, nil },
+		"marker root only":                func(h *Header) { h.CoinTreeRoot, h.DataTreeRoot = nil, nil },
+		"no marker root":                  func(h *Header) { h.DataMarkerRoot = nil },
+		"no coin root":                    func(h *Header) { h.CoinTreeRoot = nil },
+		"no data root":                    func(h *Header) { h.DataTreeRoot = nil },
 		"roots without a base fee":        func(h *Header) { h.BaseFee = nil },
 		"roots with a withdrawals hash":   func(h *Header) { h.WithdrawalsHash = &withdrawals },
 		"roots with blob gas used":        func(h *Header) { h.BlobGasUsed = &blobGas },
@@ -442,24 +449,24 @@ func TestGhostHeaderRejectsPartialOrMixedFields(t *testing.T) {
 		}
 	}
 
-	// A base header of 18 items has a short integer at index 17, its blob
-	// gas, and decodes as a base header.
+	// A base header of 19 items has a short integer at index 18, its excess
+	// blob gas, and decodes as a base header.
 	h := vectorBlockOne()
-	h.CoinTreeRoot, h.DataTreeRoot = nil, nil
-	h.WithdrawalsHash, h.BlobGasUsed = &withdrawals, &blobGas
+	h.CoinTreeRoot, h.DataTreeRoot, h.DataMarkerRoot = nil, nil, nil
+	h.WithdrawalsHash, h.BlobGasUsed, h.ExcessBlobGas = &withdrawals, &blobGas, &blobGas
 	b, err := rlp.EncodeToBytes(h)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := countItems(t, b); n != 18 {
+	if n := countItems(t, b); n != 19 {
 		t.Fatalf("test header has %d items", n)
 	}
 	var dec Header
 	if err := rlp.DecodeBytes(b, &dec); err != nil {
 		t.Fatal(err)
 	}
-	if dec.CoinTreeRoot != nil || dec.BlobGasUsed == nil || *dec.BlobGasUsed != blobGas {
-		t.Errorf("an 18-item base header decoded as %+v", dec)
+	if dec.CoinTreeRoot != nil || dec.DataMarkerRoot != nil || dec.ExcessBlobGas == nil || *dec.ExcessBlobGas != blobGas {
+		t.Errorf("a 19-item base header decoded as %+v", dec)
 	}
 	// A forbidden field between the base fee and the roots decodes as
 	// neither layout.
@@ -470,10 +477,10 @@ func TestGhostHeaderRejectsPartialOrMixedFields(t *testing.T) {
 	// Copy and size.
 	g := vectorBlockOne()
 	cpy := CopyHeader(g)
-	if cpy.CoinTreeRoot == g.CoinTreeRoot || cpy.DataTreeRoot == g.DataTreeRoot {
+	if cpy.CoinTreeRoot == g.CoinTreeRoot || cpy.DataTreeRoot == g.DataTreeRoot || cpy.DataMarkerRoot == g.DataMarkerRoot {
 		t.Error("CopyHeader shares the root pointers")
 	}
-	if *cpy.CoinTreeRoot != *g.CoinTreeRoot || *cpy.DataTreeRoot != *g.DataTreeRoot {
+	if *cpy.CoinTreeRoot != *g.CoinTreeRoot || *cpy.DataTreeRoot != *g.DataTreeRoot || *cpy.DataMarkerRoot != *g.DataMarkerRoot {
 		t.Error("CopyHeader changes the roots")
 	}
 	cpy.CoinTreeRoot[0] ^= 1
@@ -486,9 +493,9 @@ func TestGhostHeaderRejectsPartialOrMixedFields(t *testing.T) {
 		t.Error("a changed data root leaves the hash unchanged")
 	}
 	bare := CopyHeader(g)
-	bare.CoinTreeRoot, bare.DataTreeRoot = nil, nil
-	if diff := g.Size() - bare.Size(); diff != 2*common.HashLength {
-		t.Errorf("the roots add %v to the size, want %d", diff, 2*common.HashLength)
+	bare.CoinTreeRoot, bare.DataTreeRoot, bare.DataMarkerRoot = nil, nil, nil
+	if diff := g.Size() - bare.Size(); diff != 3*common.HashLength {
+		t.Errorf("the roots add %v to the size, want %d", diff, 3*common.HashLength)
 	}
 }
 
@@ -503,4 +510,119 @@ func countItems(t *testing.T, b []byte) int {
 		t.Fatal(err)
 	}
 	return n
+}
+
+// vectorBlockOneEighteenItems is header-block-one-example without its data
+// marker root: the 18-item layout before the marker root, negative vector
+// header-eighteen-items.
+var vectorBlockOneEighteenItems = "f90243" + blockOneBody + blockOneFee + blockOneCoin + blockOneData
+
+// TestGhostHeaderDataMarkerRoot checks the data marker root at index 18 of
+// the Ghost layout: the vectors, the rejection of the 18-item layout, the
+// all-or-none rule of the three roots, the hash, copy and size, and that a
+// 19-item base header still decodes as a base header.
+func TestGhostHeaderDataMarkerRoot(t *testing.T) {
+	// Both positive vectors encode to their bytes and hash.
+	for _, v := range []struct {
+		name   string
+		header *Header
+		rlp    string
+		hash   string
+	}{
+		{"header-genesis-example", vectorGenesis(), vectorGenesisRLP, vectorGenesisHash},
+		{"header-block-one-example", vectorBlockOne(), vectorBlockOneRLP, vectorBlockOneHash},
+	} {
+		got, err := rlp.EncodeToBytes(v.header)
+		if err != nil {
+			t.Fatalf("%s: encode: %v", v.name, err)
+		}
+		if want := mustHex(t, v.rlp); !bytes.Equal(got, want) {
+			t.Errorf("%s: encoding\n got %x\nwant %x", v.name, got, want)
+		}
+		if n := countItems(t, got); n != 19 {
+			t.Errorf("%s: %d items, want 19", v.name, n)
+		}
+		if h := v.header.Hash(); h != common.HexToHash(v.hash) {
+			t.Errorf("%s: hash %x, want %s", v.name, h, v.hash)
+		}
+		dec, err := DecodeGhostHeader(got)
+		if err != nil {
+			t.Fatalf("%s: strict decode: %v", v.name, err)
+		}
+		if dec.DataMarkerRoot == nil || *dec.DataMarkerRoot != *v.header.DataMarkerRoot {
+			t.Errorf("%s: decoded marker root %v", v.name, dec.DataMarkerRoot)
+		}
+	}
+
+	// header-eighteen-items: block one without the marker root.
+	eighteen := mustHex(t, vectorBlockOneEighteenItems)
+	_, err := DecodeGhostHeader(eighteen)
+	var reject *GhostHeaderError
+	if !errors.As(err, &reject) || reject.Reason != GhostReasonItemCount {
+		t.Errorf("header-eighteen-items: error %v, want reason %s", err, GhostReasonItemCount)
+	}
+	var dec Header
+	if err := rlp.DecodeBytes(eighteen, &dec); err == nil && (dec.CoinTreeRoot != nil || dec.DataTreeRoot != nil || dec.DataMarkerRoot != nil) {
+		t.Error("header-eighteen-items decodes as a Ghost header through rlp")
+	}
+
+	// Exactly one or two of the three roots set does not encode.
+	for name, mutate := range map[string]func(h *Header){
+		"coin root only":   func(h *Header) { h.DataTreeRoot, h.DataMarkerRoot = nil, nil },
+		"data root only":   func(h *Header) { h.CoinTreeRoot, h.DataMarkerRoot = nil, nil },
+		"marker root only": func(h *Header) { h.CoinTreeRoot, h.DataTreeRoot = nil, nil },
+		"no marker root":   func(h *Header) { h.DataMarkerRoot = nil },
+		"no data root":     func(h *Header) { h.DataTreeRoot = nil },
+		"no coin root":     func(h *Header) { h.CoinTreeRoot = nil },
+	} {
+		h := vectorBlockOne()
+		mutate(h)
+		if b, err := rlp.EncodeToBytes(h); !errors.Is(err, errPartialTreeRoots) {
+			t.Errorf("%s: encoded as %x, error %v", name, b, err)
+		}
+	}
+
+	// The hash covers the marker root.
+	g := vectorBlockOne()
+	cpy := CopyHeader(g)
+	cpy.DataMarkerRoot[0] ^= 1
+	if cpy.Hash() == g.Hash() {
+		t.Error("a changed marker root leaves the hash unchanged")
+	}
+
+	// CopyHeader copies it into a separate pointer, and Size counts it.
+	cpy = CopyHeader(g)
+	if cpy.DataMarkerRoot == g.DataMarkerRoot || *cpy.DataMarkerRoot != *g.DataMarkerRoot {
+		t.Error("CopyHeader does not copy the marker root into a separate pointer")
+	}
+	noMarker := CopyHeader(g)
+	noMarker.DataMarkerRoot = nil
+	if diff := g.Size() - noMarker.Size(); diff != common.HashLength {
+		t.Errorf("the marker root adds %v to the size, want %d", diff, common.HashLength)
+	}
+
+	// A 19-item base header (base fee, withdrawals root, blob gas used,
+	// excess blob gas, no beacon root) decodes as a base header.
+	withdrawals := EmptyWithdrawalsHash
+	blobGas, excess := uint64(131072), uint64(7)
+	base := vectorBlockOne()
+	base.CoinTreeRoot, base.DataTreeRoot, base.DataMarkerRoot = nil, nil, nil
+	base.WithdrawalsHash, base.BlobGasUsed, base.ExcessBlobGas = &withdrawals, &blobGas, &excess
+	b, err := rlp.EncodeToBytes(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := countItems(t, b); n != 19 {
+		t.Fatalf("base header has %d items, want 19", n)
+	}
+	dec = Header{}
+	if err := rlp.DecodeBytes(b, &dec); err != nil {
+		t.Fatalf("19-item base header: %v", err)
+	}
+	if dec.DataMarkerRoot != nil || dec.CoinTreeRoot != nil || dec.DataTreeRoot != nil {
+		t.Error("a 19-item base header decoded with roots")
+	}
+	if dec.ExcessBlobGas == nil || *dec.ExcessBlobGas != excess || dec.Hash() != base.Hash() {
+		t.Errorf("a 19-item base header decoded as %+v", dec)
+	}
 }

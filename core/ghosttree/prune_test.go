@@ -91,7 +91,11 @@ func (e *treeEngine) FinalizeAndAssemble(chain consensus.ChainHeaderReader, head
 	if err != nil {
 		return nil, err
 	}
-	header.CoinTreeRoot, header.DataTreeRoot = &coin, &data
+	marker, err := ghosttree.DataMarkerRoot(st)
+	if err != nil {
+		return nil, err
+	}
+	header.CoinTreeRoot, header.DataTreeRoot, header.DataMarkerRoot = &coin, &data, &marker
 	return e.Ethash.FinalizeAndAssemble(chain, header, st, txs, uncles, receipts, withdrawals)
 }
 

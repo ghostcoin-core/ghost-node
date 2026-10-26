@@ -91,7 +91,11 @@ func (e *testEngine) FinalizeAndAssemble(chain consensus.ChainHeaderReader, head
 	if err != nil {
 		return nil, err
 	}
-	header.CoinTreeRoot, header.DataTreeRoot = &coin, &data
+	marker, err := ghosttree.DataMarkerRoot(st)
+	if err != nil {
+		return nil, err
+	}
+	header.CoinTreeRoot, header.DataTreeRoot, header.DataMarkerRoot = &coin, &data, &marker
 	header.Root = st.IntermediateRoot(true)
 	return types.NewBlock(header, txs, nil, receipts, trie.NewStackTrie(nil)), nil
 }

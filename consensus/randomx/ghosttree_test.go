@@ -217,9 +217,9 @@ func vectorItems(t *testing.T, b []byte) [][]byte {
 // headerForbiddenField is the vector header-forbidden-field of spec 05,
 // section 11: block one with a withdrawals root after the base fee. Its logs
 // bloom of 256 zero bytes is written with strings.Repeat.
-var headerForbiddenField = "f90264a0ffc501cc30c42da020a29cce3823251ca1c110c250bfed5a3d752e262bb86af7a01dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d493479400000000000000000000000000000000000004d2a01111111111111111111111111111111111111111111111111111111111111111a02222222222222222222222222222222222222222222222222222222222222222a03333333333333333333333333333333333333333333333333333333333333333" +
+var headerForbiddenField = "f90285a0039d14f59db29e2e76c8ed76f90b70de42e48f8a67dba060b363501af50e3ba4a01dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d493479400000000000000000000000000000000000004d2a01111111111111111111111111111111111111111111111111111111111111111a02222222222222222222222222222222222222222222222222222222222222222a03333333333333333333333333333333333333333333333333333333333333333" +
 	"b90100" + strings.Repeat("00", types.BloomByteLength) +
-	"8401000000018401c9c3808301ec30846b37040e80a0444444444444444444444444444444444444444444444444444444444444444488010203040506070884342770c0a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a0142c6bdf0882396330f9942ddd49df5d860b05a5218dad1ce6ef8e69238b6ec5a0dfc2bf39581c30d2cf1f025586af2f821524daa2e496fea9f950731202f3237a"
+	"8401000000018401c9c3808301ec30846b37040e80a0444444444444444444444444444444444444444444444444444444444444444488010203040506070884342770c0a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a0142c6bdf0882396330f9942ddd49df5d860b05a5218dad1ce6ef8e69238b6ec5a0dfc2bf39581c30d2cf1f025586af2f821524daa2e496fea9f950731202f3237aa0f121b372119409a7d6fda684a14ab815c7ef9a07ba48f50ff59ea5fc62d36e4f"
 
 // TestMissingTreeRootsRejected checks that a header without either root, and
 // one carrying the forbidden field of the header-forbidden-field vector,
@@ -233,9 +233,10 @@ func TestMissingTreeRootsRejected(t *testing.T) {
 		t.Fatalf("sealed header rejected: %v", err)
 	}
 	for name, change := range map[string]func(h *types.Header){
-		"no coin root": func(h *types.Header) { h.CoinTreeRoot = nil },
-		"no data root": func(h *types.Header) { h.DataTreeRoot = nil },
-		"no roots":     func(h *types.Header) { h.CoinTreeRoot, h.DataTreeRoot = nil, nil },
+		"no coin root":   func(h *types.Header) { h.CoinTreeRoot = nil },
+		"no data root":   func(h *types.Header) { h.DataTreeRoot = nil },
+		"no marker root": func(h *types.Header) { h.DataMarkerRoot = nil },
+		"no roots":       func(h *types.Header) { h.CoinTreeRoot, h.DataTreeRoot, h.DataMarkerRoot = nil, nil, nil },
 	} {
 		h := types.CopyHeader(good)
 		change(h)
@@ -259,11 +260,14 @@ func TestMissingTreeRootsRejected(t *testing.T) {
 		t.Errorf("strict decoder: %v, want %s", err, types.GhostReasonItemCount)
 	}
 	items := vectorItems(t, vector)
-	if len(items) != 19 {
+	if len(items) != 20 {
 		t.Fatalf("vector has %d items", len(items))
 	}
 	withdrawals := common.BytesToHash(items[16])
-	coin, data := common.BytesToHash(items[17]), common.BytesToHash(items[18])
+	if withdrawals != types.EmptyWithdrawalsHash {
+		t.Fatalf("vector withdrawals root %x", withdrawals)
+	}
+	coin, data, marker := common.BytesToHash(items[17]), common.BytesToHash(items[18]), common.BytesToHash(items[19])
 
 	// The vector's own fields, read item by item.
 	decoded := &types.Header{
@@ -286,6 +290,7 @@ func TestMissingTreeRootsRejected(t *testing.T) {
 		WithdrawalsHash: &withdrawals,
 		CoinTreeRoot:    &coin,
 		DataTreeRoot:    &data,
+		DataMarkerRoot:  &marker,
 	}
 	if err := f.engine.VerifyHeader(reader, decoded, true); err == nil {
 		t.Error("the vector's header is accepted")
@@ -306,7 +311,7 @@ func TestMissingTreeRootsRejected(t *testing.T) {
 		t.Errorf("roots before EIP-1559: error %v, want %v", err, errUnsupportedField)
 	}
 	rootless := types.CopyHeader(good)
-	rootless.CoinTreeRoot, rootless.DataTreeRoot, rootless.BaseFee = nil, nil, nil
+	rootless.CoinTreeRoot, rootless.DataTreeRoot, rootless.DataMarkerRoot, rootless.BaseFee = nil, nil, nil, nil
 	if err := checkTreeRootFields(false, rootless); err != nil {
 		t.Errorf("no roots before EIP-1559: %v", err)
 	}
@@ -353,6 +358,9 @@ func TestFinalizeAndAssembleSetsTreeRoots(t *testing.T) {
 	h := block.Header()
 	if h.CoinTreeRoot == nil || *h.CoinTreeRoot != ghosttree.EmptyRoot(ghosttree.Coin) || h.DataTreeRoot == nil || *h.DataTreeRoot != ghosttree.EmptyRoot(ghosttree.Data) {
 		t.Errorf("empty block roots %v %v", h.CoinTreeRoot, h.DataTreeRoot)
+	}
+	if h.DataMarkerRoot == nil || *h.DataMarkerRoot != ghosttree.EmptyMarkerSetRoot {
+		t.Errorf("empty block marker root %v", h.DataMarkerRoot)
 	}
 
 	// One leaf of each kind.
@@ -418,7 +426,7 @@ func TestFinalizeAndAssembleSetsTreeRoots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if h := block.Header(); h.CoinTreeRoot != nil || h.DataTreeRoot != nil {
+	if h := block.Header(); h.CoinTreeRoot != nil || h.DataTreeRoot != nil || h.DataMarkerRoot != nil {
 		t.Error("a block without a base fee has tree roots")
 	}
 }
@@ -442,6 +450,9 @@ func TestGenesisCarriesEmptyTreeRoots(t *testing.T) {
 		}
 		if h.DataTreeRoot == nil || *h.DataTreeRoot != data {
 			t.Errorf("%s: data root %v, want %x", name, h.DataTreeRoot, data)
+		}
+		if h.DataMarkerRoot == nil || *h.DataMarkerRoot != ghosttree.EmptyMarkerSetRoot {
+			t.Errorf("%s: data marker root %v, want %x", name, h.DataMarkerRoot, ghosttree.EmptyMarkerSetRoot)
 		}
 		if h.BaseFee == nil {
 			t.Errorf("%s: no base fee", name)
@@ -467,7 +478,7 @@ func TestGenesisCarriesEmptyTreeRoots(t *testing.T) {
 		"go-ethereum configuration with chain ID 1337": testGenesis(),
 		"another chain ID": otherID,
 	} {
-		if h := core.GenesisToBlock(g, nil).Header(); h.CoinTreeRoot != nil || h.DataTreeRoot != nil {
+		if h := core.GenesisToBlock(g, nil).Header(); h.CoinTreeRoot != nil || h.DataTreeRoot != nil || h.DataMarkerRoot != nil {
 			t.Errorf("%s: genesis has tree roots", name)
 		}
 	}
@@ -717,5 +728,122 @@ func TestTreeStateAndMarkersAfterForcedReorg(t *testing.T) {
 	}
 	if root, err := ghosttree.Root(st, ghosttree.Coin); err != nil || root != ghosttree.K("ghost/test-final-root") {
 		t.Errorf("coin root after the reorganisation %x (%v), want the prefilled final root", root, err)
+	}
+}
+
+// TestDataMarkerRootChecks checks the data marker root of a Ghost header
+// like the two tree roots: a header without it is rejected, a block whose
+// marker root differs from the executed one by one bit is not imported, the
+// seal covers it, the assembled header and the Ghost genesis blocks carry
+// the root of the empty marker set.
+func TestDataMarkerRootChecks(t *testing.T) {
+	f := sealedChain(t)
+	const height = 16
+	good := f.blocks[height-1].Header()
+	reader := newTestReader(testConfig(), f.genesis.Header(), f.headers()[:height-1]...)
+	if err := f.engine.VerifyHeader(reader, good, true); err != nil {
+		t.Fatal(err)
+	}
+	if good.DataMarkerRoot == nil || *good.DataMarkerRoot != ghosttree.EmptyMarkerSetRoot {
+		t.Fatalf("sealed block marker root %v", good.DataMarkerRoot)
+	}
+
+	// No marker root.
+	missing := types.CopyHeader(good)
+	missing.DataMarkerRoot = nil
+	if err := f.engine.VerifyHeader(reader, missing, true); !errors.Is(err, errMissingTreeRoot) {
+		t.Errorf("no marker root: error %v, want %v", err, errMissingTreeRoot)
+	}
+	if err := f.engine.VerifyHeader(reader, missing, false); !errors.Is(err, errMissingTreeRoot) {
+		t.Errorf("no marker root, without the seal check: error %v, want %v", err, errMissingTreeRoot)
+	}
+
+	// A marker root one bit off the executed one is not imported.
+	chain, err := newTestBlockChain(f.engine, f.gspec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer chain.Stop()
+	if _, err := chain.InsertChain(f.blocks); err != nil {
+		t.Fatal(err)
+	}
+	head := chain.CurrentBlock().Hash()
+	bad := mineOn(t, f.engine, f.engine, chain, common.Address{0xd1}, func(h *types.Header) { flipBit(h.DataMarkerRoot, 9) }, false)
+	if err := f.engine.VerifyHeader(chain, bad.Header(), true); err != nil {
+		t.Fatalf("the header itself is rejected (%v); the test needs a sealed header", err)
+	}
+	if _, err := chain.InsertChain(types.Blocks{bad}); err == nil || !strings.Contains(err.Error(), "dataMarkerRoot") {
+		t.Errorf("InsertChain error %v, want one naming dataMarkerRoot", err)
+	}
+	if chain.CurrentBlock().Hash() != head {
+		t.Error("the head moved")
+	}
+	if chain.HasBlock(bad.Hash(), bad.NumberU64()) {
+		t.Error("the block was stored")
+	}
+
+	// One bit of the marker root of a sealed header fails the seal check.
+	failed := 0
+	for _, bit := range []int{0, 1, 63, 100, 128, 200, 254, 255} {
+		h := types.CopyHeader(good)
+		flipBit(h.DataMarkerRoot, bit)
+		if f.engine.SealHash(h) == f.engine.SealHash(good) {
+			t.Errorf("bit %d of the marker root is not in the seal hash", bit)
+		}
+		if err := f.engine.verifySeal(h, f.key(height)); errors.Is(err, errInvalidPoW) {
+			failed++
+		} else if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if failed < 4 {
+		t.Errorf("only %d of 8 one-bit changes of the marker root fail the seal check", failed)
+	}
+
+	// FinalizeAndAssemble sets the root of the empty marker set.
+	parent := chain.CurrentBlock()
+	h := &types.Header{
+		ParentHash: parent.Hash(),
+		Number:     new(big.Int).Add(parent.Number, common.Big1),
+		GasLimit:   parent.GasLimit,
+		Time:       parent.Time + testBlockTime,
+		Coinbase:   common.Address{0xd2},
+		BaseFee:    eip1559.CalcBaseFee(chain.Config(), parent),
+	}
+	if err := f.engine.Prepare(chain, h); err != nil {
+		t.Fatal(err)
+	}
+	st, err := chain.StateAt(parent.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, err := f.engine.FinalizeAndAssemble(chain, h, st, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := block.Header().DataMarkerRoot; m == nil || *m != ghosttree.EmptyMarkerSetRoot {
+		t.Errorf("assembled marker root %v, want %x", m, ghosttree.EmptyMarkerSetRoot)
+	}
+
+	// The Ghost genesis blocks carry it in the Ghost layout.
+	for name, g := range map[string]*genesisT.Genesis{
+		"internal network": ghost.InternalNetGenesis(),
+		"developer mode":   params.DeveloperGenesisBlock(11_500_000, nil),
+	} {
+		gh := core.GenesisToBlock(g, nil).Header()
+		if gh.DataMarkerRoot == nil || *gh.DataMarkerRoot != ghosttree.EmptyMarkerSetRoot {
+			t.Errorf("%s: marker root %v, want %x", name, gh.DataMarkerRoot, ghosttree.EmptyMarkerSetRoot)
+		}
+		enc, err := rlp.EncodeToBytes(gh)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		dec, err := types.DecodeGhostHeader(enc)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if *dec.DataMarkerRoot != ghosttree.EmptyMarkerSetRoot {
+			t.Errorf("%s: decoded marker root %x", name, *dec.DataMarkerRoot)
+		}
 	}
 }

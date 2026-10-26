@@ -42,15 +42,17 @@ func TestGasLimitAboveConsensusMaximumRejected(t *testing.T) {
 		config = testConfig()
 		coin   = common.Hash{11}
 		data   = common.Hash{12}
+		marker = common.Hash{13}
 		parent = &types.Header{
-			Number:       new(big.Int),
-			GasLimit:     ghost.MaxBlockGasLimit,
-			Time:         testGenesisAt,
-			Difficulty:   new(big.Int).Set(testDifficulty),
-			BaseFee:      big.NewInt(vars.InitialBaseFee),
-			UncleHash:    types.EmptyUncleHash,
-			CoinTreeRoot: &coin,
-			DataTreeRoot: &data,
+			Number:         new(big.Int),
+			GasLimit:       ghost.MaxBlockGasLimit,
+			Time:           testGenesisAt,
+			Difficulty:     new(big.Int).Set(testDifficulty),
+			BaseFee:        big.NewInt(vars.InitialBaseFee),
+			UncleHash:      types.EmptyUncleHash,
+			CoinTreeRoot:   &coin,
+			DataTreeRoot:   &data,
+			DataMarkerRoot: &marker,
 		}
 		reader = newTestReader(config, parent)
 	)
@@ -66,7 +68,7 @@ func TestGasLimitAboveConsensusMaximumRejected(t *testing.T) {
 			t.Fatal(err)
 		}
 		h.UncleHash = types.EmptyUncleHash
-		h.CoinTreeRoot, h.DataTreeRoot = &coin, &data
+		h.CoinTreeRoot, h.DataTreeRoot, h.DataMarkerRoot = &coin, &data, &marker
 		return h
 	}
 	// The largest step up the gas limit rule allows from the parent.

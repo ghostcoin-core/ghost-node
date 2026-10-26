@@ -28,21 +28,21 @@ import (
 
 // A header has one of two layouts (docs/trees-and-headers.md):
 //
-//   - the base layout, with both tree roots nil: fields 0 to 14 and the
+//   - the base layout, with all three roots nil: fields 0 to 14 and the
 //     optional fields BaseFee, WithdrawalsHash, BlobGasUsed, ExcessBlobGas and
 //     ParentBeaconRoot, exactly as the base client encodes them;
-//   - the Ghost layout of spec 05, section 10, with both tree roots set: the
-//     18-item list of fields 0 to 14, BaseFee, CoinTreeRoot and DataTreeRoot,
-//     and none of the other optional fields.
+//   - the Ghost layout of spec 05, section 10, with all three roots set: the
+//     19-item list of fields 0 to 14, BaseFee, CoinTreeRoot, DataTreeRoot and
+//     DataMarkerRoot, and none of the other optional fields.
 //
 // Any other combination cannot be encoded. The decoder tells the layouts
-// apart by shape: 18 items with a 32-byte string at index 17. In the base
-// layout index 17 is BlobGasUsed, an integer of at most 8 bytes.
+// apart by shape: 19 items with a 32-byte string at index 18. In the base
+// layout index 18 is ExcessBlobGas, an integer of at most 8 bytes.
 
-const ghostHeaderItems = 18
+const ghostHeaderItems = 19
 
 var (
-	errPartialTreeRoots = errors.New("header sets one tree root without the other")
+	errPartialTreeRoots = errors.New("header sets some but not all of the tree and marker roots")
 	errTreeRootsNoFee   = errors.New("header with tree roots has no base fee")
 	errTreeRootsField   = errors.New("header with tree roots sets a field the Ghost layout forbids")
 )
@@ -50,11 +50,11 @@ var (
 // ghostLayout reports whether the header takes the Ghost layout, and an error
 // for a combination of fields neither layout encodes.
 func (obj *Header) ghostLayout() (bool, error) {
-	coin, data := obj.CoinTreeRoot != nil, obj.DataTreeRoot != nil
+	coin, data, marker := obj.CoinTreeRoot != nil, obj.DataTreeRoot != nil, obj.DataMarkerRoot != nil
 	switch {
-	case !coin && !data:
+	case !coin && !data && !marker:
 		return false, nil
-	case coin != data:
+	case !coin || !data || !marker:
 		return false, errPartialTreeRoots
 	case obj.BaseFee == nil:
 		return false, errTreeRootsNoFee
@@ -115,6 +115,7 @@ func (obj *Header) EncodeRLP(_w io.Writer) error {
 		w.WriteBigInt(obj.BaseFee)
 		w.WriteBytes(obj.CoinTreeRoot[:])
 		w.WriteBytes(obj.DataTreeRoot[:])
+		w.WriteBytes(obj.DataMarkerRoot[:])
 		w.ListEnd(_tmp0)
 		return w.Flush()
 	}
@@ -167,7 +168,7 @@ func (obj *Header) EncodeRLP(_w io.Writer) error {
 
 // baseHeader has the fields and tags of Header but none of its methods, so
 // the rlp package decodes it by reflection, as it decoded Header before the
-// Ghost layout; the tree roots are tagged rlp:"-" and stay nil.
+// Ghost layout; the tree and marker roots are tagged rlp:"-" and stay nil.
 type baseHeader Header
 
 // ghostHeaderRLP is the Ghost layout: every field required.
@@ -190,34 +191,37 @@ type ghostHeaderRLP struct {
 	BaseFee      *big.Int
 	CoinTreeRoot common.Hash
 	DataTreeRoot common.Hash
+	// DataMarkerRoot is the root of the data spent-marker set.
+	DataMarkerRoot common.Hash
 }
 
 func (g *ghostHeaderRLP) header() *Header {
-	coin, data := g.CoinTreeRoot, g.DataTreeRoot
+	coin, data, marker := g.CoinTreeRoot, g.DataTreeRoot, g.DataMarkerRoot
 	return &Header{
-		ParentHash:   g.ParentHash,
-		UncleHash:    g.UncleHash,
-		Coinbase:     g.Coinbase,
-		Root:         g.Root,
-		TxHash:       g.TxHash,
-		ReceiptHash:  g.ReceiptHash,
-		Bloom:        g.Bloom,
-		Difficulty:   g.Difficulty,
-		Number:       g.Number,
-		GasLimit:     g.GasLimit,
-		GasUsed:      g.GasUsed,
-		Time:         g.Time,
-		Extra:        g.Extra,
-		MixDigest:    g.MixDigest,
-		Nonce:        g.Nonce,
-		BaseFee:      g.BaseFee,
-		CoinTreeRoot: &coin,
-		DataTreeRoot: &data,
+		ParentHash:     g.ParentHash,
+		UncleHash:      g.UncleHash,
+		Coinbase:       g.Coinbase,
+		Root:           g.Root,
+		TxHash:         g.TxHash,
+		ReceiptHash:    g.ReceiptHash,
+		Bloom:          g.Bloom,
+		Difficulty:     g.Difficulty,
+		Number:         g.Number,
+		GasLimit:       g.GasLimit,
+		GasUsed:        g.GasUsed,
+		Time:           g.Time,
+		Extra:          g.Extra,
+		MixDigest:      g.MixDigest,
+		Nonce:          g.Nonce,
+		BaseFee:        g.BaseFee,
+		CoinTreeRoot:   &coin,
+		DataTreeRoot:   &data,
+		DataMarkerRoot: &marker,
 	}
 }
 
-// isGhostLayout reports whether raw is a list of exactly 18 items whose item
-// at index 17 is a 32-byte string. Malformed input is not; the base decoder
+// isGhostLayout reports whether raw is a list of exactly 19 items whose item
+// at index 18 is a 32-byte string. Malformed input is not; the base decoder
 // then reports what is wrong with it.
 func isGhostLayout(raw []byte) bool {
 	content, _, err := rlp.SplitList(raw)
@@ -241,7 +245,7 @@ func isGhostLayout(raw []byte) bool {
 }
 
 // DecodeRLP implements rlp.Decoder. A header in the Ghost layout decodes
-// with both roots set; any other input decodes exactly as before.
+// with all three roots set; any other input decodes exactly as before.
 func (h *Header) DecodeRLP(s *rlp.Stream) error {
 	raw, err := s.Raw()
 	if err != nil {
@@ -372,7 +376,7 @@ func longLength(b []byte, n int) (int, error) {
 // Field sizes of the Ghost layout: exact sizes of the fixed fields, and the
 // widths in bytes of the integers.
 var (
-	ghostFixedSizes = map[int]int{0: 32, 1: 32, 2: 20, 3: 32, 4: 32, 5: 32, 6: 256, 13: 32, 14: 8, 16: 32, 17: 32}
+	ghostFixedSizes = map[int]int{0: 32, 1: 32, 2: 20, 3: 32, 4: 32, 5: 32, 6: 256, 13: 32, 14: 8, 16: 32, 17: 32, 18: 32}
 	ghostIntWidths  = []struct{ index, width int }{{7, 32}, {8, 8}, {9, 8}, {10, 8}, {11, 8}, {15, 32}}
 )
 
@@ -394,7 +398,7 @@ func DecodeGhostHeader(b []byte) (*Header, error) {
 	if len(rest) > 0 {
 		return nil, ghostReject(GhostReasonTrailingBytes, "%d bytes after the list", len(rest))
 	}
-	// 3. Exactly 18 items, none a list.
+	// 3. Exactly 19 items, none a list.
 	if len(top.items) != ghostHeaderItems {
 		return nil, ghostReject(GhostReasonItemCount, "%d items, want %d", len(top.items), ghostHeaderItems)
 	}
@@ -445,5 +449,6 @@ func DecodeGhostHeader(b []byte) (*Header, error) {
 	copy(g.Nonce[:], items[14].content)
 	copy(g.CoinTreeRoot[:], items[16].content)
 	copy(g.DataTreeRoot[:], items[17].content)
+	copy(g.DataMarkerRoot[:], items[18].content)
 	return g.header(), nil
 }

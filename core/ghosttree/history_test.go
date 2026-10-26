@@ -65,9 +65,9 @@ func newTestChain(t *testing.T) *testChain {
 	t.Helper()
 	db := rawdb.NewMemoryDatabase()
 	c := &testChain{t: t, db: db, h: NewHistory(db)}
-	coin, data := EmptyRoot(Coin), EmptyRoot(Data)
+	coin, data, marker := EmptyRoot(Coin), EmptyRoot(Data), EmptyMarkerSetRoot
 	c.insert(&testBlock{
-		header: &types.Header{Number: big.NewInt(0), Difficulty: big.NewInt(1), BaseFee: big.NewInt(1), CoinTreeRoot: &coin, DataTreeRoot: &data},
+		header: &types.Header{Number: big.NewInt(0), Difficulty: big.NewInt(1), BaseFee: big.NewInt(1), CoinTreeRoot: &coin, DataTreeRoot: &data, DataMarkerRoot: &marker},
 		st:     newState(t),
 	})
 	return c
@@ -99,14 +99,19 @@ func (c *testChain) next(parent *testBlock, tag byte, coin, data int) *testBlock
 		}
 	}
 	coinRoot, dataRoot := mustRoot(c.t, Release, st, Coin), mustRoot(c.t, Release, st, Data)
+	markerRoot, err := DataMarkerRoot(st)
+	if err != nil {
+		c.t.Fatal(err)
+	}
 	header := &types.Header{
-		ParentHash:   parent.hash(),
-		Number:       new(big.Int).SetUint64(number),
-		Difficulty:   big.NewInt(1),
-		BaseFee:      big.NewInt(1),
-		Extra:        []byte{tag},
-		CoinTreeRoot: &coinRoot,
-		DataTreeRoot: &dataRoot,
+		ParentHash:     parent.hash(),
+		Number:         new(big.Int).SetUint64(number),
+		Difficulty:     big.NewInt(1),
+		BaseFee:        big.NewInt(1),
+		Extra:          []byte{tag},
+		CoinTreeRoot:   &coinRoot,
+		DataTreeRoot:   &dataRoot,
+		DataMarkerRoot: &markerRoot,
 	}
 	return &testBlock{header: header, records: records, st: st}
 }
@@ -453,7 +458,7 @@ func TestWrongPageIsCaught(t *testing.T) {
 	}
 	// A header without the root of the kind is no anchor.
 	h := types.CopyHeader(anchor)
-	h.CoinTreeRoot, h.DataTreeRoot, h.ParentHash = nil, nil, common.Hash{1}
+	h.CoinTreeRoot, h.DataTreeRoot, h.DataMarkerRoot, h.ParentHash = nil, nil, nil, common.Hash{1}
 	rawdb.WriteHeader(c.db, h)
 	rawdb.WriteCanonicalHash(c.db, h.Hash(), 1)
 	if _, err := c.h.PageRoots(Coin, 0, h.Hash()); !errors.Is(err, ErrNoHeaderRoot) {
@@ -508,7 +513,8 @@ func TestHistoryServesFullTrees(t *testing.T) {
 			coin = naiveRoot(Coin, p.Depth, tree0)
 		}
 		data := zeros(Data, p.Depth)[p.Depth]
-		header := &types.Header{ParentHash: parent, Number: new(big.Int).SetUint64(number), Difficulty: big.NewInt(1), BaseFee: big.NewInt(1), CoinTreeRoot: &coin, DataTreeRoot: &data}
+		marker := EmptyMarkerSetRoot
+		header := &types.Header{ParentHash: parent, Number: new(big.Int).SetUint64(number), Difficulty: big.NewInt(1), BaseFee: big.NewInt(1), CoinTreeRoot: &coin, DataTreeRoot: &data, DataMarkerRoot: &marker}
 		rawdb.WriteHeader(db, header)
 		rawdb.WriteCanonicalHash(db, header.Hash(), number)
 		if err := h.ApplyBlock(header.Hash(), number, records); err != nil {

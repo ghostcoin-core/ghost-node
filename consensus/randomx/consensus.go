@@ -240,13 +240,14 @@ func (r *RandomX) verifyHeader(chain consensus.ChainHeaderReader, header, parent
 	return nil
 }
 
-// checkTreeRootFields checks that a header carries both tree roots when its
+// checkTreeRootFields checks that a header carries both tree roots and the
+// data marker root when its
 // chain has EIP-1559 in force, and neither otherwise. The roots take the
 // Ghost layout, which requires the base fee, so a chain without EIP-1559 (so
 // far only developer mode) cannot carry them after its genesis.
 func checkTreeRootFields(london bool, header *types.Header) error {
 	switch {
-	case !london && (header.CoinTreeRoot != nil || header.DataTreeRoot != nil):
+	case !london && (header.CoinTreeRoot != nil || header.DataTreeRoot != nil || header.DataMarkerRoot != nil):
 		return fmt.Errorf("%w: tree roots without a base fee", errUnsupportedField)
 	case !london:
 		return nil
@@ -254,6 +255,8 @@ func checkTreeRootFields(london bool, header *types.Header) error {
 		return fmt.Errorf("%w: coinTreeRoot", errMissingTreeRoot)
 	case header.DataTreeRoot == nil:
 		return fmt.Errorf("%w: dataTreeRoot", errMissingTreeRoot)
+	case header.DataMarkerRoot == nil:
+		return fmt.Errorf("%w: dataMarkerRoot", errMissingTreeRoot)
 	}
 	return nil
 }
@@ -331,7 +334,7 @@ func (r *RandomX) FinalizeAndAssemble(chain consensus.ChainHeaderReader, header 
 		return nil, errMissingBaseFee
 	}
 	r.Finalize(chain, header, state, txs, nil, nil)
-	header.CoinTreeRoot, header.DataTreeRoot = nil, nil
+	header.CoinTreeRoot, header.DataTreeRoot, header.DataMarkerRoot = nil, nil, nil
 	if london {
 		coinRoot, err := ghosttree.Root(state, ghosttree.Coin)
 		if err != nil {
@@ -341,7 +344,11 @@ func (r *RandomX) FinalizeAndAssemble(chain consensus.ChainHeaderReader, header 
 		if err != nil {
 			return nil, err
 		}
-		header.CoinTreeRoot, header.DataTreeRoot = &coinRoot, &dataRoot
+		markerRoot, err := ghosttree.DataMarkerRoot(state)
+		if err != nil {
+			return nil, err
+		}
+		header.CoinTreeRoot, header.DataTreeRoot, header.DataMarkerRoot = &coinRoot, &dataRoot, &markerRoot
 	}
 	header.Root = state.IntermediateRoot(config.IsEnabled(config.GetEIP161dTransition, header.Number))
 	return types.NewBlock(header, txs, nil, receipts, trie.NewStackTrie(nil)), nil

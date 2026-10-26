@@ -46,9 +46,9 @@ func newSyncChain(t *testing.T) *syncChain {
 	t.Helper()
 	db := rawdb.NewMemoryDatabase()
 	c := &syncChain{t: t, db: db, h: NewHistory(db), blocks: make(map[common.Hash]*testBlock), failing: make(map[common.Hash]bool)}
-	coin, data := EmptyRoot(Coin), EmptyRoot(Data)
+	coin, data, marker := EmptyRoot(Coin), EmptyRoot(Data), EmptyMarkerSetRoot
 	c.genesis = &testBlock{
-		header: &types.Header{Number: big.NewInt(0), Difficulty: big.NewInt(1), BaseFee: big.NewInt(1), CoinTreeRoot: &coin, DataTreeRoot: &data},
+		header: &types.Header{Number: big.NewInt(0), Difficulty: big.NewInt(1), BaseFee: big.NewInt(1), CoinTreeRoot: &coin, DataTreeRoot: &data, DataMarkerRoot: &marker},
 		st:     newState(t),
 	}
 	c.add(c.genesis)

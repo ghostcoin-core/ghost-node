@@ -42,7 +42,7 @@ func TestSealHashCoversEveryField(t *testing.T) {
 	engine := newTestEngine(t, testParams())
 	legacy := fullHeader()
 	legacy.BaseFee, legacy.WithdrawalsHash, legacy.BlobGasUsed, legacy.ExcessBlobGas, legacy.ParentBeaconRoot = nil, nil, nil, nil, nil
-	baseOnly := map[string]bool{"CoinTreeRoot": true, "DataTreeRoot": true}
+	baseOnly := map[string]bool{"CoinTreeRoot": true, "DataTreeRoot": true, "DataMarkerRoot": true}
 	ghostForbids := map[string]bool{"WithdrawalsHash": true, "BlobGasUsed": true, "ExcessBlobGas": true, "ParentBeaconRoot": true}
 
 	for name, c := range map[string]struct {

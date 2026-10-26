@@ -2065,3 +2065,57 @@ func TestSendRawRevealTransaction(t *testing.T) {
 		t.Fatalf("decoded reveal hash %x, want %x", dec.Hash(), hash)
 	}
 }
+
+// TestRPCMarshalHeaderDataMarkerRoot checks that both header marshalers
+// carry dataMarkerRoot for a header that has it and leave the key out for
+// one that has none.
+func TestRPCMarshalHeaderDataMarkerRoot(t *testing.T) {
+	t.Parallel()
+	coin, data, marker := common.Hash{1}, common.Hash{2}, common.HexToHash("0ef484d17824d5fefb2533c70af81a3267af1169dd091395ad7607762aeee0a3")
+	ghostHeader := &types.Header{
+		Number:         big.NewInt(1),
+		Difficulty:     big.NewInt(1),
+		BaseFee:        big.NewInt(1),
+		CoinTreeRoot:   &coin,
+		DataTreeRoot:   &data,
+		DataMarkerRoot: &marker,
+	}
+	baseHeader := &types.Header{Number: big.NewInt(1), Difficulty: big.NewInt(1), BaseFee: big.NewInt(1)}
+
+	fields := RPCMarshalHeader(ghostHeader)
+	if got, ok := fields["dataMarkerRoot"]; !ok || *got.(*common.Hash) != marker {
+		t.Errorf("RPCMarshalHeader dataMarkerRoot %v, want %x", got, marker)
+	}
+	if _, ok := RPCMarshalHeader(baseHeader)["dataMarkerRoot"]; ok {
+		t.Error("RPCMarshalHeader sets dataMarkerRoot for a header without it")
+	}
+
+	for _, c := range []struct {
+		name   string
+		header *types.Header
+		want   *common.Hash
+	}{
+		{"ghost header", ghostHeader, &marker},
+		{"base header", baseHeader, nil},
+	} {
+		enc, err := json.Marshal(NewRPCMarshalHeaderTFromHeader(c.header))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(enc, &obj); err != nil {
+			t.Fatal(err)
+		}
+		raw, ok := obj["dataMarkerRoot"]
+		if c.want == nil {
+			if ok {
+				t.Errorf("%s: dataMarkerRoot %s, want no key", c.name, raw)
+			}
+			continue
+		}
+		var got common.Hash
+		if !ok || json.Unmarshal(raw, &got) != nil || got != *c.want {
+			t.Errorf("%s: dataMarkerRoot %s, want %x", c.name, raw, *c.want)
+		}
+	}
+}

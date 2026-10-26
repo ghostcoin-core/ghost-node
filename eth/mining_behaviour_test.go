@@ -431,6 +431,9 @@ func requireAgreement(t *testing.T, nodes ...*miningNode) map[common.Address]*ui
 		if head.DataTreeRoot == nil || data != *head.DataTreeRoot {
 			t.Fatalf("node %s: data tree root %x, header has %v", n.name, data, head.DataTreeRoot)
 		}
+		if head.DataMarkerRoot == nil || *head.DataMarkerRoot != ghosttree.EmptyMarkerSetRoot {
+			t.Fatalf("node %s: header data marker root %v, want %x", n.name, head.DataMarkerRoot, ghosttree.EmptyMarkerSetRoot)
+		}
 		if root := st.IntermediateRoot(true); root != head.Root {
 			t.Fatalf("node %s: state root %x, header has %x", n.name, root, head.Root)
 		}
@@ -898,18 +901,19 @@ func TestMiningHeaderFlood(t *testing.T) {
 	// given difficulty and nonce, and an extra field that makes it unique.
 	onHead := func(difficulty int64, nonce uint64, extra int) *types.Block {
 		h := &types.Header{
-			ParentHash:   head.Hash(),
-			Coinbase:     common.Address{0xf1},
-			Number:       new(big.Int).Add(head.Number, common.Big1),
-			GasLimit:     head.GasLimit,
-			Time:         head.Time + mbBlockTime,
-			Extra:        []byte(fmt.Sprintf("flood %d", extra)),
-			BaseFee:      eip1559.CalcBaseFee(config, head),
-			Difficulty:   big.NewInt(difficulty),
-			Nonce:        types.EncodeNonce(nonce),
-			Root:         head.Root,
-			CoinTreeRoot: head.CoinTreeRoot,
-			DataTreeRoot: head.DataTreeRoot,
+			ParentHash:     head.Hash(),
+			Coinbase:       common.Address{0xf1},
+			Number:         new(big.Int).Add(head.Number, common.Big1),
+			GasLimit:       head.GasLimit,
+			Time:           head.Time + mbBlockTime,
+			Extra:          []byte(fmt.Sprintf("flood %d", extra)),
+			BaseFee:        eip1559.CalcBaseFee(config, head),
+			Difficulty:     big.NewInt(difficulty),
+			Nonce:          types.EncodeNonce(nonce),
+			Root:           head.Root,
+			CoinTreeRoot:   head.CoinTreeRoot,
+			DataTreeRoot:   head.DataTreeRoot,
+			DataMarkerRoot: head.DataMarkerRoot,
 		}
 		return types.NewBlock(h, nil, nil, nil, trie.NewStackTrie(nil))
 	}
