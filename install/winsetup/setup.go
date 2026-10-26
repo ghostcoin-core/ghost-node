@@ -45,11 +45,10 @@ import (
 	"github.com/ethereum/go-ethereum/internal/winsvc"
 )
 
-// releaseKey is the release key. This is a test key whose private half nobody
-// holds, so until the real key replaces it ghost-setup accepts no release.
-// The same key is install/release-key.pub; a test keeps the two equal.
+// releaseKey is the release key: the public half of the key that signs every
+// release. The same key is install/release-key.pub; a test keeps the two equal.
 const releaseKey = `-----BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEAaXYrmAQBL2GOex7Gk5uAi/2q/0DxRZwTbYyVPGQVHfE=
+MCowBQYDK2VwAyEA/5nNW/CysxPVl+S5p5VJxi2ywNlEl3HQ1/BzHSAQZ3A=
 -----END PUBLIC KEY-----
 `
 

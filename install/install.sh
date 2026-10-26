@@ -52,13 +52,12 @@
 
 installer_source() {
 	cat <<'GHOST_INSTALLER'
-# The release key. This is a test key whose private half nobody holds, so
-# until the real key replaces it this script accepts no release. The same key
-# is the .pub file next to this script; a test keeps the two equal.
+# The release key: the public half of the key that signs every release. The
+# same key is the .pub file next to this script; a test keeps the two equal.
 release_key() {
 	cat <<'KEY'
 -----BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEAaXYrmAQBL2GOex7Gk5uAi/2q/0DxRZwTbYyVPGQVHfE=
+MCowBQYDK2VwAyEA/5nNW/CysxPVl+S5p5VJxi2ywNlEl3HQ1/BzHSAQZ3A=
 -----END PUBLIC KEY-----
 KEY
 }
