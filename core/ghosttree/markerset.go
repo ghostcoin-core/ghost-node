@@ -109,10 +109,22 @@ func setKey(kind byte, parts ...[]byte) common.Hash {
 	return K(TagMarkerSetSlot, append([][]byte{{kind}}, parts...)...)
 }
 
-func countKey() common.Hash                     { return setKey(keyCount) }
-func leafKey(pos uint64, field byte) common.Hash { return setKey(keyLeaf, index5(pos), []byte{field}) }
-func nodeKey(level int, i uint64) common.Hash    { return setKey(keyNode, []byte{byte(level)}, index5(i)) }
-func indexRootKey() common.Hash                  { return setKey(keyIndexRoot) }
+func countKey() common.Hash {
+	return setKey(keyCount)
+}
+
+func leafKey(pos uint64, field byte) common.Hash {
+	return setKey(keyLeaf, index5(pos), []byte{field})
+}
+
+func nodeKey(level int, i uint64) common.Hash {
+	return setKey(keyNode, []byte{byte(level)}, index5(i))
+}
+
+func indexRootKey() common.Hash {
+	return setKey(keyIndexRoot)
+}
+
 func indexNodeKey(id uint64, field byte) common.Hash {
 	return setKey(keyIndexNode, index5(id), []byte{field})
 }
