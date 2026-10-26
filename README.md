@@ -52,25 +52,40 @@ private internal test network with one command, `scripts/internal-net.sh`
 
 ### The one line
 
-On Linux or macOS (amd64 or arm64), with OpenSSL 3 or later as `openssl`,
-paste this into a terminal:
+On Linux or macOS (amd64 or arm64), paste this into a terminal:
 
 ```sh
-printf 'GET /ghostcoin-core/ghost-node/main/install/install.sh HTTP/1.0\r\nHost: raw.githubusercontent.com\r\n\r\n' | openssl s_client -quiet -verify 9 -verify_return_error -servername raw.githubusercontent.com -verify_hostname raw.githubusercontent.com -connect raw.githubusercontent.com:443 2>/dev/null | sed '1,/^[[:space:]]*$/d' | sh
+curl -fsSL https://get.ghostcoin.com | sh
 ```
 
-It fetches [install/install.sh](install/install.sh) over TLS and runs it. The
-script asks nothing. It downloads the release for this computer and its
-signature, and checks the signature against the release key pinned in the
-script before it unpacks or runs anything; on a mismatch it stops with nothing
-installed. It installs the node in `~/.ghost-node`, writes a config with a new
-mining address, and starts the node mining as a user service (a systemd user
-unit on Linux, a launchd agent on macOS). Until the Ghost network is built in,
-a release runs the internal test network.
+It runs [install/install.sh](install/install.sh), which asks nothing and needs
+only the tools a stock Mac or Linux computer has (`sh`, `curl`, `tar`,
+`sha256sum` or `shasum`); no OpenSSL. It downloads the release for this
+computer, its signature, and `ghost-verify`, a small static signature checker
+([install/verify](install/verify)) that it runs only when its SHA-256 is the
+one pinned in the script. The checker checks the release's signature against
+the release key pinned in the script before anything is unpacked or run; on
+any doubt about a download, a hash or the signature the script stops with
+nothing installed and says why.
 
-The key pinned today is a test key that nobody holds the private half of, so
+It installs the node in `~/.ghost-node`, writes a config with a new mining
+address, and starts the node mining as a user service that also starts at boot
+(a systemd user unit on Linux, a launchd agent on macOS). The node joins the
+public test network and syncs. The config opens the node's HTTP RPC on
+`127.0.0.1:8545` only, to the Ghost web apps. When it finishes it prints the
+mining address and how to check on the node.
+
+Updates are on by default: `~/.ghost-node/update`, the same script run with
+`--update`, runs daily (a systemd user timer, or a launchd agent) and installs
+a newer signed release after the same checks, keeping the config and the
+mining address; a refused update changes nothing. Set `GHOST_NO_UPDATE=1` for
+the install to leave the timer out.
+
+The key pinned today is a test key that nobody holds the private half of, and
+the `ghost-verify` hashes pinned in the script are all-zero placeholders, so
 the installer accepts no release yet. The real key replaces the `.pub` file in
-`install/` and the same lines in `install.sh`; a test keeps the two equal.
+`install/` and the same lines in `install.sh`; a test keeps the two equal. The
+release fills in the checker's hashes.
 
 ## Building
 
