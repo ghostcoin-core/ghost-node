@@ -71,6 +71,8 @@ var negativeHeaderVectors = []struct {
 	{"header-short-tree-root", GhostReasonFieldSize, "f90263" + blockOneBody + blockOneFee + "9f142c6bdf0882396330f9942ddd49df5d860b05a5218dad1ce6ef8e69238b6e" + blockOneData + blockOneMarker},
 	// One byte after the list.
 	{"header-trailing-bytes", GhostReasonTrailingBytes, vectorBlockOneRLP + "00"},
+	// The 18-item layout, without the data marker root.
+	{"header-eighteen-items", GhostReasonItemCount, vectorBlockOneEighteenItems},
 }
 
 func mustHex(t *testing.T, s string) []byte {
@@ -243,7 +245,7 @@ func TestGhostHeaderNegativeVectors(t *testing.T) {
 		{"wrapped single byte", GhostReasonNonCanonicalRLP, []byte{0xc2, 0x81, 0x01}},
 		{"long form for a short list", GhostReasonNonCanonicalRLP, []byte{0xf8, 0x01, 0x80}},
 		{"long length with a leading zero", GhostReasonNonCanonicalRLP, append([]byte{0xf9, 0x00, 0x38}, bytes.Repeat([]byte{0x80}, 0x38)...)},
-		{"item that is a list", GhostReasonItemCount, append([]byte{0xd2, 0xc0}, bytes.Repeat([]byte{0x80}, 17)...)},
+		{"item that is a list", GhostReasonItemCount, append([]byte{0xd3, 0xc0}, bytes.Repeat([]byte{0x80}, 18)...)},
 		{"too large an integer", GhostReasonIntegerRange, withItem(t, good, 8, []byte{0x89, 1, 2, 3, 4, 5, 6, 7, 8, 9})},
 		{"extraData over 32 bytes", GhostReasonFieldSize, withItem(t, good, 12, append([]byte{0xa1}, bytes.Repeat([]byte{7}, 33)...))},
 		{"short coinbase", GhostReasonFieldSize, withItem(t, good, 2, append([]byte{0x93}, bytes.Repeat([]byte{7}, 19)...))},

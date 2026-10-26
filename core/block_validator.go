@@ -154,8 +154,8 @@ func (v *BlockValidator) ValidateState(block *types.Block, statedb *state.StateD
 
 // validateTreeRoots checks the coin and data tree roots and the data marker
 // root of a header that carries any of them against the roots of the
-// executed state. A header without
-// roots is left to the consensus engine, which rejects it on Ghost chains.
+// executed state. A header without roots is left to the consensus engine,
+// which rejects it on Ghost chains.
 func validateTreeRoots(header *types.Header, statedb *state.StateDB) error {
 	if header.CoinTreeRoot == nil && header.DataTreeRoot == nil && header.DataMarkerRoot == nil {
 		return nil
