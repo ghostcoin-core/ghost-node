@@ -181,7 +181,7 @@ func TestWindowsInstallerScripts(t *testing.T) {
 			for end < len(code) && code[end] != "}" && code[end] != ")" {
 				end++
 			}
-			block := strings.Join(code[check+1 : end], "\n")
+			block := strings.Join(code[check+1:end], "\n")
 			if !strings.Contains(block, ws.refuse) || !strings.Contains(block, "%REFUSAL%") && !strings.Contains(block, "$Refusal") || strings.Contains(block, ws.runLine) {
 				t.Errorf("%s: the check %q does not refuse to install:\n%s", ws.file, code[check], block)
 			}
