@@ -22,7 +22,13 @@ name: Release
 # ghost-setup-windows-<arch>.exe (install/winsetup) for amd64 and arm64. The
 # repository's install.ps1 and install.cmd pin all-zero placeholder hashes for
 # the setup files; the published copies have the real SHA-256 of this
-# release's setup files written in before they are signed. Anything that does
+# release's setup files written in before they are signed. It also carries
+# ghost-verify-<os>-<arch> (install/verify), the static checker install.sh
+# runs, for linux and darwin on amd64 and arm64, signed and listed in
+# SHA256SUMS the same way. The repository's install.sh pins all-zero
+# placeholder hashes for them; install/pin-verifier-hashes.sh writes in the
+# real SHA-256 of this release's checkers before install.sh is signed, and
+# fails the run if any placeholder is left. Anything that does
 # not check out fails the run, and nothing is published.
 #
 # Pull requests that change this file build the archives only, on
@@ -167,9 +173,44 @@ jobs:
           path: dist/ghost-setup-windows-${{ matrix.arch }}.exe
           if-no-files-found: error
 
+  verifier:
+    name: build ghost-verify (${{ matrix.os }}-${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: linux, arch: amd64 }
+          - { os: linux, arch: arm64 }
+          - { os: darwin, arch: amd64 }
+          - { os: darwin, arch: arm64 }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Build ghost-verify
+        env:
+          CGO_ENABLED: '0'
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          go build -trimpath -ldflags=-buildid= -o "dist/ghost-verify-$GOOS-$GOARCH" ./install/verify
+          file "dist/ghost-verify-$GOOS-$GOARCH"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: verify-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/ghost-verify-${{ matrix.os }}-${{ matrix.arch }}
+          if-no-files-found: error
+
   publish:
     name: sign and publish
-    needs: [build, setup]
+    needs: [build, setup, verifier]
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -194,6 +235,7 @@ jobs:
           sparse-checkout: |
             install/release-key.pub
             install/install.sh
+            install/pin-verifier-hashes.sh
             install/install.ps1
             install/install.cmd
           sparse-checkout-cone-mode: false
@@ -207,6 +249,12 @@ jobs:
         if: steps.key.outputs.present == 'true'
         with:
           pattern: setup-windows-*
+          merge-multiple: true
+          path: dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: steps.key.outputs.present == 'true'
+        with:
+          pattern: verify-*
           merge-multiple: true
           path: dist
       - name: Pin the setup hashes in the Windows scripts
@@ -233,6 +281,15 @@ jobs:
           test "$(grep -c "$zero" dist/install.cmd)" -eq 1
           diff install/install.ps1 dist/install.ps1 || true
           diff install/install.cmd dist/install.cmd || true
+      # install.sh refuses to run a ghost-verify whose hash it does not pin,
+      # and the repository's copy pins only placeholders. The script fails,
+      # and with it the release, unless every placeholder is replaced.
+      - name: Pin the ghost-verify hashes in install.sh
+        if: steps.key.outputs.present == 'true'
+        run: |
+          set -euo pipefail
+          sh install/pin-verifier-hashes.sh dist/install.sh dist
+          diff install/install.sh dist/install.sh || true
       - name: Sign
         if: steps.key.outputs.present == 'true'
         env:
@@ -259,14 +316,17 @@ jobs:
           test "$count" -eq 6
           files=0
           for f in dist/ghost-setup-windows-amd64.exe dist/ghost-setup-windows-arm64.exe \
+                   dist/ghost-verify-linux-amd64 dist/ghost-verify-linux-arm64 \
+                   dist/ghost-verify-darwin-amd64 dist/ghost-verify-darwin-arm64 \
                    dist/install.sh dist/install.ps1 dist/install.cmd; do
             openssl pkeyutl -sign -inkey "$key" -rawin -in "$f" -out "$f.sig"
             test "$(wc -c <"$f.sig")" -eq 64
             openssl pkeyutl -verify -pubin -inkey install/release-key.pub -rawin -in "$f" -sigfile "$f.sig"
             files=$((files + 1))
           done
-          test "$files" -eq 5
-          (cd dist && sha256sum ghost-node-*.tar.gz ghost-setup-windows-*.exe install.sh install.ps1 install.cmd >SHA256SUMS)
+          test "$files" -eq 9
+          (cd dist && sha256sum ghost-node-*.tar.gz ghost-setup-windows-*.exe ghost-verify-linux-amd64 ghost-verify-linux-arm64 \
+            ghost-verify-darwin-amd64 ghost-verify-darwin-arm64 install.sh install.ps1 install.cmd >SHA256SUMS)
           ls -l dist
       - name: Publish the release
         if: steps.key.outputs.present == 'true'
@@ -281,6 +341,10 @@ jobs:
           gh release create "$tag" dist/ghost-node-*.tar.gz dist/ghost-node-*.tar.gz.sig \
             dist/ghost-setup-windows-amd64.exe dist/ghost-setup-windows-amd64.exe.sig \
             dist/ghost-setup-windows-arm64.exe dist/ghost-setup-windows-arm64.exe.sig \
+            dist/ghost-verify-linux-amd64 dist/ghost-verify-linux-amd64.sig \
+            dist/ghost-verify-linux-arm64 dist/ghost-verify-linux-arm64.sig \
+            dist/ghost-verify-darwin-amd64 dist/ghost-verify-darwin-amd64.sig \
+            dist/ghost-verify-darwin-arm64 dist/ghost-verify-darwin-arm64.sig \
             dist/install.sh dist/install.sh.sig dist/install.ps1 dist/install.ps1.sig \
             dist/install.cmd dist/install.cmd.sig dist/SHA256SUMS \
             --target "$SHA" --title "Ghost node $tag" --latest \
