@@ -221,12 +221,12 @@ jobs:
             hash="$(sha256sum "$exe" | cut -d' ' -f1)"
             [[ $hash =~ ^[0-9a-f]{64}$ ]] && [ "$hash" != "$zero" ]
             # Exactly one placeholder line per arch in each script, replaced in place.
-            test "$(grep -c "^		$arch = '$zero'\$" dist/install.ps1)" -eq 1
-            sed -i "s/^\(		$arch = '\)$zero'\$/\1$hash'/" dist/install.ps1
-            test "$(grep -c "^		$arch = '$hash'\$" dist/install.ps1)" -eq 1
-            test "$(grep -c "^set \"SETUP_SHA256_$arch=$zero\"\r\?\$" dist/install.cmd)" -eq 1
-            sed -i "s/^\(set \"SETUP_SHA256_$arch=\)$zero\"/\1$hash\"/" dist/install.cmd
-            test "$(grep -c "^set \"SETUP_SHA256_$arch=$hash\"" dist/install.cmd)" -eq 1
+            test "$(grep -cE "^[[:space:]]+$arch = '$zero'\$" dist/install.ps1)" -eq 1
+            sed -i -E "s/^([[:space:]]+$arch = ')$zero'\$/\1$hash'/" dist/install.ps1
+            test "$(grep -cE "^[[:space:]]+$arch = '$hash'\$" dist/install.ps1)" -eq 1
+            test "$(grep -cE "^set \"SETUP_SHA256_$arch=$zero\"\$" dist/install.cmd)" -eq 1
+            sed -i -E "s/^(set \"SETUP_SHA256_$arch=)$zero\"\$/\1$hash\"/" dist/install.cmd
+            test "$(grep -cE "^set \"SETUP_SHA256_$arch=$hash\"\$" dist/install.cmd)" -eq 1
           done
           # Only the placeholder constants themselves still hold zeros.
           test "$(grep -c "$zero" dist/install.ps1)" -eq 1
@@ -284,4 +284,4 @@ jobs:
             dist/install.sh dist/install.sh.sig dist/install.ps1 dist/install.ps1.sig \
             dist/install.cmd dist/install.cmd.sig dist/SHA256SUMS \
             --target "$SHA" --title "Ghost node $tag" --latest \
-            --notes "Ghost node built from $SHA. Install with install/install.sh, which checks each archive's .sig against the release key."
+            --notes "Ghost node built from $SHA. Install with install.sh, or on Windows install.ps1 or install.cmd; each file's .sig is its ed25519 signature by the release key."
