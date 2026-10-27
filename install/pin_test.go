@@ -270,6 +270,20 @@ const (
 // The installers the release publishes, as they are in dist.
 var installerNames = []string{"install.sh", "install.ps1", "install.cmd"}
 
+// defaultURLs is how many times the repository's installer name holds the
+// default URL: install.sh holds it as release_url's default and as
+// newest_url's, where its updater looks for the newest release.
+func defaultURLs(name string) int {
+	if name == "install.sh" {
+		return 2
+	}
+	return 1
+}
+
+// newestLine is the line of install.sh that sets where its updater looks for
+// the newest release, which the release must not pin.
+const newestLine = "newest_url=${GHOST_LATEST_URL:-" + latestURL + "}\n"
+
 // actionsEnv is the environment GitHub Actions gives the release's steps.
 var actionsEnv = []string{"GITHUB_ACTIONS=true", "GITHUB_RUN_NUMBER=" + testRunNumber, "GITHUB_SHA=" + testSHA}
 
@@ -287,8 +301,8 @@ func distDir(t *testing.T, edit map[string]func(string) string) (string, map[str
 			t.Fatal(err)
 		}
 		text := string(blob)
-		if strings.Count(text, latestURL) != 1 {
-			t.Fatalf("the repository's %s does not hold %s once", name, latestURL)
+		if n := strings.Count(text, latestURL); n != defaultURLs(name) {
+			t.Fatalf("the repository's %s holds %s %d times, not %d", name, latestURL, n, defaultURLs(name))
 		}
 		if e := edit[name]; e != nil {
 			text = e(text)
@@ -332,7 +346,13 @@ func TestPinReleaseURLRewrite(t *testing.T) {
 		if n := strings.Count(after[name], taggedURL); n != 1 {
 			t.Errorf("%s holds %s %d times, not once", name, taggedURL, n)
 		}
-		if strings.Contains(after[name], latestURL) || strings.Contains(after[name], "releases/latest") {
+		// install.sh still looks for the newest release's signed install.sh at
+		// the latest release, and nowhere else.
+		rest := strings.Replace(after[name], newestLine, "", 1)
+		if name == "install.sh" && rest == after[name] {
+			t.Error("the pinned install.sh no longer looks for the newest release at " + latestURL)
+		}
+		if strings.Contains(rest, latestURL) || strings.Contains(rest, "releases/latest") {
 			t.Errorf("%s still downloads from the latest release", name)
 		}
 		// Apart from the URL, and install.sh's hashes, nothing changes.
@@ -380,7 +400,7 @@ func TestPinReleaseURLNoRewriteOutsideActions(t *testing.T) {
 			}
 			after := readInstallers(t, dir)
 			for _, name := range installerNames {
-				if strings.Count(after[name], latestURL) != 1 || strings.Contains(after[name], "releases/download/") {
+				if strings.Count(after[name], latestURL) != defaultURLs(name) || strings.Contains(after[name], "releases/download/") {
 					t.Errorf("%s does not download from the latest release any more", name)
 				}
 			}
@@ -437,7 +457,23 @@ func TestPinReleaseURLRefuses(t *testing.T) {
 			name: "install.sh without the URL",
 			env:  actionsEnv,
 			edit: map[string]func(string) string{"install.sh": gone},
-			want: "install.sh holds the default release URL " + latestURL + " 0 times, not once",
+			want: "install.sh sets release_url to the default release URL " + latestURL + " on 0 lines, not one",
+		},
+		{
+			name: "install.sh without the newest-release URL",
+			env:  actionsEnv,
+			edit: map[string]func(string) string{"install.sh": func(s string) string {
+				return strings.Replace(s, newestLine, "newest_url=${GHOST_LATEST_URL:-https://example.com/latest/download}\n", 1)
+			}},
+			want: "install.sh sets newest_url to the default release URL " + latestURL + " on 0 lines, not one",
+		},
+		{
+			name: "install.sh with the URL elsewhere too",
+			env:  actionsEnv,
+			edit: map[string]func(string) string{"install.sh": func(s string) string {
+				return strings.Replace(s, newestLine, newestLine+"mirror_url="+latestURL+"\n", 1)
+			}},
+			want: "install.sh holds the default release URL " + latestURL + " 3 times, not twice",
 		},
 		{
 			name: "install.ps1 without the URL",
@@ -457,7 +493,7 @@ func TestPinReleaseURLRefuses(t *testing.T) {
 			edit: map[string]func(string) string{"install.sh": func(s string) string {
 				return strings.Replace(s, latestURL, latestURL+" "+latestURL, 1)
 			}},
-			want: "install.sh holds the default release URL " + latestURL + " 2 times, not once",
+			want: "install.sh sets release_url to the default release URL " + latestURL + " on 0 lines, not one",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
