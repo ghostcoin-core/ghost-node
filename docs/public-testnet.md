@@ -13,8 +13,9 @@ be reset, and none of its values are launch values.
 | | |
 |---|---|
 | Chain ID and network ID | 6777972 (the internal network's 6777971 plus one) |
-| Genesis time | 1793491200, 2026-11-01 00:00:00 UTC |
-| Genesis hash | `0xca344c2a5aad1a81fecd0a32e5d84a83567fdc2a9314e44d6ba79ba0a15a69e9` |
+| Genesis time | 1790812800, 2026-10-01 00:00:00 UTC |
+| Genesis extra data | `ghost public test network`: the time is the internal network's, and this keeps the two first blocks apart |
+| Genesis hash | `0xeecbc41f98be17f5a47dec0c9fab9ad566107669b70323d0588a171390f6ab58` |
 | Allocation | none: coins come only from mined rewards |
 | EVM | the Ghost EVM profile from block 0, as on the internal network |
 | Consensus constants | the internal network's (`ghost.InternalNetParams`) |
