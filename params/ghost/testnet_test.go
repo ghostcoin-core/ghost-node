@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/consensus/ghostrules"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/ethereum/go-ethereum/params/ghost"
@@ -36,7 +37,7 @@ import (
 // block: a change to its genesis is a new network, so it has to be made on
 // purpose, here and in TestNetGenesisHash together.
 func TestPublicTestNetGenesisHashStable(t *testing.T) {
-	want := common.HexToHash("0xeecbc41f98be17f5a47dec0c9fab9ad566107669b70323d0588a171390f6ab58")
+	want := common.HexToHash("0xdfe4271fd12d302e15c68e381ade8076207f70d3778eebd69604566fb6979436")
 	block := core.GenesisToBlock(ghost.TestNetGenesis(), nil)
 	if block.Hash() != want {
 		t.Errorf("test network genesis hash %x, want %x", block.Hash(), want)
@@ -82,11 +83,11 @@ func TestPublicTestNetGenesis(t *testing.T) {
 	if len(g.Alloc) != 0 {
 		t.Errorf("genesis allocates %d accounts, want none", len(g.Alloc))
 	}
-	if g.Timestamp != 1_790_812_800 || ghost.TestNetTimestamp != 1_790_812_800 {
-		t.Errorf("timestamp %d, want 1790812800 (2026-10-01 00:00:00 UTC)", g.Timestamp)
+	if g.Timestamp != 1_793_124_000 || ghost.TestNetTimestamp != 1_793_124_000 {
+		t.Errorf("timestamp %d, want 1793124000 (2026-10-27 18:00:00 UTC)", g.Timestamp)
 	}
-	// The time is the internal network's, so the extra data keeps the two
-	// first blocks apart.
+	// A header carries no chain ID, so the extra data keeps the two first
+	// blocks apart.
 	if string(g.ExtraData) != "ghost public test network" || ghost.TestNetExtraData != "ghost public test network" {
 		t.Errorf("extra data %q, want %q", g.ExtraData, "ghost public test network")
 	}
@@ -99,8 +100,8 @@ func TestPublicTestNetGenesis(t *testing.T) {
 	if g.BaseFee == nil || g.BaseFee.Cmp(big.NewInt(vars.InitialBaseFee)) != 0 {
 		t.Errorf("base fee %v, want %d", g.BaseFee, vars.InitialBaseFee)
 	}
-	if g.Difficulty == nil || g.Difficulty.Cmp(big.NewInt(1)) != 0 {
-		t.Errorf("difficulty %v, want 1", g.Difficulty)
+	if g.Difficulty == nil || g.Difficulty.Cmp(big.NewInt(16_384)) != 0 {
+		t.Errorf("difficulty %v, want 16384", g.Difficulty)
 	}
 
 	// Apart from the chain and network ID the configuration is the internal
@@ -144,18 +145,24 @@ func TestPublicTestNetChainIDNotReserved(t *testing.T) {
 	}
 }
 
-// TestPublicTestNetParams checks that the test network has the internal
-// network's consensus constants.
+// TestPublicTestNetParams checks the test network's consensus constants: the
+// 30-second launch preset's with a CPU-sized start and minimum difficulty.
 func TestPublicTestNetParams(t *testing.T) {
 	p := ghost.TestNetParams()
 	if err := p.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(p, ghost.InternalNetParams()) {
-		t.Errorf("test network constants %+v differ from the internal network's", p)
+	want := ghostrules.Launch30s()
+	want.StartDifficulty = big.NewInt(16_384)
+	want.MinDifficulty = big.NewInt(4_096)
+	if !reflect.DeepEqual(p, want) {
+		t.Errorf("test network constants %+v, want %+v", p, want)
+	}
+	if reflect.DeepEqual(p, ghost.InternalNetParams()) {
+		t.Error("test network constants are the internal network's")
 	}
 	p.StartDifficulty.SetInt64(5)
-	if ghost.TestNetParams().StartDifficulty.Int64() != 1 {
+	if ghost.TestNetParams().StartDifficulty.Int64() != 16_384 {
 		t.Error("TestNetParams shares its values between calls")
 	}
 }
