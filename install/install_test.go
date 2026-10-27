@@ -29,10 +29,14 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
@@ -40,6 +44,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -51,6 +56,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -245,36 +251,48 @@ func (a archive) tarGz(t *testing.T) []byte {
 	return buf.Bytes()
 }
 
-// releaseServer serves a release over TLS the way GitHub does: the latest
-// download URL redirects to the release's own. Its files can be swapped, for
-// a new release.
+// firstTag is the tag of the release a release server serves first.
+const firstTag = "v0.0.0-test"
+
+// releaseServer serves releases over TLS the way GitHub does: each release's
+// files under its own download URL, and the latest download URL redirecting
+// to the latest release's. Its files can be swapped, and a newer release
+// published.
 type releaseServer struct {
 	*httptest.Server
 	caFile string
 	os     string
 
-	mu     sync.Mutex
-	files  map[string][]byte
-	served []string
+	mu       sync.Mutex
+	latest   string
+	releases map[string]map[string][]byte
+	served   []string // the names of the files served
+	paths    []string // the tag and name of the files served
 }
 
 // serveRelease serves the archive for os, its signature, and as the release's
 // ghost-verify for os the checker verifier.
 func serveRelease(t *testing.T, os_ string, archive, sig, verifier []byte) *releaseServer {
 	t.Helper()
-	rs := &releaseServer{os: os_, files: make(map[string][]byte)}
+	rs := &releaseServer{os: os_, latest: firstTag, releases: map[string]map[string][]byte{firstTag: {}}}
 	rs.setRelease(archive, sig)
 	rs.setVerifier(verifier)
 	rs.Server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if name, ok := strings.CutPrefix(r.URL.Path, "/latest/download/"); ok {
-			http.Redirect(w, r, "/download/v0.0.0-test/"+name, http.StatusFound)
+			rs.mu.Lock()
+			tag := rs.latest
+			rs.mu.Unlock()
+			http.Redirect(w, r, "/download/"+tag+"/"+name, http.StatusFound)
 			return
 		}
-		name, ok := strings.CutPrefix(r.URL.Path, "/download/v0.0.0-test/")
+		rest, ok := strings.CutPrefix(r.URL.Path, "/download/")
+		tag, name, cut := strings.Cut(rest, "/")
+		ok = ok && cut
 		rs.mu.Lock()
-		content, found := rs.files[name]
+		content, found := rs.releases[tag][name]
 		if ok && found {
 			rs.served = append(rs.served, name)
+			rs.paths = append(rs.paths, tag+"/"+name)
 		}
 		rs.mu.Unlock()
 		if !ok || !found {
@@ -294,23 +312,101 @@ func serveRelease(t *testing.T, os_ string, archive, sig, verifier []byte) *rele
 	return rs
 }
 
-func (rs *releaseServer) setRelease(archive, sig []byte) {
+// setFile serves content as the latest release's file name, or with nil
+// content stops serving it.
+func (rs *releaseServer) setFile(name string, content []byte) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
-	rs.files[assetName(rs.os)] = archive
-	rs.files[assetName(rs.os)+".sig"] = sig
+	if content == nil {
+		delete(rs.releases[rs.latest], name)
+		return
+	}
+	rs.releases[rs.latest][name] = content
+}
+
+func (rs *releaseServer) setRelease(archive, sig []byte) {
+	rs.setFile(assetName(rs.os), archive)
+	rs.setFile(assetName(rs.os)+".sig", sig)
 }
 
 func (rs *releaseServer) setVerifier(verifier []byte) {
+	rs.setFile(verifierName(rs.os), verifier)
+}
+
+// setInstaller serves script as the latest release's install.sh, and sig as
+// its signature.
+func (rs *releaseServer) setInstaller(script, sig []byte) {
+	rs.setFile("install.sh", script)
+	rs.setFile("install.sh.sig", sig)
+}
+
+// publish publishes a new, empty release tag and makes it the latest.
+func (rs *releaseServer) publish(tag string) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
-	rs.files[verifierName(rs.os)] = verifier
+	rs.releases[tag] = make(map[string][]byte)
+	rs.latest = tag
+}
+
+// downloadURL is the download URL of the release tag.
+func (rs *releaseServer) downloadURL(tag string) string {
+	return rs.URL + "/download/" + tag
 }
 
 func (rs *releaseServer) servedFiles() []string {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 	return append([]string(nil), rs.served...)
+}
+
+func (rs *releaseServer) servedPaths() []string {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	return append([]string(nil), rs.paths...)
+}
+
+// checkServedUpdate checks that the files served since the first skip were
+// those of an update: the checker of the release tag the updater pins, the
+// newest release's install.sh and its signature, then the newest release's
+// checker, archive and signature.
+func checkServedUpdate(t *testing.T, rs *releaseServer, skip int, pinned, newest string) {
+	t.Helper()
+	served := rs.servedPaths()[skip:]
+	want := []string{
+		pinned + "/" + verifierName(rs.os),
+		newest + "/install.sh",
+		newest + "/install.sh.sig",
+		newest + "/" + verifierName(rs.os),
+		newest + "/" + assetName(rs.os),
+		newest + "/" + assetName(rs.os) + ".sig",
+	}
+	if strings.Join(served, " ") != strings.Join(want, " ") {
+		t.Fatalf("the update downloaded %v, not %v", served, want)
+	}
+}
+
+// serveInstaller serves the script at path, signed by key, as the latest
+// release's install.sh.
+func serveInstaller(t *testing.T, rs *releaseServer, key *signer, path string) {
+	t.Helper()
+	blob, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rs.setInstaller(blob, key.sign(blob))
+}
+
+// pinRelease makes the script at path download from url by default instead
+// of the latest release, as the release does to the copy it publishes.
+func pinRelease(t *testing.T, path, url string) {
+	t.Helper()
+	editScript(t, path, func(s string) string {
+		line := "release_url=${GHOST_RELEASE_URL:-" + latestURL + "}\n"
+		if strings.Count(s, line) != 1 {
+			t.Fatalf("install.sh has no line %q", line)
+		}
+		return strings.Replace(s, line, "release_url=${GHOST_RELEASE_URL:-"+url+"}\n", 1)
+	})
 }
 
 // checkServedRelease checks that the files served since the first skip were
@@ -547,6 +643,7 @@ func (env *installEnv) runScript(t *testing.T, path string, rs *releaseServer, t
 		"PATH=" + env.stubs,
 		"STUB_DIR=" + env.stubs,
 		"GHOST_RELEASE_URL=" + rs.URL + "/latest/download",
+		"GHOST_LATEST_URL=" + rs.URL + "/latest/download",
 		"GHOST_HTTP_PORT=" + strconv.Itoa(env.httpPort),
 	}
 	if trustServer {
@@ -565,10 +662,11 @@ func (env *installEnv) run(t *testing.T, script string, rs *releaseServer, trust
 	return env.runScript(t, script, rs, trustServer, extraEnv...)
 }
 
-// update runs the update script the installer installed.
-func (env *installEnv) update(t *testing.T, rs *releaseServer) (string, error) {
+// update runs the update script the installer installed. An empty
+// GHOST_RELEASE_URL= in extraEnv leaves the script its pinned release.
+func (env *installEnv) update(t *testing.T, rs *releaseServer, extraEnv ...string) (string, error) {
 	t.Helper()
-	return env.runScript(t, filepath.Join(env.home, ".ghost-node", "update"), rs, true)
+	return env.runScript(t, filepath.Join(env.home, ".ghost-node", "update"), rs, true, extraEnv...)
 }
 
 func (env *installEnv) readStub(t *testing.T, name string) string {
@@ -1118,11 +1216,25 @@ func installRunning(t *testing.T, env *installEnv, script string, rs *releaseSer
 }
 
 // checkUpdateApplied serves a new release signed by key, a geth that is the
-// one of gethBin with bytes appended, runs the update script, and checks that
-// the node runs the new geth with the old config, keys and chain, and that a
-// second update finds nothing to do. restart is the service manager's restart
-// call.
-func checkUpdateApplied(t *testing.T, env *installEnv, rs *releaseServer, key *signer, gethBin []byte, restart string) {
+// one of gethBin with bytes appended and the installer script, runs the update
+// script, and checks the update as checkUpdatedTo does. restart is the service
+// manager's restart call.
+func checkUpdateApplied(t *testing.T, env *installEnv, rs *releaseServer, key *signer, script string, gethBin []byte, restart string) {
+	t.Helper()
+	newGeth := append(append([]byte(nil), gethBin...), []byte("\nghost test release 2\n")...)
+	newArchive := archive{"geth": newGeth}.tarGz(t)
+	rs.setRelease(newArchive, key.sign(newArchive))
+	serveInstaller(t, rs, key, script)
+	checkUpdatedTo(t, env, rs, newGeth, firstTag, firstTag, restart)
+}
+
+// checkUpdatedTo runs the update script with extraEnv, a release with the geth
+// newGeth being the newest, and checks that it downloaded the files of an
+// update from the release tag pinned and the newest release tag newest, that
+// the node runs the new geth with the old config, keys, update script and
+// chain, and that a second update finds nothing to do. restart is the service
+// manager's restart call.
+func checkUpdatedTo(t *testing.T, env *installEnv, rs *releaseServer, newGeth []byte, pinned, newest, restart string, extraEnv ...string) {
 	t.Helper()
 	base := filepath.Join(env.home, ".ghost-node")
 	installed := filepath.Join(base, "bin", "geth")
@@ -1130,19 +1242,19 @@ func checkUpdateApplied(t *testing.T, env *installEnv, rs *releaseServer, key *s
 	before := baseFiles(t, env)
 	oldPID := env.servicePID(t)
 	restarts := strings.Count(env.calls(t), restart)
-	served := len(rs.servedFiles())
+	served := len(rs.servedPaths())
 
-	newGeth := append(append([]byte(nil), gethBin...), []byte("\nghost test release 2\n")...)
-	newArchive := archive{"geth": newGeth}.tarGz(t)
-	rs.setRelease(newArchive, key.sign(newArchive))
-	out, err := env.update(t, rs)
+	out, err := env.update(t, rs, extraEnv...)
 	if err != nil {
 		t.Fatalf("the update failed: %v", err)
+	}
+	if !strings.Contains(out, "the newest release's install.sh is signed by the release key") {
+		t.Fatal("the update did not say it checked the newest release's install.sh")
 	}
 	if !strings.Contains(out, "updated the node to the latest release and restarted it") {
 		t.Fatal("the update did not say it updated the node")
 	}
-	checkServedRelease(t, rs, served)
+	checkServedUpdate(t, rs, served, pinned, newest)
 	if fileHash(t, installed) != sha256.Sum256(newGeth) {
 		t.Fatal("the installed geth is not the new release's")
 	}
@@ -1181,7 +1293,7 @@ func checkUpdateApplied(t *testing.T, env *installEnv, rs *releaseServer, key *s
 		t.Fatal("the updated node lost its chain")
 	}
 
-	out, err = env.update(t, rs)
+	out, err = env.update(t, rs, extraEnv...)
 	if err != nil {
 		t.Fatalf("the second update failed: %v", err)
 	}
@@ -1202,9 +1314,288 @@ func TestInstallScriptAppliesUpdate(t *testing.T) {
 	blob := release.tarGz(t)
 	rs := serveRelease(t, "linux", blob, key.sign(blob), verifier)
 	env := newInstallEnv(t, envOptions{systemctl: stubSystemctl})
-	installRunning(t, env, writeScript(t, key, sha256Hex(verifier)), rs, geth)
+	script := writeScript(t, key, sha256Hex(verifier))
+	installRunning(t, env, script, rs, geth)
 
-	checkUpdateApplied(t, env, rs, key, release["geth"], "systemctl --user restart ghost-node.service\n")
+	checkUpdateApplied(t, env, rs, key, script, release["geth"], "systemctl --user restart ghost-node.service\n")
+}
+
+// installPinned installs, from rs, the script at path pinned to the release
+// tag, and waits for the node to run.
+func installPinned(t *testing.T, env *installEnv, rs *releaseServer, path, tag, geth string) {
+	t.Helper()
+	pinRelease(t, path, rs.downloadURL(tag))
+	stopNodeAtCleanup(t, filepath.Join(env.stubs, "service.pid"))
+	out, err := env.run(t, path, rs, true, "GHOST_RELEASE_URL=")
+	if err != nil {
+		t.Fatalf("install.sh failed: %v", err)
+	}
+	checkInstalledAndMining(t, env, geth, out)
+	if served := rs.servedPaths(); len(served) == 0 || !strings.HasPrefix(served[0], tag+"/") {
+		t.Fatalf("the install downloaded %v, not from its release %s", served, tag)
+	}
+}
+
+// publishNewer publishes the release tag as the newest: its install.sh, signed
+// by key, pins the release tag and the hash of a ghost-verify of its own, the
+// built one with bytes appended. The release serves archive and sig, and
+// checker as its ghost-verify, or with checker nil the pinned one.
+func publishNewer(t *testing.T, rs *releaseServer, key *signer, tag string, archive, sig, checker []byte) {
+	t.Helper()
+	pinned := append(append([]byte(nil), builtVerifier(t)...), []byte("\nghost-verify of "+tag+"\n")...)
+	script := writeScript(t, key, sha256Hex(pinned))
+	pinRelease(t, script, rs.downloadURL(tag))
+	rs.publish(tag)
+	serveInstaller(t, rs, key, script)
+	rs.setRelease(archive, sig)
+	if checker == nil {
+		checker = pinned
+	}
+	rs.setVerifier(checker)
+}
+
+// TestInstallScriptUpdatesToNewerRelease installs a release whose installer
+// pins it, as a published install.sh does, then publishes a newer release,
+// whose installer pins it and another ghost-verify, and runs the installed
+// update script, as its daily timer would: the node moves to the newer
+// release and keeps its config and mining address.
+func TestInstallScriptUpdatesToNewerRelease(t *testing.T) {
+	release, geth := internalNetRelease(t)
+	verifier := builtVerifier(t)
+	key := newSigner(t)
+	blob := release.tarGz(t)
+	rs := serveRelease(t, "linux", blob, key.sign(blob), verifier)
+	script := writeScript(t, key, sha256Hex(verifier))
+	env := newInstallEnv(t, envOptions{systemctl: stubSystemctl})
+	installPinned(t, env, rs, script, firstTag, geth)
+	serveInstaller(t, rs, key, script)
+	updater, err := os.ReadFile(filepath.Join(env.home, ".ghost-node", "update"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(updater), "release_url=${GHOST_RELEASE_URL:-"+rs.downloadURL(firstTag)+"}\n") {
+		t.Fatal("the installed update script is not pinned to the release it was installed from")
+	}
+
+	const newer = "v0.0.1-test"
+	newGeth := append(append([]byte(nil), release["geth"]...), []byte("\nghost test release 2\n")...)
+	newArchive := archive{"geth": newGeth}.tarGz(t)
+	publishNewer(t, rs, key, newer, newArchive, key.sign(newArchive), nil)
+	checkUpdatedTo(t, env, rs, newGeth, firstTag, newer, "systemctl --user restart ghost-node.service\n", "GHOST_RELEASE_URL=")
+}
+
+// untrustedServer serves a release's install.sh over TLS with a certificate of
+// its own, which no CA file of the tests trusts, and counts the files it
+// serves. httptest's TLS servers all share one certificate.
+type untrustedServer struct {
+	*httptest.Server
+	served atomic.Int32
+}
+
+// serveUntrusted serves the script at path, signed by key, as the latest
+// release's install.sh of an untrusted server.
+func serveUntrusted(t *testing.T, key *signer, path string) *untrustedServer {
+	t.Helper()
+	script, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := map[string][]byte{"install.sh": script, "install.sh.sig": key.sign(script)}
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "untrusted release server"},
+		IPAddresses:  []net.IP{net.IPv4(127, 0, 0, 1)},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IsCA:         true,
+
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	us := &untrustedServer{}
+	us.Server = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		content, ok := files[filepath.Base(r.URL.Path)]
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		us.served.Add(1)
+		w.Write(content)
+	}))
+	us.TLS = &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: priv}}}
+	us.StartTLS()
+	t.Cleanup(us.Close)
+	return us
+}
+
+// nodeState is what a refused update must leave as it was: the installed
+// files, the service manager's calls and the running node.
+type nodeState struct {
+	files map[string][32]byte
+	calls string
+	pid   int
+}
+
+func snapshot(t *testing.T, env *installEnv) nodeState {
+	t.Helper()
+	return nodeState{files: baseFiles(t, env), calls: env.calls(t), pid: env.servicePID(t)}
+}
+
+// checkUpdateRefused checks that the update failed saying want and that
+// nothing was changed, nothing was left in the temporary directory and none
+// of the files markers was made.
+func checkUpdateRefused(t *testing.T, env *installEnv, state nodeState, out string, err error, want string, markers ...string) {
+	t.Helper()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) {
+		t.Fatalf("the update did not fail: %v", err)
+	}
+	if !strings.Contains(out, want) || !strings.Contains(out, "refusing to update. Nothing was changed, and the running node was left alone.") {
+		t.Fatalf("the update did not say %q and that nothing was changed", want)
+	}
+	if after := baseFiles(t, env); !sameFiles(state.files, after) {
+		t.Fatalf("a refused update changed the installed files: had %v, has %v", state.files, after)
+	}
+	if got := env.calls(t); got != state.calls {
+		t.Fatalf("a refused update called the service manager:\n%s", strings.TrimPrefix(got, state.calls))
+	}
+	if env.servicePID(t) != state.pid || !running(state.pid) {
+		t.Fatal("a refused update did not leave the running node alone")
+	}
+	if left := entries(t, env.tmp); len(left) != 0 {
+		t.Fatalf("a refused update left %v in the temporary directory", left)
+	}
+	for _, m := range markers {
+		if _, err := os.Stat(m); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("a refused update ran %s (%v)", m, err)
+		}
+	}
+}
+
+// TestInstallScriptRefusesUntrustedNewerRelease installs a release, then
+// publishes newer releases that must not be installed: an install.sh that the
+// release key did not sign, or that cannot be fetched, or a signed one whose
+// release fails its own checks. Each refused update changes nothing, leaves
+// the running node alone and runs nothing it downloaded.
+func TestInstallScriptRefusesUntrustedNewerRelease(t *testing.T) {
+	release, geth := internalNetRelease(t)
+	verifier := builtVerifier(t)
+	key, other := newSigner(t), newSigner(t)
+	blob := release.tarGz(t)
+	rs := serveRelease(t, "linux", blob, key.sign(blob), verifier)
+	script := writeScript(t, key, sha256Hex(verifier))
+	env := newInstallEnv(t, envOptions{systemctl: stubSystemctl})
+	installPinned(t, env, rs, script, firstTag, geth)
+	state := snapshot(t, env)
+
+	marker := filepath.Join(t.TempDir(), "ran")
+	verifierMarker := filepath.Join(t.TempDir(), "verifier-ran")
+	// evil is an install.sh that, run at all, leaves the marker.
+	evil := []byte(fmt.Sprintf("#!/bin/sh\necho ran >%q\n", marker))
+	signed := archive{"geth": append(append([]byte(nil), release["geth"]...), "\nsigned\n"...)}.tarGz(t)
+	tampered := archive{"geth": fakeGeth(marker)}.tarGz(t)
+	untrusted := serveUntrusted(t, key, script)
+
+	for i, tc := range []struct {
+		name     string
+		newer    func() // edits the newest release after publishNewer, unless nil
+		archive  []byte
+		sig      []byte
+		checker  []byte
+		env      []string
+		want     string
+		releases bool // whether the newest release's own checks refused it
+	}{
+		{
+			name:  "install.sh signed by another key",
+			newer: func() { rs.setInstaller(evil, other.sign(evil)) },
+			want:  "the signature of install.sh does not match the release key",
+		},
+		{
+			name:  "tampered install.sh",
+			newer: func() { rs.setFile("install.sh", evil) },
+			want:  "the signature of install.sh does not match the release key",
+		},
+		{
+			name:  "install.sh not a signature",
+			newer: func() { rs.setFile("install.sh.sig", []byte("not a signature\n")) },
+			want:  "the signature of install.sh is not a 64-byte ed25519 signature",
+		},
+		{
+			name:  "no install.sh signature",
+			newer: func() { rs.setFile("install.sh.sig", nil) },
+			want:  "could not download " + rs.URL + "/latest/download/install.sh.sig",
+		},
+		{
+			name:  "no install.sh",
+			newer: func() { rs.setFile("install.sh", nil) },
+			want:  "could not download " + rs.URL + "/latest/download/install.sh",
+		},
+		{
+			name: "untrusted server",
+			env:  []string{"GHOST_LATEST_URL=" + untrusted.URL + "/latest/download"},
+			want: "could not download " + untrusted.URL + "/latest/download/install.sh",
+		},
+		{
+			name: "not https",
+			env:  []string{"GHOST_LATEST_URL=http://" + untrusted.Listener.Addr().String() + "/latest/download"},
+			want: "GHOST_LATEST_URL must be an https URL",
+		},
+		{
+			name:     "newer release's checker not pinned",
+			archive:  tampered,
+			sig:      key.sign(signed),
+			checker:  fakeVerifier(verifierMarker),
+			want:     "pinned in this installer",
+			releases: true,
+		},
+		{
+			name:     "newer release signed by another key",
+			archive:  signed,
+			sig:      other.sign(signed),
+			want:     "the signature of " + assetName("linux") + " does not match the release key",
+			releases: true,
+		},
+		{
+			name:     "newer release tampered",
+			archive:  tampered,
+			sig:      key.sign(signed),
+			want:     "the signature of " + assetName("linux") + " does not match the release key",
+			releases: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tag := fmt.Sprintf("v0.1.%d-test", i)
+			newArchive, newSig := tc.archive, tc.sig
+			if newArchive == nil {
+				newArchive, newSig = signed, key.sign(signed)
+			}
+			publishNewer(t, rs, key, tag, newArchive, newSig, tc.checker)
+			if tc.newer != nil {
+				tc.newer()
+			}
+			served := len(rs.servedPaths())
+			out, err := env.update(t, rs, append([]string{"GHOST_RELEASE_URL="}, tc.env...)...)
+			checkUpdateRefused(t, env, state, out, err, tc.want, marker, verifierMarker)
+			for _, path := range rs.servedPaths()[served:] {
+				if !tc.releases && path != firstTag+"/"+verifierName("linux") && !strings.HasPrefix(path, tag+"/install.sh") {
+					t.Fatalf("the update downloaded %s though the newest install.sh was refused", path)
+				}
+			}
+			if n := untrusted.served.Load(); n != 0 {
+				t.Fatalf("the update downloaded %d files from an untrusted server", n)
+			}
+		})
+	}
 }
 
 // TestInstallScriptRefusesTamperedUpdate installs a release, then serves
@@ -1217,12 +1608,11 @@ func TestInstallScriptRefusesTamperedUpdate(t *testing.T) {
 	blob := release.tarGz(t)
 	rs := serveRelease(t, "linux", blob, key.sign(blob), verifier)
 	env := newInstallEnv(t, envOptions{systemctl: stubSystemctl})
-	installRunning(t, env, writeScript(t, key, sha256Hex(verifier)), rs, geth)
+	script := writeScript(t, key, sha256Hex(verifier))
+	installRunning(t, env, script, rs, geth)
+	serveInstaller(t, rs, key, script)
 
-	installed := filepath.Join(env.home, ".ghost-node", "bin", "geth")
-	before := baseFiles(t, env)
-	calls := env.calls(t)
-	pid := env.servicePID(t)
+	state := snapshot(t, env)
 	marker := filepath.Join(t.TempDir(), "ran")
 	verifierMarker := filepath.Join(t.TempDir(), "verifier-ran")
 	signed := archive{"geth": append(append([]byte(nil), release["geth"]...), "\nsigned\n"...)}.tarGz(t)
@@ -1230,33 +1620,7 @@ func TestInstallScriptRefusesTamperedUpdate(t *testing.T) {
 
 	checkUnchanged := func(t *testing.T, out string, err error, want string) {
 		t.Helper()
-		var exit *exec.ExitError
-		if !errors.As(err, &exit) {
-			t.Fatalf("the update did not fail: %v", err)
-		}
-		if !strings.Contains(out, want) || !strings.Contains(out, "refusing to update. Nothing was changed, and the running node was left alone.") {
-			t.Fatalf("the update did not say %q and that nothing was changed", want)
-		}
-		if fileHash(t, installed) != fileHash(t, geth) {
-			t.Fatal("a refused update replaced geth")
-		}
-		if after := baseFiles(t, env); !sameFiles(before, after) {
-			t.Fatalf("a refused update changed the installed files: had %v, has %v", before, after)
-		}
-		if got := env.calls(t); got != calls {
-			t.Fatalf("a refused update called the service manager:\n%s", strings.TrimPrefix(got, calls))
-		}
-		if env.servicePID(t) != pid || !running(pid) {
-			t.Fatal("a refused update did not leave the running node alone")
-		}
-		if left := entries(t, env.tmp); len(left) != 0 {
-			t.Fatalf("a refused update left %v in the temporary directory", left)
-		}
-		for _, m := range []string{marker, verifierMarker} {
-			if _, err := os.Stat(m); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("a refused update ran %s (%v)", m, err)
-			}
-		}
+		checkUpdateRefused(t, env, state, out, err, want, marker, verifierMarker)
 	}
 
 	t.Run("tampered archive", func(t *testing.T) {
@@ -1352,7 +1716,8 @@ func TestInstallScriptDarwin(t *testing.T) {
 	rs := serveRelease(t, "darwin", blob, key.sign(blob), verifier)
 	env := newInstallEnv(t, envOptions{darwin: true, stockMac: true})
 	checkStockMac(t, env)
-	installRunning(t, env, writeScript(t, key, sha256Hex(verifier)), rs, geth)
+	script := writeScript(t, key, sha256Hex(verifier))
+	installRunning(t, env, script, rs, geth)
 	checkServedRelease(t, rs, 0)
 	checkNoOpenSSL(t, env)
 
@@ -1392,6 +1757,6 @@ func TestInstallScriptDarwin(t *testing.T) {
 		t.Fatalf("the script used systemd on a Mac:\n%s", calls)
 	}
 
-	checkUpdateApplied(t, env, rs, key, release["geth"], fmt.Sprintf("launchctl kickstart -k %s/com.ghostcoin.node\n", domain))
+	checkUpdateApplied(t, env, rs, key, script, release["geth"], fmt.Sprintf("launchctl kickstart -k %s/com.ghostcoin.node\n", domain))
 	checkNoOpenSSL(t, env)
 }

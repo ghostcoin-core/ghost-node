@@ -21,11 +21,14 @@
 # release, whose ghost-verify has other hashes. It computes the release tag as
 # the publish step does, build-$GITHUB_RUN_NUMBER- and the first 12 characters
 # of $GITHUB_SHA, and replaces the default releases/latest/download URL with
-# releases/download/<tag> in the script and in dir's install.ps1 and
-# install.cmd. GHOST_RELEASE_URL still overrides it. It fails, changing none
-# of the files, when either variable is missing or malformed or when a file
-# does not hold the default URL exactly once. Outside GitHub Actions the URL
-# is left alone.
+# releases/download/<tag> in the script's release_url and in dir's
+# install.ps1 and install.cmd. GHOST_RELEASE_URL still overrides it. The
+# script's newest_url keeps the default URL: its updater looks there for the
+# newest release's signed install.sh. It fails, changing none of the files,
+# when either variable is missing or malformed, when install.ps1 or
+# install.cmd does not hold the default URL exactly once, or when the script
+# does not hold it exactly twice, once as release_url's and once as
+# newest_url's default. Outside GitHub Actions the URL is left alone.
 
 set -eu
 LC_ALL=C
@@ -119,8 +122,28 @@ pin_release_url() {
 		fail "could not pin the release URL in $3"
 }
 
+# pin_script_url writes the script $1 to $2 with release_url's default
+# replaced by this release's URL, keeping newest_url's. It refuses a script $3
+# that does not set each of the two to the default URL on exactly one line,
+# or holds the default URL anywhere else.
+pin_script_url() {
+	release_line="release_url=\${GHOST_RELEASE_URL:-$latest_url}"
+	newest_line="newest_url=\${GHOST_LATEST_URL:-$latest_url}"
+	count=$(grep -cxF "$release_line" "$1" || :)
+	[ "$count" = 1 ] || fail "$3 sets release_url to the default release URL $latest_url on $count lines, not one"
+	count=$(grep -cxF "$newest_line" "$1" || :)
+	[ "$count" = 1 ] || fail "$3 sets newest_url to the default release URL $latest_url on $count lines, not one"
+	count=$(occurrences "$latest_url" "$1")
+	[ "$count" = 2 ] || fail "$3 holds the default release URL $latest_url $count times, not twice"
+	sed "/^release_url=/s|$latest_pattern|$release_url|" "$1" >"$2"
+	[ "$(grep -cxF "release_url=\${GHOST_RELEASE_URL:-$release_url}" "$2" || :)" = 1 ] &&
+		[ "$(grep -cxF "$newest_line" "$2" || :)" = 1 ] &&
+		[ "$(occurrences "$latest_url" "$2")" = 1 ] && [ "$(occurrences "$release_url" "$2")" = 1 ] ||
+		fail "could not pin the release URL in $3"
+}
+
 if [ "$pin_url" = true ]; then
-	pin_release_url "$tmp" "$tmp.new" "$script"
+	pin_script_url "$tmp" "$tmp.new" "$script"
 	cat "$tmp.new" >"$tmp"
 	pin_release_url "$dir/install.ps1" "$tmp.ps1" "$dir/install.ps1"
 	pin_release_url "$dir/install.cmd" "$tmp.cmd" "$dir/install.cmd"

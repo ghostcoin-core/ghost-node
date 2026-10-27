@@ -27,7 +27,11 @@
 # It also installs ~/.ghost-node/update, which is this script run with
 # --update, and runs it daily (a systemd user timer, or a launchd agent with a
 # StartInterval) unless GHOST_NO_UPDATE=1 is set at install time. An update
-# passes the same checks as an install, replaces the geth executable
+# first downloads the install.sh of the newest release, from newest_url below,
+# and its signature, install.sh.sig, and checks that signature against the
+# release key with this script's own pinned ghost-verify. Only then does it
+# run that install.sh with --update, which passes the same checks as an
+# install with the newest release's own pins, replaces the geth executable
 # atomically, keeps the previous one until the node has restarted, and keeps
 # the config and the mining address. A refused update changes nothing and
 # leaves the running node alone. Run again, the installer installs its release
@@ -35,10 +39,10 @@
 #
 # This copy in the repository downloads from the latest release. The copy a
 # release publishes is pinned to its own release: install/pin-verifier-hashes.sh
-# writes in that release's ghost-verify hashes and replaces the latest/download
-# URL with the release's own download URL, so the script never fetches a later
-# release whose ghost-verify it does not pin. An update run by that copy
-# downloads the same release.
+# writes in that release's ghost-verify hashes and replaces release_url's
+# latest/download URL with the release's own download URL, so the script never
+# fetches a ghost-verify it does not pin. newest_url stays latest/download:
+# it is only where an update finds the newest release's signed install.sh.
 #
 # It needs only sh, curl, tar, gzip, uname, sha256sum or shasum and the usual
 # POSIX tools that stock macOS and Linux have; no OpenSSL of any version.
@@ -50,8 +54,10 @@
 #
 # GHOST_RELEASE_URL sets where the release is downloaded from, over https
 # only, and GHOST_INSTALL_CA_FILE names a certificate file to trust for that
-# server; GHOST_HTTP_PORT moves the node's HTTP RPC off 8545. The tests use
-# them for a local release server.
+# server; GHOST_LATEST_URL, over https only and trusted the same way, sets
+# where an update looks for the newest release's install.sh; GHOST_HTTP_PORT
+# moves the node's HTTP RPC off 8545. The tests use them for a local release
+# server.
 #
 # The whole installer is the text of installer_source, which the last lines
 # run. So a download cut short runs nothing, and the installer can write
@@ -84,6 +90,7 @@ HASHES
 
 placeholder_hash=0000000000000000000000000000000000000000000000000000000000000000
 release_url=${GHOST_RELEASE_URL:-https://github.com/ghostcoin-core/ghost-node/releases/latest/download}
+newest_url=${GHOST_LATEST_URL:-https://github.com/ghostcoin-core/ghost-node/releases/latest/download}
 ca_file=${GHOST_INSTALL_CA_FILE:-}
 http_port=${GHOST_HTTP_PORT:-8545}
 service=ghost-node
@@ -194,6 +201,27 @@ verify() {
 	esac
 }
 
+# run_newest downloads the newest release's install.sh and runs it with
+# --update once its signature is the release key's, so that the update moves
+# to the newest release and checks it with that release's own pins. The
+# newest install.sh, told by GHOST_NEWEST_INSTALLER=1 that it is the newest,
+# updates from its own release instead of looking further. This script exits
+# with its status.
+run_newest() {
+	newest_url=${newest_url%/}
+	case "$newest_url" in
+	https://*) ;;
+	*) refuse "GHOST_LATEST_URL must be an https URL, not $newest_url" ;;
+	esac
+	fetch "$newest_url/install.sh" "$work/install.sh"
+	fetch "$newest_url/install.sh.sig" "$work/install.sh.sig"
+	verify "$work/install.sh"
+	say "the newest release's install.sh is signed by the release key"
+	n_status=0
+	GHOST_NEWEST_INSTALLER=1 sh "$work/install.sh" --update </dev/null || n_status=$?
+	exit "$n_status"
+}
+
 # unpack unpacks the verified archive $1 into $work/release.
 unpack() {
 	tar -tzf "$1" >"$work/members" 2>"$work/tar.log" || refuse "the release archive cannot be read"
@@ -262,8 +290,9 @@ write_updater() {
 	{
 		printf '#!/bin/sh\n'
 		printf '#\n# Updates the Ghost node in this directory to the latest signed release.\n'
-		printf '# install.sh wrote this file: it is the installer run with --update, and it\n'
-		printf '# checks each release exactly as the installer does.\n\n'
+		printf '# install.sh wrote this file: it is the installer run with --update. It\n'
+		printf '# runs the newest release'\''s install.sh once its signature checks out, and\n'
+		printf '# that checks the release exactly as the installer does.\n\n'
 		printf 'installer_source() {\n\tcat <<'\''GHOST_INSTALLER'\''\n'
 		installer_source
 		printf 'GHOST_INSTALLER\n}\n\neval "$(installer_source)"\nmain --update "$@" </dev/null\n'
@@ -551,7 +580,7 @@ main() {
 	umask 077
 	[ -n "${HOME:-}" ] && [ -d "$HOME" ] || die "HOME is not set to a directory"
 	platform
-	need uname curl tar gzip sed tr head tail wc mktemp grep od cp mv rm mkdir chmod touch find sleep id basename
+	need sh uname curl tar gzip sed tr head tail wc mktemp grep od cp mv rm mkdir chmod touch find sleep id basename
 	command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 ||
 		die "this installer needs sha256sum or shasum, and neither is on the PATH"
 	case "$http_port" in
@@ -582,6 +611,9 @@ main() {
 	trap 'exit 1' HUP INT TERM
 
 	get_verifier
+	if [ "$mode" = update ] && [ "${GHOST_NEWEST_INSTALLER:-}" != 1 ]; then
+		run_newest
+	fi
 	asset="ghost-node-$os-$arch.tar.gz"
 	say "downloading $asset"
 	fetch "$release_url/$asset" "$work/$asset"
