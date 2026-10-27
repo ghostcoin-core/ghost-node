@@ -30,8 +30,15 @@
 # passes the same checks as an install, replaces the geth executable
 # atomically, keeps the previous one until the node has restarted, and keeps
 # the config and the mining address. A refused update changes nothing and
-# leaves the running node alone. Run again, the installer installs the latest
-# release and keeps the config and the mining address.
+# leaves the running node alone. Run again, the installer installs its release
+# again and keeps the config and the mining address.
+#
+# This copy in the repository downloads from the latest release. The copy a
+# release publishes is pinned to its own release: install/pin-verifier-hashes.sh
+# writes in that release's ghost-verify hashes and replaces the latest/download
+# URL with the release's own download URL, so the script never fetches a later
+# release whose ghost-verify it does not pin. An update run by that copy
+# downloads the same release.
 #
 # It needs only sh, curl, tar, gzip, uname, sha256sum or shasum and the usual
 # POSIX tools that stock macOS and Linux have; no OpenSSL of any version.
@@ -63,8 +70,9 @@ KEY
 }
 
 # The SHA-256 of the release's ghost-verify-<os>-<arch> files. The release
-# fills them in; until then they are all zeros, the placeholder, and the
-# installer refuses to install rather than run an unpinned checker.
+# fills them in, and pins release_url below to itself; until then they are all
+# zeros, the placeholder, and the installer refuses to install rather than run
+# an unpinned checker.
 verifier_hashes() {
 	cat <<'HASHES'
 linux-amd64 0000000000000000000000000000000000000000000000000000000000000000

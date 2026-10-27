@@ -14,6 +14,18 @@
 # It fails, leaving the script as it was, when a file is missing or empty,
 # when the script does not hold exactly one placeholder line for a platform,
 # or when any placeholder line is left afterwards.
+#
+# In GitHub Actions (GITHUB_ACTIONS=true) it also pins the release the
+# installers download from: the published install.sh pins this release's
+# ghost-verify hashes, so it must not follow releases/latest to the next
+# release, whose ghost-verify has other hashes. It computes the release tag as
+# the publish step does, build-$GITHUB_RUN_NUMBER- and the first 12 characters
+# of $GITHUB_SHA, and replaces the default releases/latest/download URL with
+# releases/download/<tag> in the script and in dir's install.ps1 and
+# install.cmd. GHOST_RELEASE_URL still overrides it. It fails, changing none
+# of the files, when either variable is missing or malformed or when a file
+# does not hold the default URL exactly once. Outside GitHub Actions the URL
+# is left alone.
 
 set -eu
 LC_ALL=C
@@ -21,6 +33,8 @@ export LC_ALL
 
 zero=0000000000000000000000000000000000000000000000000000000000000000
 platforms='linux-amd64 linux-arm64 darwin-amd64 darwin-arm64'
+latest_url=https://github.com/ghostcoin-core/ghost-node/releases/latest/download
+latest_pattern='https://github\.com/ghostcoin-core/ghost-node/releases/latest/download'
 
 fail() {
 	printf 'pin-verifier-hashes: %s\n' "$*" >&2
@@ -32,6 +46,25 @@ script=$1
 dir=$2
 [ -f "$script" ] || fail "$script is not a file"
 [ -d "$dir" ] || fail "$dir is not a directory"
+
+pin_url=false
+if [ "${GITHUB_ACTIONS:-}" = true ]; then
+	pin_url=true
+	run=${GITHUB_RUN_NUMBER:-}
+	sha=${GITHUB_SHA:-}
+	case "$run" in
+	'' | *[!0-9]* | 0*) fail "GITHUB_RUN_NUMBER is not a positive integer: '$run'" ;;
+	esac
+	case "$sha" in
+	'' | *[!0-9a-fA-F]*) fail "GITHUB_SHA is not a hex commit hash: '$sha'" ;;
+	esac
+	[ "${#sha}" -ge 12 ] || fail "GITHUB_SHA is shorter than 12 characters: '$sha'"
+	tag=build-$run-$(printf '%s\n' "$sha" | cut -c1-12)
+	release_url=https://github.com/ghostcoin-core/ghost-node/releases/download/$tag
+	for name in install.ps1 install.cmd; do
+		[ -f "$dir/$name" ] || fail "there is no $name in $dir"
+	done
+fi
 
 # sha256 prints the SHA-256 of the file $1, with sha256sum or, on a Mac,
 # shasum.
@@ -45,7 +78,7 @@ sha256() {
 }
 
 tmp=$(mktemp "${TMPDIR:-/tmp}/pin-verifier-hashes.XXXXXX")
-trap 'rm -f "$tmp" "$tmp.new"' EXIT
+trap 'rm -f "$tmp" "$tmp.new" "$tmp.ps1" "$tmp.cmd"' EXIT
 cat "$script" >"$tmp"
 
 for platform in $platforms; do
@@ -71,5 +104,32 @@ fi
 count=$(grep -c "$zero" "$tmp" || :)
 [ "$count" = 1 ] || fail "$script holds the placeholder $count times after pinning, not only in placeholder_hash"
 
+# occurrences prints how many times the text $1 is in the file $2.
+occurrences() {
+	grep -oF "$1" "$2" | wc -l | tr -d ' '
+}
+
+# pin_release_url writes the file $1 to $2 with the default URL replaced by
+# this release's, which file $3 must hold exactly once.
+pin_release_url() {
+	count=$(occurrences "$latest_url" "$1")
+	[ "$count" = 1 ] || fail "$3 holds the default release URL $latest_url $count times, not once"
+	sed "s|$latest_pattern|$release_url|" "$1" >"$2"
+	[ "$(occurrences "$latest_url" "$2")" = 0 ] && [ "$(occurrences "$release_url" "$2")" = 1 ] ||
+		fail "could not pin the release URL in $3"
+}
+
+if [ "$pin_url" = true ]; then
+	pin_release_url "$tmp" "$tmp.new" "$script"
+	cat "$tmp.new" >"$tmp"
+	pin_release_url "$dir/install.ps1" "$tmp.ps1" "$dir/install.ps1"
+	pin_release_url "$dir/install.cmd" "$tmp.cmd" "$dir/install.cmd"
+fi
+
 cat "$tmp" >"$script"
 printf 'pin-verifier-hashes: pinned the ghost-verify hashes of %s in %s\n' "$platforms" "$script"
+if [ "$pin_url" = true ]; then
+	cat "$tmp.ps1" >"$dir/install.ps1"
+	cat "$tmp.cmd" >"$dir/install.cmd"
+	printf 'pin-verifier-hashes: pinned the release URL %s in %s, %s and %s\n' "$release_url" "$script" "$dir/install.ps1" "$dir/install.cmd"
+fi
