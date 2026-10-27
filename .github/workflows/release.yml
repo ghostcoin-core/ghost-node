@@ -17,6 +17,14 @@ name: Release
 # whose public half is not install/release-key.pub fails the run, since the
 # installer would refuse everything it signed.
 #
+# The same release also carries the installers, each signed the same way:
+# install/install.sh, install/install.ps1 and install/install.cmd, and
+# ghost-setup-windows-<arch>.exe (install/winsetup) for amd64 and arm64. The
+# repository's install.ps1 and install.cmd pin all-zero placeholder hashes for
+# the setup files; the published copies have the real SHA-256 of this
+# release's setup files written in before they are signed. Anything that does
+# not check out fails the run, and nothing is published.
+#
 # Pull requests that change this file build the archives only, on
 # GitHub-hosted runners, with no secret and no write access.
 
@@ -128,9 +136,40 @@ jobs:
           path: dist/ghost-node-${{ matrix.os }}-${{ matrix.arch }}.tar.gz
           if-no-files-found: error
 
+  setup:
+    name: build ghost-setup (windows-${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Build ghost-setup
+        env:
+          CGO_ENABLED: '0'
+          GOOS: windows
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          go build -trimpath -ldflags=-buildid= -o "dist/ghost-setup-windows-$GOARCH.exe" ./install/winsetup
+          file "dist/ghost-setup-windows-$GOARCH.exe"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: setup-windows-${{ matrix.arch }}
+          path: dist/ghost-setup-windows-${{ matrix.arch }}.exe
+          if-no-files-found: error
+
   publish:
     name: sign and publish
-    needs: build
+    needs: [build, setup]
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -152,7 +191,11 @@ jobs:
         if: steps.key.outputs.present == 'true'
         with:
           persist-credentials: false
-          sparse-checkout: install/release-key.pub
+          sparse-checkout: |
+            install/release-key.pub
+            install/install.sh
+            install/install.ps1
+            install/install.cmd
           sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: steps.key.outputs.present == 'true'
@@ -160,6 +203,36 @@ jobs:
           pattern: archive-*
           merge-multiple: true
           path: dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: steps.key.outputs.present == 'true'
+        with:
+          pattern: setup-windows-*
+          merge-multiple: true
+          path: dist
+      - name: Pin the setup hashes in the Windows scripts
+        if: steps.key.outputs.present == 'true'
+        run: |
+          set -euo pipefail
+          zero=0000000000000000000000000000000000000000000000000000000000000000
+          cp install/install.sh install/install.ps1 install/install.cmd dist/
+          for arch in amd64 arm64; do
+            exe="dist/ghost-setup-windows-$arch.exe"
+            test -s "$exe"
+            hash="$(sha256sum "$exe" | cut -d' ' -f1)"
+            [[ $hash =~ ^[0-9a-f]{64}$ ]] && [ "$hash" != "$zero" ]
+            # Exactly one placeholder line per arch in each script, replaced in place.
+            test "$(grep -c "^		$arch = '$zero'\$" dist/install.ps1)" -eq 1
+            sed -i "s/^\(		$arch = '\)$zero'\$/\1$hash'/" dist/install.ps1
+            test "$(grep -c "^		$arch = '$hash'\$" dist/install.ps1)" -eq 1
+            test "$(grep -c "^set \"SETUP_SHA256_$arch=$zero\"\r\?\$" dist/install.cmd)" -eq 1
+            sed -i "s/^\(set \"SETUP_SHA256_$arch=\)$zero\"/\1$hash\"/" dist/install.cmd
+            test "$(grep -c "^set \"SETUP_SHA256_$arch=$hash\"" dist/install.cmd)" -eq 1
+          done
+          # Only the placeholder constants themselves still hold zeros.
+          test "$(grep -c "$zero" dist/install.ps1)" -eq 1
+          test "$(grep -c "$zero" dist/install.cmd)" -eq 1
+          diff install/install.ps1 dist/install.ps1 || true
+          diff install/install.cmd dist/install.cmd || true
       - name: Sign
         if: steps.key.outputs.present == 'true'
         env:
@@ -184,7 +257,16 @@ jobs:
             count=$((count + 1))
           done
           test "$count" -eq 6
-          (cd dist && sha256sum ghost-node-*.tar.gz >SHA256SUMS)
+          files=0
+          for f in dist/ghost-setup-windows-amd64.exe dist/ghost-setup-windows-arm64.exe \
+                   dist/install.sh dist/install.ps1 dist/install.cmd; do
+            openssl pkeyutl -sign -inkey "$key" -rawin -in "$f" -out "$f.sig"
+            test "$(wc -c <"$f.sig")" -eq 64
+            openssl pkeyutl -verify -pubin -inkey install/release-key.pub -rawin -in "$f" -sigfile "$f.sig"
+            files=$((files + 1))
+          done
+          test "$files" -eq 5
+          (cd dist && sha256sum ghost-node-*.tar.gz ghost-setup-windows-*.exe install.sh install.ps1 install.cmd >SHA256SUMS)
           ls -l dist
       - name: Publish the release
         if: steps.key.outputs.present == 'true'
@@ -196,6 +278,10 @@ jobs:
         run: |
           set -euo pipefail
           tag="build-$RUN-${SHA:0:12}"
-          gh release create "$tag" dist/ghost-node-*.tar.gz dist/ghost-node-*.tar.gz.sig dist/SHA256SUMS \
+          gh release create "$tag" dist/ghost-node-*.tar.gz dist/ghost-node-*.tar.gz.sig \
+            dist/ghost-setup-windows-amd64.exe dist/ghost-setup-windows-amd64.exe.sig \
+            dist/ghost-setup-windows-arm64.exe dist/ghost-setup-windows-arm64.exe.sig \
+            dist/install.sh dist/install.sh.sig dist/install.ps1 dist/install.ps1.sig \
+            dist/install.cmd dist/install.cmd.sig dist/SHA256SUMS \
             --target "$SHA" --title "Ghost node $tag" --latest \
             --notes "Ghost node built from $SHA. Install with install/install.sh, which checks each archive's .sig against the release key."
