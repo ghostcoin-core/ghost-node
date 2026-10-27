@@ -133,6 +133,12 @@ const (
 	// node.
 	RevalidateInterval = 10 * time.Second
 
+	// BootnodeRetryInterval is the least time between the end of one
+	// bootstrap and the start of the next while the table holds no
+	// bootnode. A node that reached none on its first start, or lost them
+	// all, tries them again this often.
+	BootnodeRetryInterval = 10 * time.Second
+
 	// MaxRevalidateFails is the number of live checks in a row a table node
 	// may leave unanswered before it is removed. One lost pong, or one a
 	// flood crowded out, does not evict a live node.

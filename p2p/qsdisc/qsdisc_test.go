@@ -942,6 +942,97 @@ func TestQSDiscovery(t *testing.T) {
 	})
 }
 
+// bootRetryDeadline is how long the bootnode retry tests wait for a node to
+// reach a bootnode it missed on its first start. It is under VerifyInterval,
+// so only a retry of the bootstrap can get there in time: a ping of the
+// bootnode makes the node verify it again no sooner than VerifyInterval
+// after the first try.
+const bootRetryDeadline = 30 * time.Second
+
+func waitWithin(t *testing.T, d time.Duration, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out after %v waiting for %s", d, what)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// firstBootstrapDone reports whether the bootstrap n ran at start has ended.
+func firstBootstrapDone(n *testNode) bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return !n.bootDone.IsZero()
+}
+
+// TestBootnodeRetry checks that a node whose first bootstrap reached no
+// bootnode tries its bootnodes again and gets them into its table, without
+// a restart and without anyone adding them by hand.
+func TestBootnodeRetry(t *testing.T) {
+	v := newFakeVerifier()
+	t.Cleanup(v.closeNodes)
+
+	// The bootnode answers pings but its record cannot be fetched at first,
+	// as when it is busy. The failed fetch must not be remembered against it.
+	t.Run("record-not-served-at-first", func(t *testing.T) {
+		t.Parallel()
+		b := startNode(t, v, 31, nil)
+		v.serve(b.Self(), nil)
+		c := startNode(t, v, 32, nil, b)
+		waitWithin(t, 15*time.Second, "the first bootstrap", func() bool {
+			return v.timesAsked(b.Self()) > 0 && firstBootstrapDone(c)
+		})
+		if hasNode(c.Nodes(), b.Self()) {
+			t.Fatal("bootnode added without a record")
+		}
+		v.serve(b.Self(), signRecord(t, b.key, b.LocalAddr().Addr().AsSlice(), b.LocalAddr().Port()).Encode())
+		waitWithin(t, bootRetryDeadline, "the bootnode in the table once it serves its record", func() bool {
+			return hasNode(c.Nodes(), b.Self())
+		})
+	})
+
+	// The bootnode is not up when the node starts, as when the node starts
+	// before its network or the bootnode restarts.
+	t.Run("bootnode-not-up-at-first", func(t *testing.T) {
+		t.Parallel()
+		reserve := listenLoopback(t, 33)
+		addr := reserve.LocalAddr().(*net.UDPAddr).AddrPort()
+		reserve.Close()
+		key := newKey(t)
+		v.serve(enode.ID(key.ID()), signRecord(t, key, addr.Addr().AsSlice(), addr.Port()).Encode())
+
+		conn := listenLoopback(t, 34)
+		ckey := newKey(t)
+		caddr := conn.LocalAddr().(*net.UDPAddr).AddrPort()
+		v.serve(enode.ID(ckey.ID()), signRecord(t, ckey, caddr.Addr().AsSlice(), caddr.Port()).Encode())
+		cu, err := Listen(conn, Config{Self: ckey.ID(), Verifier: v, Bootnodes: []Bootnode{{ID: enode.ID(key.ID()), Addr: addr}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(cu.Close)
+		c := &testNode{UDP: cu, key: ckey}
+		waitWithin(t, 15*time.Second, "the first bootstrap", func() bool { return firstBootstrapDone(c) })
+		if len(c.Nodes()) != 0 {
+			t.Fatal("table not empty with no bootnode up")
+		}
+
+		bconn, err := net.ListenUDP("udp4", net.UDPAddrFromAddrPort(addr))
+		if err != nil {
+			t.Fatalf("listen on the bootnode endpoint %v: %v", addr, err)
+		}
+		bu, err := Listen(bconn, Config{Self: key.ID(), Verifier: v})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(bu.Close)
+		waitWithin(t, bootRetryDeadline, "the bootnode in the table once it is up", func() bool {
+			return hasNode(c.Nodes(), enode.ID(key.ID()))
+		})
+	})
+}
+
 func TestQSDiscoveryLimitsAreSet(t *testing.T) {
 	limits := map[string]int64{
 		"MaxPacketSize":      MaxPacketSize,
@@ -972,6 +1063,11 @@ func TestQSDiscoveryLimitsAreSet(t *testing.T) {
 		"LookupResults":      LookupResults,
 		"RevalidateInterval": int64(RevalidateInterval),
 		"MaxRevalidateFails": MaxRevalidateFails,
+
+		"BootnodeRetryInterval": int64(BootnodeRetryInterval),
+	}
+	if BootnodeRetryInterval+2*PingTimeout > time.Minute/2 {
+		t.Errorf("BootnodeRetryInterval %v lets a first start wait too long for its bootnodes", BootnodeRetryInterval)
 	}
 	for name, v := range limits {
 		if v <= 0 {

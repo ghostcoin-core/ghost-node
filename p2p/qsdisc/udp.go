@@ -117,6 +117,11 @@ type UDP struct {
 
 	challengePings int // pending pings proving again a table node's endpoint
 
+	boot     []Bootnode
+	bootKeys map[nodeAddr]bool
+	booting  bool      // a bootstrap is running
+	bootDone time.Time // when the last bootstrap ended
+
 	closing chan struct{}
 	wg      sync.WaitGroup
 }
@@ -179,9 +184,10 @@ func Listen(conn *net.UDPConn, cfg Config) (*UDP, error) {
 	u.wg.Add(2)
 	go u.readLoop()
 	go u.maintainLoop()
-	if len(cfg.Bootnodes) > 0 {
+	if len(u.boot) > 0 {
+		u.booting = true
 		u.wg.Add(1)
-		go u.bootstrap(cfg.Bootnodes)
+		go u.bootstrap()
 	}
 	return u, nil
 }
@@ -193,7 +199,13 @@ func newUDP(conn *net.UDPConn, cfg Config) *UDP {
 	self := enode.ID(cfg.Self)
 	var key [32]byte
 	rand.Read(key[:]) // never fails
+	bootKeys := make(map[nodeAddr]bool, len(cfg.Bootnodes))
+	for _, b := range cfg.Bootnodes {
+		bootKeys[nodeAddr{b.ID, b.Addr}] = true
+	}
 	return &UDP{
+		boot:      cfg.Bootnodes,
+		bootKeys:  bootKeys,
 		cookieKey: key,
 		conn:      conn,
 		self:      self,
@@ -246,20 +258,63 @@ func (u *UDP) Nodes() []Node {
 	return u.tab.closest(u.self, NumBuckets*BucketSize)
 }
 
-func (u *UDP) bootstrap(nodes []Bootnode) {
+// bootstrap verifies the bootnodes not in the table and looks up the local
+// node ID. It runs at start and again from the maintain loop while the table
+// holds no bootnode, so a node whose first start found no bootnode, because
+// its network was not up yet or a bootnode did not answer or serve its
+// record in time, keeps trying them instead of staying alone.
+func (u *UDP) bootstrap() {
 	defer u.wg.Done()
+	defer func() {
+		u.mu.Lock()
+		u.booting = false
+		u.bootDone = time.Now()
+		u.mu.Unlock()
+	}()
 	var wg sync.WaitGroup
-	for _, b := range nodes {
+	for _, b := range u.boot {
+		if n, ok := u.tab.get(b.ID); ok && n.Addr == b.Addr {
+			continue
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, err := u.verify(b.ID, b.Addr, true); err != nil {
+			if _, err := u.verifyAs(b.ID, b.Addr, true, true); err != nil {
 				u.log.Debug("Bootnode not verified", "id", b.ID, "addr", b.Addr, "err", err)
 			}
 		}()
 	}
 	wg.Wait()
+	if !u.hasBootnode() {
+		u.log.Debug("No bootnode reached, retrying later", "bootnodes", len(u.boot), "in", BootnodeRetryInterval)
+	}
 	u.Lookup(u.self)
+}
+
+// hasBootnode reports whether the table holds a bootnode at its endpoint.
+func (u *UDP) hasBootnode() bool {
+	for _, b := range u.boot {
+		if n, ok := u.tab.get(b.ID); ok && n.Addr == b.Addr {
+			return true
+		}
+	}
+	return false
+}
+
+// retryBootstrap starts a bootstrap when the table holds no bootnode, none
+// is running and the last one ended BootnodeRetryInterval ago or more.
+func (u *UDP) retryBootstrap(now time.Time) {
+	if len(u.boot) == 0 || u.hasBootnode() {
+		return
+	}
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.closed || u.booting || now.Sub(u.bootDone) < BootnodeRetryInterval {
+		return
+	}
+	u.booting = true
+	u.wg.Add(1)
+	go u.bootstrap()
 }
 
 // Packet handling.
@@ -686,6 +741,14 @@ func (u *UDP) verifyRemote(id enode.ID, addr netip.AddrPort) {
 // what a remote peer triggers, is refused with errBusy when
 // MaxVerifications are running and otherwise runs in the background.
 func (u *UDP) verify(id enode.ID, addr netip.AddrPort, blocking bool) (Node, error) {
+	return u.verifyAs(id, addr, blocking, false)
+}
+
+// verifyAs is verify; boot is a bootstrap's own verification of a bootnode,
+// which is not held to VerifyInterval and MaxVerifyStarts: those bound what
+// remote peers make the node verify, while bootstraps run only at start and
+// every BootnodeRetryInterval, for the configured bootnodes alone.
+func (u *UDP) verifyAs(id enode.ID, addr netip.AddrPort, blocking, boot bool) (Node, error) {
 	if id == u.self {
 		return Node{}, errSelf
 	}
@@ -723,12 +786,14 @@ func (u *UDP) verify(id enode.ID, addr netip.AddrPort, blocking bool) (Node, err
 			return Node{}, errBusy
 		}
 	}
-	if err := u.mayStartLocked(key, now); err != nil {
-		u.mu.Unlock()
-		if !blocking {
-			<-u.sem
+	if !boot {
+		if err := u.mayStartLocked(key, now); err != nil {
+			u.mu.Unlock()
+			if !blocking {
+				<-u.sem
+			}
+			return Node{}, err
 		}
-		return Node{}, err
 	}
 	v := &verification{remote: !blocking, done: make(chan struct{})}
 	u.verifying[key] = v
@@ -852,7 +917,13 @@ func checkRecord(rec *enode.QSRecord, id enode.ID, addr netip.AddrPort) error {
 	return nil
 }
 
+// addFailureLocked remembers a failed verification. A bootnode at its
+// configured endpoint is never remembered: a fetch that failed once, while
+// it was busy or our network was not up, must not keep the node from it.
 func (u *UDP) addFailureLocked(k nodeAddr) {
+	if u.bootKeys[k] {
+		return
+	}
 	if _, ok := u.failed[k]; ok {
 		return
 	}
@@ -913,7 +984,8 @@ func (u *UDP) maintainLoop() {
 	defer tick.Stop()
 	for {
 		select {
-		case <-tick.C:
+		case now := <-tick.C:
+			u.retryBootstrap(now)
 			u.runRetries()
 			if u.revalidate() == errClosed {
 				return

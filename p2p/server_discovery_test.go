@@ -156,6 +156,56 @@ func TestServerDiscoveryTwoNodesConnect(t *testing.T) {
 	}
 }
 
+// TestServerDiscoveryBootnodeRetry starts a server whose only bootstrap
+// node is not up yet, as on a first start before the network or the seed is
+// reachable, then starts the bootstrap node. The server must find it, dial
+// it and have it as a peer within a minute of its own start, with no static
+// node and no peer added by hand.
+func TestServerDiscoveryBootnodeRetry(t *testing.T) {
+	keyA, keyB := newQSIdentity(t), newQSIdentity(t)
+	idB := enode.ID(keyB.ID())
+
+	// Take a free port for B, TCP and UDP, and leave it closed for now.
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tcpB := *l.Addr().(*net.TCPAddr)
+	l.Close()
+
+	start := time.Now()
+	srvA := startDiscServer(t, "a", keyA, func(c *Config) {
+		c.BootstrapNodes = []*enode.Node{enode.NewQuantumSafe(idB, tcpB.IP, tcpB.Port)}
+	})
+	chA := make(chan *PeerEvent, 10)
+	subA := srvA.SubscribeEvents(chA)
+	defer subA.Unsubscribe()
+
+	// The first bootstrap of A finds nobody: its ping of B goes unanswered.
+	time.Sleep(qsdisc.PingTimeout + time.Second)
+	if n := len(srvA.disc.Nodes()); n != 0 {
+		t.Fatalf("A's table holds %d nodes before B is up", n)
+	}
+	if n := srvA.PeerCount(); n != 0 {
+		t.Fatalf("A has %d peers before B is up", n)
+	}
+
+	startDiscServer(t, "b", keyB, func(c *Config) { c.ListenAddr = tcpB.String() })
+
+	deadline := time.NewTimer(time.Until(start.Add(time.Minute)))
+	defer deadline.Stop()
+	for {
+		select {
+		case ev := <-chA:
+			if ev.Type == PeerEventTypeAdd && ev.Peer == idB {
+				return
+			}
+		case <-deadline.C:
+			t.Fatalf("A has no peer B %v after its start; peers %d, table %d", time.Since(start), srvA.PeerCount(), len(srvA.disc.Nodes()))
+		}
+	}
+}
+
 // TestServerNoDiscoveryOpensNoUDPPort checks that a server with NoDiscovery
 // opens no UDP port and answers no record request, that a server with
 // discovery on opens its UDP socket on the TCP port, and that DiscAddr
