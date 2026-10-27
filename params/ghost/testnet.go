@@ -34,12 +34,21 @@ const (
 	TestNetChainID = InternalNetChainID + 1
 
 	// TestNetTimestamp is the fixed genesis time of the public test network,
-	// 2026-11-01 00:00:00 UTC.
-	TestNetTimestamp = 1_793_491_200
+	// 2026-10-01 00:00:00 UTC. It must lie in the past: block 1 must be
+	// later than its parent and no more than FutureDrift ahead of the clock,
+	// so a future genesis time leaves every miner waiting until that time.
+	TestNetTimestamp = 1_790_812_800
+
+	// TestNetExtraData is the extra data of the public test network's first
+	// block. Its genesis time is the internal network's and a header carries
+	// no chain ID, so this is what gives the two networks different first
+	// blocks: a database holding the internal chain is never taken for this
+	// one.
+	TestNetExtraData = "ghost public test network"
 )
 
 // TestNetGenesisHash is the hash of the public test network's first block.
-var TestNetGenesisHash = common.HexToHash("0xca344c2a5aad1a81fecd0a32e5d84a83567fdc2a9314e44d6ba79ba0a15a69e9")
+var TestNetGenesisHash = common.HexToHash("0xeecbc41f98be17f5a47dec0c9fab9ad566107669b70323d0588a171390f6ab58")
 
 // TestNetBootnodes are the seed nodes of the public test network, the
 // bootstrap nodes a node uses when neither --bootnodes nor the config file
@@ -58,13 +67,14 @@ func TestNetParams() ghostrules.Params {
 
 // TestNetGenesis returns the first block of the public test network: the
 // Ghost EVM profile from block 0, like InternalNetGenesis, with its own chain
-// ID and time. Nothing is allocated: test coins come only from mined rewards.
+// ID, time and extra data. Nothing is allocated: test coins come only from mined rewards.
 //
 // This is a test-network genesis, not the launch genesis.
 func TestNetGenesis() *genesisT.Genesis {
 	return &genesisT.Genesis{
 		Config:     profileChainConfig(TestNetChainID),
 		Timestamp:  TestNetTimestamp,
+		ExtraData:  []byte(TestNetExtraData),
 		GasLimit:   InternalNetGasLimit,
 		Difficulty: TestNetParams().StartDifficulty,
 		BaseFee:    big.NewInt(vars.InitialBaseFee),

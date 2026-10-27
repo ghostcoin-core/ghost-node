@@ -36,7 +36,7 @@ import (
 // block: a change to its genesis is a new network, so it has to be made on
 // purpose, here and in TestNetGenesisHash together.
 func TestPublicTestNetGenesisHashStable(t *testing.T) {
-	want := common.HexToHash("0xca344c2a5aad1a81fecd0a32e5d84a83567fdc2a9314e44d6ba79ba0a15a69e9")
+	want := common.HexToHash("0xeecbc41f98be17f5a47dec0c9fab9ad566107669b70323d0588a171390f6ab58")
 	block := core.GenesisToBlock(ghost.TestNetGenesis(), nil)
 	if block.Hash() != want {
 		t.Errorf("test network genesis hash %x, want %x", block.Hash(), want)
@@ -55,6 +55,7 @@ func TestPublicTestNetGenesisHashStable(t *testing.T) {
 	// Each call returns its own genesis with the same block.
 	g := ghost.TestNetGenesis()
 	g.Timestamp++
+	g.ExtraData[0] ^= 0xff
 	if core.GenesisToBlock(ghost.TestNetGenesis(), nil).Hash() != want {
 		t.Error("TestNetGenesis shares its values between calls")
 	}
@@ -81,8 +82,16 @@ func TestPublicTestNetGenesis(t *testing.T) {
 	if len(g.Alloc) != 0 {
 		t.Errorf("genesis allocates %d accounts, want none", len(g.Alloc))
 	}
-	if g.Timestamp != 1_793_491_200 || ghost.TestNetTimestamp != 1_793_491_200 {
-		t.Errorf("timestamp %d, want 1793491200 (2026-11-01 00:00:00 UTC)", g.Timestamp)
+	if g.Timestamp != 1_790_812_800 || ghost.TestNetTimestamp != 1_790_812_800 {
+		t.Errorf("timestamp %d, want 1790812800 (2026-10-01 00:00:00 UTC)", g.Timestamp)
+	}
+	// The time is the internal network's, so the extra data keeps the two
+	// first blocks apart.
+	if string(g.ExtraData) != "ghost public test network" || ghost.TestNetExtraData != "ghost public test network" {
+		t.Errorf("extra data %q, want %q", g.ExtraData, "ghost public test network")
+	}
+	if len(g.ExtraData) > int(vars.MaximumExtraDataSize) {
+		t.Errorf("extra data is %d bytes, longer than %d", len(g.ExtraData), vars.MaximumExtraDataSize)
 	}
 	if g.GasLimit != 30_000_000 {
 		t.Errorf("gas limit %d, want 30000000", g.GasLimit)
