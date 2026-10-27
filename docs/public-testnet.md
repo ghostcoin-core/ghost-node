@@ -75,11 +75,29 @@ config file.
 
 ## Stored chains are kept
 
-The built-in genesis is used only when the data directory holds no genesis.
+The built-in genesis is written only when the data directory holds no genesis.
 A data directory that already holds a chain, such as one initialised with
-`geth init` for the internal network, keeps that chain; the node never
-replaces a stored chain with the built-in one. Developer mode (`--dev`) and
-`scripts/internal-net.sh` work as before.
+`geth init` for the internal network, keeps that chain. Developer mode
+(`--dev`) and `scripts/internal-net.sh` work as before, and a genesis
+mismatch on those chains still fails as before.
+
+The one exception is a public test network chain from before a reset. When
+the node runs the built-in network (no genesis given, not developer mode) and
+the stored chain has the test network's chain ID, 6777972, but a genesis hash
+other than the built-in one, the node moves that chain aside before opening
+it and starts on the built-in genesis. Without this it would start on the old
+chain, find no peers there and mine alone.
+
+The chain data is renamed to a dated sibling folder, such as
+`chaindata.old-2026-10-27` (`chaindata.old-2026-10-27-2` and so on if that
+exists), and a freezer kept elsewhere with `--datadir.ancient` is renamed the
+same way beside it. Nothing is deleted. The keystore and the node key are not
+touched. The node logs one warning naming the old genesis hash, the new one
+and the new folder. A chain with any other chain ID, and a test network chain
+on the built-in genesis, are left alone.
+
+The decision is `isStaleTestNetChain` in `eth/testnet_reset.go`, and
+`eth/testnet_reset_test.go` checks it and the move.
 
 ## Tests
 
