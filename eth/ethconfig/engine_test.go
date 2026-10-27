@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/consensus/ethash"
+	"github.com/ethereum/go-ethereum/consensus/ghostrules"
 	"github.com/ethereum/go-ethereum/consensus/randomx"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/params/ghost"
@@ -64,18 +65,27 @@ func TestUnknownChainIDHasNoEngine(t *testing.T) {
 	}
 }
 
-// TestEngineParamsByChainID checks that the public test network, the internal
-// network and developer mode use the internal network's consensus parameters.
+// TestEngineParamsByChainID checks that the public test network uses its own
+// 30-second consensus parameters, and that the internal network and developer
+// mode use the internal network's.
 func TestEngineParamsByChainID(t *testing.T) {
-	want := ghost.InternalNetParams()
-	for _, id := range []int64{ghost.TestNetChainID, ghost.InternalNetChainID, ghost.DeveloperChainID} {
-		params, err := consensusParams(big.NewInt(id))
+	for _, c := range []struct {
+		id   int64
+		want ghostrules.Params
+	}{
+		{ghost.TestNetChainID, ghost.TestNetParams()},
+		{ghost.InternalNetChainID, ghost.InternalNetParams()},
+		{ghost.DeveloperChainID, ghost.InternalNetParams()},
+	} {
+		params, err := consensusParams(big.NewInt(c.id))
 		if err != nil {
-			t.Fatalf("chain ID %d: %v", id, err)
+			t.Fatalf("chain ID %d: %v", c.id, err)
 		}
+		want := c.want
 		if params.BlockTime != want.BlockTime || params.FutureDrift != want.FutureDrift ||
+			params.StartDifficulty.Cmp(want.StartDifficulty) != 0 ||
 			params.MinDifficulty.Cmp(want.MinDifficulty) != 0 || !params.FirstReward.Eq(want.FirstReward) {
-			t.Errorf("chain ID %d: parameters %+v, want %+v", id, params, want)
+			t.Errorf("chain ID %d: parameters %+v, want %+v", c.id, params, want)
 		}
 	}
 }
