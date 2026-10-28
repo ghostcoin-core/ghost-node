@@ -124,6 +124,35 @@ out. The `ghost-setup` hashes pinned in the two scripts are all-zero
 placeholders until the release publishes the setup executables, so for now
 both lines refuse to install.
 
+#### Settings
+
+Each line takes these settings from the environment at install time; a value
+the installer cannot use is refused with nothing installed.
+
+- `GHOST_MINE_TO=0x...` mines straight to a wallet address of your own, such
+  as the Ghost pop-up wallet's, instead of a newly generated mining key.
+- `GHOST_HTTP_PORT=<port>` moves the node's HTTP RPC off `8545`.
+- `GHOST_MINE_THREADS=<number>` sets how many CPU cores the node mines on, a
+  whole number from 1 to 9999. By default it mines on half the computer's
+  logical cores, rounded down and at least 1, so a laptop stays cool and quiet.
+  The installer's closing lines say how many cores it mines on. A re-run or an
+  update keeps the number unless the setting is given again, and a node
+  installed before the setting existed gets the default on its next update.
+  To change it, run the install line again with the setting:
+
+  ```sh
+  curl -fsSL https://get.ghostcoin.com | GHOST_MINE_THREADS=2 sh
+  ```
+
+  ```powershell
+  $env:GHOST_MINE_THREADS='2'; irm https://get.ghostcoin.com/win | iex
+  ```
+
+  In CMD, run `set "GHOST_MINE_THREADS=2"` before the line above. On Linux and
+  macOS the node runs with `--miner.threads`; on Windows `ghost-setup` keeps
+  the number as `GETH_MINER_THREADS` in the user's environment, which geth reads
+  as the same setting, so the node started at login uses it too.
+
 ## Building
 
 You need Go 1.26 (the exact toolchain is pinned in `go.mod`) and a C compiler.

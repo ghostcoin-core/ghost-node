@@ -38,6 +38,21 @@ rem config's Etherbase to the address, and ghost-setup restarts the node.
 rem Unset, the config is left to ghost-setup as before. Either way the script
 rem ends by printing the address the node mines to.
 rem
+rem The node mines on half this computer's logical cores, rounded down and at
+rem least 1. GHOST_MINE_THREADS chooses the number of cores instead. In CMD,
+rem run  set "GHOST_MINE_THREADS=2"  before the line above. The same in
+rem PowerShell and on a Mac or Linux:
+rem
+rem   $env:GHOST_MINE_THREADS='2'; irm https://get.ghostcoin.com/win | iex
+rem   curl -fsSL https://get.ghostcoin.com | GHOST_MINE_THREADS=2 sh
+rem
+rem It must be a whole number from 1 to 9999; anything else is refused with
+rem nothing installed. ghost-setup keeps it as GETH_MINER_THREADS, which geth
+rem reads as --miner.threads, in the user's environment, so the node started
+rem at login mines on that many cores too. A re-run or an update keeps the
+rem number unless GHOST_MINE_THREADS is set again. ghost-setup's closing lines
+rem say how many cores the node mines on.
+rem
 rem It uses no labels, so it runs the same whatever its line endings.
 
 setlocal EnableExtensions DisableDelayedExpansion
@@ -83,6 +98,23 @@ if defined GHOST_MINE_TO (
 )
 if not defined MINE_TO_OK (
 	echo ghost-node: GHOST_MINE_TO must be a wallet address, 0x followed by exactly 40 hex characters, and GHOST_HTTP_PORT a port number; %REFUSAL% 1>&2
+	exit /b 1
+)
+rem GHOST_MINE_THREADS, when set, is the number of CPU cores to mine on: a
+rem whole number from 1 to 9999, which ghost-setup reads too. It is checked
+rem with delayed expansion only, as GHOST_MINE_TO is. THREADS_OK is 1 when it
+rem is unset or such a number.
+set "THREADS_OK=1"
+if defined GHOST_MINE_THREADS (
+	setlocal EnableDelayedExpansion
+	set "THREADS_OK="
+	set "REST=!GHOST_MINE_THREADS!"
+	for %%C in (0 1 2 3 4 5 6 7 8 9) do if defined REST set "REST=!REST:%%C=!"
+	if not defined REST if not "!GHOST_MINE_THREADS:~0,1!"=="0" if "!GHOST_MINE_THREADS:~4!"=="" set "THREADS_OK=1"
+	for %%R in ("!THREADS_OK!") do endlocal & set "THREADS_OK=%%~R"
+)
+if not defined THREADS_OK (
+	echo ghost-node: GHOST_MINE_THREADS must be the number of CPU cores to mine on, a whole number from 1 to 9999; %REFUSAL% 1>&2
 	exit /b 1
 )
 if defined GHOST_MINE_TO if defined GHOST_HTTP_PORT set "HTTP_PORT=%GHOST_HTTP_PORT%"

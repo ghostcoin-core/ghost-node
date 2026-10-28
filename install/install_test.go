@@ -577,7 +577,26 @@ type envOptions struct {
 	systemctl string // the systemctl stub, or none
 	darwin    bool   // a Mac: uname says Darwin, and launchctl is a stub
 	stockMac  bool   // a Mac's tools: shasum, no sha256sum, and a LibreSSL openssl
+	// cpus, when not 0, is the number of logical cores the computer has: a
+	// stub getconf says so on Linux, a stub sysctl on a Mac. Without, the
+	// installer finds no tool that tells.
+	cpus int
 }
+
+// The stub tools that tell the number of logical cores, as Linux's getconf
+// and a Mac's sysctl do.
+const (
+	stubGetconf = `#!/bin/sh
+echo "getconf $*" >>"$STUB_DIR/cpus.calls"
+[ "$*" = _NPROCESSORS_ONLN ] || exit 1
+echo %d
+`
+	stubSysctl = `#!/bin/sh
+echo "sysctl $*" >>"$STUB_DIR/cpus.calls"
+[ "$*" = "-n hw.logicalcpu" ] || exit 1
+echo %d
+`
+)
 
 // installEnv is the computer the script runs on: an empty home, an empty
 // temporary directory, a PATH of stock tools and stub service managers, and
@@ -612,8 +631,14 @@ func newInstallEnv(t *testing.T, opts envOptions) *installEnv {
 		machine := map[string]string{"amd64": "x86_64", "arm64": "arm64"}[runtime.GOARCH]
 		stubs["uname"] = fmt.Sprintf(stubUnameDarwin, machine)
 		stubs["launchctl"] = stubLaunchctl
+		if opts.cpus != 0 {
+			stubs["sysctl"] = fmt.Sprintf(stubSysctl, opts.cpus)
+		}
 	} else {
 		tools = append(tools, "uname")
+		if opts.cpus != 0 {
+			stubs["getconf"] = fmt.Sprintf(stubGetconf, opts.cpus)
+		}
 	}
 	if opts.stockMac {
 		sha256sum, err := exec.LookPath("sha256sum")
@@ -959,7 +984,7 @@ func TestInstallScriptInstallsAndStarts(t *testing.T) {
 	unitDir := func(env *installEnv) string { return filepath.Join(env.home, ".config", "systemd", "user") }
 
 	t.Run("systemd", func(t *testing.T) {
-		env := newInstallEnv(t, envOptions{systemctl: stubSystemctl})
+		env := newInstallEnv(t, envOptions{systemctl: stubSystemctl, cpus: 6})
 		stopNodeAtCleanup(t, filepath.Join(env.stubs, "service.pid"))
 		out, err := env.run(t, script, rs, true)
 		if err != nil {
@@ -970,7 +995,7 @@ func TestInstallScriptInstallsAndStarts(t *testing.T) {
 			t.Fatal(err)
 		}
 		base := filepath.Join(env.home, ".ghost-node")
-		execStart := fmt.Sprintf("ExecStart=%q --config %q --mine\n", filepath.Join(base, "bin", "geth"), filepath.Join(base, "config.toml"))
+		execStart := fmt.Sprintf("ExecStart=%q --config %q --mine --miner.threads 3\n", filepath.Join(base, "bin", "geth"), filepath.Join(base, "config.toml"))
 		if !strings.Contains(string(unit), execStart) || !strings.Contains(string(unit), "WantedBy=default.target") {
 			t.Fatalf("the unit does not run the node mining at login:\n%s", unit)
 		}
@@ -1754,7 +1779,7 @@ func TestInstallScriptDarwin(t *testing.T) {
 	key := newSigner(t)
 	blob := release.tarGz(t)
 	rs := serveRelease(t, "darwin", blob, key.sign(blob), verifier)
-	env := newInstallEnv(t, envOptions{darwin: true, stockMac: true})
+	env := newInstallEnv(t, envOptions{darwin: true, stockMac: true, cpus: 18})
 	checkStockMac(t, env)
 	script := writeScript(t, key, sha256Hex(verifier))
 	installRunning(t, env, script, rs, geth)
@@ -1767,7 +1792,8 @@ func TestInstallScriptDarwin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	args := fmt.Sprintf("<array>\n\t\t<string>%s</string>\n\t\t<string>--config</string>\n\t\t<string>%s</string>\n\t\t<string>--mine</string>\n\t</array>",
+	args := fmt.Sprintf("<array>\n\t\t<string>%s</string>\n\t\t<string>--config</string>\n\t\t<string>%s</string>\n\t\t<string>--mine</string>\n"+
+		"\t\t<string>--miner.threads</string>\n\t\t<string>9</string>\n\t</array>",
 		filepath.Join(base, "bin", "geth"), filepath.Join(base, "config.toml"))
 	for _, want := range []string{"<string>com.ghostcoin.node</string>", args, "<key>RunAtLoad</key>\n\t<true/>", "<key>KeepAlive</key>\n\t<true/>"} {
 		if !strings.Contains(string(plist), want) {

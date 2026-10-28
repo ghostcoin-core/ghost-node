@@ -77,7 +77,16 @@ const (
 	startCheck = 5 * time.Second
 
 	installLine = "irm https://get.ghostcoin.com/win | iex"
+
+	// minerThreadsVar is the environment variable geth reads as
+	// --miner.threads. The Run key starts the node with its config and --mine
+	// only, so the number of cores it mines on is this variable of the user's
+	// environment, which programs started at login inherit.
+	minerThreadsVar = "GETH_MINER_THREADS"
 )
+
+// minerThreadsPattern is a number of cores GHOST_MINE_THREADS may give.
+var minerThreadsPattern = regexp.MustCompile(`^[1-9][0-9]{0,3}$`)
 
 // webOrigins are the Ghost web apps the node's HTTP RPC allows.
 var webOrigins = []string{"https://ghost-webapp-alpha.vercel.app", "https://ghost-wallet-nine.vercel.app"}
@@ -105,6 +114,15 @@ func parseArgs(args []string) (mode, error) {
 	return 0, errors.New("usage: ghost-setup.exe [--update [--daily]]")
 }
 
+// userEnv is the current user's environment variables, the ones every
+// program started at login inherits.
+type userEnv interface {
+	// Get returns the variable name, and false when there is none.
+	Get(name string) (value string, ok bool, err error)
+	// Set writes the variable name.
+	Set(name, value string) error
+}
+
 // setup installs and updates the node of one user.
 type setup struct {
 	releaseURL string // https, with no trailing slash
@@ -116,9 +134,16 @@ type setup struct {
 	workRoot   string // where temporary directories are made; "" is the system's
 	httpPort   int
 	autoUpdate bool
+	threads    int // GHOST_MINE_THREADS's number of cores, 0 when unset
+	cpus       int // this computer's logical cores
 
-	runKey winsvc.RunKey
-	procs  winsvc.Processes
+	runKey  winsvc.RunKey
+	procs   winsvc.Processes
+	userEnv userEnv
+
+	// setenv sets a variable of this process's environment, which the node
+	// it starts inherits.
+	setenv func(key, value string) error
 
 	// runGeth runs the geth executable exe with args to completion and
 	// returns its output.
@@ -153,6 +178,12 @@ func newSetup(getenv func(string) string, self string, out io.Writer) (*setup, e
 			return nil, fmt.Errorf("GHOST_HTTP_PORT is not a port number: %s", p)
 		}
 	}
+	threads := 0
+	if v := getenv("GHOST_MINE_THREADS"); v != "" {
+		if threads = parseThreads(v); threads == 0 {
+			return nil, fmt.Errorf("GHOST_MINE_THREADS must be the number of CPU cores to mine on, a whole number from 1 to 9999, not '%s'; nothing was installed or changed", v)
+		}
+	}
 	client, err := newClient(getenv("GHOST_INSTALL_CA_FILE"))
 	if err != nil {
 		return nil, err
@@ -170,6 +201,9 @@ func newSetup(getenv func(string) string, self string, out io.Writer) (*setup, e
 		self:       self,
 		httpPort:   port,
 		autoUpdate: getenv("GHOST_NO_UPDATE") != "1",
+		threads:    threads,
+		cpus:       runtime.NumCPU(),
+		setenv:     os.Setenv,
 		runGeth:    runCommand,
 		now:        time.Now,
 		sleep:      time.Sleep,
@@ -261,9 +295,64 @@ func (s *setup) service() *winsvc.Service {
 	return &winsvc.Service{Exe: s.gethPath(), Home: s.home, RunKey: s.runKey, Processes: s.procs, Sleep: s.sleep}
 }
 
+// parseThreads returns the number of cores v gives, or 0 when it is not a
+// whole number from 1 to 9999.
+func parseThreads(v string) int {
+	if !minerThreadsPattern.MatchString(v) {
+		return 0
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// minerThreads returns the number of cores the node mines on:
+// GHOST_MINE_THREADS's, else the number kept in the user's environment, else
+// half this computer's logical cores, rounded down and at least 1. It reports
+// whether that is not the number kept.
+func (s *setup) minerThreads() (int, bool, error) {
+	kept := 0
+	if v, ok, err := s.userEnv.Get(minerThreadsVar); err != nil {
+		return 0, false, fmt.Errorf("could not read %s of the user's environment: %w", minerThreadsVar, err)
+	} else if ok {
+		kept = parseThreads(v)
+	}
+	n := s.threads
+	if n == 0 {
+		n = kept
+	}
+	if n == 0 {
+		n = max(s.cpus/2, 1)
+	}
+	return n, n != kept, nil
+}
+
+// applyThreads keeps n in the user's environment when changed, for the node
+// the Run key starts at login, and sets it in this process's, for the node
+// started from here.
+func (s *setup) applyThreads(n int, changed bool) error {
+	v := strconv.Itoa(n)
+	if changed {
+		if err := s.userEnv.Set(minerThreadsVar, v); err != nil {
+			return fmt.Errorf("could not set %s in the user's environment: %w", minerThreadsVar, err)
+		}
+	}
+	if err := s.setenv(minerThreadsVar, v); err != nil {
+		return fmt.Errorf("could not set %s: %w", minerThreadsVar, err)
+	}
+	return nil
+}
+
+// threadsSummary says how many cores the node mines on.
+func (s *setup) threadsSummary(n int) string {
+	return fmt.Sprintf("%d of the %d logical CPU cores of this computer", n, s.cpus)
+}
+
 func (s *setup) run(m mode) error {
-	if s.runKey == nil || s.procs == nil || s.runGeth == nil {
-		return errors.New("the setup has no Run key, process or geth access")
+	if s.runKey == nil || s.procs == nil || s.runGeth == nil || s.userEnv == nil || s.setenv == nil {
+		return errors.New("the setup has no Run key, process, environment or geth access")
 	}
 	if m == modeInstall {
 		return s.install()
@@ -450,6 +539,10 @@ func (s *setup) install() error {
 	if err != nil {
 		return fmt.Errorf("%v; refusing to install. Nothing was installed", err)
 	}
+	threads, threadsChanged, err := s.minerThreads()
+	if err != nil {
+		return fmt.Errorf("%v; refusing to install. Nothing was installed", err)
+	}
 
 	for _, dir := range []string{s.binDir(), s.dataDir()} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -476,6 +569,9 @@ func (s *setup) install() error {
 	if err := s.initialise(rel); err != nil {
 		return err
 	}
+	if err := s.applyThreads(threads, threadsChanged); err != nil {
+		return err
+	}
 	if _, err := svc.Install(); err != nil {
 		return fmt.Errorf("could not make the node start at login: %w", err)
 	}
@@ -494,6 +590,7 @@ func (s *setup) install() error {
 	stop := winsvc.JoinCommandLine(s.gethPath(), "service", "stop", "--home", s.home)
 	s.say("the node is installed in %s, running, syncing and mining", s.home)
 	s.say("your mining address: %s", address)
+	s.say("mining on %s; to change that, run the install line again with GHOST_MINE_THREADS set to the number of cores, such as: $env:GHOST_MINE_THREADS='2'; %s", s.threadsSummary(threads), installLine)
 	s.say("check its status with: %s", status)
 	s.say("follow its log with: Get-Content -Wait %s", winsvc.QuoteArg(svc.LogPath()))
 	s.say("the Ghost web apps reach it at http://127.0.0.1:%d", s.httpPort)
@@ -625,12 +722,31 @@ func (s *setup) update(daily bool) error {
 	if err != nil {
 		return err
 	}
+	threads, threadsChanged, err := s.minerThreads()
+	if err != nil {
+		return fmt.Errorf("%v; refusing to update. Nothing was changed, and the running node was left alone", err)
+	}
+	if err := s.applyThreads(threads, threadsChanged); err != nil {
+		return err
+	}
+	svc := s.service()
 	if have == rel.sum {
 		s.say("the node is up to date")
+		if threadsChanged {
+			// A node installed before the number of cores was set mines
+			// on them all until it starts again.
+			if _, err := svc.Stop(); err != nil {
+				return fmt.Errorf("could not stop the node to restart it on %s: %w", s.threadsSummary(threads), err)
+			}
+			if _, err := s.startNode(svc); err != nil {
+				return err
+			}
+			s.say("restarted the node to mine on %s", s.threadsSummary(threads))
+		}
+		s.say("mining on %s", s.threadsSummary(threads))
 		return nil
 	}
 
-	svc := s.service()
 	if _, err := svc.Stop(); err != nil {
 		return fmt.Errorf("could not stop the node to update it: %w; nothing was changed", err)
 	}
@@ -649,6 +765,7 @@ func (s *setup) update(daily bool) error {
 	if startErr == nil {
 		os.Remove(previous)
 		s.say("updated the node to the latest release and restarted it")
+		s.say("mining on %s", s.threadsSummary(threads))
 		return nil
 	}
 	svc.Stop()

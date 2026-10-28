@@ -50,6 +50,16 @@
 // server; GHOST_HTTP_PORT moves the node's HTTP RPC off 8545. The tests use
 // them for a local release server.
 //
+// The node mines on half this computer's logical cores, rounded down and at
+// least 1. GHOST_MINE_THREADS, a whole number from 1 to 9999, chooses the
+// number of cores instead; anything else is refused before anything is
+// installed. The Run key starts the node with its config and --mine only, so
+// the number is GETH_MINER_THREADS, which geth reads as --miner.threads, in
+// the user's environment (HKEY_CURRENT_USER\Environment): the node started at
+// login inherits it, and the one started here gets it too. A re-run or an
+// update keeps the number unless GHOST_MINE_THREADS is set again; an update of
+// a node installed before ghost-setup set it restarts the node on the default.
+//
 // It is built with the standard library and internal/winsvc only, with cgo
 // off, for windows/amd64 and windows/arm64.
 package main
@@ -110,5 +120,6 @@ func runSystem(m mode, stdout io.Writer) error {
 		return err
 	}
 	s.runKey, s.procs = sys.RunKey, sys.Processes
+	s.userEnv = systemUserEnv()
 	return s.run(m)
 }

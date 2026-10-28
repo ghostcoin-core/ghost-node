@@ -384,6 +384,116 @@ func TestWindowsInstallerScriptsMineTo(t *testing.T) {
 	}
 }
 
+// The one-line examples of GHOST_MINE_THREADS that each installer's header
+// gives.
+var mineThreadsExamples = []string{
+	"curl -fsSL https://get.ghostcoin.com | GHOST_MINE_THREADS=2 sh",
+	"$env:GHOST_MINE_THREADS='2'; irm https://get.ghostcoin.com/win | iex",
+}
+
+// TestMinerThreadsWindowsScripts checks that the Windows scripts read
+// GHOST_MINE_THREADS: they refuse what is not a whole number from 1 to 9999
+// before they download anything or write a config, and leave the number to
+// ghost-setup. Every installer's header and the README describe the setting.
+func TestMinerThreadsWindowsScripts(t *testing.T) {
+	for _, ws := range windowsScripts {
+		comments := ws.comments(t)
+		for _, example := range mineThreadsExamples {
+			if !strings.Contains(comments, example) {
+				t.Errorf("%s's header does not give the example %s", ws.file, example)
+			}
+		}
+	}
+	sh, err := os.ReadFile("install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, example := range mineThreadsExamples {
+		if !strings.Contains(string(sh), "\n#\t"+example+"\n") && !strings.Contains(string(sh), example+")\n") {
+			t.Errorf("install.sh's header does not give the example %s", example)
+		}
+	}
+	readme, err := os.ReadFile("../README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range append([]string{"GHOST_MINE_THREADS", "half"}, mineThreadsExamples...) {
+		if !strings.Contains(string(readme), want) {
+			t.Errorf("README.md does not mention %s", want)
+		}
+	}
+
+	valid := []string{"1", "2", "9", "10", "64", "9999"}
+	invalid := []string{"0", "00", "02", "-1", "+2", "1.5", "2 ", " 2", "2\n", "10000", "two", "0x4", "１"}
+
+	// install.ps1 checks the number with a .NET regular expression, which
+	// means the same in Go, before it downloads anything.
+	ps1 := windowsScripts[0]
+	code := ps1.code(t)
+	read := find(t, ps1.file, code, `$MineThreads = $env:GHOST_MINE_THREADS`)
+	check := find(t, ps1.file, code, `if ($MineThreads -and $MineThreads -cnotmatch '`)
+	if check >= 0 {
+		m := regexp.MustCompile(`-cnotmatch '([^']+)'`).FindStringSubmatch(code[check])
+		if m == nil || check+1 >= len(code) {
+			t.Fatalf("install.ps1 checks GHOST_MINE_THREADS with no pattern: %s", code[check])
+		}
+		pattern := regexp.MustCompile(m[1])
+		for _, good := range valid {
+			if !pattern.MatchString(good) {
+				t.Errorf("install.ps1 refuses GHOST_MINE_THREADS=%s", good)
+			}
+		}
+		for _, bad := range invalid {
+			if pattern.MatchString(bad) {
+				t.Errorf("install.ps1 takes the malformed GHOST_MINE_THREADS %q", bad)
+			}
+		}
+		if !strings.HasPrefix(code[check+1], "throw ") || !strings.Contains(code[check+1], "$Refusal") ||
+			!strings.Contains(code[check+1], "GHOST_MINE_THREADS must be the number of CPU cores to mine on") {
+			t.Errorf("install.ps1 does not refuse a malformed GHOST_MINE_THREADS: %s", code[check+1])
+		}
+	}
+	checkOrder(t, ps1.file, code, read, check, ps1.download, `[IO.File]::WriteAllText($Config, $Text)`, ps1.runLine)
+
+	// install.cmd checks the number by what is left once every digit is taken
+	// out, its first character and its length, before it downloads anything.
+	cmd := windowsScripts[1]
+	code = cmd.code(t)
+	read = find(t, cmd.file, code, `if defined GHOST_MINE_THREADS (`)
+	strip := find(t, cmd.file, code, `set "REST=!GHOST_MINE_THREADS!"`)
+	check = find(t, cmd.file, code, `if not defined REST if not "!GHOST_MINE_THREADS:~0,1!"=="0" if "!GHOST_MINE_THREADS:~4!"=="" set "THREADS_OK=1"`)
+	refuse := find(t, cmd.file, code, `if not defined THREADS_OK (`)
+	if refuse >= 0 && (refuse+2 >= len(code) || !strings.Contains(code[refuse+1], "GHOST_MINE_THREADS must be") ||
+		!strings.Contains(code[refuse+1], "%REFUSAL%") || code[refuse+2] != "exit /b 1") {
+		t.Errorf("install.cmd does not refuse a malformed GHOST_MINE_THREADS")
+	}
+	if strip >= 0 && (strip+1 >= len(code) || code[strip+1] != `for %%C in (0 1 2 3 4 5 6 7 8 9) do if defined REST set "REST=!REST:%%C=!"`) {
+		t.Errorf("install.cmd does not take every digit out of GHOST_MINE_THREADS")
+	}
+	checkOrder(t, cmd.file, code, read, strip, check, refuse, cmd.download, `if defined GHOST_MINE_TO move /y "%CONFIG%.new" "%CONFIG%" >nul`, cmd.runLine)
+
+	// ghost-setup takes the same numbers.
+	setupSource, err := os.ReadFile("winsetup/setup.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile("minerThreadsPattern = regexp.MustCompile\\(`([^`]+)`\\)").FindSubmatch(setupSource)
+	if m == nil {
+		t.Fatal("winsetup/setup.go has no minerThreadsPattern")
+	}
+	pattern := regexp.MustCompile(string(m[1]))
+	for _, good := range valid {
+		if !pattern.MatchString(good) {
+			t.Errorf("ghost-setup refuses GHOST_MINE_THREADS=%s", good)
+		}
+	}
+	for _, bad := range invalid {
+		if pattern.MatchString(bad) {
+			t.Errorf("ghost-setup takes the malformed GHOST_MINE_THREADS %q", bad)
+		}
+	}
+}
+
 // checkOrder checks that the code lines come in the order given, each given
 // by its index or by a literal that only it holds; the run line by equality.
 func checkOrder(t *testing.T, file string, code []string, order ...any) {

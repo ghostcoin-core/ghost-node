@@ -186,11 +186,42 @@ func (k *fakeRunKey) Delete(name string) error {
 	return nil
 }
 
+// fakeUserEnv is the current user's environment.
+type fakeUserEnv struct {
+	mu     sync.Mutex
+	values map[string]string
+}
+
+func (u *fakeUserEnv) Get(name string) (string, bool, error) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	v, ok := u.values[name]
+	return v, ok, nil
+}
+
+func (u *fakeUserEnv) Set(name, value string) error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.values[name] = value
+	return nil
+}
+
+func (u *fakeUserEnv) copy() map[string]string {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	c := make(map[string]string)
+	for k, v := range u.values {
+		c[k] = v
+	}
+	return c
+}
+
 // fakeProc is a process the fake processes started.
 type fakeProc struct {
 	exe     string
 	args    []string
 	content string // of exe when it started
+	threads string // GETH_MINER_THREADS of its environment, "" if none
 	alive   bool
 }
 
@@ -198,6 +229,24 @@ type fakeProcesses struct {
 	mu    sync.Mutex
 	procs map[int]*fakeProc
 	next  int
+	// environ is the environment of the process that starts the node, which
+	// the node inherits.
+	environ map[string]string
+}
+
+// setenv sets a variable of the starting process's environment.
+func (p *fakeProcesses) setenv(key, value string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.environ[key] = value
+	return nil
+}
+
+// setEnviron makes environ the starting process's environment.
+func (p *fakeProcesses) setEnviron(environ map[string]string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.environ = environ
 }
 
 func (p *fakeProcesses) Start(exe string, args []string, logPath string) (int, error) {
@@ -211,7 +260,7 @@ func (p *fakeProcesses) Start(exe string, args []string, logPath string) (int, e
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.next++
-	p.procs[p.next] = &fakeProc{exe: exe, args: args, content: string(content), alive: string(content) != "crashing geth"}
+	p.procs[p.next] = &fakeProc{exe: exe, args: args, content: string(content), threads: p.environ[minerThreadsVar], alive: string(content) != "crashing geth"}
 	return p.next, nil
 }
 
@@ -285,6 +334,8 @@ type env struct {
 	selfExe  string
 	runKey   *fakeRunKey
 	procs    *fakeProcesses
+	userEnv  *fakeUserEnv
+	cpus     int
 	accounts int
 	now      time.Time
 	vars     map[string]string
@@ -299,7 +350,9 @@ func newEnv(t *testing.T, rs *releaseServer, key ed25519.PublicKey) *env {
 		profile: filepath.Join(root, "profile"),
 		selfExe: filepath.Join(root, "download", setupExeName),
 		runKey:  &fakeRunKey{values: make(map[string]string)},
-		procs:   &fakeProcesses{procs: make(map[int]*fakeProc)},
+		procs:   &fakeProcesses{procs: make(map[int]*fakeProc), environ: make(map[string]string)},
+		userEnv: &fakeUserEnv{values: make(map[string]string)},
+		cpus:    8,
 		now:     time.Date(2026, 10, 26, 9, 0, 0, 0, time.UTC),
 		key:     key,
 	}
@@ -336,6 +389,10 @@ func (e *env) run(args ...string) (string, error) {
 	s.arch = "amd64"
 	s.workRoot = filepath.Join(filepath.Dir(e.selfExe), "..", "tmp")
 	s.runKey, s.procs = e.runKey, e.procs
+	s.userEnv, s.cpus = e.userEnv, e.cpus
+	// ghost-setup runs with the user's environment, as at login.
+	e.procs.setEnviron(e.userEnv.copy())
+	s.setenv = e.procs.setenv
 	s.runGeth = fakeGeth(e.t, &e.accounts)
 	s.now = func() time.Time { return e.now }
 	s.sleep = func(time.Duration) {}
@@ -371,7 +428,26 @@ func (e *env) requireNothingInstalled() {
 	if n := e.procs.started(); n != 0 {
 		e.t.Errorf("%d processes were started", n)
 	}
+	if vars := e.userEnv.copy(); len(vars) != 0 {
+		e.t.Errorf("the user's environment was changed: %v", vars)
+	}
 	e.requireNoTempLeft()
+}
+
+// requireMinesOn fails unless the running node mines on threads cores, and the
+// user's environment keeps that number for the node started at login.
+func (e *env) requireMinesOn(threads string) {
+	e.t.Helper()
+	live := e.procs.running()
+	if len(live) != 1 {
+		e.t.Fatalf("%d nodes are running, not 1", len(live))
+	}
+	if live[0].threads != threads {
+		e.t.Errorf("the node runs with %s=%q, not %q", minerThreadsVar, live[0].threads, threads)
+	}
+	if got, _, _ := e.userEnv.Get(minerThreadsVar); got != threads {
+		e.t.Errorf("the user's environment holds %s=%q, not %q", minerThreadsVar, got, threads)
+	}
 }
 
 func (e *env) requireNoTempLeft() {
@@ -482,11 +558,13 @@ func TestWinSetupCleanInstall(t *testing.T) {
 		"your mining address: " + testAddress,
 		"check its status with: " + winsvc.JoinCommandLine(e.gethPath(), "service", "status", "--home", e.home),
 		"signed updates are checked daily at login",
+		"mining on 4 of the 8 logical CPU cores of this computer; to change that, run the install line again with GHOST_MINE_THREADS",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the output lacks %q:\n%s", want, out)
 		}
 	}
+	e.requireMinesOn("4")
 	e.requireNoTempLeft()
 
 	// Run again, it keeps the config and the mining address and runs one node.
@@ -789,5 +867,159 @@ func TestWinSetupReleaseKeyPinned(t *testing.T) {
 	}
 	if !got.Equal(want) {
 		t.Error("the key pinned in setup.go is not install/release-key.pub")
+	}
+}
+
+// login starts the node as the Run key does at login: a new process with the
+// user's environment runs geth service start.
+func (e *env) login() {
+	e.t.Helper()
+	if _, err := e.nodeService().Stop(); err != nil {
+		e.t.Fatal(err)
+	}
+	e.procs.setEnviron(e.userEnv.copy())
+	if _, _, err := e.nodeService().Start(); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+// TestWinSetupMinerThreadsDefault installs on computers with various numbers
+// of logical cores: the node mines on half of them, rounded down and at least
+// one, now and after every login.
+func TestWinSetupMinerThreadsDefault(t *testing.T) {
+	for cpus, want := range map[int]string{1: "1", 2: "1", 7: "3", 18: "9"} {
+		t.Run(fmt.Sprint(cpus), func(t *testing.T) {
+			rs := newReleaseServer(t)
+			s := newSigner(t)
+			rs.publish(s, gethArchive(t, "geth"))
+			e := newEnv(t, rs, s.pub)
+			e.cpus = cpus
+			out, err := e.run()
+			if err != nil {
+				t.Fatalf("install failed: %v\n%s", err, out)
+			}
+			e.requireRunning("geth")
+			e.requireMinesOn(want)
+			if summary := fmt.Sprintf("mining on %s of the %d logical CPU cores", want, cpus); !strings.Contains(out, summary) {
+				t.Errorf("the output lacks %q:\n%s", summary, out)
+			}
+			e.login()
+			e.requireMinesOn(want)
+		})
+	}
+}
+
+// TestWinSetupMinerThreadsSetting installs with GHOST_MINE_THREADS: the node
+// mines on that many cores. A re-run or an update without it keeps the
+// number; with another, the node restarts on it.
+func TestWinSetupMinerThreadsSetting(t *testing.T) {
+	rs := newReleaseServer(t)
+	s := newSigner(t)
+	rs.publish(s, gethArchive(t, "geth"))
+	e := newEnv(t, rs, s.pub)
+	e.vars["GHOST_MINE_THREADS"] = "6"
+	if out, err := e.run(); err != nil {
+		t.Fatalf("install failed: %v\n%s", err, out)
+	}
+	e.requireMinesOn("6")
+
+	delete(e.vars, "GHOST_MINE_THREADS")
+	if out, err := e.run(); err != nil {
+		t.Fatalf("second install failed: %v\n%s", err, out)
+	}
+	e.requireMinesOn("6")
+
+	// An update with nothing new keeps the number and the running node.
+	e.login()
+	running := e.procs.running()[0]
+	out, err := e.run("--update")
+	if err != nil || !strings.Contains(out, "the node is up to date") || !strings.Contains(out, "mining on 6 of the 8") {
+		t.Fatalf("an update to the same release: %v\n%s", err, out)
+	}
+	if live := e.procs.running(); len(live) != 1 || live[0] != running {
+		t.Error("an update keeping the number of cores restarted the node")
+	}
+
+	// An update with another number restarts the node on it.
+	e.vars["GHOST_MINE_THREADS"] = "2"
+	out, err = e.run("--update")
+	if err != nil {
+		t.Fatalf("update failed: %v\n%s", err, out)
+	}
+	if live := e.procs.running(); len(live) != 1 || live[0] == running {
+		t.Error("an update with another number of cores did not restart the node")
+	}
+	e.requireRunning("geth")
+	e.requireMinesOn("2")
+	if !strings.Contains(out, "restarted the node to mine on 2 of the 8") {
+		t.Errorf("the update does not say it restarted the node on 2 cores:\n%s", out)
+	}
+
+	// A new release is installed with the number kept.
+	delete(e.vars, "GHOST_MINE_THREADS")
+	rs.publish(s, gethArchive(t, "geth v2"))
+	if out, err := e.run("--update"); err != nil {
+		t.Fatalf("update failed: %v\n%s", err, out)
+	}
+	e.requireRunning("geth v2")
+	e.requireMinesOn("2")
+	e.login()
+	e.requireMinesOn("2")
+}
+
+// TestWinSetupMinerThreadsOldInstall updates a node installed before
+// ghost-setup set the number of cores, which mines on all of them: the update
+// restarts it on half, though the release is the same.
+func TestWinSetupMinerThreadsOldInstall(t *testing.T) {
+	rs := newReleaseServer(t)
+	s := newSigner(t)
+	e := installed(t, rs, s)
+	// As before: nothing in the user's environment, the node started without.
+	delete(e.userEnv.values, minerThreadsVar)
+	e.login()
+	e.requireRunning("geth")
+	old := e.procs.running()[0]
+	if old.threads != "" {
+		t.Fatalf("the old node runs with %s=%q", minerThreadsVar, old.threads)
+	}
+
+	e.cpus = 18
+	out, err := e.run("--update", "--daily")
+	if err != nil {
+		t.Fatalf("daily update failed: %v\n%s", err, out)
+	}
+	if live := e.procs.running(); len(live) != 1 || live[0] == old {
+		t.Fatal("the update did not restart the node")
+	}
+	e.requireRunning("geth")
+	e.requireMinesOn("9")
+	if !strings.Contains(out, "the node is up to date") || !strings.Contains(out, "restarted the node to mine on 9 of the 18") {
+		t.Errorf("the update does not say it restarted the node on 9 cores:\n%s", out)
+	}
+	e.login()
+	e.requireMinesOn("9")
+}
+
+// TestWinSetupMinerThreadsRefusesMalformed runs ghost-setup with
+// GHOST_MINE_THREADS set to what is not a number of cores: it refuses before
+// it downloads anything.
+func TestWinSetupMinerThreadsRefusesMalformed(t *testing.T) {
+	for _, value := range []string{"0", "00", "02", "-1", "+2", "1.5", "2 ", " 2", "10000", "two", "0x4"} {
+		t.Run(fmt.Sprintf("%q", value), func(t *testing.T) {
+			rs := newReleaseServer(t)
+			s := newSigner(t)
+			rs.publish(s, gethArchive(t, "geth"))
+			e := newEnv(t, rs, s.pub)
+			e.vars["GHOST_MINE_THREADS"] = value
+			_, err := e.run()
+			want := "GHOST_MINE_THREADS must be the number of CPU cores to mine on, a whole number from 1 to 9999, not '" + value + "'"
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("GHOST_MINE_THREADS=%q was not refused saying %q: %v", value, want, err)
+			}
+			if rs.count() != 0 {
+				t.Error("a refused GHOST_MINE_THREADS downloaded the release")
+			}
+			e.requireNothingInstalled()
+		})
 	}
 }
