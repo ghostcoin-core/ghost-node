@@ -17,7 +17,7 @@
 # with nothing installed and says why.
 #
 # It then installs the node in ~/.ghost-node, writes the node's config with a
-# newly generated mining address, and starts the node as a user service with
+# newly generated mining address (or GHOST_MINE_TO's, below), and starts the node as a user service with
 # mining on, which also starts it at boot: a systemd user unit on Linux, a
 # launchd agent on macOS. The node joins the network built into it, the public
 # test network; an archive that still holds a genesis.json gets that chain
@@ -58,6 +58,19 @@
 # where an update looks for the newest release's install.sh; GHOST_HTTP_PORT
 # moves the node's HTTP RPC off 8545. The tests use them for a local release
 # server.
+#
+# GHOST_MINE_TO mines straight to a wallet address of your own, such as the
+# Ghost pop-up wallet's, instead of a newly generated mining key:
+#
+#	curl -fsSL https://get.ghostcoin.com | GHOST_MINE_TO=0x... sh
+#
+# (on Windows, in PowerShell: $env:GHOST_MINE_TO='0x...'; irm https://get.ghostcoin.com/win | iex)
+#
+# It must be 0x followed by exactly 40 hex characters; anything else is
+# refused with nothing installed. The config's Etherbase is then that address,
+# and no mining key or password file is made. Set on a re-run or an update, it
+# rewrites Etherbase to the address it names and restarts the node; unset, the
+# config keeps the Etherbase it has.
 #
 # The whole installer is the text of installer_source, which the last lines
 # run. So a download cut short runs nothing, and the installer can write
@@ -244,25 +257,64 @@ toml_string() {
 	printf '%s' "$1" | sed 's/[\\"]/\\&/g'
 }
 
-# configure writes the config with a new mining address, unless there is one.
+# config_address prints the mining address of the config.
+config_address() {
+	sed -n 's/^Etherbase = "\(0x[0-9a-fA-F]*\)"$/\1/p' "$config" | head -n 1
+}
+
+# set_etherbase rewrites the config's Etherbase to GHOST_MINE_TO's address,
+# keeping the rest of the config.
+set_etherbase() {
+	if grep -q '^Etherbase = ' "$config"; then
+		sed "s/^Etherbase = .*\$/Etherbase = \"$mine_to\"/" "$config" >"$config.new" ||
+			die "could not rewrite the mining address of $config"
+	else
+		{
+			cat "$config"
+			printf '\n[Eth.Miner]\nEtherbase = "%s"\n' "$mine_to"
+		} >"$config.new" || die "could not rewrite the mining address of $config"
+	fi
+	mv -f "$config.new" "$config"
+	say "the config $config now mines to $mine_to"
+}
+
+# configure writes the config with GHOST_MINE_TO's address or a new mining
+# address, unless there is one; an existing config gets GHOST_MINE_TO's
+# address when it is set.
 configure() {
 	if [ -f "$config" ]; then
-		say "keeping the existing config $config"
+		if [ -n "$mine_to" ]; then
+			set_etherbase
+		else
+			say "keeping the existing config $config"
+		fi
 		return 0
 	fi
-	password=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
-	[ "${#password}" = 64 ] || die "could not make a password for the mining key"
-	printf '%s\n' "$password" >"$base/password" || die "could not write the password of the mining key"
-	created=$("$geth" --datadir "$data" account new --password "$base/password" 2>"$work/account.log" </dev/null) ||
-		die "could not create the mining key: $(tail -n 3 "$work/account.log" | tr '\n' ' ')"
-	address=$(printf '%s\n' "$created" | sed -n 's/^Public address of the key: *\(0x[0-9a-fA-F]\{40\}\)$/\1/p')
-	[ -n "$address" ] || die "could not read the new mining address from: $created"
-	cat >"$config.new" <<EOF
+	if [ -n "$mine_to" ]; then
+		address=$mine_to
+		cat >"$config.new" <<EOF
+# The Ghost node's config, written by install.sh. The node mines to Etherbase,
+# the wallet address GHOST_MINE_TO named, whose key is not on this computer.
+# Its HTTP RPC listens on this computer only, for the Ghost web apps.
+
+EOF
+	else
+		password=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
+		[ "${#password}" = 64 ] || die "could not make a password for the mining key"
+		printf '%s\n' "$password" >"$base/password" || die "could not write the password of the mining key"
+		created=$("$geth" --datadir "$data" account new --password "$base/password" 2>"$work/account.log" </dev/null) ||
+			die "could not create the mining key: $(tail -n 3 "$work/account.log" | tr '\n' ' ')"
+		address=$(printf '%s\n' "$created" | sed -n 's/^Public address of the key: *\(0x[0-9a-fA-F]\{40\}\)$/\1/p')
+		[ -n "$address" ] || die "could not read the new mining address from: $created"
+		cat >"$config.new" <<EOF
 # The Ghost node's config, written by install.sh. The node mines to Etherbase,
 # whose key is in the keystore of DataDir, locked with the password in
 # $(toml_string "$base/password"). Its HTTP RPC listens on this computer only,
 # for the Ghost web apps.
 
+EOF
+	fi
+	cat >>"$config.new" <<EOF
 [Eth.Miner]
 Etherbase = "$address"
 
@@ -558,6 +610,7 @@ update() {
 	mv -f "$geth.new" "$geth"
 	mark_start
 	if restart_node && wait_started; then
+		restarted=1
 		rm -f "$geth.previous"
 		say "updated the node to the latest release and restarted it"
 		return 0
@@ -587,6 +640,19 @@ main() {
 	'' | *[!0-9]* | 0*) die "GHOST_HTTP_PORT is not a port number: $http_port" ;;
 	esac
 	[ "$http_port" -le 65535 ] || die "GHOST_HTTP_PORT is not a port number: $http_port"
+	mine_to=${GHOST_MINE_TO:-}
+	if [ -n "$mine_to" ]; then
+		m_hex=${mine_to#0x}
+		case "$mine_to" in
+		0x*) ;;
+		*) m_hex=bad ;;
+		esac
+		case "$m_hex" in
+		*[!0-9a-fA-F]*) m_hex=bad ;;
+		esac
+		[ "${#m_hex}" = 40 ] ||
+			refuse "GHOST_MINE_TO must be a wallet address, 0x followed by exactly 40 hex characters, not '$mine_to'"
+	fi
 	release_url=${release_url%/}
 	case "$release_url" in
 	https://*) ;;
@@ -602,6 +668,7 @@ main() {
 	agents="$HOME/Library/LaunchAgents"
 	domain="gui/$(id -u)"
 	update_hint=
+	restarted=0
 	if [ "$mode" = update ] && { [ ! -x "$geth" ] || [ ! -f "$config" ]; }; then
 		die "there is no Ghost node installed in $base to update; install one with: curl -fsSL https://get.ghostcoin.com | sh"
 	fi
@@ -623,7 +690,18 @@ main() {
 	unpack "$work/$asset"
 
 	if [ "$mode" = update ]; then
+		rewritten=0
+		if [ -n "$mine_to" ] && [ "$(config_address)" != "$mine_to" ]; then
+			set_etherbase
+			rewritten=1
+		fi
 		update
+		if [ "$rewritten" = 1 ] && [ "$restarted" != 1 ]; then
+			mark_start
+			{ restart_node && wait_started; } || die "the node did not start again to mine to $mine_to; see its log"
+			say "restarted the node to mine to $mine_to"
+		fi
+		say "mining to: $(config_address)"
 		return 0
 	fi
 
@@ -644,7 +722,7 @@ main() {
 
 	address=$(sed -n 's/^Etherbase = "\(0x[0-9a-fA-F]*\)"$/\1/p' "$config")
 	say "the node is installed in $base, running, syncing and mining"
-	say "your mining address: $address"
+	say "mining to: $address"
 	say "check its status with: $status_hint"
 	say "follow its log with: $log_hint"
 	say "ask it for the chain head with: $geth attach --exec eth.blockNumber $data/geth.ipc"

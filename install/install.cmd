@@ -22,6 +22,22 @@ rem GHOST_RELEASE_URL sets where the release is downloaded from, over https
 rem only, and GHOST_INSTALL_CA_FILE names a certificate file to trust for that
 rem server; ghost-setup reads both too.
 rem
+rem GHOST_MINE_TO mines straight to a wallet address of your own, such as the
+rem Ghost pop-up wallet's, instead of a newly generated mining key. In CMD,
+rem run  set "GHOST_MINE_TO=0x..."  before the line above. The same in
+rem PowerShell and on a Mac or Linux:
+rem
+rem   $env:GHOST_MINE_TO='0x...'; irm https://get.ghostcoin.com/win | iex
+rem   curl -fsSL https://get.ghostcoin.com | GHOST_MINE_TO=0x... sh
+rem
+rem It must be 0x followed by exactly 40 hex characters; anything else is
+rem refused with nothing installed. This script then writes the config with
+rem that address as Etherbase before ghost-setup runs, so ghost-setup keeps it
+rem and makes no mining key or password file; on a re-run it rewrites the
+rem config's Etherbase to the address, and ghost-setup restarts the node.
+rem Unset, the config is left to ghost-setup as before. Either way the script
+rem ends by printing the address the node mines to.
+rem
 rem It uses no labels, so it runs the same whatever its line endings.
 
 setlocal EnableExtensions DisableDelayedExpansion
@@ -39,6 +55,41 @@ if defined GHOST_RELEASE_URL set "RELEASE_URL=%GHOST_RELEASE_URL%"
 if "%RELEASE_URL:~-1%"=="/" set "RELEASE_URL=%RELEASE_URL:~0,-1%"
 if /i not "%RELEASE_URL:~0,8%"=="https://" (
 	echo ghost-node: GHOST_RELEASE_URL must be an https URL, not "%RELEASE_URL%" 1>&2
+	exit /b 1
+)
+
+rem GHOST_MINE_TO, when set, is the wallet address to mine to: 0x and 40 hex
+rem characters. It is read with delayed expansion only, so no character in it
+rem can run as a command, and used with %% only once it is known to be hex.
+rem MINE_TO_OK is 1 when it is unset or such an address. GHOST_HTTP_PORT is
+rem checked the same way, as the config written for it holds the port.
+set "MINE_TO_OK=1"
+set "HTTP_PORT=8545"
+if defined GHOST_MINE_TO (
+	setlocal EnableDelayedExpansion
+	set "MINE_TO_OK="
+	set "REST=!GHOST_MINE_TO:~2!"
+	for %%C in (0 1 2 3 4 5 6 7 8 9 a b c d e f) do if defined REST set "REST=!REST:%%C=!"
+	if "!GHOST_MINE_TO:~0,2!"=="0x" if not "!GHOST_MINE_TO:~41,1!"=="" if "!GHOST_MINE_TO:~42!"=="" if not defined REST set "MINE_TO_OK=1"
+	if defined GHOST_HTTP_PORT (
+		set "REST=!GHOST_HTTP_PORT!"
+		for %%C in (0 1 2 3 4 5 6 7 8 9) do if defined REST set "REST=!REST:%%C=!"
+		if defined REST set "MINE_TO_OK="
+		if "!GHOST_HTTP_PORT:~0,1!"=="0" set "MINE_TO_OK="
+		if not "!GHOST_HTTP_PORT:~5!"=="" set "MINE_TO_OK="
+		if not defined REST if !GHOST_HTTP_PORT! gtr 65535 set "MINE_TO_OK="
+	)
+	for %%R in ("!MINE_TO_OK!") do endlocal & set "MINE_TO_OK=%%~R"
+)
+if not defined MINE_TO_OK (
+	echo ghost-node: GHOST_MINE_TO must be a wallet address, 0x followed by exactly 40 hex characters, and GHOST_HTTP_PORT a port number; %REFUSAL% 1>&2
+	exit /b 1
+)
+if defined GHOST_MINE_TO if defined GHOST_HTTP_PORT set "HTTP_PORT=%GHOST_HTTP_PORT%"
+set "NODE_HOME=%USERPROFILE%\.ghost-node"
+set "CONFIG=%NODE_HOME%\config.toml"
+if defined GHOST_MINE_TO if not defined USERPROFILE (
+	echo ghost-node: USERPROFILE is not set to a directory; %REFUSAL% 1>&2
 	exit /b 1
 )
 
@@ -93,7 +144,52 @@ if /i not "%HASH%"=="%PINNED%" (
 	exit /b 1
 )
 
+rem With GHOST_MINE_TO, the config mines to its address before ghost-setup
+rem runs: ghost-setup keeps an existing config, and so makes no mining key. A
+rem new config is written whole; an existing one gets its Etherbase line
+rem replaced, every other line kept.
+set "FRESH="
+set "REWRITE="
+if defined GHOST_MINE_TO if not exist "%CONFIG%" set "FRESH=1"
+if defined GHOST_MINE_TO if exist "%CONFIG%" set "REWRITE=1"
+set "DATA_TOML=%NODE_HOME:\=\\%\\data"
+if defined FRESH mkdir "%NODE_HOME%" 2>nul
+if defined FRESH >"%CONFIG%.new" echo # The Ghost node's config, written by install.cmd. The node mines to Etherbase,
+if defined FRESH >>"%CONFIG%.new" echo # the wallet address GHOST_MINE_TO named, whose key is not on this computer.
+if defined FRESH >>"%CONFIG%.new" echo # Its HTTP RPC listens on this computer only, for the Ghost web apps.
+if defined FRESH >>"%CONFIG%.new" echo(
+if defined FRESH >>"%CONFIG%.new" echo [Eth.Miner]
+if defined FRESH >>"%CONFIG%.new" echo Etherbase = "%GHOST_MINE_TO%"
+if defined FRESH >>"%CONFIG%.new" echo(
+if defined FRESH >>"%CONFIG%.new" echo [Node]
+if defined FRESH >>"%CONFIG%.new" echo DataDir = "%DATA_TOML%"
+if defined FRESH >>"%CONFIG%.new" echo HTTPHost = "127.0.0.1"
+if defined FRESH >>"%CONFIG%.new" echo HTTPPort = %HTTP_PORT%
+if defined FRESH >>"%CONFIG%.new" echo HTTPModules = ["eth", "net", "web3"]
+if defined FRESH >>"%CONFIG%.new" echo HTTPCors = ["https://ghost-webapp-alpha.vercel.app", "https://ghost-wallet-nine.vercel.app"]
+if defined REWRITE type nul >"%CONFIG%.new"
+if defined REWRITE for /f "delims=" %%L in ('findstr /n "^" "%CONFIG%"') do (
+	set "LINE=%%L"
+	setlocal EnableDelayedExpansion
+	set "LINE=!LINE:*:=!"
+	if "!LINE:~0,10!"=="Etherbase " (
+		>>"%CONFIG%.new" echo Etherbase = "%GHOST_MINE_TO%"
+	) else (
+		>>"%CONFIG%.new" echo(!LINE!
+	)
+	endlocal
+)
+set "HAS_ETHERBASE="
+if defined REWRITE findstr /b /l /c:"Etherbase " "%CONFIG%" >nul 2>nul && set "HAS_ETHERBASE=1"
+if defined REWRITE if not defined HAS_ETHERBASE >>"%CONFIG%.new" echo(
+if defined REWRITE if not defined HAS_ETHERBASE >>"%CONFIG%.new" echo [Eth.Miner]
+if defined REWRITE if not defined HAS_ETHERBASE >>"%CONFIG%.new" echo Etherbase = "%GHOST_MINE_TO%"
+if defined GHOST_MINE_TO move /y "%CONFIG%.new" "%CONFIG%" >nul
+if defined GHOST_MINE_TO echo ghost-node: the config "%CONFIG%" mines to %GHOST_MINE_TO%
+
 "%SETUP%"
 set "STATUS=%ERRORLEVEL%"
 rmdir /s /q "%WORK%"
+rem Either way, say the address the node mines to.
+if "%STATUS%"=="0" if exist "%CONFIG%" for /f "tokens=2 delims==" %%A in ('findstr /b /l /c:"Etherbase " "%CONFIG%"') do for %%B in (%%A) do echo ghost-node: mining to: %%~B
 exit /b %STATUS%

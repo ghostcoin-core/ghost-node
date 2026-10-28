@@ -21,6 +21,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/naoina/toml"
 )
 
 // windowsScript is what TestWindowsInstallerScripts looks for in one of the
@@ -220,6 +222,192 @@ func TestWindowsInstallerScripts(t *testing.T) {
 	} {
 		if !strings.Contains(string(readme), line) {
 			t.Errorf("README.md does not give the line %s", line)
+		}
+	}
+}
+
+// The one-line examples of GHOST_MINE_TO that each installer's header gives.
+var mineToExamples = []string{
+	"curl -fsSL https://get.ghostcoin.com | GHOST_MINE_TO=0x... sh",
+	"$env:GHOST_MINE_TO='0x...'; irm https://get.ghostcoin.com/win | iex",
+}
+
+// mineToConfig is the config a Windows script writes for GHOST_MINE_TO.
+type mineToConfig struct {
+	Eth struct {
+		Miner struct {
+			Etherbase string
+		}
+	}
+	Node struct {
+		DataDir     string
+		HTTPHost    string
+		HTTPPort    int
+		HTTPModules []string
+		HTTPCors    []string
+	}
+}
+
+// checkMineToConfig parses the config text and checks it mines to address,
+// with the settings ghost-setup writes.
+func checkMineToConfig(t *testing.T, file, text, address, dataDir string) {
+	t.Helper()
+	var config mineToConfig
+	if err := toml.Unmarshal([]byte(text), &config); err != nil {
+		t.Fatalf("%s writes a config that does not parse: %v\n%s", file, err, text)
+	}
+	if config.Eth.Miner.Etherbase != address {
+		t.Errorf("%s writes the Etherbase %q, not GHOST_MINE_TO's %q", file, config.Eth.Miner.Etherbase, address)
+	}
+	if config.Node.DataDir != dataDir || config.Node.HTTPHost != "127.0.0.1" || config.Node.HTTPPort != 8545 ||
+		strings.Join(config.Node.HTTPModules, " ") != "eth net web3" ||
+		strings.Join(config.Node.HTTPCors, " ") != "https://ghost-webapp-alpha.vercel.app https://ghost-wallet-nine.vercel.app" {
+		t.Errorf("%s writes the [Node] settings %+v, not ghost-setup's", file, config.Node)
+	}
+}
+
+// comments returns the text of the script's comment lines.
+func (ws windowsScript) comments(t *testing.T) string {
+	t.Helper()
+	blob, err := os.ReadFile(ws.file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lines []string
+	for _, line := range strings.Split(strings.ReplaceAll(string(blob), "\r\n", "\n"), "\n") {
+		if line = strings.TrimSpace(line); ws.isComment(line) {
+			lines = append(lines, line)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// TestWindowsInstallerScriptsMineTo checks that the Windows scripts read
+// GHOST_MINE_TO: they refuse a malformed address before they download
+// anything, write the config mining to the address after the setup's hash is
+// checked and before ghost-setup runs, so that ghost-setup keeps it and makes
+// no mining key, and say what the node mines to once it ran.
+func TestWindowsInstallerScriptsMineTo(t *testing.T) {
+	for _, ws := range windowsScripts {
+		comments := ws.comments(t)
+		for _, example := range mineToExamples {
+			if !strings.Contains(comments, example) {
+				t.Errorf("%s's header does not give the example %s", ws.file, example)
+			}
+		}
+	}
+	sh, err := os.ReadFile("install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, example := range mineToExamples {
+		if !strings.Contains(string(sh), "\n#\t"+example+"\n") && !strings.Contains(string(sh), example+")\n") {
+			t.Errorf("install.sh's header does not give the example %s", example)
+		}
+	}
+
+	valid := "0x" + strings.Repeat("aB", 20)
+	invalid := []string{
+		"0x" + strings.Repeat("aB", 20)[:39], "0x" + strings.Repeat("aB", 20) + "a", strings.Repeat("aB", 20),
+		"0X" + strings.Repeat("aB", 20), "0x" + strings.Repeat("aB", 20)[:39] + "g", "0x", " 0x" + strings.Repeat("aB", 20),
+		"0x" + strings.Repeat("aB", 20) + "\n", "wallet",
+	}
+
+	// install.ps1 checks the address with a .NET regular expression, which
+	// means the same in Go.
+	ps1 := windowsScripts[0]
+	code := ps1.code(t)
+	read := find(t, ps1.file, code, `$MineTo = $env:GHOST_MINE_TO`)
+	check := find(t, ps1.file, code, `if ($MineTo -cnotmatch '`)
+	if check >= 0 {
+		m := regexp.MustCompile(`-cnotmatch '([^']+)'`).FindStringSubmatch(code[check])
+		if m == nil || check+1 >= len(code) {
+			t.Fatalf("install.ps1 checks GHOST_MINE_TO with no pattern: %s", code[check])
+		}
+		pattern := regexp.MustCompile(m[1])
+		if !pattern.MatchString(valid) {
+			t.Errorf("install.ps1 refuses the address %s", valid)
+		}
+		for _, bad := range invalid {
+			if pattern.MatchString(bad) {
+				t.Errorf("install.ps1 takes the malformed GHOST_MINE_TO %q", bad)
+			}
+		}
+		if !strings.HasPrefix(code[check+1], "throw ") || !strings.Contains(code[check+1], "$Refusal") {
+			t.Errorf("install.ps1 does not refuse a malformed GHOST_MINE_TO: %s", code[check+1])
+		}
+	}
+	write := find(t, ps1.file, code, `[IO.File]::WriteAllText($Config, $Text)`)
+	say := find(t, ps1.file, code, `Write-Host "ghost-node: mining to: $($Mined.Groups[1].Value)"`)
+	checkOrder(t, ps1.file, code, read, check, ps1.download, ps1.compare, write, ps1.runLine, say)
+
+	// Its new config, filled in as the script fills it in.
+	blob, err := os.ReadFile(ps1.file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?s)\$Text = @'\r?\n(.*?)\r?\n'@ -f \$MineTo, \$DataDir, \$HttpPort`).FindSubmatch(blob)
+	if m == nil {
+		t.Fatal("install.ps1 has no config template filled in with $MineTo, $DataDir and $HttpPort")
+	}
+	dataDir := `C:\Users\tester\.ghost-node\data`
+	filled := strings.NewReplacer("{0}", valid, "{1}", strings.ReplaceAll(dataDir, `\`, `\\`), "{2}", "8545").Replace(string(m[1]))
+	checkMineToConfig(t, ps1.file, filled, valid, dataDir)
+
+	// install.cmd checks the address by its first two characters, its length
+	// and what is left once every hex digit is taken out.
+	cmd := windowsScripts[1]
+	code = cmd.code(t)
+	read = find(t, cmd.file, code, `if defined GHOST_MINE_TO (`)
+	strip := find(t, cmd.file, code, `for %%C in (0 1 2 3 4 5 6 7 8 9 a b c d e f) do if defined REST set "REST=!REST:%%C=!"`)
+	check = find(t, cmd.file, code, `if "!GHOST_MINE_TO:~0,2!"=="0x" if not "!GHOST_MINE_TO:~41,1!"=="" if "!GHOST_MINE_TO:~42!"=="" if not defined REST set "MINE_TO_OK=1"`)
+	refuse := find(t, cmd.file, code, `if not defined MINE_TO_OK (`)
+	if refuse >= 0 && (refuse+2 >= len(code) || !strings.Contains(code[refuse+1], "%REFUSAL%") || code[refuse+2] != "exit /b 1") {
+		t.Errorf("install.cmd does not refuse a malformed GHOST_MINE_TO")
+	}
+	write = find(t, cmd.file, code, `if defined GHOST_MINE_TO move /y "%CONFIG%.new" "%CONFIG%" >nul`)
+	say = find(t, cmd.file, code, `echo ghost-node: mining to: %%~B`)
+	checkOrder(t, cmd.file, code, read, strip, check, refuse, cmd.download, cmd.compare, write, cmd.runLine, say)
+
+	// Its new config, the lines it echoes filled in as cmd fills them in.
+	echo := regexp.MustCompile(`^if defined FRESH >>?"%CONFIG%\.new" echo[ (](.*)$`)
+	var lines []string
+	for _, line := range code {
+		if m := echo.FindStringSubmatch(line); m != nil {
+			lines = append(lines, m[1])
+		}
+	}
+	filled = strings.NewReplacer("%GHOST_MINE_TO%", valid, "%DATA_TOML%", strings.ReplaceAll(dataDir, `\`, `\\`), "%HTTP_PORT%", "8545").Replace(strings.Join(lines, "\n"))
+	checkMineToConfig(t, cmd.file, filled, valid, dataDir)
+	if !strings.Contains(strings.Join(code, "\n"), `set "DATA_TOML=%NODE_HOME:\=\\%\\data"`) {
+		t.Error("install.cmd does not write the data directory as a TOML string")
+	}
+}
+
+// checkOrder checks that the code lines come in the order given, each given
+// by its index or by a literal that only it holds; the run line by equality.
+func checkOrder(t *testing.T, file string, code []string, order ...any) {
+	t.Helper()
+	at := make([]int, len(order))
+	for i, o := range order {
+		switch o := o.(type) {
+		case int:
+			at[i] = o
+		case string:
+			at[i] = -1
+			for j, line := range code {
+				if line == o || !strings.HasPrefix(o, `"`) && strings.Contains(line, o) {
+					at[i] = j
+					break
+				}
+			}
+		}
+		if at[i] < 0 {
+			t.Errorf("%s: no line %v", file, o)
+			return
+		}
+		if i > 0 && at[i] <= at[i-1] {
+			t.Errorf("%s: line %d (%s) does not come after line %d (%s)", file, at[i], code[at[i]], at[i-1], code[at[i-1]])
 		}
 	}
 }
