@@ -21,6 +21,21 @@
 # server; ghost-setup reads both too. The tests use them for a local release
 # server.
 #
+# GHOST_MINE_TO mines straight to a wallet address of your own, such as the
+# Ghost pop-up wallet's, instead of a newly generated mining key:
+#
+#	$env:GHOST_MINE_TO='0x...'; irm https://get.ghostcoin.com/win | iex
+#
+# (on a Mac or Linux: curl -fsSL https://get.ghostcoin.com | GHOST_MINE_TO=0x... sh)
+#
+# It must be 0x followed by exactly 40 hex characters; anything else is
+# refused with nothing installed. This script then writes the config with
+# that address as Etherbase before ghost-setup runs, so ghost-setup keeps it
+# and makes no mining key or password file; on a re-run it rewrites the
+# config's Etherbase to the address, and ghost-setup restarts the node. Unset,
+# the config is left to ghost-setup as before. Either way the script ends by
+# printing the address the node mines to.
+#
 # The whole script is one script block that runs at its last line, so a
 # download cut short runs nothing.
 
@@ -42,6 +57,30 @@
 	$ReleaseUrl = $ReleaseUrl.TrimEnd('/')
 	if (-not $ReleaseUrl.StartsWith('https://', [StringComparison]::OrdinalIgnoreCase)) {
 		throw "ghost-node: GHOST_RELEASE_URL must be an https URL, not $ReleaseUrl"
+	}
+
+	# GHOST_MINE_TO, when set, is the wallet address to mine to.
+	$MineTo = $env:GHOST_MINE_TO
+	$HttpPort = 8545
+	if ($MineTo) {
+		if ($MineTo -cnotmatch '^0x[0-9a-fA-F]{40}\z') {
+			throw "ghost-node: GHOST_MINE_TO must be a wallet address, 0x followed by exactly 40 hex characters, not '$MineTo'; $Refusal"
+		}
+		if (-not $env:USERPROFILE) {
+			throw "ghost-node: USERPROFILE is not set to a directory; $Refusal"
+		}
+		if ($env:GHOST_HTTP_PORT) {
+			if ($env:GHOST_HTTP_PORT -cnotmatch '^[1-9][0-9]{0,4}\z' -or [int]$env:GHOST_HTTP_PORT -gt 65535) {
+				throw "ghost-node: GHOST_HTTP_PORT is not a port number: $env:GHOST_HTTP_PORT; $Refusal"
+			}
+			$HttpPort = [int]$env:GHOST_HTTP_PORT
+		}
+	}
+	$NodeHome = $null
+	$Config = $null
+	if ($env:USERPROFILE) {
+		$NodeHome = Join-Path $env:USERPROFILE '.ghost-node'
+		$Config = Join-Path $NodeHome 'config.toml'
 	}
 
 	$Machine = $env:PROCESSOR_ARCHITECTURE
@@ -78,9 +117,51 @@
 			throw "ghost-node: the downloaded $Name has the SHA-256 $Hash, not the $Pinned pinned in this installer; $Refusal"
 		}
 
+		# With GHOST_MINE_TO, the config mines to its address before ghost-setup
+		# runs: ghost-setup keeps an existing config, and so makes no mining key.
+		if ($MineTo) {
+			$Etherbase = "Etherbase = `"$MineTo`""
+			if (Test-Path -LiteralPath $Config -PathType Leaf) {
+				$Text = [IO.File]::ReadAllText($Config)
+				if ($Text -cmatch '(?m)^Etherbase = ') {
+					$Text = [regex]::Replace($Text, '(?m)^Etherbase = [^\r\n]*', $Etherbase)
+				} else {
+					$Text = $Text.TrimEnd() + "`n`n[Eth.Miner]`n$Etherbase`n"
+				}
+			} else {
+				$DataDir = (Join-Path $NodeHome 'data').Replace('\', '\\').Replace('"', '\"')
+				$Text = @'
+# The Ghost node's config, written by install.ps1. The node mines to Etherbase,
+# the wallet address GHOST_MINE_TO named, whose key is not on this computer.
+# Its HTTP RPC listens on this computer only, for the Ghost web apps.
+
+[Eth.Miner]
+Etherbase = "{0}"
+
+[Node]
+DataDir = "{1}"
+HTTPHost = "127.0.0.1"
+HTTPPort = {2}
+HTTPModules = ["eth", "net", "web3"]
+HTTPCors = ["https://ghost-webapp-alpha.vercel.app", "https://ghost-wallet-nine.vercel.app"]
+'@ -f $MineTo, $DataDir, $HttpPort
+				$Text = $Text.Replace("`r`n", "`n") + "`n"
+			}
+			New-Item -ItemType Directory -Force -Path $NodeHome | Out-Null
+			[IO.File]::WriteAllText($Config, $Text)
+			Write-Host "ghost-node: the config $Config mines to $MineTo"
+		}
+
 		& $Setup
 		if ($LASTEXITCODE -ne 0) {
 			throw "ghost-node: the setup stopped with exit code $LASTEXITCODE; see why above."
+		}
+
+		if ($Config -and (Test-Path -LiteralPath $Config -PathType Leaf)) {
+			$Mined = [regex]::Match([IO.File]::ReadAllText($Config), '(?m)^Etherbase = "(0x[0-9a-fA-F]{40})"\r?$')
+			if ($Mined.Success) {
+				Write-Host "ghost-node: mining to: $($Mined.Groups[1].Value)"
+			}
 		}
 	} finally {
 		Remove-Item -LiteralPath $Work -Recurse -Force -ErrorAction SilentlyContinue

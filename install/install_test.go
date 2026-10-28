@@ -786,6 +786,15 @@ func configAddress(t *testing.T, env *installEnv) common.Address {
 // RPC.
 func checkInstalledAndMining(t *testing.T, env *installEnv, geth string, out string) {
 	t.Helper()
+	checkInstalledAndMiningTo(t, env, geth, out, "")
+}
+
+// checkInstalledAndMiningTo checks as checkInstalledAndMining does. With
+// mineTo, a wallet address given as GHOST_MINE_TO, the config must name it as
+// Etherbase, exactly as given, and no mining key or password must have been
+// made; without, the config must name a newly made key.
+func checkInstalledAndMiningTo(t *testing.T, env *installEnv, geth string, out string, mineTo string) {
+	t.Helper()
 	base := filepath.Join(env.home, ".ghost-node")
 	if fileHash(t, filepath.Join(base, "bin", "geth")) != fileHash(t, geth) {
 		t.Fatal("the installed geth is not the released one")
@@ -806,16 +815,25 @@ func checkInstalledAndMining(t *testing.T, env *installEnv, geth string, out str
 			t.Fatalf("the config has no line %q:\n%s", want, config)
 		}
 	}
-	keys := entries(t, filepath.Join(base, "data", "keystore"))
-	if len(keys) != 1 || !strings.HasSuffix(keys[0], strings.ToLower(address.Hex()[2:])) {
-		t.Fatalf("the keystore holds %v, not the one key of the mining address %s", keys, address.Hex())
-	}
-	info, err := os.Stat(filepath.Join(base, "password"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0600 || info.Size() != 65 {
-		t.Fatalf("the key's password file has mode %v and %d bytes", info.Mode().Perm(), info.Size())
+	printed := address.Hex()
+	if mineTo != "" {
+		printed = mineTo
+		if !strings.Contains(string(config), "\nEtherbase = \""+mineTo+"\"\n") {
+			t.Fatalf("the config does not mine to GHOST_MINE_TO's %s:\n%s", mineTo, config)
+		}
+		checkNoMiningKey(t, env)
+	} else {
+		keys := entries(t, filepath.Join(base, "data", "keystore"))
+		if len(keys) != 1 || !strings.HasSuffix(keys[0], strings.ToLower(address.Hex()[2:])) {
+			t.Fatalf("the keystore holds %v, not the one key of the mining address %s", keys, address.Hex())
+		}
+		info, err := os.Stat(filepath.Join(base, "password"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0600 || info.Size() != 65 {
+			t.Fatalf("the key's password file has mode %v and %d bytes", info.Mode().Perm(), info.Size())
+		}
 	}
 	updater, err := os.Stat(filepath.Join(base, "update"))
 	if err != nil {
@@ -827,7 +845,7 @@ func checkInstalledAndMining(t *testing.T, env *installEnv, geth string, out str
 	if left := entries(t, env.tmp); len(left) != 0 {
 		t.Fatalf("the installer left %v in the temporary directory", left)
 	}
-	if !strings.Contains(out, "your mining address: "+address.Hex()) || !strings.Contains(out, "check its status with: ") {
+	if !strings.Contains(out, "mining to: "+printed+"\n") || !strings.Contains(out, "check its status with: ") {
 		t.Fatal("the installer did not print the mining address and how to check on the node")
 	}
 
@@ -1759,4 +1777,236 @@ func TestInstallScriptDarwin(t *testing.T) {
 
 	checkUpdateApplied(t, env, rs, key, script, release["geth"], fmt.Sprintf("launchctl kickstart -k %s/com.ghostcoin.node\n", domain))
 	checkNoOpenSSL(t, env)
+}
+
+// The wallet addresses the GHOST_MINE_TO tests mine to, as a tester's pop-up
+// wallet gives them: no key of theirs is on the computer.
+var (
+	mineToWallet  = "0x" + strings.Repeat("aB", 20)
+	mineToWallet2 = "0x" + strings.Repeat("12", 20)
+	mineToWallet3 = "0x" + strings.Repeat("Cd", 20)
+)
+
+const mineToRefusal = "GHOST_MINE_TO must be a wallet address, 0x followed by exactly 40 hex characters"
+
+// checkNoMiningKey checks that the installer made no mining key and no
+// password file.
+func checkNoMiningKey(t *testing.T, env *installEnv) {
+	t.Helper()
+	base := filepath.Join(env.home, ".ghost-node")
+	if keys, err := os.ReadDir(filepath.Join(base, "data", "keystore")); err == nil && len(keys) != 0 {
+		t.Fatalf("with GHOST_MINE_TO the keystore holds %d keys", len(keys))
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "password")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("with GHOST_MINE_TO there is a mining key password file (%v)", err)
+	}
+}
+
+// readConfig returns the installed config.
+func readConfig(t *testing.T, env *installEnv) string {
+	t.Helper()
+	blob, err := os.ReadFile(filepath.Join(env.home, ".ghost-node", "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(blob)
+}
+
+// checkRestarted checks that the node of the process oldPID was restarted
+// once, by the service manager's call restart, which had been made restarts
+// times before.
+func checkRestarted(t *testing.T, env *installEnv, oldPID, restarts int, restart string) {
+	t.Helper()
+	if got := strings.Count(env.calls(t), restart); got != restarts+1 {
+		t.Fatalf("the node was restarted %d times, not once:\n%s", got-restarts, env.calls(t))
+	}
+	newPID := env.servicePID(t)
+	if newPID == oldPID || running(oldPID) || !running(newPID) {
+		t.Fatalf("the node was not restarted: process %d (running %v) became %d (running %v)", oldPID, running(oldPID), newPID, running(newPID))
+	}
+}
+
+// waitMinedTo waits for the running node's latest block to be mined to
+// address.
+func waitMinedTo(t *testing.T, env *installEnv, address common.Address) {
+	t.Helper()
+	client, err := rpc.Dial(filepath.Join(env.home, ".ghost-node", "data", "geth.ipc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	deadline := time.Now().Add(3 * time.Minute)
+	for {
+		var block struct {
+			Number hexutil.Uint64 `json:"number"`
+			Miner  common.Address `json:"miner"`
+		}
+		if err := client.Call(&block, "eth_getBlockByNumber", "latest", false); err != nil {
+			t.Fatal(err)
+		}
+		if block.Number > 0 && block.Miner == address {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the node mined no block to %s in 3 minutes; block %d went to %s", address.Hex(), block.Number, block.Miner.Hex())
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// TestInstallScriptMineTo installs with GHOST_MINE_TO set to a wallet
+// address: the node mines straight to it, and no mining key or password is
+// made. A re-run with another address rewrites Etherbase, keeping the rest of
+// the config, and restarts the node mining to it; a re-run without keeps the
+// config as it is. An update with an address does the same; one without, or
+// with a malformed address, changes nothing.
+func TestInstallScriptMineTo(t *testing.T) {
+	release, geth := internalNetRelease(t)
+	verifier := builtVerifier(t)
+	key := newSigner(t)
+	blob := release.tarGz(t)
+	rs := serveRelease(t, "linux", blob, key.sign(blob), verifier)
+	script := writeScript(t, key, sha256Hex(verifier))
+	env := newInstallEnv(t, envOptions{systemctl: stubSystemctl})
+	stopNodeAtCleanup(t, filepath.Join(env.stubs, "service.pid"))
+	const restart = "systemctl --user restart ghost-node.service\n"
+
+	out, err := env.run(t, script, rs, true, "GHOST_MINE_TO="+mineToWallet)
+	if err != nil {
+		t.Fatalf("install.sh failed: %v", err)
+	}
+	checkInstalledAndMiningTo(t, env, geth, out, mineToWallet)
+	first := readConfig(t, env)
+
+	// A re-run with another address.
+	oldPID, restarts := env.servicePID(t), strings.Count(env.calls(t), restart)
+	out, err = env.run(t, script, rs, true, "GHOST_MINE_TO="+mineToWallet2)
+	if err != nil {
+		t.Fatalf("the re-run of install.sh failed: %v", err)
+	}
+	second := readConfig(t, env)
+	if want := strings.Replace(first, mineToWallet, mineToWallet2, 1); second != want {
+		t.Fatalf("the re-run with GHOST_MINE_TO=%s did not rewrite only Etherbase; the config went from\n%s\nto\n%s", mineToWallet2, first, second)
+	}
+	checkRestarted(t, env, oldPID, restarts, restart)
+	checkNoMiningKey(t, env)
+	if !strings.Contains(out, "mining to: "+mineToWallet2+"\n") {
+		t.Fatal("the re-run did not print the address it mines to")
+	}
+	waitMinedTo(t, env, common.HexToAddress(mineToWallet2))
+
+	// A re-run without GHOST_MINE_TO keeps the config.
+	out, err = env.run(t, script, rs, true)
+	if err != nil {
+		t.Fatalf("the re-run of install.sh failed: %v", err)
+	}
+	if got := readConfig(t, env); got != second {
+		t.Fatalf("the re-run without GHOST_MINE_TO changed the config from\n%s\nto\n%s", second, got)
+	}
+	checkNoMiningKey(t, env)
+	if !strings.Contains(out, "keeping the existing config") || !strings.Contains(out, "mining to: "+mineToWallet2+"\n") {
+		t.Fatal("the re-run without GHOST_MINE_TO did not keep the config and say what it mines to")
+	}
+
+	// An update with another address.
+	serveInstaller(t, rs, key, script)
+	oldPID, restarts = env.servicePID(t), strings.Count(env.calls(t), restart)
+	out, err = env.update(t, rs, "GHOST_MINE_TO="+mineToWallet3)
+	if err != nil {
+		t.Fatalf("the update failed: %v", err)
+	}
+	third := readConfig(t, env)
+	if want := strings.Replace(second, mineToWallet2, mineToWallet3, 1); third != want {
+		t.Fatalf("the update with GHOST_MINE_TO=%s did not rewrite only Etherbase; the config went from\n%s\nto\n%s", mineToWallet3, second, third)
+	}
+	checkRestarted(t, env, oldPID, restarts, restart)
+	checkNoMiningKey(t, env)
+	if !strings.Contains(out, "the node is up to date") || !strings.Contains(out, "mining to: "+mineToWallet3+"\n") {
+		t.Fatal("the update did not say the node is up to date and what it mines to")
+	}
+	waitMinedTo(t, env, common.HexToAddress(mineToWallet3))
+
+	// An update without GHOST_MINE_TO, or with the address already mined to,
+	// changes nothing and leaves the node running.
+	for _, extra := range [][]string{nil, {"GHOST_MINE_TO=" + mineToWallet3}} {
+		pid, restarts := env.servicePID(t), strings.Count(env.calls(t), restart)
+		out, err = env.update(t, rs, extra...)
+		if err != nil {
+			t.Fatalf("the update failed: %v", err)
+		}
+		if got := readConfig(t, env); got != third {
+			t.Fatalf("the update with %q changed the config from\n%s\nto\n%s", extra, third, got)
+		}
+		if strings.Count(env.calls(t), restart) != restarts || env.servicePID(t) != pid || !running(pid) {
+			t.Fatalf("the update with %q restarted the node", extra)
+		}
+		if !strings.Contains(out, "mining to: "+mineToWallet3+"\n") {
+			t.Fatalf("the update with %q did not say what the node mines to", extra)
+		}
+	}
+
+	// An update with a malformed address is refused.
+	state := snapshot(t, env)
+	out, err = env.update(t, rs, "GHOST_MINE_TO=0x1234")
+	checkUpdateRefused(t, env, state, out, err, mineToRefusal)
+}
+
+// TestInstallScriptMineToRefusesMalformed sets GHOST_MINE_TO to what is not
+// 0x followed by exactly 40 hex characters: the installer refuses it before it
+// downloads anything, and installs nothing. The release it would install is
+// one whose geth leaves a marker when run.
+func TestInstallScriptMineToRefusesMalformed(t *testing.T) {
+	verifier := builtVerifier(t)
+	key := newSigner(t)
+	marker := filepath.Join(t.TempDir(), "ran")
+	blob := archive{"geth": fakeGeth(marker)}.tarGz(t)
+	rs := serveRelease(t, "linux", blob, key.sign(blob), verifier)
+	script := writeScript(t, key, sha256Hex(verifier))
+	hex40 := strings.Repeat("aB", 20)
+
+	for _, value := range []string{
+		"0x" + hex40[:39],
+		"0x" + hex40 + "a",
+		hex40,
+		"0X" + hex40,
+		"0x" + hex40[:39] + "g",
+		"0x",
+		" 0x" + hex40,
+		"0x" + hex40 + "\n",
+		"0x" + hex40 + " 0x" + hex40,
+		"0x$(touch " + marker + ")",
+		"wallet",
+	} {
+		t.Run(fmt.Sprintf("%q", value), func(t *testing.T) {
+			env := newInstallEnv(t, envOptions{systemctl: stubSystemctl})
+			out, err := env.run(t, script, rs, true, "GHOST_MINE_TO="+value)
+			checkRefused(t, env, out, err, mineToRefusal+", not '"+value+"'; refusing to install. Nothing was installed.", marker)
+		})
+	}
+	if served := rs.servedFiles(); len(served) != 0 {
+		t.Fatalf("a refused GHOST_MINE_TO downloaded %v", served)
+	}
+}
+
+// TestInstallScriptMineToUnset installs without GHOST_MINE_TO, as before it
+// existed: the node mines to a newly made key, whose password is kept, and
+// the installer says it mines to it.
+func TestInstallScriptMineToUnset(t *testing.T) {
+	release, geth := internalNetRelease(t)
+	verifier := builtVerifier(t)
+	key := newSigner(t)
+	blob := release.tarGz(t)
+	rs := serveRelease(t, "linux", blob, key.sign(blob), verifier)
+	env := newInstallEnv(t, envOptions{systemctl: stubSystemctl})
+	stopNodeAtCleanup(t, filepath.Join(env.stubs, "service.pid"))
+	out, err := env.run(t, writeScript(t, key, sha256Hex(verifier)), rs, true)
+	if err != nil {
+		t.Fatalf("install.sh failed: %v", err)
+	}
+	checkInstalledAndMining(t, env, geth, out)
+	if config := readConfig(t, env); !strings.Contains(config, "whose key is in the keystore of DataDir") {
+		t.Fatalf("the config does not say where the mining key is:\n%s", config)
+	}
 }
