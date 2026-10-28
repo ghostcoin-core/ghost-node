@@ -3,8 +3,11 @@
 # job, so the package sets and test commands live here and nowhere else.
 #
 # Usage:
-#   build/ci-gate.sh                    run every stage
-#   build/ci-gate.sh typecheck          gofmt, go mod tidy, go vet, release and link checks
+#   build/ci-gate.sh                    the merge gate: every stage, or only the
+#                                       checks of what the change touches (below)
+#   build/ci-gate.sh --full             run every stage
+#   build/ci-gate.sh --plan             print what the merge gate would run, run nothing
+#   build/ci-gate.sh typecheck         gofmt, go mod tidy, go vet, release and link checks
 #   build/ci-gate.sh build              build every command and run the real-proof tests
 #   build/ci-gate.sh unit [shard]       one unit test shard, or all of them
 #   build/ci-gate.sh fixtures [part]    one part of the Ethereum test fixtures, or all of them
@@ -14,6 +17,20 @@
 #
 # When several shards run, GATE_JOBS (default 4) of them run at once, each
 # with its output kept aside; the last 100 lines of a failed shard are printed.
+#
+# The merge gate compares the work tree, untracked files included, with the
+# merge base of HEAD and GATE_BASE (default origin/main, else main). When every
+# changed file is in the install directory or is documentation (docs, *.md),
+# it runs only:
+#   gofmt of the changed Go files and go mod tidy, when Go files changed;
+#   bash -n or sh -n of the changed shell scripts;
+#   go vet and go test of the install directory's packages, when it changed;
+#   go vet and go test of the packages whose Go files name a changed document,
+#   or that sit in its directory; in the Ethereum fixture runner (tests), only
+#   the tests of the test files that name it.
+# With no base, nothing changed, any other changed path, or a document the
+# fixture runner may read outside its own tests, every stage runs as --full.
+# CI's jobs name their stage and are not scoped.
 set -euo pipefail
 
 self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
@@ -328,17 +345,247 @@ run_all() {
 	echo "The gate passed."
 }
 
+installer=install
+# The Ethereum fixture runner, whose fixtures run only in the full gate.
+fixture_dir=tests
+
+scope=full
+scope_reason=""
+scope_base=""
+changed=()
+scoped_packages=()
+fixture_tests=()
+
+# Prints the scope of the repository path $1: installer, docs or full.
+scope_of() {
+	case "$1" in
+	"$installer"/*) echo installer ;;
+	docs/* | *.md) echo docs ;;
+	*) echo full ;;
+	esac
+}
+
+# Prints the commit the change is measured from.
+base_commit() {
+	local ref
+	for ref in ${GATE_BASE:-origin/main main}; do
+		if git rev-parse --verify --quiet "$ref^{commit}" >/dev/null; then
+			git merge-base HEAD "$ref"
+			return
+		fi
+		if [ -n "${GATE_BASE:-}" ]; then
+			echo "GATE_BASE $GATE_BASE is not a commit" >&2
+		fi
+	done
+	return 1
+}
+
+# Prints every path that differs between the commit $1 and the work tree.
+changed_files() {
+	{
+		git diff --name-only --no-renames --ignore-submodules=dirty "$1" --
+		git ls-files --others --exclude-standard
+	} | sort -u
+}
+
+add_scoped_package() {
+	if ! known "$1" "${scoped_packages[@]+"${scoped_packages[@]}"}"; then
+		scoped_packages+=("$1")
+	fi
+}
+
+# Adds the tests of the fixture runner's test file $1. Fails when $1 is not a
+# test file: what it does with the document may reach every fixture.
+add_fixture_tests() {
+	local file=$1 name
+	case "$file" in
+	*_test.go) ;;
+	*) return 1 ;;
+	esac
+	while IFS= read -r name; do
+		name="${name#func }"
+		name="${name%(}"
+		if ! known "$name" "${fixture_tests[@]+"${fixture_tests[@]}"}"; then
+			fixture_tests+=("$name")
+		fi
+	done < <(grep -o -E '^func Test[A-Za-z0-9_]*\(' "$file" || true)
+}
+
+# Adds the package in directory $1, unless it is test data.
+add_dir_package() {
+	local dir=$1
+	case "/$dir/" in
+	*/testdata/* | */vendor/*) return 0 ;;
+	esac
+	if [ "$dir" = . ]; then
+		add_scoped_package .
+	else
+		add_scoped_package "./$dir"
+	fi
+}
+
+# Adds the packages that may read the document $1: those whose Go files name
+# it, and a package in its own directory (go:embed). Fails when the fixture
+# runner may read it outside its own tests.
+add_doc_packages() {
+	local doc=$1 file dir
+	while IFS= read -r file; do
+		dir="$(dirname "$file")"
+		if [ "$dir" = "$fixture_dir" ]; then
+			add_fixture_tests "$file" || return 1
+		else
+			add_dir_package "$dir"
+		fi
+	done < <(git grep -l -F -e "$(basename "$doc")" -- '*.go' || true)
+	dir="$(dirname "$doc")"
+	if [ -n "$(git ls-files -- ":(glob)$dir/*.go")" ]; then
+		if [ "$dir" = "$fixture_dir" ]; then
+			return 1
+		fi
+		add_dir_package "$dir"
+	fi
+	return 0
+}
+
+# Sets scope to scoped when the change allows it, and scope_reason to why.
+decide_scope() {
+	local path
+	if ! scope_base="$(base_commit)"; then
+		scope_reason="there is no base to compare against"
+		return
+	fi
+	while IFS= read -r path; do
+		if [ -n "$path" ]; then
+			changed+=("$path")
+		fi
+	done < <(changed_files "$scope_base")
+	if [ ${#changed[@]} -eq 0 ]; then
+		scope_reason="nothing differs from the base $scope_base"
+		return
+	fi
+	for path in "${changed[@]}"; do
+		case "$(scope_of "$path")" in
+		installer)
+			add_scoped_package "./$installer/..."
+			;;
+		docs)
+			if ! add_doc_packages "$path"; then
+				scope_reason="$path may be read by the Ethereum fixtures"
+				return
+			fi
+			;;
+		*)
+			scope_reason="$path is outside the install directory and the docs"
+			return
+			;;
+		esac
+	done
+	scope=scoped
+	scope_reason="every changed file is in the install directory or is documentation"
+}
+
+print_plan() {
+	local path
+	echo "$scope"
+	echo "reason: $scope_reason"
+	echo "base: ${scope_base:-none}"
+	for path in "${changed[@]+"${changed[@]}"}"; do
+		echo "changed: $path"
+	done
+	if [ "$scope" = scoped ]; then
+		for path in "${scoped_packages[@]+"${scoped_packages[@]}"}"; do
+			echo "package: $path"
+		done
+		for path in "${fixture_tests[@]+"${fixture_tests[@]}"}"; do
+			echo "fixture runner test: $path"
+		done
+	fi
+}
+
+run_scoped() {
+	local path go_files=() sh_files=() gofmt unformatted names
+	for path in "${changed[@]}"; do
+		if [ ! -f "$path" ]; then
+			continue
+		fi
+		case "$path" in
+		*.go) go_files+=("$path") ;;
+		*.sh) sh_files+=("$path") ;;
+		esac
+	done
+	if [ ${#go_files[@]} -gt 0 ]; then
+		echo "--- gofmt"
+		gofmt="$(go env GOROOT)/bin/gofmt"
+		unformatted="$("$gofmt" -l "${go_files[@]}")"
+		if [ -n "$unformatted" ]; then
+			echo "These files need gofmt:"
+			echo "$unformatted"
+			exit 1
+		fi
+		echo "--- go mod tidy"
+		go mod tidy -diff
+	fi
+	if [ ${#sh_files[@]} -gt 0 ]; then
+		echo "--- shell syntax"
+		for path in "${sh_files[@]}"; do
+			if head -n 1 "$path" | grep -q bash; then
+				bash -n "$path"
+			else
+				sh -n "$path"
+			fi
+		done
+	fi
+	if [ ${#scoped_packages[@]} -eq 0 ] && [ ${#fixture_tests[@]} -eq 0 ]; then
+		echo "No Go package reads the changed files."
+	fi
+	if [ ${#scoped_packages[@]} -gt 0 ]; then
+		echo "--- go vet"
+		go vet -tags integrationtests "${scoped_packages[@]}"
+		echo "--- go test"
+		go test -tags integrationtests -timeout 20m "${scoped_packages[@]}"
+	fi
+	if [ ${#fixture_tests[@]} -gt 0 ]; then
+		names="$(
+			IFS='|'
+			echo "${fixture_tests[*]}"
+		)"
+		echo "--- fixture runner tests that read the changed documents"
+		go test -timeout 20m -run "^($names)\$" "./$fixture_dir"
+	fi
+	echo "The scoped gate passed."
+}
+
+# The merge gate: every stage, unless the change allows the scoped checks.
+run_merge_gate() {
+	decide_scope
+	echo "=== $scope gate: $scope_reason"
+	if [ "$scope" = scoped ]; then
+		run_scoped
+	else
+		run_all
+	fi
+}
+
 usage() {
-	echo "usage: $0 [--list | --check-shards | --prepare-fixtures | typecheck | build | unit [shard] | fixtures [part]]" >&2
+	echo "usage: $0 [--full | --plan | --list | --check-shards | --prepare-fixtures | typecheck | build | unit [shard] | fixtures [part]]" >&2
 	exit 2
 }
 
 if [ $# -eq 0 ]; then
-	run_all
+	run_merge_gate
 	exit 0
 fi
 
 case "$1" in
+--full)
+	[ $# -eq 1 ] || usage
+	run_all
+	;;
+--plan)
+	[ $# -eq 1 ] || usage
+	decide_scope
+	print_plan
+	;;
 --list)
 	[ $# -eq 1 ] || usage
 	list_stages
