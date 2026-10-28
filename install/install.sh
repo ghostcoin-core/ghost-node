@@ -74,6 +74,20 @@
 # rewrites Etherbase to the address it names and restarts the node; unset, the
 # config keeps the Etherbase it has.
 #
+# The node mines with --miner.threads, on half this computer's logical cores,
+# rounded down and at least 1, so the computer stays cool and quiet.
+# GHOST_MINE_THREADS chooses the number of cores instead:
+#
+#	curl -fsSL https://get.ghostcoin.com | GHOST_MINE_THREADS=2 sh
+#
+# (on Windows, in PowerShell: $env:GHOST_MINE_THREADS='2'; irm https://get.ghostcoin.com/win | iex)
+#
+# It must be a whole number from 1 to 9999; anything else is refused with
+# nothing installed. The number is kept in ~/.ghost-node/miner-threads, and a
+# re-run or an update keeps it unless GHOST_MINE_THREADS is set again; a node
+# installed before the installer knew of it gets the default on its next
+# update. Its closing lines say how many cores the node mines on.
+#
 # The whole installer is the text of installer_source, which the last lines
 # run. So a download cut short runs nothing, and the installer can write
 # itself out as the update script.
@@ -330,6 +344,65 @@ EOF
 	mv -f "$config.new" "$config"
 }
 
+# cpu_count prints the number of this computer's logical cores, or nothing
+# when it cannot tell.
+cpu_count() {
+	c_count=
+	if [ "$os" = darwin ]; then
+		c_count=$(sysctl -n hw.logicalcpu 2>/dev/null </dev/null) || c_count=
+	fi
+	[ -n "$c_count" ] || c_count=$(getconf _NPROCESSORS_ONLN 2>/dev/null </dev/null) || c_count=
+	[ -n "$c_count" ] || c_count=$(nproc 2>/dev/null </dev/null) || c_count=
+	case "$c_count" in
+	'' | 0* | *[!0-9]*) return 0 ;;
+	esac
+	printf '%s\n' "$c_count"
+}
+
+# choose_threads sets threads to the number of cores the node mines on:
+# GHOST_MINE_THREADS's, else the number the node was installed with, else half
+# this computer's logical cores, rounded down and at least 1. It sets
+# threads_changed to 1 when that is not the number kept in threads_file.
+choose_threads() {
+	cores=$(cpu_count)
+	t_kept=
+	if [ -f "$threads_file" ]; then
+		t_kept=$(head -n 1 "$threads_file")
+		case "$t_kept" in
+		'' | 0* | *[!0-9]* | ?????*) t_kept= ;;
+		esac
+	fi
+	if [ -n "$mine_threads" ]; then
+		threads=$mine_threads
+	elif [ -n "$t_kept" ]; then
+		threads=$t_kept
+	elif [ -n "$cores" ]; then
+		threads=$((cores / 2))
+		[ "$threads" -ge 1 ] || threads=1
+	else
+		threads=1
+	fi
+	threads_changed=0
+	[ "$threads" = "$t_kept" ] || threads_changed=1
+}
+
+# keep_threads writes the number of cores the node mines on to threads_file.
+keep_threads() {
+	printf '%s\n' "$threads" >"$threads_file.new" || die "could not write $threads_file"
+	mv -f "$threads_file.new" "$threads_file"
+}
+
+# threads_summary prints how many cores the node mines on.
+threads_summary() {
+	if [ -n "$cores" ]; then
+		printf '%s of the %s logical CPU cores of this computer' "$threads" "$cores"
+	elif [ "$threads" = 1 ]; then
+		printf '1 CPU core'
+	else
+		printf '%s CPU cores' "$threads"
+	fi
+}
+
 # port_busy succeeds when a program listens on 127.0.0.1:$1. It asks nc, then
 # lsof, then makes a connection with curl, which fails with status 7 only when
 # nothing listens.
@@ -436,21 +509,20 @@ stop_background() {
 }
 
 start_background() {
-	nohup "$geth" --config "$config" --mine >>"$base/node.log" 2>&1 </dev/null &
+	nohup "$geth" --config "$config" --mine --miner.threads "$threads" >>"$base/node.log" 2>&1 </dev/null &
 	echo "$!" >"$base/node.pid"
 }
 
-start_linux() {
-	if systemd_user; then
-		mkdir -p "$unit_dir"
-		cat >"$unit_dir/$service.service" <<EOF
+# node_unit prints the node's systemd user unit.
+node_unit() {
+	cat <<EOF
 [Unit]
 Description=Ghost node
 Wants=network-online.target
 After=network-online.target
 
 [Service]
-ExecStart=$(unit_word "$geth") --config $(unit_word "$config") --mine
+ExecStart=$(unit_word "$geth") --config $(unit_word "$config") --mine --miner.threads $threads
 Restart=on-failure
 RestartSec=10
 Nice=10
@@ -458,6 +530,12 @@ Nice=10
 [Install]
 WantedBy=default.target
 EOF
+}
+
+start_linux() {
+	if systemd_user; then
+		mkdir -p "$unit_dir"
+		node_unit >"$unit_dir/$service.service"
 		if [ "$auto_update" = 1 ]; then
 			cat >"$unit_dir/$update_service.service" <<EOF
 [Unit]
@@ -529,35 +607,40 @@ plist_head() {
 EOF
 }
 
-# load_agent (re)loads the launchd agent $1 from the plist $2. It enables the
-# agent first: launchd refuses to bootstrap a disabled one, and stopping the
-# node with launchctl disable leaves it disabled.
-load_agent() {
+# reload_agent (re)loads the launchd agent $1 from the plist $2, and fails
+# when launchd does not load it. It enables the agent first: launchd refuses to
+# bootstrap a disabled one, and stopping the node with launchctl disable leaves
+# it disabled.
+reload_agent() {
 	launchctl bootout "$domain/$1" >/dev/null 2>&1 || :
 	launchctl enable "$domain/$1" >/dev/null 2>&1 || :
 	# bootout returns before the old agent is gone; bootstrap until it loads.
 	tries=0
 	until launchctl bootstrap "$domain" "$2" 2>"$work/launchctl.log"; do
 		tries=$((tries + 1))
-		if [ "$tries" -ge 10 ]; then
-			l_disabled=$(launchctl print-disabled "$domain" 2>/dev/null | grep -F "\"$1\"" | sed 's/^[[:space:]]*//' | tr '\n' ' ')
-			die "could not start the launchd agent $1: $(cat "$work/launchctl.log").${l_disabled:+ launchd lists it as: ${l_disabled% }.} Run 'launchctl enable $domain/$1', then run this installer again."
-		fi
+		[ "$tries" -lt 10 ] || return 1
 		sleep 1
 	done
 }
 
-start_darwin() {
-	mkdir -p "$agents"
-	plist="$agents/$label.plist"
-	update_plist="$agents/$update_label.plist"
-	{
-		plist_head "$label"
-		cat <<EOF
+# load_agent (re)loads the launchd agent $1 from the plist $2, or stops saying
+# why launchd did not load it.
+load_agent() {
+	reload_agent "$1" "$2" && return 0
+	l_disabled=$(launchctl print-disabled "$domain" 2>/dev/null | grep -F "\"$1\"" | sed 's/^[[:space:]]*//' | tr '\n' ' ')
+	die "could not start the launchd agent $1: $(cat "$work/launchctl.log").${l_disabled:+ launchd lists it as: ${l_disabled% }.} Run 'launchctl enable $domain/$1', then run this installer again."
+}
+
+# node_plist prints the node's launchd agent.
+node_plist() {
+	plist_head "$label"
+	cat <<EOF
 		<string>$(xml_text "$geth")</string>
 		<string>--config</string>
 		<string>$(xml_text "$config")</string>
 		<string>--mine</string>
+		<string>--miner.threads</string>
+		<string>$threads</string>
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
@@ -572,7 +655,13 @@ start_darwin() {
 </dict>
 </plist>
 EOF
-	} >"$plist"
+}
+
+start_darwin() {
+	mkdir -p "$agents"
+	plist="$agents/$label.plist"
+	update_plist="$agents/$update_label.plist"
+	node_plist >"$plist"
 	load_agent "$label" "$plist"
 	if [ "$auto_update" = 1 ]; then
 		{
@@ -605,11 +694,34 @@ EOF
 	stop_hint="launchctl bootout $domain/$label"
 }
 
-# restart_node restarts the installed node, however it was started.
+# refresh_service rewrites the installed node's systemd unit or launchd agent
+# to mine on $threads cores, for restart_node to start it so. A node started
+# without a service gets them when start_background starts it again.
+refresh_service() {
+	case "$os" in
+	linux)
+		[ -f "$unit_dir/$service.service" ] || return 0
+		node_unit >"$unit_dir/$service.service.new" || die "could not rewrite the $service user service"
+		mv -f "$unit_dir/$service.service.new" "$unit_dir/$service.service"
+		;;
+	darwin)
+		[ -f "$agents/$label.plist" ] || return 0
+		node_plist >"$agents/$label.plist.new" || die "could not rewrite the launchd agent $label"
+		mv -f "$agents/$label.plist.new" "$agents/$label.plist"
+		;;
+	esac
+	service_rewritten=1
+}
+
+# restart_node restarts the installed node, however it was started. After
+# refresh_service it has the service manager read the node's service again.
 restart_node() {
 	case "$os" in
 	linux)
 		if [ -f "$unit_dir/$service.service" ] && systemd_user; then
+			if [ "$service_rewritten" = 1 ]; then
+				systemctl --user daemon-reload || return 1
+			fi
 			systemctl --user restart "$service.service"
 		else
 			stop_background
@@ -617,6 +729,10 @@ restart_node() {
 		fi
 		;;
 	darwin)
+		if [ "$service_rewritten" = 1 ]; then
+			reload_agent "$label" "$agents/$label.plist"
+			return
+		fi
 		launchctl kickstart -k "$domain/$label" >/dev/null 2>&1 || {
 			launchctl enable "$domain/$label" >/dev/null 2>&1 || :
 			launchctl bootstrap "$domain" "$agents/$label.plist" >/dev/null 2>&1
@@ -707,6 +823,13 @@ main() {
 		[ "${#m_hex}" = 40 ] ||
 			refuse "GHOST_MINE_TO must be a wallet address, 0x followed by exactly 40 hex characters, not '$mine_to'"
 	fi
+	mine_threads=${GHOST_MINE_THREADS:-}
+	case "$mine_threads" in
+	'') ;;
+	0* | *[!0-9]* | ?????*)
+		refuse "GHOST_MINE_THREADS must be the number of CPU cores to mine on, a whole number from 1 to 9999, not '$mine_threads'"
+		;;
+	esac
 	release_url=${release_url%/}
 	case "$release_url" in
 	https://*) ;;
@@ -718,6 +841,8 @@ main() {
 	data="$base/data"
 	config="$base/config.toml"
 	geth="$base/bin/geth"
+	threads_file="$base/miner-threads"
+	service_rewritten=0
 	unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 	agents="$HOME/Library/LaunchAgents"
 	domain="gui/$(id -u)"
@@ -744,19 +869,27 @@ main() {
 	say "the release signature is valid"
 	unpack "$work/$asset"
 
+	choose_threads
 	if [ "$mode" = update ]; then
 		rewritten=0
 		if [ -n "$mine_to" ] && [ "$(config_address)" != "$mine_to" ]; then
 			set_etherbase
 			rewritten=1
 		fi
+		if [ "$threads_changed" = 1 ]; then
+			refresh_service
+			keep_threads
+			rewritten=1
+		fi
 		update
 		if [ "$rewritten" = 1 ] && [ "$restarted" != 1 ]; then
 			mark_start
-			{ restart_node && wait_started; } || die "the node did not start again to mine to $mine_to; see its log"
-			say "restarted the node to mine to $mine_to"
+			{ restart_node && wait_started; } ||
+				die "the node did not start again to mine to $(config_address) on $(threads_summary); see its log"
+			say "restarted the node to mine to $(config_address) on $(threads_summary)"
 		fi
 		say "mining to: $(config_address)"
+		say "mining on $(threads_summary)"
 		return 0
 	fi
 
@@ -766,6 +899,7 @@ main() {
 	mv -f "$geth.new" "$geth"
 	write_updater
 	configure
+	keep_threads
 	initialise
 
 	mark_start
@@ -778,6 +912,7 @@ main() {
 	address=$(sed -n 's/^Etherbase = "\(0x[0-9a-fA-F]*\)"$/\1/p' "$config")
 	say "the node is installed in $base, running, syncing and mining"
 	say "mining to: $address"
+	say "mining on $(threads_summary); to change that, run the install line again with GHOST_MINE_THREADS set to the number of cores, such as: curl -fsSL https://get.ghostcoin.com | GHOST_MINE_THREADS=2 sh"
 	say "check its status with: $status_hint"
 	say "follow its log with: $log_hint"
 	say "ask it for the chain head with: $geth attach --exec eth.blockNumber $data/geth.ipc"

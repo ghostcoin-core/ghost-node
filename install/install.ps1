@@ -36,6 +36,20 @@
 # the config is left to ghost-setup as before. Either way the script ends by
 # printing the address the node mines to.
 #
+# The node mines on half this computer's logical cores, rounded down and at
+# least 1. GHOST_MINE_THREADS chooses the number of cores instead:
+#
+#	$env:GHOST_MINE_THREADS='2'; irm https://get.ghostcoin.com/win | iex
+#
+# (on a Mac or Linux: curl -fsSL https://get.ghostcoin.com | GHOST_MINE_THREADS=2 sh)
+#
+# It must be a whole number from 1 to 9999; anything else is refused with
+# nothing installed. ghost-setup keeps it as GETH_MINER_THREADS, which geth
+# reads as --miner.threads, in the user's environment, so the node started at
+# login mines on that many cores too. A re-run or an update keeps the number
+# unless GHOST_MINE_THREADS is set again. ghost-setup's closing lines say how
+# many cores the node mines on.
+#
 # The whole script is one script block that runs at its last line, so a
 # download cut short runs nothing.
 
@@ -75,6 +89,12 @@
 			}
 			$HttpPort = [int]$env:GHOST_HTTP_PORT
 		}
+	}
+	# GHOST_MINE_THREADS, when set, is the number of CPU cores to mine on;
+	# ghost-setup reads it too.
+	$MineThreads = $env:GHOST_MINE_THREADS
+	if ($MineThreads -and $MineThreads -cnotmatch '^[1-9][0-9]{0,3}\z') {
+		throw "ghost-node: GHOST_MINE_THREADS must be the number of CPU cores to mine on, a whole number from 1 to 9999, not '$MineThreads'; $Refusal"
 	}
 	$NodeHome = $null
 	$Config = $null
