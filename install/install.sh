@@ -57,7 +57,9 @@
 # server; GHOST_LATEST_URL, over https only and trusted the same way, sets
 # where an update looks for the newest release's install.sh; GHOST_HTTP_PORT
 # moves the node's HTTP RPC off 8545. The tests use them for a local release
-# server.
+# server. When another program already listens on 127.0.0.1 at that port, the
+# installer stops with nothing installed and says so; the installed node
+# itself holding it, as on an update, is fine.
 #
 # GHOST_MINE_TO mines straight to a wallet address of your own, such as the
 # Ghost pop-up wallet's, instead of a newly generated mining key:
@@ -328,6 +330,51 @@ EOF
 	mv -f "$config.new" "$config"
 }
 
+# port_busy succeeds when a program listens on 127.0.0.1:$1. It asks nc, then
+# lsof, then makes a connection with curl, which fails with status 7 only when
+# nothing listens.
+port_busy() {
+	if command -v nc >/dev/null 2>&1 && nc -z -w 2 127.0.0.1 "$1" >/dev/null 2>&1; then
+		return 0
+	fi
+	if command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1; then
+		return 0
+	fi
+	p_status=0
+	curl -s -o /dev/null --noproxy '*' --connect-timeout 2 --max-time 3 "http://127.0.0.1:$1/" >/dev/null 2>&1 </dev/null ||
+		p_status=$?
+	[ "$p_status" != 7 ]
+}
+
+# own_node_on_port succeeds when the program on 127.0.0.1:$1 is the installed
+# node: its HTTP RPC answers eth_coinbase with the Etherbase of the config it
+# was started with.
+own_node_on_port() {
+	[ -f "$config" ] || return 1
+	o_want=$(config_address | tr 'A-F' 'a-f')
+	[ -n "$o_want" ] || return 1
+	o_out=$(curl -s --noproxy '*' --connect-timeout 2 --max-time 5 -H 'Content-Type: application/json' \
+		--data '{"jsonrpc":"2.0","id":1,"method":"eth_coinbase","params":[]}' "http://127.0.0.1:$1/" 2>/dev/null </dev/null) ||
+		return 1
+	o_got=$(printf '%s\n' "$o_out" | sed -n 's/.*"result" *: *"\(0x[0-9a-fA-F]\{40\}\)".*/\1/p' | head -n 1 | tr 'A-F' 'a-f')
+	[ -n "$o_got" ] && [ "$o_got" = "$o_want" ]
+}
+
+# check_port refuses when another program holds the node's HTTP RPC port: the
+# port of the existing config, or GHOST_HTTP_PORT's on a fresh install. The
+# installed node itself may hold it, as it does when it runs during an update
+# or a re-run.
+check_port() {
+	c_port=$http_port
+	if [ -f "$config" ]; then
+		c_conf=$(sed -n 's/^HTTPPort = \([0-9][0-9]*\)$/\1/p' "$config" | head -n 1)
+		[ -z "$c_conf" ] || c_port=$c_conf
+	fi
+	port_busy "$c_port" || return 0
+	own_node_on_port "$c_port" && return 0
+	refuse "port $c_port on this computer is already in use by another program; stop it, or install with GHOST_HTTP_PORT=<free port>"
+}
+
 # initialise writes the genesis of the release's network into a new data
 # directory. A release with the network built in has no genesis.json.
 initialise() {
@@ -482,17 +529,22 @@ plist_head() {
 EOF
 }
 
-# load_agent (re)loads the launchd agent $1 from the plist $2.
+# load_agent (re)loads the launchd agent $1 from the plist $2. It enables the
+# agent first: launchd refuses to bootstrap a disabled one, and stopping the
+# node with launchctl disable leaves it disabled.
 load_agent() {
 	launchctl bootout "$domain/$1" >/dev/null 2>&1 || :
+	launchctl enable "$domain/$1" >/dev/null 2>&1 || :
 	# bootout returns before the old agent is gone; bootstrap until it loads.
 	tries=0
 	until launchctl bootstrap "$domain" "$2" 2>"$work/launchctl.log"; do
 		tries=$((tries + 1))
-		[ "$tries" -lt 10 ] || die "could not start the launchd agent $1: $(cat "$work/launchctl.log")"
+		if [ "$tries" -ge 10 ]; then
+			l_disabled=$(launchctl print-disabled "$domain" 2>/dev/null | grep -F "\"$1\"" | sed 's/^[[:space:]]*//' | tr '\n' ' ')
+			die "could not start the launchd agent $1: $(cat "$work/launchctl.log").${l_disabled:+ launchd lists it as: ${l_disabled% }.} Run 'launchctl enable $domain/$1', then run this installer again."
+		fi
 		sleep 1
 	done
-	launchctl enable "$domain/$1" >/dev/null 2>&1 || :
 }
 
 start_darwin() {
@@ -565,8 +617,10 @@ restart_node() {
 		fi
 		;;
 	darwin)
-		launchctl kickstart -k "$domain/$label" >/dev/null 2>&1 ||
+		launchctl kickstart -k "$domain/$label" >/dev/null 2>&1 || {
+			launchctl enable "$domain/$label" >/dev/null 2>&1 || :
 			launchctl bootstrap "$domain" "$agents/$label.plist" >/dev/null 2>&1
+		}
 		;;
 	esac
 }
@@ -672,6 +726,7 @@ main() {
 	if [ "$mode" = update ] && { [ ! -x "$geth" ] || [ ! -f "$config" ]; }; then
 		die "there is no Ghost node installed in $base to update; install one with: curl -fsSL https://get.ghostcoin.com | sh"
 	fi
+	check_port
 
 	work=$(mktemp -d "${TMPDIR:-/tmp}/ghost-node-install.XXXXXX") || die "could not make a temporary directory"
 	trap 'rm -rf "$work"' EXIT

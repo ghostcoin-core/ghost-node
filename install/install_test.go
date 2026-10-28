@@ -484,21 +484,43 @@ start_node() {
 	nohup "$@" >>"$STUB_DIR/service.log" 2>&1 </dev/null &
 	echo "$!" >"$STUB_DIR/service.pid"
 }
+# Like launchd, the stub refuses to bootstrap an agent that is disabled: one
+# with a file disabled.<label> in STUB_DIR. enable clears it, unless the file
+# enable-refused is there too.
+refuse_disabled() {
+	[ -f "$STUB_DIR/disabled.$1" ] || return 0
+	echo "Bootstrap failed: 5: Input/output error" >&2
+	exit 5
+}
 case "$1 $2" in
 "bootout $node")
 	stop_node
 	exit 0
 	;;
-"bootout $node.update" | "enable $node" | "enable $node.update")
+"bootout $node.update")
+	exit 0
+	;;
+"enable $node" | "enable $node.update")
+	[ -f "$STUB_DIR/enable-refused" ] || rm -f "$STUB_DIR/disabled.${2##*/}"
+	exit 0
+	;;
+"print-disabled gui/$(id -u)")
+	echo "disabled services = {"
+	for f in "$STUB_DIR"/disabled.*; do
+		[ -f "$f" ] && printf '\t"%s" => disabled\n' "${f##*/disabled.}"
+	done
+	echo "}"
 	exit 0
 	;;
 "bootstrap gui/$(id -u)")
 	case "$3" in
 	*/Library/LaunchAgents/com.ghostcoin.node.plist)
+		refuse_disabled com.ghostcoin.node
 		start_node "$3"
 		exit 0
 		;;
 	*/Library/LaunchAgents/com.ghostcoin.node.update.plist)
+		refuse_disabled com.ghostcoin.node.update
 		exit 0
 		;;
 	esac
@@ -2008,5 +2030,201 @@ func TestInstallScriptMineToUnset(t *testing.T) {
 	checkInstalledAndMining(t, env, geth, out)
 	if config := readConfig(t, env); !strings.Contains(config, "whose key is in the keystore of DataDir") {
 		t.Fatalf("the config does not say where the mining key is:\n%s", config)
+	}
+}
+
+// disableAgent marks the launchd agent label disabled in the stub launchd, as
+// launchctl disable leaves it on a Mac.
+func (env *installEnv) disableAgent(t *testing.T, label string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(env.stubs, "disabled."+label), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// checkEnabledBeforeBootstrap checks that every bootstrap of the agent label
+// in calls follows a launchctl enable of it.
+func checkEnabledBeforeBootstrap(t *testing.T, calls, domain, agents, label string) {
+	t.Helper()
+	enable := fmt.Sprintf("launchctl enable %s/%s\n", domain, label)
+	bootstrap := fmt.Sprintf("launchctl bootstrap %s %s\n", domain, filepath.Join(agents, label+".plist"))
+	b := strings.Index(calls, bootstrap)
+	if b < 0 {
+		t.Fatalf("no call %q; the calls were:\n%s", bootstrap, calls)
+	}
+	if e := strings.Index(calls, enable); e < 0 || e > b {
+		t.Fatalf("the agent %s was not enabled before it was bootstrapped; the calls were:\n%s", label, calls)
+	}
+}
+
+// TestInstallScriptLaunchdEnablesDisabledAgents installs on a Mac where both
+// launchd agents were disabled before, as stopping the node leaves them: the
+// stub launchd refuses to bootstrap a disabled agent, so the installer must
+// enable each one before it bootstraps it.
+func TestInstallScriptLaunchdEnablesDisabledAgents(t *testing.T) {
+	release, geth := internalNetRelease(t)
+	verifier := builtVerifier(t)
+	key := newSigner(t)
+	blob := release.tarGz(t)
+	rs := serveRelease(t, "darwin", blob, key.sign(blob), verifier)
+	env := newInstallEnv(t, envOptions{darwin: true, stockMac: true})
+	env.disableAgent(t, "com.ghostcoin.node")
+	env.disableAgent(t, "com.ghostcoin.node.update")
+	installRunning(t, env, writeScript(t, key, sha256Hex(verifier)), rs, geth)
+
+	domain := fmt.Sprintf("gui/%d", os.Getuid())
+	agents := filepath.Join(env.home, "Library", "LaunchAgents")
+	calls := env.calls(t)
+	checkEnabledBeforeBootstrap(t, calls, domain, agents, "com.ghostcoin.node")
+	checkEnabledBeforeBootstrap(t, calls, domain, agents, "com.ghostcoin.node.update")
+	for _, label := range []string{"com.ghostcoin.node", "com.ghostcoin.node.update"} {
+		if _, err := os.Stat(filepath.Join(env.stubs, "disabled."+label)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("the agent %s is still disabled (%v)", label, err)
+		}
+	}
+}
+
+// TestInstallScriptLaunchdBootstrapFailsSaysWhy installs on a Mac whose
+// launchd keeps the node's agent disabled however it is enabled: the
+// installer must stop saying launchd's error, what launchd lists for the
+// agent, and what to do.
+func TestInstallScriptLaunchdBootstrapFailsSaysWhy(t *testing.T) {
+	verifier := builtVerifier(t)
+	key := newSigner(t)
+	marker := filepath.Join(t.TempDir(), "ran")
+	blob := archive{"geth": fakeGeth(marker)}.tarGz(t)
+	rs := serveRelease(t, "darwin", blob, key.sign(blob), verifier)
+	env := newInstallEnv(t, envOptions{darwin: true, stockMac: true})
+	env.disableAgent(t, "com.ghostcoin.node")
+	if err := os.WriteFile(filepath.Join(env.stubs, "enable-refused"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := env.run(t, writeScript(t, key, sha256Hex(verifier)), rs, true, "GHOST_MINE_TO="+mineToWallet)
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) {
+		t.Fatalf("install.sh did not fail: %v", err)
+	}
+	domain := fmt.Sprintf("gui/%d", os.Getuid())
+	for _, want := range []string{
+		"could not start the launchd agent com.ghostcoin.node: Bootstrap failed: 5: Input/output error",
+		`launchd lists it as: "com.ghostcoin.node" => disabled.`,
+		fmt.Sprintf("Run 'launchctl enable %s/com.ghostcoin.node', then run this installer again.", domain),
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("install.sh did not say %q", want)
+		}
+	}
+	calls := env.calls(t)
+	checkEnabledBeforeBootstrap(t, calls, domain, filepath.Join(env.home, "Library", "LaunchAgents"), "com.ghostcoin.node")
+	if !strings.Contains(calls, "launchctl print-disabled "+domain+"\n") {
+		t.Fatalf("install.sh did not ask launchd what it disabled; the calls were:\n%s", calls)
+	}
+}
+
+// holdPort makes another program, a JSON-RPC server that is not the node,
+// listen on 127.0.0.1:port until the test ends. It answers eth_coinbase with
+// an address no installed config names.
+func holdPort(t *testing.T, port int) {
+	t.Helper()
+	l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":%q}`, "0x"+strings.Repeat("99", 20))
+	})}
+	go srv.Serve(l)
+	t.Cleanup(func() { srv.Close() })
+}
+
+func portInUse(port int) string {
+	return fmt.Sprintf("port %d on this computer is already in use by another program; stop it, or install with GHOST_HTTP_PORT=<free port>", port)
+}
+
+// TestInstallScriptPortInUse installs, on Linux and on a Mac, while another
+// program listens on the node's HTTP RPC port: the installer must refuse
+// before it downloads or writes anything.
+func TestInstallScriptPortInUse(t *testing.T) {
+	verifier := builtVerifier(t)
+	key := newSigner(t)
+	script := writeScript(t, key, sha256Hex(verifier))
+	for _, tc := range []struct {
+		name string
+		opts envOptions
+	}{
+		{"linux", envOptions{systemctl: stubSystemctl}},
+		{"darwin", envOptions{darwin: true, stockMac: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			marker := filepath.Join(t.TempDir(), "ran")
+			blob := archive{"geth": fakeGeth(marker)}.tarGz(t)
+			rs := serveRelease(t, tc.name, blob, key.sign(blob), verifier)
+			env := newInstallEnv(t, tc.opts)
+			holdPort(t, env.httpPort)
+
+			out, err := env.run(t, script, rs, true, "GHOST_MINE_TO="+mineToWallet)
+			checkRefused(t, env, out, err, portInUse(env.httpPort)+"; refusing to install. Nothing was installed.", marker)
+			if served := rs.servedFiles(); len(served) != 0 {
+				t.Fatalf("an install refused for a busy port downloaded %v", served)
+			}
+		})
+	}
+}
+
+// TestInstallScriptUpdatePortHeldByOwnNode installs a node and updates it
+// while it runs and holds its HTTP RPC port, which must not stop the update.
+// Then, with the node stopped and another program on the port, an update must
+// refuse and change nothing.
+func TestInstallScriptUpdatePortHeldByOwnNode(t *testing.T) {
+	release, geth := internalNetRelease(t)
+	verifier := builtVerifier(t)
+	key := newSigner(t)
+	blob := release.tarGz(t)
+	rs := serveRelease(t, "linux", blob, key.sign(blob), verifier)
+	env := newInstallEnv(t, envOptions{systemctl: stubSystemctl})
+	script := writeScript(t, key, sha256Hex(verifier))
+	installRunning(t, env, script, rs, geth)
+
+	conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", env.httpPort))
+	if err != nil {
+		t.Fatalf("the installed node does not hold its HTTP RPC port: %v", err)
+	}
+	conn.Close()
+	checkUpdateApplied(t, env, rs, key, script, release["geth"], "systemctl --user restart ghost-node.service\n")
+
+	pid := env.servicePID(t)
+	syscall.Kill(pid, syscall.SIGTERM)
+	for i := 0; i < 600 && running(pid); i++ {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if running(pid) {
+		t.Fatal("the node did not stop")
+	}
+	holdPort(t, env.httpPort)
+	before := baseFiles(t, env)
+	calls := env.calls(t)
+	served := len(rs.servedPaths())
+
+	out, err := env.update(t, rs)
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) {
+		t.Fatalf("the update did not fail: %v", err)
+	}
+	if want := portInUse(env.httpPort) + "; refusing to update. Nothing was changed"; !strings.Contains(out, want) {
+		t.Fatalf("the update did not say %q", want)
+	}
+	if !sameFiles(before, baseFiles(t, env)) {
+		t.Fatal("an update refused for a busy port changed the installed files")
+	}
+	if env.calls(t) != calls {
+		t.Fatal("an update refused for a busy port called the service manager")
+	}
+	if got := rs.servedPaths(); len(got) != served {
+		t.Fatalf("an update refused for a busy port downloaded %v", got[served:])
+	}
+	if left := entries(t, env.tmp); len(left) != 0 {
+		t.Fatalf("the update left %v in the temporary directory", left)
 	}
 }
