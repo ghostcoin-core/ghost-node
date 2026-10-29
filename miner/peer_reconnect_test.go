@@ -29,12 +29,23 @@ const publicTestNetChainID = 6_777_972
 
 // TestMinerResumesAfterPeersReturn checks that a node on the public test
 // network that loses its last peer and gets one back starts sealing again on
-// its own, with nothing but the returning peer to wake it, and that it does so
-// every time the connection drops and comes back.
+// its own, with nothing but the returning peer to wake it: every time the
+// connection drops and comes back, and also when the last peer leaves while
+// the worker is building a block, after it checked for peers.
 func TestMinerResumesAfterPeersReturn(t *testing.T) {
 	var peers atomic.Int32
 	peers.Store(1)
 	w, tasks := startPeerGatedWorker(t, publicTestNetChainID, &peers, true)
+
+	// While leaving is set, the next look at the peer count still sees the
+	// leaving peer, and every later one sees the count in peers.
+	var leaving atomic.Bool
+	w.setPeerCount(func() int {
+		if leaving.CompareAndSwap(true, false) {
+			return 1
+		}
+		return int(peers.Load())
+	})
 
 	select {
 	case <-tasks:
@@ -42,30 +53,39 @@ func TestMinerResumesAfterPeersReturn(t *testing.T) {
 		t.Fatal("the worker did not seal with a peer connected")
 	}
 
-	for round := 1; round <= 2; round++ {
-		// The last peer leaves: new work is built but not sealed.
+	// dropAndReturn takes the last peer away, checks that new work is built
+	// but not sealed, then brings a peer back and expects the worker to seal
+	// again without being started again.
+	dropAndReturn := func(name string, midBuild bool) {
+		t.Helper()
 		peers.Store(0)
 		time.Sleep(200 * time.Millisecond)
 		for len(tasks) > 0 {
 			<-tasks
 		}
+		leaving.Store(midBuild)
 		w.start()
 		select {
 		case task := <-tasks:
-			t.Fatalf("round %d: sealed block %d with no peers", round, task.block.NumberU64())
+			t.Fatalf("%s: sealed block %d with no peers", name, task.block.NumberU64())
 		case <-time.After(2500 * time.Millisecond):
 		}
+		if midBuild && leaving.Load() {
+			t.Fatalf("%s: the worker never looked at the peer count", name)
+		}
 		if !w.isRunning() {
-			t.Fatalf("round %d: the worker stopped running while it waits for peers", round)
+			t.Fatalf("%s: the worker stopped running while it waits for peers", name)
 		}
 
-		// A peer comes back and nothing else happens: the worker seals the
-		// work it held back without being started again.
 		peers.Store(1)
 		select {
 		case <-tasks:
 		case <-time.After(5 * time.Second):
-			t.Fatalf("round %d: the worker did not seal again once a peer reconnected", round)
+			t.Fatalf("%s: the worker did not seal again once a peer reconnected", name)
 		}
 	}
+
+	dropAndReturn("first drop", false)
+	dropAndReturn("second drop", false)
+	dropAndReturn("peer leaves while a block is built", true)
 }

@@ -484,11 +484,6 @@ func (w *worker) waitingForPeers() bool {
 	return (*count)() == 0
 }
 
-// sealing reports whether the worker hands its blocks to the sealer.
-func (w *worker) sealing() bool {
-	return w.isRunning() && !w.waitingForPeers()
-}
-
 // close terminates all background threads maintained by the worker.
 // Note the worker does not support being closed multiple times.
 func (w *worker) close() {
@@ -1555,7 +1550,13 @@ func (w *worker) commitWork(interrupt *atomic.Int32, noempty bool, timestamp int
 // Note the assumption is held that the mutation is allowed to the passed env, do
 // the deep copy first.
 func (w *worker) commit(env *environment, interval func(), update bool, start time.Time) error {
-	if w.sealing() {
+	// The last peer may leave after commitWork looked, so work turned away
+	// here for want of a peer is marked held too, to be sealed once one returns.
+	held := w.isRunning() && w.waitingForPeers()
+	if held {
+		w.heldForPeers.Store(true)
+	}
+	if w.isRunning() && !held {
 		if interval != nil {
 			interval()
 		}
