@@ -768,8 +768,8 @@ func TestMiningPausedFile(t *testing.T) {
 		base := filepath.Join(env.home, ".ghost-node")
 		paused := filepath.Join(base, "mining-paused")
 		const restart = "systemctl --user restart ghost-node.service\n"
-		mining := fmt.Sprintf("ExecStart=%q --config %q --mine --miner.threads 1\n", filepath.Join(base, "bin", "geth"), filepath.Join(base, "config.toml"))
-		notMining := fmt.Sprintf("ExecStart=%q --config %q --miner.threads 1\n", filepath.Join(base, "bin", "geth"), filepath.Join(base, "config.toml"))
+		mining := fmt.Sprintf("ExecStart=%q --config %q --mine --miner.threads 1%s\n", filepath.Join(base, "bin", "geth"), filepath.Join(base, "config.toml"), env.portFlag())
+		notMining := fmt.Sprintf("ExecStart=%q --config %q --miner.threads 1%s\n", filepath.Join(base, "bin", "geth"), filepath.Join(base, "config.toml"), env.portFlag())
 		checkMining := func(t *testing.T, want bool, out string) {
 			t.Helper()
 			unit := nodeUnit(t, env)
@@ -859,8 +859,8 @@ func TestMiningPausedFile(t *testing.T) {
 		}
 		plist := readFile(t, filepath.Join(env.home, "Library", "LaunchAgents", "com.ghostcoin.node.plist"))
 		args := fmt.Sprintf("<array>\n\t\t<string>%s</string>\n\t\t<string>--config</string>\n\t\t<string>%s</string>\n"+
-			"\t\t<string>--miner.threads</string>\n\t\t<string>1</string>\n\t</array>",
-			filepath.Join(base, "bin", "geth"), filepath.Join(base, "config.toml"))
+			"\t\t<string>--miner.threads</string>\n\t\t<string>1</string>\n%s\t</array>",
+			filepath.Join(base, "bin", "geth"), filepath.Join(base, "config.toml"), env.portPlist())
 		if !strings.Contains(plist, args) {
 			t.Fatalf("the agent's plist does not run the node without --mine:\n%s", plist)
 		}
