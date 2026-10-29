@@ -53,6 +53,8 @@ const (
 	configFile = "config.toml"
 	pidFile    = "node.pid"
 	logFile    = "node.log"
+
+	miningPausedFile = "mining-paused"
 )
 
 // InterruptArgs are the arguments that make the geth executable send the
@@ -131,9 +133,17 @@ func (s *Service) PIDPath() string { return filepath.Join(s.Home, pidFile) }
 // LogPath is the node's log file.
 func (s *Service) LogPath() string { return filepath.Join(s.Home, logFile) }
 
-// NodeArgs are the node's arguments: its config, with mining on.
+// MiningPausedPath is the file whose presence keeps the node from mining.
+func (s *Service) MiningPausedPath() string { return filepath.Join(s.Home, miningPausedFile) }
+
+// NodeArgs are the node's arguments: its config, with mining on unless the
+// mining-paused file is in the home directory.
 func (s *Service) NodeArgs() []string {
-	return []string{"--config", s.ConfigPath(), "--mine"}
+	args := []string{"--config", s.ConfigPath()}
+	if _, err := os.Lstat(s.MiningPausedPath()); err == nil {
+		return args
+	}
+	return append(args, "--mine")
 }
 
 // RunCommand is the command line the Run key holds: this executable's

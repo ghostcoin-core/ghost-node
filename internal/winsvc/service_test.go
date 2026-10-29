@@ -393,6 +393,39 @@ func TestWinsvcStartAndStop(t *testing.T) {
 	}
 }
 
+func TestWinsvcMiningPausedStartsWithoutMine(t *testing.T) {
+	f := newFixture(t)
+	config := filepath.Join(f.svc.Home, "config.toml")
+	if want := []string{"--config", config, "--mine"}; !reflect.DeepEqual(f.svc.NodeArgs(), want) {
+		t.Fatalf("NodeArgs = %q, want %q", f.svc.NodeArgs(), want)
+	}
+	if err := os.WriteFile(filepath.Join(f.svc.Home, "mining-paused"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pid, started, err := f.svc.Start()
+	if err != nil || !started {
+		t.Fatalf("Start = %d, %v, %v", pid, started, err)
+	}
+	if want := []string{"--config", config}; !reflect.DeepEqual(f.procs.procs[pid].args, want) {
+		t.Fatalf("node args with mining paused = %q, want %q", f.procs.procs[pid].args, want)
+	}
+
+	// Removing the file turns mining back on at the next start.
+	if _, err := f.svc.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(f.svc.Home, "mining-paused")); err != nil {
+		t.Fatal(err)
+	}
+	pid, _, err = f.svc.Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"--config", config, "--mine"}; !reflect.DeepEqual(f.procs.procs[pid].args, want) {
+		t.Fatalf("node args after unpausing = %q, want %q", f.procs.procs[pid].args, want)
+	}
+}
+
 func TestWinsvcStalePIDFile(t *testing.T) {
 	f := newFixture(t)
 	// The recorded process has exited.
