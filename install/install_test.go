@@ -652,6 +652,19 @@ type installEnv struct {
 	home, tmp, stubs string
 	httpPort         int
 	dashPort         int // GHOST_DASH_PORT, so no test needs 8580 free
+	// p2pPort is GHOST_P2P_PORT, free for TCP and UDP, so no test needs
+	// geth's default 30303 free.
+	p2pPort int
+}
+
+// portFlag is the --port argument the node's unit runs it with.
+func (env *installEnv) portFlag() string {
+	return fmt.Sprintf(" --port %d", env.p2pPort)
+}
+
+// portPlist is the --port argument in the node's launchd agent.
+func (env *installEnv) portPlist() string {
+	return fmt.Sprintf("\t\t<string>--port</string>\n\t\t<string>%d</string>\n", env.p2pPort)
 }
 
 func newInstallEnv(t *testing.T, opts envOptions) *installEnv {
@@ -666,6 +679,10 @@ func newInstallEnv(t *testing.T, opts envOptions) *installEnv {
 	env := &installEnv{home: filepath.Join(root, "h"), tmp: filepath.Join(root, "t"), stubs: filepath.Join(root, "s"), httpPort: freePort(t), dashPort: freePort(t)}
 	for env.dashPort == env.httpPort {
 		env.dashPort = freePort(t)
+	}
+	env.p2pPort = freeP2PPort(t)
+	for env.p2pPort == env.httpPort || env.p2pPort == env.dashPort {
+		env.p2pPort = freeP2PPort(t)
 	}
 	for _, dir := range []string{env.home, env.tmp, env.stubs} {
 		if err := os.Mkdir(dir, 0700); err != nil {
@@ -728,6 +745,28 @@ func freePort(t *testing.T) int {
 	return l.Addr().(*net.TCPAddr).Port
 }
 
+// freeP2PPort returns a port free for both TCP and UDP on every address, as
+// the node's peer port must be.
+func freeP2PPort(t *testing.T) int {
+	t.Helper()
+	for i := 0; i < 100; i++ {
+		l, err := net.Listen("tcp", ":0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		port := l.Addr().(*net.TCPAddr).Port
+		u, err := net.ListenPacket("udp", fmt.Sprintf(":%d", port))
+		l.Close()
+		if err != nil {
+			continue
+		}
+		u.Close()
+		return port
+	}
+	t.Fatal("found no port free for both TCP and UDP")
+	return 0
+}
+
 // runScript runs the script at path against the release server and returns
 // its output.
 func (env *installEnv) runScript(t *testing.T, path string, rs *releaseServer, trustServer bool, extraEnv ...string) (string, error) {
@@ -744,6 +783,7 @@ func (env *installEnv) runScript(t *testing.T, path string, rs *releaseServer, t
 		"GHOST_LATEST_URL=" + rs.URL + "/latest/download",
 		"GHOST_HTTP_PORT=" + strconv.Itoa(env.httpPort),
 		"GHOST_DASH_PORT=" + strconv.Itoa(env.dashPort),
+		"GHOST_P2P_PORT=" + strconv.Itoa(env.p2pPort),
 	}
 	if trustServer {
 		cmd.Env = append(cmd.Env, "GHOST_INSTALL_CA_FILE="+rs.caFile)
@@ -1047,7 +1087,7 @@ func TestInstallScriptInstallsAndStarts(t *testing.T) {
 			t.Fatal(err)
 		}
 		base := filepath.Join(env.home, ".ghost-node")
-		execStart := fmt.Sprintf("ExecStart=%q --config %q --mine --miner.threads 3\n", filepath.Join(base, "bin", "geth"), filepath.Join(base, "config.toml"))
+		execStart := fmt.Sprintf("ExecStart=%q --config %q --mine --miner.threads 3%s\n", filepath.Join(base, "bin", "geth"), filepath.Join(base, "config.toml"), env.portFlag())
 		if !strings.Contains(string(unit), execStart) || !strings.Contains(string(unit), "WantedBy=default.target") {
 			t.Fatalf("the unit does not run the node mining at login:\n%s", unit)
 		}
@@ -1845,8 +1885,8 @@ func TestInstallScriptDarwin(t *testing.T) {
 		t.Fatal(err)
 	}
 	args := fmt.Sprintf("<array>\n\t\t<string>%s</string>\n\t\t<string>--config</string>\n\t\t<string>%s</string>\n\t\t<string>--mine</string>\n"+
-		"\t\t<string>--miner.threads</string>\n\t\t<string>9</string>\n\t</array>",
-		filepath.Join(base, "bin", "geth"), filepath.Join(base, "config.toml"))
+		"\t\t<string>--miner.threads</string>\n\t\t<string>9</string>\n%s\t</array>",
+		filepath.Join(base, "bin", "geth"), filepath.Join(base, "config.toml"), env.portPlist())
 	for _, want := range []string{"<string>com.ghostcoin.node</string>", args, "<key>RunAtLoad</key>\n\t<true/>", "<key>KeepAlive</key>\n\t<true/>"} {
 		if !strings.Contains(string(plist), want) {
 			t.Fatalf("the agent's plist has no %q:\n%s", want, plist)
@@ -2305,4 +2345,98 @@ func TestInstallScriptUpdatePortHeldByOwnNode(t *testing.T) {
 	if left := entries(t, env.tmp); len(left) != 0 {
 		t.Fatalf("the update left %v in the temporary directory", left)
 	}
+}
+
+// The tests of the port the installed node listens for peers on: geth's
+// default 30303 unless GHOST_P2P_PORT names another, kept across re-runs.
+
+const p2pPortRefusal = "GHOST_P2P_PORT must be the port the node listens for peers on, a whole number from 1 to 65535"
+
+// TestInstallScriptP2PPort installs a node with GHOST_P2P_PORT: the node runs
+// with --port and that number, which a re-run without it keeps. Installed
+// without it, the node runs with no --port, on geth's default; and a
+// malformed number is refused with nothing installed.
+func TestInstallScriptP2PPort(t *testing.T) {
+	verifier := builtVerifier(t)
+	key := newSigner(t)
+	script := writeScript(t, key, sha256Hex(verifier))
+
+	t.Run("set", func(t *testing.T) {
+		release, _ := internalNetRelease(t)
+		blob := release.tarGz(t)
+		rs := serveRelease(t, "linux", blob, key.sign(blob), verifier)
+		env := newInstallEnv(t, envOptions{systemctl: stubSystemctl, cpus: 2})
+		stopNodeAtCleanup(t, filepath.Join(env.stubs, "service.pid"))
+		base := filepath.Join(env.home, ".ghost-node")
+		port := strconv.Itoa(env.p2pPort)
+		check := func(t *testing.T) {
+			t.Helper()
+			execStart := fmt.Sprintf("ExecStart=%q --config %q --mine --miner.threads 1 --port %s\n", filepath.Join(base, "bin", "geth"), filepath.Join(base, "config.toml"), port)
+			if unit := nodeUnit(t, env); !strings.Contains(unit, execStart) {
+				t.Fatalf("the unit does not run the node on port %s:\n%s", port, unit)
+			}
+			args := procArgs(t, env.servicePID(t))
+			found := false
+			for i, a := range args {
+				if a == "--port" && i+1 < len(args) && args[i+1] == port {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("the node runs as %q, not with --port %s", args, port)
+			}
+			if kept := strings.TrimSpace(readFile(t, filepath.Join(base, "p2p-port"))); kept != port {
+				t.Fatalf("the installer kept port %q, not %s", kept, port)
+			}
+		}
+		if _, err := env.run(t, script, rs, true); err != nil {
+			t.Fatalf("install.sh failed: %v", err)
+		}
+		check(t)
+		// A re-run without the setting keeps the port.
+		if _, err := env.run(t, script, rs, true, "GHOST_P2P_PORT="); err != nil {
+			t.Fatalf("the re-run failed: %v", err)
+		}
+		check(t)
+	})
+
+	t.Run("default", func(t *testing.T) {
+		// The stand-in geth listens for no peers, so 30303 need not be free.
+		blob := nodeRelease(t).tarGz(t)
+		rs := serveRelease(t, "linux", blob, key.sign(blob), verifier)
+		env := newInstallEnv(t, envOptions{systemctl: stubSystemctl, cpus: 2})
+		stopNodeAtCleanup(t, filepath.Join(env.stubs, "service.pid"))
+		base := filepath.Join(env.home, ".ghost-node")
+		if _, err := runMineTo(t, env, script, rs, "GHOST_P2P_PORT="); err != nil {
+			t.Fatalf("install.sh failed: %v", err)
+		}
+		execStart := fmt.Sprintf("ExecStart=%q --config %q --mine --miner.threads 1\n", filepath.Join(base, "bin", "geth"), filepath.Join(base, "config.toml"))
+		if unit := nodeUnit(t, env); !strings.Contains(unit, execStart) {
+			t.Fatalf("the unit does not run the node on geth's default port:\n%s", unit)
+		}
+		if pid := env.servicePID(t); hasArg(t, pid, "--port") {
+			t.Fatalf("the node runs as %q, with a --port", procArgs(t, pid))
+		}
+		if _, err := os.Stat(filepath.Join(base, "p2p-port")); !os.IsNotExist(err) {
+			t.Fatalf("the installer kept a port with no GHOST_P2P_PORT: %v", err)
+		}
+	})
+
+	t.Run("malformed", func(t *testing.T) {
+		marker := filepath.Join(t.TempDir(), "ran")
+		blob := archive{"geth": fakeGeth(marker)}.tarGz(t)
+		rs := serveRelease(t, "linux", blob, key.sign(blob), verifier)
+		for _, value := range []string{
+			"0", "00", "030303", "-1", "+2", "1.5", "2 ", " 2", "2\n3", "65536", "100000", "port", "0x76", "$(touch " + marker + ")",
+		} {
+			t.Run(fmt.Sprintf("%q", value), func(t *testing.T) {
+				env := newInstallEnv(t, envOptions{systemctl: stubSystemctl, cpus: 2})
+				out, err := env.run(t, script, rs, true, "GHOST_P2P_PORT="+value)
+				checkRefused(t, env, out, err, p2pPortRefusal+", not '"+value+"'; refusing to install. Nothing was installed.", marker)
+			})
+		}
+		if served := rs.servedFiles(); len(served) != 0 {
+			t.Fatalf("a refused GHOST_P2P_PORT downloaded %v", served)
+		}
+	})
 }

@@ -90,6 +90,16 @@
 # installed before the installer knew of it gets the default on its next
 # update. Its closing lines say how many cores the node mines on.
 #
+# The node listens for peers on geth's default port, 30303 (TCP and UDP).
+# GHOST_P2P_PORT chooses another, for a computer where something else holds
+# 30303:
+#
+#	curl -fsSL https://get.ghostcoin.com | GHOST_P2P_PORT=30304 sh
+#
+# It must be a whole number from 1 to 65535; anything else is refused with
+# nothing installed. The number is kept in ~/.ghost-node/p2p-port, and a re-run
+# or an update keeps it unless GHOST_P2P_PORT is set again.
+#
 # The release archive also holds ghost-dash, the Ghost Node Dashboard: a
 # small program that shows the node, its mining and its rewards in the
 # browser, on 127.0.0.1 only. The installer installs it as
@@ -437,6 +447,45 @@ keep_threads() {
 	mv -f "$threads_file.new" "$threads_file"
 }
 
+# choose_p2p_port sets p2p_port to the port the node listens for peers on:
+# GHOST_P2P_PORT's, else the one the node was installed with, else none (geth's
+# default, 30303). It sets p2p_changed to 1 when that is not the kept one.
+choose_p2p_port() {
+	p_kept=
+	if [ -f "$p2p_file" ]; then
+		p_kept=$(head -n 1 "$p2p_file")
+		valid_port "$p_kept" || p_kept=
+	fi
+	p2p_port=$p_kept
+	[ -z "$p2p_env" ] || p2p_port=$p2p_env
+	p2p_changed=0
+	[ "$p2p_port" = "$p_kept" ] || p2p_changed=1
+}
+
+# valid_port succeeds when $1 is a whole number from 1 to 65535, with no
+# leading zero.
+valid_port() {
+	printf '%s\n' "$1" | grep -Eqx '[1-9][0-9]{0,4}' || return 1
+	[ "$(printf '%s\n' "$1" | wc -l)" -eq 1 ] && [ "$1" -le 65535 ]
+}
+
+# keep_p2p_port writes the node's peer port to p2p_file, or removes it when
+# the node uses geth's default.
+keep_p2p_port() {
+	if [ -z "$p2p_port" ]; then
+		rm -f "$p2p_file"
+		return 0
+	fi
+	printf '%s\n' "$p2p_port" >"$p2p_file.new" || die "could not write $p2p_file"
+	mv -f "$p2p_file.new" "$p2p_file"
+}
+
+# port_flag prints the node's --port argument, with a space before it, or
+# nothing when the node uses geth's default.
+port_flag() {
+	[ -z "$p2p_port" ] || printf ' --port %s' "$p2p_port"
+}
+
 # threads_summary prints how many cores the node mines on.
 threads_summary() {
 	if [ -n "$cores" ]; then
@@ -594,7 +643,9 @@ stop_pidfile() {
 start_background() {
 	set -- --config "$config"
 	[ -e "$paused" ] || set -- "$@" --mine
-	nohup "$geth" "$@" --miner.threads "$threads" >>"$base/node.log" 2>&1 </dev/null &
+	set -- "$@" --miner.threads "$threads"
+	[ -z "$p2p_port" ] || set -- "$@" --port "$p2p_port"
+	nohup "$geth" "$@" >>"$base/node.log" 2>&1 </dev/null &
 	echo "$!" >"$base/node.pid"
 }
 
@@ -634,7 +685,7 @@ Wants=network-online.target
 After=network-online.target
 
 [Service]
-ExecStart=$(unit_word "$geth") --config $(unit_word "$config")$(mine_flag) --miner.threads $threads
+ExecStart=$(unit_word "$geth") --config $(unit_word "$config")$(mine_flag) --miner.threads $threads$(port_flag)
 Restart=on-failure
 RestartSec=10
 Nice=10
@@ -755,6 +806,9 @@ EOF
 	cat <<EOF
 		<string>--miner.threads</string>
 		<string>$threads</string>
+EOF
+	[ -z "$p2p_port" ] || printf '\t\t<string>--port</string>\n\t\t<string>%s</string>\n' "$p2p_port"
+	cat <<EOF
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
@@ -1198,6 +1252,9 @@ main() {
 		refuse "GHOST_MINE_THREADS must be the number of CPU cores to mine on, a whole number from 1 to 9999, not '$mine_threads'"
 		;;
 	esac
+	p2p_env=${GHOST_P2P_PORT:-}
+	[ -z "$p2p_env" ] || valid_port "$p2p_env" ||
+		refuse "GHOST_P2P_PORT must be the port the node listens for peers on, a whole number from 1 to 65535, not '$p2p_env'"
 	release_url=${release_url%/}
 	case "$release_url" in
 	https://*) ;;
@@ -1212,6 +1269,7 @@ main() {
 	config="$base/config.toml"
 	geth="$base/bin/geth"
 	threads_file="$base/miner-threads"
+	p2p_file="$base/p2p-port"
 	paused="$base/mining-paused"
 	dash="$base/bin/ghost-dash"
 	dash_key="$base/dashboard-key"
@@ -1259,15 +1317,17 @@ main() {
 	unpack "$work/$asset"
 
 	choose_threads
+	choose_p2p_port
 	if [ "$mode" = update ]; then
 		rewritten=0
 		if [ -n "$mine_to" ] && [ "$(config_address)" != "$mine_to" ]; then
 			set_etherbase
 			rewritten=1
 		fi
-		if [ "$threads_changed" = 1 ] || service_mining_changed; then
+		if [ "$threads_changed" = 1 ] || [ "$p2p_changed" = 1 ] || service_mining_changed; then
 			refresh_service
 			keep_threads
+			keep_p2p_port
 			rewritten=1
 		fi
 		update
@@ -1292,6 +1352,7 @@ main() {
 	write_updater
 	configure
 	keep_threads
+	keep_p2p_port
 	initialise
 
 	mark_start
