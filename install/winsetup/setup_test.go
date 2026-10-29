@@ -23,17 +23,22 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/pem"
+	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf16"
 
 	"github.com/ethereum/go-ethereum/internal/winsvc"
 )
@@ -340,6 +345,8 @@ type env struct {
 	now      time.Time
 	vars     map[string]string
 	key      ed25519.PublicKey
+	tools    *fakeTools
+	busy     map[int]bool // ports other programs listen on
 }
 
 func newEnv(t *testing.T, rs *releaseServer, key ed25519.PublicKey) *env {
@@ -355,6 +362,8 @@ func newEnv(t *testing.T, rs *releaseServer, key ed25519.PublicKey) *env {
 		cpus:    8,
 		now:     time.Date(2026, 10, 26, 9, 0, 0, 0, time.UTC),
 		key:     key,
+		tools:   &fakeTools{tasks: make(map[string]*fakeTask), granted: make(map[string]string)},
+		busy:    make(map[int]bool),
 	}
 	e.home = filepath.Join(e.profile, homeDirName)
 	e.vars = map[string]string{
@@ -394,6 +403,8 @@ func (e *env) run(args ...string) (string, error) {
 	e.procs.setEnviron(e.userEnv.copy())
 	s.setenv = e.procs.setenv
 	s.runGeth = fakeGeth(e.t, &e.accounts)
+	s.runTool = e.tools.run
+	s.portBusy = e.portBusy
 	s.now = func() time.Time { return e.now }
 	s.sleep = func(time.Duration) {}
 	err = s.run(m)
@@ -430,6 +441,9 @@ func (e *env) requireNothingInstalled() {
 	}
 	if vars := e.userEnv.copy(); len(vars) != 0 {
 		e.t.Errorf("the user's environment was changed: %v", vars)
+	}
+	if len(e.tools.tasks) != 0 || len(e.tools.opened) != 0 {
+		e.t.Errorf("a scheduled task was made or a link opened: %v %v", e.tools.tasks, e.tools.opened)
 	}
 	e.requireNoTempLeft()
 }
@@ -1022,4 +1036,473 @@ func TestWinSetupMinerThreadsRefusesMalformed(t *testing.T) {
 			e.requireNothingInstalled()
 		})
 	}
+}
+
+// fakeTask is a scheduled task of the fake schtasks.
+type fakeTask struct {
+	xml     string // its definition, decoded from UTF-16
+	running bool
+	runs    int // how often it was started
+	ends    int // how often it was ended
+}
+
+// fakeTools is schtasks, icacls and rundll32 as ghost-setup runs them.
+type fakeTools struct {
+	mu      sync.Mutex
+	tasks   map[string]*fakeTask
+	granted map[string]string // file: the icacls grant that leaves only it
+	opened  []string          // links opened in the browser
+}
+
+func (f *fakeTools) run(exe string, args ...string) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	switch {
+	case exe == schtasksExe && len(args) >= 3 && args[1] == "/TN":
+		name := args[2]
+		task := f.tasks[name]
+		switch {
+		case args[0] == "/Query" && len(args) == 3:
+			if task == nil {
+				return []byte("ERROR: The system cannot find the file specified."), errors.New("exit status 1")
+			}
+			return []byte("Ready"), nil
+		case args[0] == "/End" && len(args) == 3 && task != nil:
+			task.running = false
+			task.ends++
+			return nil, nil
+		case args[0] == "/Run" && len(args) == 3 && task != nil:
+			task.running = true
+			task.runs++
+			return nil, nil
+		case args[0] == "/Delete" && len(args) == 4 && args[3] == "/F" && task != nil:
+			delete(f.tasks, name)
+			return nil, nil
+		case args[0] == "/Create" && len(args) == 6 && args[3] == "/XML" && args[5] == "/F":
+			blob, err := os.ReadFile(args[4])
+			if err != nil {
+				return nil, err
+			}
+			text, err := decodeUTF16(blob)
+			if err != nil {
+				return []byte("ERROR: " + err.Error()), errors.New("exit status 1")
+			}
+			if task == nil {
+				task = &fakeTask{}
+				f.tasks[name] = task
+			}
+			task.xml = text
+			return nil, nil
+		}
+	case exe == icaclsExe && len(args) == 4 && args[1] == "/inheritance:r" && args[2] == "/grant:r":
+		f.granted[strings.TrimSuffix(args[0], ".new")] = args[3]
+		return nil, nil
+	case exe == "rundll32.exe" && len(args) == 2 && args[0] == "url.dll,FileProtocolHandler":
+		f.opened = append(f.opened, args[1])
+		return nil, nil
+	}
+	return []byte("unexpected command"), fmt.Errorf("unexpected command %s %q", exe, args)
+}
+
+func (f *fakeTools) task(name string) *fakeTask {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.tasks[name]
+}
+
+// decodeUTF16 decodes UTF-16LE with a byte order mark, as schtasks reads it.
+func decodeUTF16(blob []byte) (string, error) {
+	if len(blob) < 2 || blob[0] != 0xff || blob[1] != 0xfe || len(blob)%2 != 0 {
+		return "", errors.New("the task file is not UTF-16 with a byte order mark")
+	}
+	units := make([]uint16, 0, len(blob)/2-1)
+	for i := 2; i < len(blob); i += 2 {
+		units = append(units, uint16(blob[i])|uint16(blob[i+1])<<8)
+	}
+	return string(utf16.Decode(units)), nil
+}
+
+// taskDef is what the tests read of a task's definition.
+type taskDef struct {
+	Triggers struct {
+		Logon []struct {
+			Enabled bool   `xml:"Enabled"`
+			UserID  string `xml:"UserId"`
+		} `xml:"LogonTrigger"`
+	} `xml:"Triggers"`
+	Principals struct {
+		Principal []struct {
+			UserID    string `xml:"UserId"`
+			LogonType string `xml:"LogonType"`
+			RunLevel  string `xml:"RunLevel"`
+		} `xml:"Principal"`
+	} `xml:"Principals"`
+	Actions struct {
+		Exec []struct {
+			Command   string `xml:"Command"`
+			Arguments string `xml:"Arguments"`
+		} `xml:"Exec"`
+	} `xml:"Actions"`
+}
+
+func parseTask(t *testing.T, text string) taskDef {
+	t.Helper()
+	var def taskDef
+	dec := xml.NewDecoder(strings.NewReader(text))
+	// The text is decoded already; the declaration still says UTF-16.
+	dec.CharsetReader = func(_ string, r io.Reader) (io.Reader, error) { return r, nil }
+	if err := dec.Decode(&def); err != nil {
+		t.Fatalf("the task definition does not parse: %v\n%s", err, text)
+	}
+	return def
+}
+
+// portBusy is whether a program listens on the port: another program, or
+// the dashboard while its task runs.
+func (e *env) portBusy(port int) bool {
+	if e.busy[port] {
+		return true
+	}
+	task := e.tools.task(dashTaskName)
+	return task != nil && task.running && strings.Contains(task.xml, "--port "+strconv.Itoa(port)+"<")
+}
+
+func (e *env) dashPath() string { return filepath.Join(e.home, "bin", dashExeName) }
+
+func (e *env) readFile(name string) string {
+	e.t.Helper()
+	blob, err := os.ReadFile(name)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	return string(blob)
+}
+
+// dashArchive is a release archive holding a geth.exe and a ghost-dash.exe.
+func dashArchive(t *testing.T, geth, dash string) []byte {
+	return tarGz(t, tarEntry{name: gethExeName, body: geth}, tarEntry{name: dashExeName, body: dash})
+}
+
+// dashEnv is a computer whose user is PC\tester, with the release rs serves.
+func dashEnv(t *testing.T, rs *releaseServer, s *signer, geth, dash string) *env {
+	t.Helper()
+	rs.publish(s, dashArchive(t, geth, dash))
+	e := newEnv(t, rs, s.pub)
+	e.vars["USERNAME"] = "tester"
+	e.vars["USERDOMAIN"] = "PC"
+	return e
+}
+
+// requireDashboard fails unless ghost-dash.exe holds content and its task
+// starts it at the user's login with the node's folder and port, unelevated,
+// and runs it now.
+func (e *env) requireDashboard(content string, port int) {
+	e.t.Helper()
+	if got := e.readFile(e.dashPath()); got != content {
+		e.t.Errorf("the installed ghost-dash.exe holds %q, not %q", got, content)
+	}
+	task := e.tools.task(dashTaskName)
+	if task == nil {
+		e.t.Fatalf("there is no %s task", dashTaskName)
+	}
+	if !task.running {
+		e.t.Errorf("the %s task is not running", dashTaskName)
+	}
+	def := parseTask(e.t, task.xml)
+	if len(def.Triggers.Logon) != 1 || !def.Triggers.Logon[0].Enabled || def.Triggers.Logon[0].UserID != `PC\tester` {
+		e.t.Errorf("the task does not start at the login of PC\\tester only: %+v", def.Triggers)
+	}
+	if len(def.Principals.Principal) != 1 || def.Principals.Principal[0].UserID != `PC\tester` ||
+		def.Principals.Principal[0].LogonType != "InteractiveToken" || def.Principals.Principal[0].RunLevel != "LeastPrivilege" {
+		e.t.Errorf("the task does not run as the user, unelevated: %+v", def.Principals)
+	}
+	wantArgs := winsvc.JoinCommandLine("--node-dir", e.home, "--port", strconv.Itoa(port))
+	if len(def.Actions.Exec) != 1 || def.Actions.Exec[0].Command != e.dashPath() || def.Actions.Exec[0].Arguments != wantArgs {
+		e.t.Errorf("the task runs %+v, not %s %s", def.Actions.Exec, e.dashPath(), wantArgs)
+	}
+}
+
+// TestWindowsDashboardFirstInstall installs a release with the dashboard: it
+// is installed with a new key, runs as its own logon task, and opens in the
+// browser. A re-run keeps the key, restarts the dashboard and only prints the
+// link.
+func TestWindowsDashboardFirstInstall(t *testing.T) {
+	rs := newReleaseServer(t)
+	s := newSigner(t)
+	e := dashEnv(t, rs, s, "geth", "dash")
+
+	out, err := e.run()
+	if err != nil {
+		t.Fatalf("install failed: %v\n%s", err, out)
+	}
+	e.requireRunning("geth")
+	e.requireDashboard("dash", 8580)
+
+	keyPath := filepath.Join(e.home, dashKeyName)
+	key := e.readFile(keyPath)
+	if !regexp.MustCompile(`^[0-9a-f]{64}\n$`).MatchString(key) {
+		t.Errorf("dashboard-key is not 32 bytes in hex: %q", key)
+	}
+	if got := e.tools.granted[keyPath]; got != `PC\tester:F` {
+		t.Errorf("dashboard-key is not made readable only by PC\\tester: %q", got)
+	}
+	if fi, err := os.Stat(keyPath); err != nil || fi.Mode().Perm()&0o077 != 0 {
+		t.Errorf("dashboard-key is open to others: %v %v", fi.Mode(), err)
+	}
+	link := "http://127.0.0.1:8580/"
+	if len(e.tools.opened) != 1 || e.tools.opened[0] != link {
+		t.Errorf("the first install opened %q, not %s", e.tools.opened, link)
+	}
+	if !strings.Contains(out, "the node dashboard runs at "+link) {
+		t.Errorf("the output does not give the dashboard's link:\n%s", out)
+	}
+	e.requireNoTempLeft()
+
+	// A re-run, with the dashboard holding its port.
+	runs := e.tools.task(dashTaskName).runs
+	out, err = e.run()
+	if err != nil {
+		t.Fatalf("second install failed: %v\n%s", err, out)
+	}
+	e.requireDashboard("dash", 8580)
+	if got := e.readFile(keyPath); got != key {
+		t.Error("a re-run changed dashboard-key")
+	}
+	if task := e.tools.task(dashTaskName); task.runs != runs+1 || task.ends == 0 {
+		t.Errorf("a re-run did not restart the dashboard: started %d times, ended %d", task.runs, task.ends)
+	}
+	if len(e.tools.opened) != 1 {
+		t.Errorf("a re-run opened the dashboard again: %q", e.tools.opened)
+	}
+	if !strings.Contains(out, "the node dashboard runs at "+link) {
+		t.Errorf("the re-run does not give the dashboard's link:\n%s", out)
+	}
+}
+
+// TestWindowsDashboardPort installs with GHOST_DASH_PORT: the dashboard runs
+// on it, and re-runs and updates keep it.
+func TestWindowsDashboardPort(t *testing.T) {
+	rs := newReleaseServer(t)
+	s := newSigner(t)
+	e := dashEnv(t, rs, s, "geth", "dash")
+	e.vars["GHOST_DASH_PORT"] = "8590"
+	if out, err := e.run(); err != nil {
+		t.Fatalf("install failed: %v\n%s", err, out)
+	}
+	e.requireDashboard("dash", 8590)
+	if len(e.tools.opened) != 1 || e.tools.opened[0] != "http://127.0.0.1:8590/" {
+		t.Errorf("the install opened %q", e.tools.opened)
+	}
+
+	delete(e.vars, "GHOST_DASH_PORT")
+	if out, err := e.run(); err != nil {
+		t.Fatalf("second install failed: %v\n%s", err, out)
+	}
+	e.requireDashboard("dash", 8590)
+	out, err := e.run("--update")
+	if err != nil {
+		t.Fatalf("update failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "the node dashboard runs at http://127.0.0.1:8590/") {
+		t.Errorf("the update does not give the dashboard's link:\n%s", out)
+	}
+}
+
+// TestWindowsDashboardRefusesBusyPort installs while another program holds
+// the dashboard's port, or with the node's HTTP port as the dashboard's: the
+// install is refused with nothing installed.
+func TestWindowsDashboardRefusesBusyPort(t *testing.T) {
+	t.Run("busy", func(t *testing.T) {
+		rs := newReleaseServer(t)
+		s := newSigner(t)
+		e := dashEnv(t, rs, s, "geth", "dash")
+		e.busy[8580] = true
+		_, err := e.run()
+		if err == nil || !strings.Contains(err.Error(), "port 8580 on this computer is already in use by another program") ||
+			!strings.Contains(err.Error(), "GHOST_DASH_PORT") || !strings.Contains(err.Error(), "Nothing was installed") {
+			t.Fatalf("a busy dashboard port was not refused: %v", err)
+		}
+		e.requireNothingInstalled()
+
+		// Another port is free.
+		e.vars["GHOST_DASH_PORT"] = "8581"
+		if out, err := e.run(); err != nil {
+			t.Fatalf("install on a free port failed: %v\n%s", err, out)
+		}
+		e.requireDashboard("dash", 8581)
+	})
+	t.Run("http port", func(t *testing.T) {
+		rs := newReleaseServer(t)
+		s := newSigner(t)
+		e := dashEnv(t, rs, s, "geth", "dash")
+		e.vars["GHOST_DASH_PORT"] = "8545"
+		_, err := e.run()
+		if err == nil || !strings.Contains(err.Error(), "the node's HTTP RPC port") {
+			t.Fatalf("the HTTP RPC port as the dashboard's was not refused: %v", err)
+		}
+		e.requireNothingInstalled()
+	})
+}
+
+// TestWindowsDashboardRefusesMalformedPort runs ghost-setup with
+// GHOST_DASH_PORT set to what is not a port: it refuses before it downloads
+// anything.
+func TestWindowsDashboardRefusesMalformedPort(t *testing.T) {
+	for _, value := range []string{"0", "080", "-1", "+80", "65536", "99999", "port", "85 80", "8580 "} {
+		t.Run(fmt.Sprintf("%q", value), func(t *testing.T) {
+			rs := newReleaseServer(t)
+			s := newSigner(t)
+			e := dashEnv(t, rs, s, "geth", "dash")
+			e.vars["GHOST_DASH_PORT"] = value
+			_, err := e.run()
+			if err == nil || !strings.Contains(err.Error(), "GHOST_DASH_PORT must be a port number") {
+				t.Fatalf("GHOST_DASH_PORT=%q was not refused: %v", value, err)
+			}
+			if rs.count() != 0 {
+				t.Error("a refused GHOST_DASH_PORT downloaded the release")
+			}
+			e.requireNothingInstalled()
+		})
+	}
+}
+
+// TestWindowsDashboardSkipped installs with GHOST_NO_DASHBOARD=1: the node is
+// installed without the dashboard, and a dashboard installed before is taken
+// out, its key kept.
+func TestWindowsDashboardSkipped(t *testing.T) {
+	rs := newReleaseServer(t)
+	s := newSigner(t)
+	e := dashEnv(t, rs, s, "geth", "dash")
+	e.vars["GHOST_NO_DASHBOARD"] = "1"
+	out, err := e.run()
+	if err != nil {
+		t.Fatalf("install failed: %v\n%s", err, out)
+	}
+	e.requireRunning("geth")
+	for _, name := range []string{e.dashPath(), filepath.Join(e.home, dashKeyName)} {
+		if _, err := os.Stat(name); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("%s was installed with GHOST_NO_DASHBOARD=1 (%v)", name, err)
+		}
+	}
+	if len(e.tools.tasks) != 0 || len(e.tools.opened) != 0 {
+		t.Errorf("GHOST_NO_DASHBOARD=1 made a task or opened a link: %v %v", e.tools.tasks, e.tools.opened)
+	}
+	if !strings.Contains(out, "GHOST_NO_DASHBOARD=1: the node dashboard is not installed") || strings.Contains(out, "127.0.0.1:8580") {
+		t.Errorf("the output does not say the dashboard was left out:\n%s", out)
+	}
+
+	// Installed with it, then re-run without.
+	delete(e.vars, "GHOST_NO_DASHBOARD")
+	if out, err := e.run(); err != nil {
+		t.Fatalf("install failed: %v\n%s", err, out)
+	}
+	e.requireDashboard("dash", 8580)
+	if len(e.tools.opened) != 0 {
+		t.Errorf("a re-run of an installed node opened the dashboard: %q", e.tools.opened)
+	}
+	key := e.readFile(filepath.Join(e.home, dashKeyName))
+	e.vars["GHOST_NO_DASHBOARD"] = "1"
+	if out, err := e.run(); err != nil {
+		t.Fatalf("install failed: %v\n%s", err, out)
+	}
+	if e.tools.task(dashTaskName) != nil {
+		t.Error("GHOST_NO_DASHBOARD=1 left the dashboard's task")
+	}
+	if _, err := os.Stat(e.dashPath()); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("GHOST_NO_DASHBOARD=1 left ghost-dash.exe (%v)", err)
+	}
+	if got := e.readFile(filepath.Join(e.home, dashKeyName)); got != key {
+		t.Error("GHOST_NO_DASHBOARD=1 changed dashboard-key")
+	}
+
+	// An update does not bring it back.
+	delete(e.vars, "GHOST_NO_DASHBOARD")
+	rs.publish(s, dashArchive(t, "geth v2", "dash v2"))
+	if out, err := e.run("--update"); err != nil {
+		t.Fatalf("update failed: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(e.dashPath()); !errors.Is(err, fs.ErrNotExist) || e.tools.task(dashTaskName) != nil {
+		t.Errorf("an update installed the dashboard left out (%v)", err)
+	}
+}
+
+// TestWindowsDashboardNoneInRelease installs a release without
+// ghost-dash.exe: the node is installed, and the output says there is no
+// dashboard.
+func TestWindowsDashboardNoneInRelease(t *testing.T) {
+	rs := newReleaseServer(t)
+	s := newSigner(t)
+	rs.publish(s, gethArchive(t, "geth"))
+	e := newEnv(t, rs, s.pub)
+	e.vars["USERNAME"] = "tester"
+	out, err := e.run()
+	if err != nil {
+		t.Fatalf("install failed: %v\n%s", err, out)
+	}
+	e.requireRunning("geth")
+	if len(e.tools.tasks) != 0 || len(e.tools.opened) != 0 {
+		t.Errorf("a release without a dashboard made a task or opened a link: %v %v", e.tools.tasks, e.tools.opened)
+	}
+	if !strings.Contains(out, "this release has no node dashboard") {
+		t.Errorf("the output does not say the release has no dashboard:\n%s", out)
+	}
+}
+
+// TestWindowsDashboardUpdate updates an installed dashboard: a new
+// ghost-dash.exe replaces it and its task restarts, keeping the key; the same
+// one is left running. An update only prints the link.
+func TestWindowsDashboardUpdate(t *testing.T) {
+	rs := newReleaseServer(t)
+	s := newSigner(t)
+	e := dashEnv(t, rs, s, "geth", "dash")
+	if out, err := e.run(); err != nil {
+		t.Fatalf("install failed: %v\n%s", err, out)
+	}
+	key := e.readFile(filepath.Join(e.home, dashKeyName))
+	task := e.tools.task(dashTaskName)
+
+	// The same release: the dashboard keeps running.
+	runs, ends := task.runs, task.ends
+	out, err := e.run("--update")
+	if err != nil {
+		t.Fatalf("update failed: %v\n%s", err, out)
+	}
+	if task.runs != runs || task.ends != ends {
+		t.Error("an update to the same release restarted the dashboard")
+	}
+	if !strings.Contains(out, "the node dashboard runs at http://127.0.0.1:8580/") {
+		t.Errorf("the update does not give the dashboard's link:\n%s", out)
+	}
+
+	// A new node and dashboard.
+	rs.publish(s, dashArchive(t, "geth v2", "dash v2"))
+	out, err = e.run("--update")
+	if err != nil {
+		t.Fatalf("update failed: %v\n%s", err, out)
+	}
+	e.requireRunning("geth v2")
+	e.requireDashboard("dash v2", 8580)
+	if task.runs != runs+1 || task.ends != ends+1 {
+		t.Errorf("the update did not restart the dashboard: started %d times, ended %d", task.runs-runs, task.ends-ends)
+	}
+	if !strings.Contains(out, "updated the node dashboard and restarted it") {
+		t.Errorf("the output does not say the dashboard was updated:\n%s", out)
+	}
+
+	// A new dashboard only, from the daily update.
+	rs.publish(s, dashArchive(t, "geth v2", "dash v3"))
+	if out, err := e.run("--update", "--daily"); err != nil {
+		t.Fatalf("daily update failed: %v\n%s", err, out)
+	}
+	e.requireDashboard("dash v3", 8580)
+	if task.runs != runs+2 {
+		t.Error("the daily update did not restart the dashboard")
+	}
+	if got := e.readFile(filepath.Join(e.home, dashKeyName)); got != key {
+		t.Error("an update changed dashboard-key")
+	}
+	if len(e.tools.opened) != 1 {
+		t.Errorf("an update opened the dashboard: %q", e.tools.opened)
+	}
+	e.requireNoTempLeft()
 }

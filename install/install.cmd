@@ -53,6 +53,17 @@ rem at login mines on that many cores too. A re-run or an update keeps the
 rem number unless GHOST_MINE_THREADS is set again. ghost-setup's closing lines
 rem say how many cores the node mines on.
 rem
+rem A release with the node dashboard, ghost-dash.exe, gets it installed beside
+rem the node with its own key, dashboard-key, and run as the scheduled task
+rem "Ghost Dashboard" at every login, on 127.0.0.1 port 8580. A first install
+rem opens it in the browser; re-runs and updates print its link.
+rem GHOST_DASH_PORT moves it to another port, a number from 1 to 65535;
+rem anything else is refused with nothing installed, and so is a port another
+rem program holds. GHOST_NO_DASHBOARD=1 leaves it out. In CMD, run
+rem set "GHOST_NO_DASHBOARD=1"  before the line above. The same in PowerShell:
+rem
+rem   $env:GHOST_NO_DASHBOARD='1'; irm https://get.ghostcoin.com/win | iex
+rem
 rem It uses no labels, so it runs the same whatever its line endings.
 
 setlocal EnableExtensions DisableDelayedExpansion
@@ -115,6 +126,23 @@ if defined GHOST_MINE_THREADS (
 )
 if not defined THREADS_OK (
 	echo ghost-node: GHOST_MINE_THREADS must be the number of CPU cores to mine on, a whole number from 1 to 9999; %REFUSAL% 1>&2
+	exit /b 1
+)
+rem GHOST_DASH_PORT, when set, is the node dashboard's port: a number from 1
+rem to 65535, which ghost-setup reads too. It is checked with delayed
+rem expansion only, as GHOST_MINE_TO is. DASH_PORT_OK is 1 when it is unset or
+rem such a number.
+set "DASH_PORT_OK=1"
+if defined GHOST_DASH_PORT (
+	setlocal EnableDelayedExpansion
+	set "DASH_PORT_OK="
+	set "REST=!GHOST_DASH_PORT!"
+	for %%C in (0 1 2 3 4 5 6 7 8 9) do if defined REST set "REST=!REST:%%C=!"
+	if not defined REST if not "!GHOST_DASH_PORT:~0,1!"=="0" if "!GHOST_DASH_PORT:~5!"=="" if !GHOST_DASH_PORT! leq 65535 set "DASH_PORT_OK=1"
+	for %%R in ("!DASH_PORT_OK!") do endlocal & set "DASH_PORT_OK=%%~R"
+)
+if not defined DASH_PORT_OK (
+	echo ghost-node: GHOST_DASH_PORT must be a port number for the node dashboard, from 1 to 65535; %REFUSAL% 1>&2
 	exit /b 1
 )
 if defined GHOST_MINE_TO if defined GHOST_HTTP_PORT set "HTTP_PORT=%GHOST_HTTP_PORT%"

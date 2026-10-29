@@ -494,6 +494,110 @@ func TestMinerThreadsWindowsScripts(t *testing.T) {
 	}
 }
 
+// noDashboardExample is the one-line example of GHOST_NO_DASHBOARD that each
+// Windows installer's header gives.
+const noDashboardExample = "$env:GHOST_NO_DASHBOARD='1'; irm https://get.ghostcoin.com/win | iex"
+
+// TestWindowsDashboardScripts checks that the Windows scripts read
+// GHOST_DASH_PORT: they refuse what is not a port number before they
+// download anything, and leave the dashboard to ghost-setup. Each header and
+// the README describe the dashboard and its settings.
+func TestWindowsDashboardScripts(t *testing.T) {
+	for _, ws := range windowsScripts {
+		comments := ws.comments(t)
+		for _, want := range []string{noDashboardExample, "GHOST_DASH_PORT", `"Ghost Dashboard"`, "8580", "dashboard-key", "opens it in the browser"} {
+			if !strings.Contains(comments, want) {
+				t.Errorf("%s's header does not mention %s", ws.file, want)
+			}
+		}
+	}
+	readme, err := os.ReadFile("../README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"ghost-dash.exe", "Ghost Dashboard", "GHOST_DASH_PORT", "GHOST_NO_DASHBOARD=1", "8580", "dashboard-key"} {
+		if !strings.Contains(string(readme), want) {
+			t.Errorf("README.md does not mention %s", want)
+		}
+	}
+
+	valid := []string{"1", "80", "8580", "65535"}
+	invalid := []string{"0", "080", "-1", "+80", "85 80", "8580 ", " 8580", "8580\n", "port", "123456", "0x50"}
+
+	// install.ps1 checks the port with a .NET regular expression, which means
+	// the same in Go, and its value, before it downloads anything.
+	ps1 := windowsScripts[0]
+	code := ps1.code(t)
+	read := find(t, ps1.file, code, `$DashPort = $env:GHOST_DASH_PORT`)
+	check := find(t, ps1.file, code, `if ($DashPort -and ($DashPort -cnotmatch '`)
+	if check >= 0 {
+		m := regexp.MustCompile(`-cnotmatch '([^']+)'`).FindStringSubmatch(code[check])
+		if m == nil || check+1 >= len(code) {
+			t.Fatalf("install.ps1 checks GHOST_DASH_PORT with no pattern: %s", code[check])
+		}
+		pattern := regexp.MustCompile(m[1])
+		for _, good := range valid {
+			if !pattern.MatchString(good) {
+				t.Errorf("install.ps1 refuses GHOST_DASH_PORT=%s", good)
+			}
+		}
+		for _, bad := range invalid {
+			if pattern.MatchString(bad) {
+				t.Errorf("install.ps1 takes the malformed GHOST_DASH_PORT %q", bad)
+			}
+		}
+		if !strings.Contains(code[check], "-or [int]$DashPort -gt 65535)) {") {
+			t.Errorf("install.ps1 does not refuse a GHOST_DASH_PORT over 65535: %s", code[check])
+		}
+		if !strings.HasPrefix(code[check+1], "throw ") || !strings.Contains(code[check+1], "$Refusal") ||
+			!strings.Contains(code[check+1], "GHOST_DASH_PORT must be a port number") {
+			t.Errorf("install.ps1 does not refuse a malformed GHOST_DASH_PORT: %s", code[check+1])
+		}
+	}
+	checkOrder(t, ps1.file, code, read, check, ps1.download, ps1.runLine)
+
+	// install.cmd checks the port by what is left once every digit is taken
+	// out, its first character, its length and its value, before it downloads
+	// anything.
+	cmd := windowsScripts[1]
+	code = cmd.code(t)
+	read = find(t, cmd.file, code, `if defined GHOST_DASH_PORT (`)
+	strip := find(t, cmd.file, code, `set "REST=!GHOST_DASH_PORT!"`)
+	check = find(t, cmd.file, code, `if not defined REST if not "!GHOST_DASH_PORT:~0,1!"=="0" if "!GHOST_DASH_PORT:~5!"=="" if !GHOST_DASH_PORT! leq 65535 set "DASH_PORT_OK=1"`)
+	refuse := find(t, cmd.file, code, `if not defined DASH_PORT_OK (`)
+	if strip >= 0 && (strip+1 >= len(code) || code[strip+1] != `for %%C in (0 1 2 3 4 5 6 7 8 9) do if defined REST set "REST=!REST:%%C=!"`) {
+		t.Errorf("install.cmd does not take every digit out of GHOST_DASH_PORT")
+	}
+	if refuse >= 0 && (refuse+2 >= len(code) || !strings.Contains(code[refuse+1], "GHOST_DASH_PORT must be") ||
+		!strings.Contains(code[refuse+1], "%REFUSAL%") || code[refuse+2] != "exit /b 1") {
+		t.Errorf("install.cmd does not refuse a malformed GHOST_DASH_PORT")
+	}
+	if read >= 0 && (read+2 >= len(code) || code[read+2] != `set "DASH_PORT_OK="`) {
+		t.Errorf("install.cmd does not start from refusing a set GHOST_DASH_PORT")
+	}
+	checkOrder(t, cmd.file, code, read, strip, check, refuse, cmd.download, cmd.runLine)
+
+	// ghost-setup reads the same settings, and keeps its key and task names.
+	setupSource, err := os.ReadFile("winsetup/dashboard.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`dashTaskName    = "Ghost Dashboard"`, `dashKeyName     = "dashboard-key"`, `defaultDashPort = 8580`} {
+		if !strings.Contains(string(setupSource), want) {
+			t.Errorf("winsetup/dashboard.go does not hold %s", want)
+		}
+	}
+	mainSource, err := os.ReadFile("winsetup/setup.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`getenv("GHOST_DASH_PORT")`, `getenv("GHOST_NO_DASHBOARD") != "1"`} {
+		if !strings.Contains(string(mainSource), want) {
+			t.Errorf("winsetup/setup.go does not read %s", want)
+		}
+	}
+}
+
 // checkOrder checks that the code lines come in the order given, each given
 // by its index or by a literal that only it holds; the run line by equality.
 func checkOrder(t *testing.T, file string, code []string, order ...any) {

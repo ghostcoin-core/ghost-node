@@ -60,6 +60,19 @@
 // update keeps the number unless GHOST_MINE_THREADS is set again; an update of
 // a node installed before ghost-setup set it restarts the node on the default.
 //
+// A release archive that holds ghost-dash.exe, the node dashboard, gets it
+// installed in the same bin directory, with dashboard-key in the node's
+// folder: 32 random bytes in hex, written on the first install, readable only
+// by the user (icacls), and kept on re-runs and updates. The dashboard runs as
+// its own scheduled task, "Ghost Dashboard", which starts it at the user's
+// login, as the user and with no elevation, with --node-dir and --port: 8580,
+// or GHOST_DASH_PORT's, which the folder's dashboard-port keeps for re-runs
+// and updates. An install refuses a port another program holds. A first
+// install opens the dashboard's link in the default browser; every install and
+// update prints it. An update replaces ghost-dash.exe when the release's
+// differs and restarts the task. GHOST_NO_DASHBOARD=1 at install time leaves
+// the dashboard out, and takes out one installed before.
+//
 // It is built with the standard library and internal/winsvc only, with cgo
 // off, for windows/amd64 and windows/arm64.
 package main
