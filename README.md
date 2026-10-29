@@ -120,7 +120,19 @@ Updates are on by default: a second Run key value runs
 and installs a newer signed release after the same checks, keeping the
 previous `geth.exe` until the node has restarted on the new one; a refused
 update changes nothing. Set `GHOST_NO_UPDATE=1` for the install to leave it
-out. The `ghost-setup` hashes pinned in the two scripts are all-zero
+out.
+
+A release that ships the node dashboard, `ghost-dash.exe`, gets it installed
+beside `geth.exe` from the same signed archive, with a key of its own,
+`%USERPROFILE%\.ghost-node\dashboard-key` (32 random bytes in hex, readable
+only by you), written on the first install and kept on re-runs and updates.
+The dashboard runs as its own scheduled task, `Ghost Dashboard`, which starts
+it at every login as you, with no administrator rights, on
+`http://127.0.0.1:8580/`. A first install opens that link in your browser;
+re-runs and updates only print it. An update replaces `ghost-dash.exe` and
+restarts the task.
+
+The `ghost-setup` hashes pinned in the two scripts are all-zero
 placeholders until the release publishes the setup executables, so for now
 both lines refuse to install.
 
@@ -152,6 +164,15 @@ the installer cannot use is refused with nothing installed.
   macOS the node runs with `--miner.threads`; on Windows `ghost-setup` keeps
   the number as `GETH_MINER_THREADS` in the user's environment, which geth reads
   as the same setting, so the node started at login uses it too.
+- `GHOST_DASH_PORT=<port>` moves the Windows node dashboard off `8580`; a
+  re-run or an update keeps the port unless the setting is given again. An
+  install refuses a port another program already holds.
+- `GHOST_NO_DASHBOARD=1` leaves the Windows node dashboard out, and takes out
+  one installed before:
+
+  ```powershell
+  $env:GHOST_NO_DASHBOARD='1'; irm https://get.ghostcoin.com/win | iex
+  ```
 
 ## Building
 

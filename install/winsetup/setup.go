@@ -137,6 +137,10 @@ type setup struct {
 	threads    int // GHOST_MINE_THREADS's number of cores, 0 when unset
 	cpus       int // this computer's logical cores
 
+	dashboard   bool   // install the node dashboard: GHOST_NO_DASHBOARD is not 1
+	dashPortEnv int    // GHOST_DASH_PORT's port, 0 when unset
+	user        string // DOMAIN\name of the user, whose login starts the dashboard
+
 	runKey  winsvc.RunKey
 	procs   winsvc.Processes
 	userEnv userEnv
@@ -148,9 +152,14 @@ type setup struct {
 	// runGeth runs the geth executable exe with args to completion and
 	// returns its output.
 	runGeth func(exe string, args ...string) ([]byte, error)
-	now     func() time.Time
-	sleep   func(time.Duration)
-	out     io.Writer
+	// runTool runs a Windows tool, schtasks, icacls or rundll32, to
+	// completion and returns its output.
+	runTool func(exe string, args ...string) ([]byte, error)
+	// portBusy reports whether a program listens on 127.0.0.1 at a port.
+	portBusy func(port int) bool
+	now      func() time.Time
+	sleep    func(time.Duration)
+	out      io.Writer
 }
 
 // newSetup returns the setup that getenv's environment asks for, with the
@@ -184,6 +193,16 @@ func newSetup(getenv func(string) string, self string, out io.Writer) (*setup, e
 			return nil, fmt.Errorf("GHOST_MINE_THREADS must be the number of CPU cores to mine on, a whole number from 1 to 9999, not '%s'; nothing was installed or changed", v)
 		}
 	}
+	dashPort := 0
+	if p := getenv("GHOST_DASH_PORT"); p != "" {
+		if dashPort = parsePort(p); dashPort == 0 {
+			return nil, fmt.Errorf("GHOST_DASH_PORT must be a port number for the node dashboard, not '%s'; nothing was installed or changed", p)
+		}
+	}
+	user := getenv("USERNAME")
+	if domain := getenv("USERDOMAIN"); user != "" && domain != "" {
+		user = domain + `\` + user
+	}
 	client, err := newClient(getenv("GHOST_INSTALL_CA_FILE"))
 	if err != nil {
 		return nil, err
@@ -193,21 +212,26 @@ func newSetup(getenv func(string) string, self string, out io.Writer) (*setup, e
 		return nil, fmt.Errorf("there is no Ghost node release for %s processors; releases are for amd64 and arm64", arch)
 	}
 	return &setup{
-		releaseURL: releaseURL,
-		client:     client,
-		key:        key,
-		arch:       arch,
-		home:       filepath.Join(profile, homeDirName),
-		self:       self,
-		httpPort:   port,
-		autoUpdate: getenv("GHOST_NO_UPDATE") != "1",
-		threads:    threads,
-		cpus:       runtime.NumCPU(),
-		setenv:     os.Setenv,
-		runGeth:    runCommand,
-		now:        time.Now,
-		sleep:      time.Sleep,
-		out:        out,
+		releaseURL:  releaseURL,
+		client:      client,
+		key:         key,
+		arch:        arch,
+		home:        filepath.Join(profile, homeDirName),
+		self:        self,
+		httpPort:    port,
+		autoUpdate:  getenv("GHOST_NO_UPDATE") != "1",
+		threads:     threads,
+		cpus:        runtime.NumCPU(),
+		dashboard:   getenv("GHOST_NO_DASHBOARD") != "1",
+		dashPortEnv: dashPort,
+		user:        user,
+		setenv:      os.Setenv,
+		runGeth:     runCommand,
+		runTool:     runCommand,
+		portBusy:    portInUse,
+		now:         time.Now,
+		sleep:       time.Sleep,
+		out:         out,
 	}, nil
 }
 
@@ -351,7 +375,7 @@ func (s *setup) threadsSummary(n int) string {
 }
 
 func (s *setup) run(m mode) error {
-	if s.runKey == nil || s.procs == nil || s.runGeth == nil || s.userEnv == nil || s.setenv == nil {
+	if s.runKey == nil || s.procs == nil || s.runGeth == nil || s.userEnv == nil || s.setenv == nil || s.runTool == nil || s.portBusy == nil {
 		return errors.New("the setup has no Run key, process, environment or geth access")
 	}
 	if m == modeInstall {
@@ -365,6 +389,8 @@ type release struct {
 	geth    string // its geth.exe
 	genesis string // its genesis.json, "" if it has the network built in
 	sum     [32]byte
+	dash    string // its ghost-dash.exe, "" if it has no dashboard
+	dashSum [32]byte
 }
 
 // fetchRelease downloads the release archive and its signature into work,
@@ -402,6 +428,12 @@ func (s *setup) fetchRelease(work string) (*release, error) {
 	}
 	if rel.sum, err = fileSum(rel.geth); err != nil {
 		return nil, err
+	}
+	if dash := filepath.Join(dir, dashExeName); isRegular(dash) {
+		rel.dash = dash
+		if rel.dashSum, err = fileSum(dash); err != nil {
+			return nil, err
+		}
 	}
 	if out, err := s.runGeth(rel.geth, "version"); err != nil {
 		return nil, fmt.Errorf("the downloaded %s does not run on this computer: %v %s", gethExeName, err, lastLines(out))
@@ -543,6 +575,13 @@ func (s *setup) install() error {
 	if err != nil {
 		return fmt.Errorf("%v; refusing to install. Nothing was installed", err)
 	}
+	first := !isFile(s.gethPath())
+	dashboard := s.dashboard && rel.dash != ""
+	if dashboard {
+		if err := s.prepareDashboard(); err != nil {
+			return fmt.Errorf("%v; refusing to install. Nothing was installed", err)
+		}
+	}
 
 	for _, dir := range []string{s.binDir(), s.dataDir()} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -585,6 +624,16 @@ func (s *setup) install() error {
 	} else if err := s.runKey.Delete(updateValueName); err != nil {
 		return fmt.Errorf("could not remove the daily update from the Run key: %w", err)
 	}
+	switch {
+	case !s.dashboard:
+		if err := s.removeDashboard(); err != nil {
+			return err
+		}
+	case dashboard:
+		if err := s.installDashboard(rel, work, first); err != nil {
+			return err
+		}
+	}
 
 	status := winsvc.JoinCommandLine(s.gethPath(), "service", "status", "--home", s.home)
 	stop := winsvc.JoinCommandLine(s.gethPath(), "service", "stop", "--home", s.home)
@@ -601,6 +650,14 @@ func (s *setup) install() error {
 		s.say("automatic updates are off; to update run: %s", update)
 	}
 	s.say("stop it with: %s", stop)
+	switch {
+	case !s.dashboard:
+		s.say("GHOST_NO_DASHBOARD=1: the node dashboard is not installed")
+	case !dashboard:
+		s.say("this release has no node dashboard")
+	default:
+		s.say("the node dashboard runs at %s", dashLink(s.dashboardPort()))
+	}
 	return nil
 }
 
@@ -744,7 +801,7 @@ func (s *setup) update(daily bool) error {
 			s.say("restarted the node to mine on %s", s.threadsSummary(threads))
 		}
 		s.say("mining on %s", s.threadsSummary(threads))
-		return nil
+		return s.updateDashboard(rel)
 	}
 
 	if _, err := svc.Stop(); err != nil {
@@ -766,7 +823,7 @@ func (s *setup) update(daily bool) error {
 		os.Remove(previous)
 		s.say("updated the node to the latest release and restarted it")
 		s.say("mining on %s", s.threadsSummary(threads))
-		return nil
+		return s.updateDashboard(rel)
 	}
 	svc.Stop()
 	if err := os.Rename(previous, geth); err != nil {
@@ -805,6 +862,12 @@ func tomlString(s string) (string, error) {
 
 func isFile(name string) bool {
 	fi, err := os.Stat(name)
+	return err == nil && fi.Mode().IsRegular()
+}
+
+// isRegular reports whether name is a regular file and not a link to one.
+func isRegular(name string) bool {
+	fi, err := os.Lstat(name)
 	return err == nil && fi.Mode().IsRegular()
 }
 

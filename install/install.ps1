@@ -50,6 +50,16 @@
 # unless GHOST_MINE_THREADS is set again. ghost-setup's closing lines say how
 # many cores the node mines on.
 #
+# A release with the node dashboard, ghost-dash.exe, gets it installed beside
+# the node with its own key, dashboard-key, and run as the scheduled task
+# "Ghost Dashboard" at every login, on 127.0.0.1 port 8580. A first install
+# opens it in the browser; re-runs and updates print its link. GHOST_DASH_PORT
+# moves it to another port, a number from 1 to 65535; anything else is refused
+# with nothing installed, and so is a port another program holds.
+# GHOST_NO_DASHBOARD=1 leaves it out:
+#
+#	$env:GHOST_NO_DASHBOARD='1'; irm https://get.ghostcoin.com/win | iex
+#
 # The whole script is one script block that runs at its last line, so a
 # download cut short runs nothing.
 
@@ -95,6 +105,12 @@
 	$MineThreads = $env:GHOST_MINE_THREADS
 	if ($MineThreads -and $MineThreads -cnotmatch '^[1-9][0-9]{0,3}\z') {
 		throw "ghost-node: GHOST_MINE_THREADS must be the number of CPU cores to mine on, a whole number from 1 to 9999, not '$MineThreads'; $Refusal"
+	}
+	# GHOST_DASH_PORT, when set, is the node dashboard's port; ghost-setup
+	# reads it too.
+	$DashPort = $env:GHOST_DASH_PORT
+	if ($DashPort -and ($DashPort -cnotmatch '^[1-9][0-9]{0,4}\z' -or [int]$DashPort -gt 65535)) {
+		throw "ghost-node: GHOST_DASH_PORT must be a port number for the node dashboard, not '$DashPort'; $Refusal"
 	}
 	$NodeHome = $null
 	$Config = $null
