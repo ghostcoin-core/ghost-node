@@ -74,7 +74,7 @@ func nodeUnit(t *testing.T, env *installEnv) string {
 func checkMinesOn(t *testing.T, env *installEnv, threads int) {
 	t.Helper()
 	base := filepath.Join(env.home, ".ghost-node")
-	execStart := fmt.Sprintf("ExecStart=%q --config %q --mine --miner.threads %d\n", filepath.Join(base, "bin", "geth"), filepath.Join(base, "config.toml"), threads)
+	execStart := fmt.Sprintf("ExecStart=%q --config %q --mine --miner.threads %d%s\n", filepath.Join(base, "bin", "geth"), filepath.Join(base, "config.toml"), threads, env.portFlag())
 	if unit := nodeUnit(t, env); !strings.Contains(unit, execStart) {
 		t.Fatalf("the unit does not run the node on %d cores:\n%s", threads, unit)
 	}
@@ -277,7 +277,7 @@ func TestMinerThreadsOldInstallGetsDefaultOnUpdate(t *testing.T) {
 		// The unit of an old install runs the node with no --miner.threads,
 		// and no number is kept.
 		unitPath := filepath.Join(env.home, ".config", "systemd", "user", "ghost-node.service")
-		old := strings.Replace(nodeUnit(t, env), " --mine --miner.threads 1\n", " --mine\n", 1)
+		old := strings.Replace(nodeUnit(t, env), " --mine --miner.threads 1"+env.portFlag()+"\n", " --mine"+env.portFlag()+"\n", 1)
 		if err := os.WriteFile(unitPath, []byte(old), 0600); err != nil {
 			t.Fatal(err)
 		}
