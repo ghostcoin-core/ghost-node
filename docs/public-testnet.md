@@ -71,7 +71,27 @@ enode://d438702bc0ce195458046d316ec67a9da0d9cac60c28179b9685d0c6136c0d80@65.21.1
 ```
 
 `--bootnodes` replaces the list, and so does a `BootstrapNodes` list in the
-config file.
+config file. The installer's config sets neither, nor a network ID, and it
+initialises no chain for a release with the network built in;
+`install/peers_test.go` checks that.
+
+## Mining waits for a peer
+
+On the public test network a node with no peers does not mine. Alone it
+would build a fork of its own that no other node follows, and its blocks and
+rewards would count for nothing. `--mine` still starts the miner, which keeps
+its pending block current, but it hands no block to the sealer while the node
+has zero peers. It logs `Not mining: waiting for a peer on the public test
+network`, at most once a minute, and starts sealing within a recommit interval
+of the first peer connecting. When the last peer leaves, the miner stops
+handing out new work. A block already being sealed may still be found.
+
+The gate checks only the chain ID and the peer count: the consensus rules are
+unchanged. Developer mode, the internal network (6777971) and any other chain
+mine with no peers as before. The peers counted are those the p2p server
+connected that completed the eth handshake on this chain, which
+`eth/backend.go` passes to the miner; `miner/peergate_test.go` checks the
+gate.
 
 ## Stored chains are kept
 

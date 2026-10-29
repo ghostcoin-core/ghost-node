@@ -21,8 +21,10 @@
 # mining on, which also starts it at boot: a systemd user unit on Linux, a
 # launchd agent on macOS. The node joins the network built into it, the public
 # test network; an archive that still holds a genesis.json gets that chain
-# initialised first. The config opens the node's HTTP RPC on 127.0.0.1 only,
-# for the Ghost web apps.
+# initialised first. The config sets no network and no peers, so the node
+# finds the public test network through the seed nodes built into it, and on
+# that network it mines only while it has a peer. The config opens the node's
+# HTTP RPC on 127.0.0.1 only, for the Ghost web apps.
 #
 # It also installs ~/.ghost-node/update, which is this script run with
 # --update, and runs it daily (a systemd user timer, or a launchd agent with a
