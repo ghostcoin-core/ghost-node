@@ -785,9 +785,16 @@ func holdDefaultP2PPort(t *testing.T) {
 // its output.
 func (env *installEnv) runScript(t *testing.T, path string, rs *releaseServer, trustServer bool, extraEnv ...string) (string, error) {
 	t.Helper()
+	return env.runScriptArgs(t, path, nil, rs, trustServer, extraEnv...)
+}
+
+// runScriptArgs runs the script at path with the arguments args, as runScript
+// does.
+func (env *installEnv) runScriptArgs(t *testing.T, path string, args []string, rs *releaseServer, trustServer bool, extraEnv ...string) (string, error) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "/bin/sh", path)
+	cmd := exec.CommandContext(ctx, "/bin/sh", append([]string{path}, args...)...)
 	cmd.Env = []string{
 		"HOME=" + env.home,
 		"TMPDIR=" + env.tmp,
@@ -813,6 +820,13 @@ func (env *installEnv) runScript(t *testing.T, path string, rs *releaseServer, t
 func (env *installEnv) run(t *testing.T, script string, rs *releaseServer, trustServer bool, extraEnv ...string) (string, error) {
 	t.Helper()
 	return env.runScript(t, script, rs, trustServer, extraEnv...)
+}
+
+// runArgs runs the installer with the arguments args, as
+// sh -s -- <args> does for the one line.
+func (env *installEnv) runArgs(t *testing.T, script string, args []string, rs *releaseServer, trustServer bool, extraEnv ...string) (string, error) {
+	t.Helper()
+	return env.runScriptArgs(t, script, args, rs, trustServer, extraEnv...)
 }
 
 // update runs the update script the installer installed. An empty
