@@ -291,6 +291,11 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 
 	eth.miner = miner.New(eth, &config.Miner, eth.blockchain.Config(), eth.EventMux(), eth.engine, eth.isLocalBlock)
 	eth.miner.SetExtra(makeExtraData(config.Miner.ExtraData))
+	// A public test network node with no peers holds off mining instead of
+	// building a fork of its own. The count is of the peers the p2p server
+	// connected that run this chain; unlike the server's own count, it never
+	// waits on a server that has not started.
+	eth.miner.SetPeerCount(eth.handler.peers.len)
 
 	eth.APIBackend = &EthAPIBackend{stack.Config().ExtRPCEnabled(), stack.Config().AllowUnprotectedTxs, eth, nil}
 	if eth.APIBackend.allowUnprotectedTxs {

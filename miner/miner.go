@@ -191,6 +191,12 @@ func (miner *Miner) Mining() bool {
 	return miner.worker.isRunning()
 }
 
+// SetPeerCount sets the function that reports the node's connected peers. On
+// the public test network the miner seals no block while it reports zero.
+func (miner *Miner) SetPeerCount(count func() int) {
+	miner.worker.setPeerCount(count)
+}
+
 func (miner *Miner) Hashrate() uint64 {
 	if pow, ok := miner.engine.(consensus.PoW); ok {
 		return uint64(pow.Hashrate())

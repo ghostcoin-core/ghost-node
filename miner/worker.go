@@ -281,6 +281,14 @@ type worker struct {
 	// External functions
 	isLocalBlock func(header *types.Header) bool // Function used to determine whether the specified block is mined by local miner.
 
+	// peerCount reports the node's connected peers. On the public test
+	// network the worker seals no block while it reports zero, so a node
+	// that reached nobody does not mine a fork of its own. Unset, the worker
+	// seals as it always has.
+	peerCount    atomic.Pointer[func() int]
+	heldForPeers atomic.Bool // Whether the last work was held back for want of a peer.
+	peerWaitLog  time.Time   // When the worker last logged that it waits for peers.
+
 	// Test hooks
 	newTaskHook  func(*task)                        // Method to call upon receiving a new sealing task.
 	skipSealHook func(*task) bool                   // Method to decide whether skipping the sealing.
@@ -452,6 +460,35 @@ func (w *worker) isRunning() bool {
 	return w.running.Load()
 }
 
+// setPeerCount sets the function that reports the node's connected peers.
+func (w *worker) setPeerCount(count func() int) {
+	if count == nil {
+		w.peerCount.Store(nil)
+		return
+	}
+	w.peerCount.Store(&count)
+}
+
+// waitingForPeers reports whether the worker must hold off sealing because it
+// runs on the public test network with no peers. Developer mode, the internal
+// network and any other chain are never held.
+func (w *worker) waitingForPeers() bool {
+	count := w.peerCount.Load()
+	if count == nil {
+		return false
+	}
+	id := w.chainConfig.GetChainID()
+	if id == nil || !id.IsUint64() || id.Uint64() != ghost.TestNetChainID {
+		return false
+	}
+	return (*count)() == 0
+}
+
+// sealing reports whether the worker hands its blocks to the sealer.
+func (w *worker) sealing() bool {
+	return w.isRunning() && !w.waitingForPeers()
+}
+
 // close terminates all background threads maintained by the worker.
 // Note the worker does not support being closed multiple times.
 func (w *worker) close() {
@@ -536,6 +573,11 @@ func (w *worker) newWorkLoop(recommit time.Duration) {
 			// If sealing is running resubmit a new work cycle periodically to pull in
 			// higher priced transactions. Disable this overhead for pending blocks.
 			if w.isRunning() && (!w.chainConfig.GetConsensusEngineType().IsClique() || w.chainConfig.GetCliquePeriod() > 0) {
+				// Work held back for want of a peer is sealed once one connects.
+				if w.heldForPeers.Load() && !w.waitingForPeers() {
+					commit(false, commitInterruptResubmit)
+					continue
+				}
 				// Short circuit if no new transaction arrives.
 				if w.newTxs.Load() == 0 {
 					timer.Reset(recommit)
@@ -1435,6 +1477,14 @@ func (w *worker) commitWork(interrupt *atomic.Int32, noempty bool, timestamp int
 	}
 	start := time.Now()
 
+	// On the public test network a node with no peers builds its pending
+	// block but seals nothing until a peer connects.
+	held := w.isRunning() && w.waitingForPeers()
+	w.heldForPeers.Store(held)
+	if held && time.Since(w.peerWaitLog) >= time.Minute {
+		log.Warn("Not mining: waiting for a peer on the public test network")
+		w.peerWaitLog = start
+	}
 	// Set the coinbase if the worker is running or it's required
 	var coinbase common.Address
 	if w.isRunning() {
@@ -1505,7 +1555,7 @@ func (w *worker) commitWork(interrupt *atomic.Int32, noempty bool, timestamp int
 // Note the assumption is held that the mutation is allowed to the passed env, do
 // the deep copy first.
 func (w *worker) commit(env *environment, interval func(), update bool, start time.Time) error {
-	if w.isRunning() {
+	if w.sealing() {
 		if interval != nil {
 			interval()
 		}
