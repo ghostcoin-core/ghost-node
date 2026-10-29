@@ -75,6 +75,31 @@ public test network and syncs. The config opens the node's HTTP RPC on
 `127.0.0.1:8545` only, to the Ghost web apps. When it finishes it prints the
 mining address and how to check on the node.
 
+#### A public node for the Ghost Wallet
+
+On Linux, the same line with `--public` also publishes the node as a public
+node for the Ghost Wallet, with an HTTPS address of its own:
+
+```sh
+curl -fsSL https://get.ghostcoin.com | sh -s -- --public
+```
+
+After the plain install it keeps the node running at boot and after logout
+(`loginctl enable-linger`, with `sudo` if needed), installs
+[Tailscale](https://tailscale.com) with its official install script when it is
+missing, adds the node's Tailscale name to `HTTPVirtualHosts` in
+`~/.ghost-node/config.toml`, restarts the node, and publishes only its HTTP RPC
+(eth, net, web3; still on `127.0.0.1`) with Tailscale Funnel at `/ghost-rpc`.
+It ends by printing the address, such as
+`https://box.tail1234.ts.net/ghost-rpc`.
+
+One step is yours: when the computer is not yet logged in to Tailscale, the
+installer runs `sudo tailscale up`, which prints a login link. Open it in a
+browser, sign in to your own free Tailscale account, and allow Funnel when it
+asks; the installer waits until you have. If a public step fails, the node
+stays installed and running, and running the line again is safe. Updates keep
+a public node public. `--public` is not available on macOS for now.
+
 Updates are on by default: `~/.ghost-node/update`, the same script run with
 `--update`, runs daily (a systemd user timer, or a launchd agent) and installs
 a newer signed release after the same checks, keeping the config and the

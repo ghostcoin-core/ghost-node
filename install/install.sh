@@ -131,6 +131,33 @@
 # they make. An update finds when the file came or went and rewrites and
 # restarts the node's service to match.
 #
+# With --public, on Linux only, the installer also publishes the node as a
+# public node for the Ghost Wallet, with an HTTPS address of its own:
+#
+#	curl -fsSL https://get.ghostcoin.com | sh -s -- --public
+#
+# The plain install runs first and completes on its own; then the public steps
+# run. They make sure lingering is on (loginctl enable-linger, through sudo
+# when the plain call is not allowed), so the node's user service runs at boot
+# and after logout; install Tailscale with its official install script when
+# it is missing (GHOST_TAILSCALE_INSTALL_URL, over https only, sets where that
+# script is downloaded from, for the tests); and run sudo tailscale up when
+# this computer is not logged in to Tailscale. That prints a link the
+# volunteer opens in a browser to sign in to their own free Tailscale account
+# and allow Funnel: the one step the installer cannot do for them, and it
+# waits for it. The node's public name is the DNSName of Self in tailscale
+# status --self --json, without its trailing dot. The config gets
+# HTTPVirtualHosts = ["localhost", "<public name>"] after its HTTPModules line,
+# once, and the node restarts when that line changed. HTTPHost stays
+# 127.0.0.1 and the modules stay eth, net and web3; a config with any other
+# refuses to be published. Then sudo tailscale funnel --bg --set-path
+# /ghost-rpc publishes the node's HTTP RPC, and only it, at
+# https://<public name>/ghost-rpc, which the closing line prints. When a public
+# step fails, the node stays installed and running and the installer says which
+# step failed; running the line with --public again is safe. On macOS --public
+# is refused before anything is installed. An update keeps the config, and
+# Tailscale keeps the Funnel, so a public node stays public.
+#
 # The whole installer is the text of installer_source, which the last lines
 # run. So a download cut short runs nothing, and the installer can write
 # itself out as the update script.
@@ -172,6 +199,8 @@ update_label=com.ghostcoin.node.update
 dash_service=ghost-dashboard
 dash_label=com.ghostcoin.dashboard
 dash_default_port=8580
+tailscale_install_url=${GHOST_TAILSCALE_INSTALL_URL:-https://tailscale.com/install.sh}
+public_line='curl -fsSL https://get.ghostcoin.com | sh -s -- --public'
 
 say() {
 	printf 'ghost-node: %s\n' "$*"
@@ -1213,18 +1242,156 @@ update() {
 	die "the updated node did not start, so the previous geth was put back and restarted"
 }
 
+# public_fail stops a public step that failed, the step named $1 and why in
+# $2. The node stays installed and running.
+public_fail() {
+	die "making the node public failed at the step '$1': $2. The node itself stays installed and running. Once that is fixed, run the line again, which is safe: $public_line"
+}
+
+# as_root runs its arguments as root: as they are for root, else with sudo.
+as_root() {
+	if [ "$(id -u)" = 0 ]; then
+		"$@"
+	else
+		command -v sudo >/dev/null 2>&1 || return 127
+		sudo "$@"
+	fi
+}
+
+# lingering succeeds when systemd keeps the user $1's services running at boot
+# and after logout.
+lingering() {
+	[ "$(loginctl show-user "$1" --property=Linger --value 2>/dev/null </dev/null)" = yes ]
+}
+
+# public_linger makes sure the node's user service runs at boot and after
+# logout, or stops: a public address that goes away at a reboot is no use.
+public_linger() {
+	[ -f "$unit_dir/$service.service" ] && systemd_user ||
+		public_fail "keep running" "systemd user services are not available here, so the node would not run again after a reboot"
+	command -v loginctl >/dev/null 2>&1 ||
+		public_fail "keep running" "there is no loginctl to keep the node running at boot and after logout"
+	l_user=$(id -un) || public_fail "keep running" "could not tell this user's name"
+	lingering "$l_user" && return 0
+	loginctl enable-linger --no-ask-password >/dev/null 2>&1 </dev/null || :
+	lingering "$l_user" && return 0
+	say "turning lingering on for $l_user with sudo, so the node runs at boot and after logout"
+	as_root loginctl enable-linger "$l_user" || :
+	lingering "$l_user" ||
+		public_fail "keep running" "'sudo loginctl enable-linger $l_user' did not turn lingering on, so the node and its public address would stop at logout and not come back after a reboot"
+}
+
+# install_tailscale installs Tailscale with its official install script,
+# unless tailscale is on the PATH.
+install_tailscale() {
+	command -v tailscale >/dev/null 2>&1 && return 0
+	case "$tailscale_install_url" in
+	https://*) ;;
+	*) public_fail "install Tailscale" "GHOST_TAILSCALE_INSTALL_URL must be an https URL, not $tailscale_install_url" ;;
+	esac
+	say "installing Tailscale with its official install script, $tailscale_install_url"
+	set -- -fsSL --proto =https --proto-redir =https --tlsv1.2 --max-redirs 8 \
+		--connect-timeout 30 --retry 3 --output "$work/tailscale-install.sh"
+	if [ -n "${GHOST_TAILSCALE_INSTALL_URL:-}" ] && [ -n "$ca_file" ]; then
+		set -- "$@" --cacert "$ca_file"
+	fi
+	curl "$@" "$tailscale_install_url" 2>"$work/curl.log" </dev/null ||
+		public_fail "install Tailscale" "could not download $tailscale_install_url: $(tail -n 2 "$work/curl.log" | tr '\n' ' ')"
+	sh "$work/tailscale-install.sh" </dev/null || public_fail "install Tailscale" "its install script failed"
+	command -v tailscale >/dev/null 2>&1 ||
+		public_fail "install Tailscale" "its install script ran, but there is still no tailscale on the PATH"
+}
+
+# tailscale_self sets ts_state to this computer's Tailscale BackendState and
+# ts_name to its DNSName without the trailing dot, each empty when Tailscale
+# does not tell.
+tailscale_self() {
+	ts_json=$(tailscale status --self --json 2>/dev/null </dev/null | tr -d '\r\n')
+	ts_state=$(printf '%s\n' "$ts_json" | sed -n 's/.*"BackendState"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+	ts_name=$(printf '%s\n' "$ts_json" |
+		sed -n 's/.*"Self"[[:space:]]*:[[:space:]]*{[^{}]*"DNSName"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+	ts_name=${ts_name%.}
+}
+
+# public_login logs this computer in to Tailscale when it is not, and sets
+# public_name to its name there.
+public_login() {
+	tailscale_self
+	if [ "$ts_state" != Running ] || [ -z "$ts_name" ]; then
+		say "this computer is not logged in to Tailscale yet. This is the one step the installer cannot do for you: Tailscale prints a login link below; open it in a browser, sign in to your own free Tailscale account, and allow Funnel when it asks. The installer waits until you have."
+		as_root tailscale up </dev/null || public_fail "log in to Tailscale" "'sudo tailscale up' did not finish"
+		tailscale_self
+	fi
+	[ -n "$ts_name" ] ||
+		public_fail "log in to Tailscale" "Tailscale is not logged in: 'tailscale status --self --json' gives this computer no DNSName"
+	case "$ts_name" in
+	*[!a-zA-Z0-9.-]* | .* | *..*) public_fail "find the public name" "Tailscale names this computer '$ts_name', which is not a DNS name" ;;
+	esac
+	public_name=$ts_name
+}
+
+# public_config checks that the config opens the node's HTTP RPC on 127.0.0.1
+# only and with only the eth, net and web3 modules, sets public_port to its
+# port, and names public_name in its HTTPVirtualHosts line, right after the
+# HTTPModules line. It sets vhost_changed to 1 when it changed that line.
+public_config() {
+	vhost_changed=0
+	[ "$(sed -n 's/^HTTPHost = //p' "$config")" = '"127.0.0.1"' ] ||
+		public_fail "set the public name" "the config $config must have one HTTPHost line, HTTPHost = \"127.0.0.1\""
+	[ "$(sed -n 's/^HTTPModules = //p' "$config")" = '["eth", "net", "web3"]' ] ||
+		public_fail "set the public name" "the config $config must have one HTTPModules line, HTTPModules = [\"eth\", \"net\", \"web3\"], so the public address offers nothing more"
+	public_port=$(sed -n 's/^HTTPPort = //p' "$config")
+	valid_port "$public_port" || public_fail "set the public name" "the config $config has no single HTTPPort line with a port number"
+	v_line="HTTPVirtualHosts = [\"localhost\", \"$public_name\"]"
+	[ "$(grep '^HTTPVirtualHosts = ' "$config")" != "$v_line" ] || return 0
+	while IFS= read -r v_text || [ -n "$v_text" ]; do
+		case "$v_text" in
+		'HTTPVirtualHosts = '*) continue ;;
+		esac
+		printf '%s\n' "$v_text"
+		case "$v_text" in
+		'HTTPModules = '*) printf '%s\n' "$v_line" ;;
+		esac
+	done <"$config" >"$config.new" || public_fail "set the public name" "could not rewrite $config"
+	mv -f "$config.new" "$config"
+	vhost_changed=1
+	say "the config $config now lets the node answer at $public_name"
+}
+
+# go_public publishes the installed node at https://<its Tailscale name>/ghost-rpc.
+go_public() {
+	say "making the node a public node for the Ghost Wallet"
+	public_linger
+	install_tailscale
+	public_login
+	public_config
+	if [ "$vhost_changed" = 1 ]; then
+		mark_start
+		{ systemctl --user restart "$service.service" && wait_started; } ||
+			public_fail "restart the node" "the node did not start again with its public name; see its log (journalctl --user -u $service)"
+	fi
+	as_root tailscale funnel --bg --set-path /ghost-rpc "http://127.0.0.1:$public_port" </dev/null ||
+		public_fail "publish with Tailscale Funnel" "'sudo tailscale funnel --bg --set-path /ghost-rpc http://127.0.0.1:$public_port' failed; Funnel may not be allowed for this computer in your Tailscale account"
+	say "the node runs at boot and after logout, and Tailscale Funnel publishes only its HTTP RPC (eth, net, web3)"
+	say "the node's public address for the Ghost Wallet: https://$public_name/ghost-rpc"
+}
+
 main() {
 	mode=install
+	public=0
 	case "$*" in
 	'') ;;
 	--update) mode=update ;;
-	*) die "usage: install.sh [--update]" ;;
+	--public) public=1 ;;
+	*) die "usage: install.sh [--update | --public]" ;;
 	esac
 	LC_ALL=C
 	export LC_ALL
 	umask 077
 	[ -n "${HOME:-}" ] && [ -d "$HOME" ] || die "HOME is not set to a directory"
 	platform
+	[ "$public" != 1 ] || [ "$os" = linux ] ||
+		refuse "public nodes (--public) are Linux-only for now; on this Mac run the plain install line, without --public"
 	need sh uname curl tar gzip sed tr head tail wc mktemp grep od cp mv rm mkdir chmod touch find sleep id basename
 	command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 ||
 		die "this installer needs sha256sum or shasum, and neither is on the PATH"
@@ -1383,6 +1550,7 @@ main() {
 	say "stop it with: $stop_hint"
 	paused_summary
 	dashboard_summary
+	[ "$public" != 1 ] || go_public
 }
 
 # paused_summary says when mining is paused.
