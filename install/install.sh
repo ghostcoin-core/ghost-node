@@ -88,6 +88,37 @@
 # installed before the installer knew of it gets the default on its next
 # update. Its closing lines say how many cores the node mines on.
 #
+# The release archive also holds ghost-dash, the Ghost Node Dashboard: a
+# small program that shows the node, its mining and its rewards in the
+# browser, on 127.0.0.1 only. The installer installs it as
+# ~/.ghost-node/bin/ghost-dash and runs it as a service of its own, which also
+# starts at boot: the systemd user unit ghost-dashboard.service on Linux, the
+# launchd agent com.ghostcoin.dashboard on macOS. It serves on port 8580;
+# GHOST_DASH_PORT chooses another, and a re-run or an update keeps the port it
+# was installed with unless GHOST_DASH_PORT is set again. When another program
+# already listens on 127.0.0.1 at that port, the installer stops with nothing
+# installed and says so; the installed dashboard holding it is fine. The
+# dashboard signs a browser in with the key in ~/.ghost-node/dashboard-key, 32
+# random bytes in hex, made on the first install and kept by re-runs and
+# updates. Its link is
+#
+#	http://127.0.0.1:8580/open?key=<the key>
+#
+# which the closing lines print. On a first install they also open it in the
+# browser: with open on macOS, and on Linux with xdg-open when there is a
+# desktop session (DISPLAY or WAYLAND_DISPLAY); re-runs and updates only
+# print it. ~/.ghost-node/dashboard, a small script that runs ghost-dash open,
+# opens it again any time. An update replaces ghost-dash with the copy in the
+# newest release's archive, so the release signature covers it too, and
+# restarts its service. GHOST_NO_DASHBOARD=1 leaves the dashboard out; set on a
+# re-run, it takes out one installed before and keeps its key.
+#
+# When ~/.ghost-node/mining-paused exists, which the dashboard's pause control
+# writes, the node's service starts it without --mine, so the node syncs but
+# does not mine, and a pause holds across re-runs, updates and the restarts
+# they make. An update finds when the file came or went and rewrites and
+# restarts the node's service to match.
+#
 # The whole installer is the text of installer_source, which the last lines
 # run. So a download cut short runs nothing, and the installer can write
 # itself out as the update script.
@@ -126,6 +157,9 @@ service=ghost-node
 update_service=ghost-node-update
 label=com.ghostcoin.node
 update_label=com.ghostcoin.node.update
+dash_service=ghost-dashboard
+dash_label=com.ghostcoin.dashboard
+dash_default_port=8580
 
 say() {
 	printf 'ghost-node: %s\n' "$*"
@@ -266,6 +300,15 @@ unpack() {
 	fi
 	chmod 700 "$work/release/geth"
 	"$work/release/geth" version >/dev/null 2>&1 </dev/null || refuse "the downloaded geth does not run on this computer"
+	# A release from before the dashboard has no ghost-dash.
+	has_dash=0
+	if [ -e "$work/release/ghost-dash" ] || [ -L "$work/release/ghost-dash" ]; then
+		if [ ! -f "$work/release/ghost-dash" ] || [ -L "$work/release/ghost-dash" ]; then
+			refuse "the release archive's ghost-dash is not a regular file"
+		fi
+		chmod 700 "$work/release/ghost-dash"
+		has_dash=1
+	fi
 }
 
 # toml_string prints $1 as the inside of a TOML basic string.
@@ -448,6 +491,38 @@ check_port() {
 	refuse "port $c_port on this computer is already in use by another program; stop it, or install with GHOST_HTTP_PORT=<free port>"
 }
 
+# dash_key_value prints the dashboard key, or nothing when there is none.
+dash_key_value() {
+	[ -f "$dash_key" ] || return 0
+	tr -d ' \t\r\n' <"$dash_key"
+}
+
+# own_dash_on_port succeeds when the program on 127.0.0.1:$1 is the installed
+# dashboard: its sign-in link with the dashboard's key answers 303 and sets the
+# dashboard's session cookie, which only a server holding the key does.
+own_dash_on_port() {
+	d_key=$(dash_key_value)
+	case "$d_key" in
+	'' | *[!0-9a-f]*) return 1 ;;
+	esac
+	d_head=$(curl -s -o /dev/null -D - --noproxy '*' --connect-timeout 2 --max-time 5 \
+		"http://127.0.0.1:$1/open?key=$d_key" 2>/dev/null </dev/null) || return 1
+	printf '%s\n' "$d_head" | head -n 1 | grep -q ' 303' || return 1
+	printf '%s\n' "$d_head" | grep -qi '^set-cookie: *ghost_dash='
+}
+
+# check_dash_port refuses, on an install or a re-run that installs the
+# dashboard, when its port is the node's HTTP RPC port or another program
+# holds it. The installed dashboard may hold it. check_port sets c_port.
+check_dash_port() {
+	[ "$mode" = install ] && [ "$with_dash" = 1 ] || return 0
+	[ "$dash_port" != "$c_port" ] ||
+		refuse "the dashboard's port $dash_port is the node's HTTP RPC port; install with GHOST_DASH_PORT=<another free port>"
+	port_busy "$dash_port" || return 0
+	own_dash_on_port "$dash_port" && return 0
+	refuse "port $dash_port on this computer is already in use by another program; stop it, or install with GHOST_DASH_PORT=<free port>"
+}
+
 # initialise writes the genesis of the release's network into a new data
 # directory. A release with the network built in has no genesis.json.
 initialise() {
@@ -490,14 +565,20 @@ systemd_user() {
 
 # stop_background stops a node this script started without a service.
 stop_background() {
-	[ -f "$base/node.pid" ] || return 0
-	pid=$(cat "$base/node.pid")
-	rm -f "$base/node.pid"
+	stop_pidfile "$base/node.pid" "$geth"
+}
+
+# stop_pidfile stops the process whose ID the file $1 holds, when it runs the
+# program $2, and removes the file.
+stop_pidfile() {
+	[ -f "$1" ] || return 0
+	pid=$(cat "$1")
+	rm -f "$1"
 	case "$pid" in
 	'' | *[!0-9]*) return 0 ;;
 	esac
 	case "$(ps -p "$pid" -o args= 2>/dev/null)" in
-	*"$geth"*) ;;
+	*"$2"*) ;;
 	*) return 0 ;;
 	esac
 	kill "$pid" 2>/dev/null || return 0
@@ -509,8 +590,37 @@ stop_background() {
 }
 
 start_background() {
-	nohup "$geth" --config "$config" --mine --miner.threads "$threads" >>"$base/node.log" 2>&1 </dev/null &
+	set -- --config "$config"
+	[ -e "$paused" ] || set -- "$@" --mine
+	nohup "$geth" "$@" --miner.threads "$threads" >>"$base/node.log" 2>&1 </dev/null &
 	echo "$!" >"$base/node.pid"
+}
+
+# mine_flag prints the node's --mine argument, with a space before it, or
+# nothing while mining is paused.
+mine_flag() {
+	[ -e "$paused" ] || printf ' --mine'
+}
+
+# service_mining_changed succeeds when the node's service mines and mining is
+# paused, or the other way round.
+service_mining_changed() {
+	case "$os" in
+	linux)
+		m_file="$unit_dir/$service.service"
+		m_pat=' --mine '
+		;;
+	darwin)
+		m_file="$agents/$label.plist"
+		m_pat='<string>--mine</string>'
+		;;
+	esac
+	[ -f "$m_file" ] || return 1
+	m_want=1
+	[ ! -e "$paused" ] || m_want=0
+	m_have=0
+	! grep -qF -- "$m_pat" "$m_file" || m_have=1
+	[ "$m_have" != "$m_want" ]
 }
 
 # node_unit prints the node's systemd user unit.
@@ -522,7 +632,7 @@ Wants=network-online.target
 After=network-online.target
 
 [Service]
-ExecStart=$(unit_word "$geth") --config $(unit_word "$config") --mine --miner.threads $threads
+ExecStart=$(unit_word "$geth") --config $(unit_word "$config")$(mine_flag) --miner.threads $threads
 Restart=on-failure
 RestartSec=10
 Nice=10
@@ -638,7 +748,9 @@ node_plist() {
 		<string>$(xml_text "$geth")</string>
 		<string>--config</string>
 		<string>$(xml_text "$config")</string>
-		<string>--mine</string>
+EOF
+	[ -e "$paused" ] || printf '\t\t<string>--mine</string>\n'
+	cat <<EOF
 		<string>--miner.threads</string>
 		<string>$threads</string>
 	</array>
@@ -741,6 +853,260 @@ restart_node() {
 	esac
 }
 
+# sh_word prints $1 as one single-quoted word of a shell script.
+sh_word() {
+	printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+# kept_dash_port prints the port the installed dashboard was installed with,
+# from its open script, or nothing.
+kept_dash_port() {
+	[ -f "$dash_script" ] || return 0
+	sed -n 's/^exec .* --port \([0-9][0-9]*\) "\$@"$/\1/p' "$dash_script" | head -n 1
+}
+
+# make_dash_key writes the dashboard key unless there is one, and sets
+# dash_new to 1 when it made it: the dashboard's first install.
+make_dash_key() {
+	dash_new=0
+	[ -z "$(dash_key_value)" ] || return 0
+	k_value=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
+	[ "${#k_value}" = 64 ] || die "could not make a key for the dashboard"
+	printf '%s\n' "$k_value" >"$dash_key.new" || die "could not write $dash_key"
+	chmod 600 "$dash_key.new"
+	mv -f "$dash_key.new" "$dash_key"
+	dash_new=1
+}
+
+# write_dash_script writes the script that opens the dashboard signed in.
+write_dash_script() {
+	{
+		printf '#!/bin/sh\n#\n'
+		printf '# Opens the Ghost Node Dashboard in the browser, signed in: it prints the\n'
+		printf '# dashboard'\''s link and opens it. install.sh wrote this file.\n\n'
+		printf 'exec %s open --node-dir %s --port %s "$@"\n' "$(sh_word "$dash")" "$(sh_word "$base")" "$dash_port"
+	} >"$dash_script.new" || die "could not write $dash_script"
+	chmod 700 "$dash_script.new"
+	mv -f "$dash_script.new" "$dash_script"
+}
+
+# dash_unit prints the dashboard's systemd user unit.
+dash_unit() {
+	cat <<EOF
+[Unit]
+Description=Ghost Node Dashboard
+
+[Service]
+ExecStart=$(unit_word "$dash") --node-dir $(unit_word "$base") --port $dash_port
+Restart=on-failure
+RestartSec=10
+Nice=10
+
+[Install]
+WantedBy=default.target
+EOF
+}
+
+# dash_plist prints the dashboard's launchd agent.
+dash_plist() {
+	plist_head "$dash_label"
+	cat <<EOF
+		<string>$(xml_text "$dash")</string>
+		<string>--node-dir</string>
+		<string>$(xml_text "$base")</string>
+		<string>--port</string>
+		<string>$dash_port</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>Nice</key>
+	<integer>10</integer>
+	<key>StandardOutPath</key>
+	<string>$(xml_text "$base/dashboard.log")</string>
+	<key>StandardErrorPath</key>
+	<string>$(xml_text "$base/dashboard.log")</string>
+</dict>
+</plist>
+EOF
+}
+
+start_dash_background() {
+	nohup "$dash" --node-dir "$base" --port "$dash_port" >>"$base/dashboard.log" 2>&1 </dev/null &
+	echo "$!" >"$base/dashboard.pid"
+}
+
+# start_dashboard writes the dashboard's service and (re)starts it, as the
+# node's is: a systemd user unit, a launchd agent, or without systemd user
+# services a process in the background.
+start_dashboard() {
+	case "$os" in
+	linux)
+		if systemd_user; then
+			mkdir -p "$unit_dir"
+			dash_unit >"$unit_dir/$dash_service.service"
+			stop_pidfile "$base/dashboard.pid" "$dash"
+			systemctl --user daemon-reload || die "systemctl --user daemon-reload failed"
+			systemctl --user enable "$dash_service.service" >/dev/null 2>&1 ||
+				die "could not enable the $dash_service user service"
+			systemctl --user restart "$dash_service.service" || die "could not start the $dash_service user service"
+		else
+			stop_pidfile "$base/dashboard.pid" "$dash"
+			start_dash_background
+		fi
+		;;
+	darwin)
+		mkdir -p "$agents"
+		dash_plist >"$agents/$dash_label.plist"
+		load_agent "$dash_label" "$agents/$dash_label.plist"
+		;;
+	esac
+}
+
+# restart_dashboard restarts the installed dashboard, however it was started.
+restart_dashboard() {
+	case "$os" in
+	linux)
+		if [ -f "$unit_dir/$dash_service.service" ] && systemd_user; then
+			systemctl --user restart "$dash_service.service"
+		else
+			stop_pidfile "$base/dashboard.pid" "$dash"
+			start_dash_background
+		fi
+		;;
+	darwin)
+		launchctl kickstart -k "$domain/$dash_label" >/dev/null 2>&1 || {
+			launchctl enable "$domain/$dash_label" >/dev/null 2>&1 || :
+			launchctl bootstrap "$domain" "$agents/$dash_label.plist" >/dev/null 2>&1
+		}
+		;;
+	esac
+}
+
+# remove_dashboard takes out a dashboard installed before, for
+# GHOST_NO_DASHBOARD=1, and keeps its key.
+remove_dashboard() {
+	r_had=0
+	case "$os" in
+	linux)
+		if [ -f "$unit_dir/$dash_service.service" ]; then
+			systemctl --user disable --now "$dash_service.service" >/dev/null 2>&1 || :
+			rm -f "$unit_dir/$dash_service.service"
+			r_had=1
+		fi
+		;;
+	darwin)
+		if [ -f "$agents/$dash_label.plist" ]; then
+			launchctl bootout "$domain/$dash_label" >/dev/null 2>&1 || :
+			rm -f "$agents/$dash_label.plist"
+			r_had=1
+		fi
+		;;
+	esac
+	if [ -f "$base/dashboard.pid" ]; then
+		stop_pidfile "$base/dashboard.pid" "$dash"
+		r_had=1
+	fi
+	if [ -f "$dash" ] || [ -f "$dash_script" ]; then
+		rm -f "$dash" "$dash_script"
+		r_had=1
+	fi
+	[ "$r_had" = 0 ] || say "took out the dashboard installed before, as GHOST_NO_DASHBOARD=1 asks; its key $dash_key is kept"
+}
+
+# install_dashboard installs the release's ghost-dash with its key, its open
+# script and its service, and starts it; or with GHOST_NO_DASHBOARD=1 takes
+# out one installed before.
+install_dashboard() {
+	if [ "$with_dash" != 1 ]; then
+		remove_dashboard
+		return 0
+	fi
+	if [ "$has_dash" != 1 ]; then
+		say "this release has no dashboard, so none is installed"
+		return 0
+	fi
+	cp "$work/release/ghost-dash" "$dash.new" || die "could not copy ghost-dash"
+	chmod 700 "$dash.new"
+	mv -f "$dash.new" "$dash"
+	make_dash_key
+	write_dash_script
+	start_dashboard
+	dash_on=1
+}
+
+# update_dashboard replaces the installed ghost-dash with the release's copy
+# and restarts it. A node installed without the dashboard is left without.
+update_dashboard() {
+	[ -f "$dash" ] || return 0
+	dash_on=1
+	[ "$has_dash" = 1 ] || return 0
+	o_hash=$(sha256 "$dash") || die "could not compute the SHA-256 of $dash"
+	n_hash=$(sha256 "$work/release/ghost-dash") || die "could not compute the SHA-256 of the new ghost-dash"
+	[ "$o_hash" != "$n_hash" ] || return 0
+	cp "$work/release/ghost-dash" "$dash.new" || {
+		rm -f "$dash.new"
+		die "could not copy the new ghost-dash"
+	}
+	chmod 700 "$dash.new"
+	mv -f "$dash.new" "$dash"
+	if restart_dashboard; then
+		say "updated the dashboard to the latest release and restarted it"
+	else
+		say "note: updated the dashboard, but it did not restart; it runs the new copy when it next starts"
+	fi
+}
+
+# dash_link prints the link that opens the dashboard signed in.
+dash_link() {
+	printf 'http://127.0.0.1:%s/open?key=%s' "$dash_port" "$(dash_key_value)"
+}
+
+# open_dashboard opens the dashboard's link in the browser once it listens:
+# with open on a Mac, and with xdg-open on Linux when there is a desktop
+# session.
+open_dashboard() {
+	tries=0
+	until port_busy "$dash_port"; do
+		tries=$((tries + 1))
+		[ "$tries" -lt 10 ] || break
+		sleep 1
+	done
+	case "$os" in
+	darwin)
+		if command -v open >/dev/null 2>&1 && open "$(dash_link)" >/dev/null 2>&1 </dev/null; then
+			say "opened the dashboard in the browser"
+		else
+			say "could not open the browser; open the dashboard's link above"
+		fi
+		;;
+	linux)
+		if [ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] || ! command -v xdg-open >/dev/null 2>&1; then
+			say "there is no desktop session here, so the browser was not opened; open the dashboard's link above in a browser on this computer"
+			return 0
+		fi
+		# xdg-open can wait for the browser it starts; the installer does not.
+		nohup xdg-open "$(dash_link)" >/dev/null 2>&1 </dev/null &
+		say "opened the dashboard in the browser"
+		;;
+	esac
+}
+
+# dashboard_summary prints the dashboard's link, and on its first install
+# opens it.
+dashboard_summary() {
+	if [ "$dash_on" != 1 ]; then
+		[ "$with_dash" = 1 ] || [ "$mode" = update ] || say "the dashboard is left out, as GHOST_NO_DASHBOARD=1 asks"
+		return 0
+	fi
+	say "the Ghost Node Dashboard runs at http://127.0.0.1:$dash_port; this link opens it signed in: $(dash_link)"
+	say "open it again with: $dash_script"
+	if [ "$mode" = install ] && [ "$dash_new" = 1 ]; then
+		open_dashboard
+	fi
+}
+
 # mark_start notes the time before the node is (re)started.
 mark_start() {
 	touch "$work/started"
@@ -837,11 +1203,31 @@ main() {
 	esac
 	auto_update=1
 	[ "${GHOST_NO_UPDATE:-}" != 1 ] || auto_update=0
+	with_dash=1
+	[ "${GHOST_NO_DASHBOARD:-}" != 1 ] || with_dash=0
 	base="$HOME/.ghost-node"
 	data="$base/data"
 	config="$base/config.toml"
 	geth="$base/bin/geth"
 	threads_file="$base/miner-threads"
+	paused="$base/mining-paused"
+	dash="$base/bin/ghost-dash"
+	dash_key="$base/dashboard-key"
+	dash_script="$base/dashboard"
+	dash_port=${GHOST_DASH_PORT:-}
+	if [ -n "$dash_port" ]; then
+		case "$dash_port" in
+		*[!0-9]* | 0*) refuse "GHOST_DASH_PORT must be a port number, not '$dash_port'" ;;
+		esac
+		[ "${#dash_port}" -le 5 ] && [ "$dash_port" -le 65535 ] ||
+			refuse "GHOST_DASH_PORT must be a port number, not '$dash_port'"
+	else
+		dash_port=$(kept_dash_port)
+		[ -n "$dash_port" ] || dash_port=$dash_default_port
+	fi
+	dash_on=0
+	dash_new=0
+	has_dash=0
 	service_rewritten=0
 	unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 	agents="$HOME/Library/LaunchAgents"
@@ -852,6 +1238,7 @@ main() {
 		die "there is no Ghost node installed in $base to update; install one with: curl -fsSL https://get.ghostcoin.com | sh"
 	fi
 	check_port
+	check_dash_port
 
 	work=$(mktemp -d "${TMPDIR:-/tmp}/ghost-node-install.XXXXXX") || die "could not make a temporary directory"
 	trap 'rm -rf "$work"' EXIT
@@ -876,7 +1263,7 @@ main() {
 			set_etherbase
 			rewritten=1
 		fi
-		if [ "$threads_changed" = 1 ]; then
+		if [ "$threads_changed" = 1 ] || service_mining_changed; then
 			refresh_service
 			keep_threads
 			rewritten=1
@@ -888,8 +1275,11 @@ main() {
 				die "the node did not start again to mine to $(config_address) on $(threads_summary); see its log"
 			say "restarted the node to mine to $(config_address) on $(threads_summary)"
 		fi
+		update_dashboard
 		say "mining to: $(config_address)"
 		say "mining on $(threads_summary)"
+		paused_summary
+		dashboard_summary
 		return 0
 	fi
 
@@ -908,9 +1298,14 @@ main() {
 	darwin) start_darwin ;;
 	esac
 	wait_started || die "the node did not start; see its log ($log_hint)"
+	install_dashboard
 
 	address=$(sed -n 's/^Etherbase = "\(0x[0-9a-fA-F]*\)"$/\1/p' "$config")
-	say "the node is installed in $base, running, syncing and mining"
+	if [ -e "$paused" ]; then
+		say "the node is installed in $base, running and syncing"
+	else
+		say "the node is installed in $base, running, syncing and mining"
+	fi
 	say "mining to: $address"
 	say "mining on $(threads_summary); to change that, run the install line again with GHOST_MINE_THREADS set to the number of cores, such as: curl -fsSL https://get.ghostcoin.com | GHOST_MINE_THREADS=2 sh"
 	say "check its status with: $status_hint"
@@ -923,6 +1318,14 @@ main() {
 		say "automatic updates are off; to update run: $base/update"
 	fi
 	say "stop it with: $stop_hint"
+	paused_summary
+	dashboard_summary
+}
+
+# paused_summary says when mining is paused.
+paused_summary() {
+	[ -e "$paused" ] || return 0
+	say "mining is paused: $paused is there, so the node runs without --mine; resume it from the dashboard, or delete that file and run $base/update"
 }
 GHOST_INSTALLER
 }

@@ -81,6 +81,29 @@ a newer signed release after the same checks, keeping the config and the
 mining address; a refused update changes nothing. Set `GHOST_NO_UPDATE=1` for
 the install to leave the timer out.
 
+The node comes with the **Ghost Node Dashboard** (`ghost-dash`, from the
+ghost-node-dashboard repository), which shows the node, its mining and its
+rewards in the browser and can pause mining. Each release archive carries it
+next to `geth`, built from the commit pinned in
+[build/dashboard-commit](build/dashboard-commit), so the release signature
+covers it. The installer puts it in `~/.ghost-node/bin/ghost-dash` and runs it
+as a service of its own (the systemd user unit `ghost-dashboard.service`, or
+the launchd agent `com.ghostcoin.dashboard`) on `127.0.0.1:8580` only. Its
+link signs the browser in with the key in `~/.ghost-node/dashboard-key`, made
+on the first install and kept by re-runs and updates:
+
+```text
+http://127.0.0.1:8580/open?key=<the key>
+```
+
+The installer's closing lines print the link; on a first install they also
+open it in the browser (with `open` on macOS, and on Linux with `xdg-open`
+when there is a desktop session). To open it again later, run
+`~/.ghost-node/dashboard`. Updates replace `ghost-dash` with the new release's
+copy and restart it. While `~/.ghost-node/mining-paused` exists, which the
+dashboard's pause control writes, the node's service starts it without
+`--mine`, so the pause holds across re-runs, updates and their restarts.
+
 The key pinned today is a test key that nobody holds the private half of, and
 the `ghost-verify` hashes pinned in the script are all-zero placeholders, so
 the installer accepts no release yet. The real key replaces the `.pub` file in
@@ -144,6 +167,13 @@ the installer cannot use is refused with nothing installed.
 - `GHOST_MINE_TO=0x...` mines straight to a wallet address of your own, such
   as the Ghost pop-up wallet's, instead of a newly generated mining key.
 - `GHOST_HTTP_PORT=<port>` moves the node's HTTP RPC off `8545`.
+- `GHOST_DASH_PORT=<port>` moves the dashboard off `8580` (Linux and macOS).
+  A re-run or an update keeps the port the dashboard was installed with
+  unless the setting is given again. When another program already holds the
+  port, the installer stops with nothing installed and says so.
+- `GHOST_NO_DASHBOARD=1` leaves the dashboard out (Linux and macOS): no
+  `ghost-dash`, no key, no service and no link. Given on a re-run, it takes
+  out a dashboard installed before and keeps its key.
 - `GHOST_MINE_THREADS=<number>` sets how many CPU cores the node mines on, a
   whole number from 1 to 9999. By default it mines on half the computer's
   logical cores, rounded down and at least 1, so a laptop stays cool and quiet.
@@ -185,7 +215,9 @@ go run build/ci.go install ./cmd/geth
 The executable is written to `build/bin/geth`. Release builds use the
 `ghostrelease` build tag, which leaves out the fake proof-of-work modes the
 tests use. Builds are reproducible: the same commit gives the same bytes on
-the same platform, whatever directory it is built in. To check that yourself:
+the same platform, whatever directory it is built in. So is the release's
+`ghost-dash`, built with `CGO_ENABLED=0 -trimpath` from the pinned dashboard
+commit. To check both yourself:
 
 ```sh
 build/check-reproducible.sh

@@ -424,11 +424,20 @@ func checkServedRelease(t *testing.T, rs *releaseServer, skip int) {
 // systemd stub stands in for a user session's systemd, and the launchd stub
 // for a Mac's launchd: each starts the node's command as the service would,
 // stopping the one it started before, and records the process ID.
+//
+// The dashboard's service is started the same way, its process ID recorded in
+// $STUB_DIR/dash.pid.
 const stubStopNode = `
 stop_node() {
-	[ -f "$STUB_DIR/service.pid" ] || return 0
-	pid=$(cat "$STUB_DIR/service.pid")
-	rm -f "$STUB_DIR/service.pid"
+	stop_pid "$STUB_DIR/service.pid"
+}
+stop_dash() {
+	stop_pid "$STUB_DIR/dash.pid"
+}
+stop_pid() {
+	[ -f "$1" ] || return 0
+	pid=$(cat "$1")
+	rm -f "$1"
 	kill "$pid" 2>/dev/null || return 0
 	i=0
 	while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 300 ]; do
@@ -458,6 +467,21 @@ case "$*" in
 	echo "$!" >"$STUB_DIR/service.pid"
 	exit 0
 	;;
+"--user enable ghost-dashboard.service")
+	exit 0
+	;;
+"--user disable --now ghost-dashboard.service")
+	stop_dash
+	exit 0
+	;;
+"--user restart ghost-dashboard.service")
+	stop_dash
+	line=$(sed -n 's/^ExecStart=//p' "$HOME/.config/systemd/user/ghost-dashboard.service")
+	eval "set -- $line"
+	nohup "$@" >>"$STUB_DIR/dash.log" 2>&1 </dev/null &
+	echo "$!" >"$STUB_DIR/dash.pid"
+	exit 0
+	;;
 esac
 echo "unexpected systemctl call: $*" >&2
 exit 1
@@ -475,14 +499,23 @@ exit 0
 echo "launchctl $*" >>"$STUB_DIR/calls"
 ` + stubStopNode + `
 node="gui/$(id -u)/com.ghostcoin.node"
+dash="gui/$(id -u)/com.ghostcoin.dashboard"
+dash_plist="$HOME/Library/LaunchAgents/com.ghostcoin.dashboard.plist"
 start_node() {
+	start_agent "$1" service
+}
+start_dash() {
+	start_agent "$1" dash
+}
+start_agent() {
 	plist=$1
+	name=$2
 	set --
 	for arg in $(sed -n '/<key>ProgramArguments<\/key>/,/<\/array>/s/.*<string>\(.*\)<\/string>.*/\1/p' "$plist"); do
 		set -- "$@" "$arg"
 	done
-	nohup "$@" >>"$STUB_DIR/service.log" 2>&1 </dev/null &
-	echo "$!" >"$STUB_DIR/service.pid"
+	nohup "$@" >>"$STUB_DIR/$name.log" 2>&1 </dev/null &
+	echo "$!" >"$STUB_DIR/$name.pid"
 }
 # Like launchd, the stub refuses to bootstrap an agent that is disabled: one
 # with a file disabled.<label> in STUB_DIR. enable clears it, unless the file
@@ -500,7 +533,11 @@ case "$1 $2" in
 "bootout $node.update")
 	exit 0
 	;;
-"enable $node" | "enable $node.update")
+"bootout $dash")
+	stop_dash
+	exit 0
+	;;
+"enable $node" | "enable $node.update" | "enable $dash")
 	[ -f "$STUB_DIR/enable-refused" ] || rm -f "$STUB_DIR/disabled.${2##*/}"
 	exit 0
 	;;
@@ -523,12 +560,22 @@ case "$1 $2" in
 		refuse_disabled com.ghostcoin.node.update
 		exit 0
 		;;
+	*/Library/LaunchAgents/com.ghostcoin.dashboard.plist)
+		refuse_disabled com.ghostcoin.dashboard
+		start_dash "$3"
+		exit 0
+		;;
 	esac
 	;;
 "kickstart -k")
 	if [ "$3" = "$node" ]; then
 		stop_node
 		start_node "$HOME/Library/LaunchAgents/com.ghostcoin.node.plist"
+		exit 0
+	fi
+	if [ "$3" = "$dash" ]; then
+		stop_dash
+		start_dash "$dash_plist"
 		exit 0
 	fi
 	;;
@@ -604,6 +651,7 @@ echo %d
 type installEnv struct {
 	home, tmp, stubs string
 	httpPort         int
+	dashPort         int // GHOST_DASH_PORT, so no test needs 8580 free
 }
 
 func newInstallEnv(t *testing.T, opts envOptions) *installEnv {
@@ -615,7 +663,10 @@ func newInstallEnv(t *testing.T, opts envOptions) *installEnv {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(root) })
-	env := &installEnv{home: filepath.Join(root, "h"), tmp: filepath.Join(root, "t"), stubs: filepath.Join(root, "s"), httpPort: freePort(t)}
+	env := &installEnv{home: filepath.Join(root, "h"), tmp: filepath.Join(root, "t"), stubs: filepath.Join(root, "s"), httpPort: freePort(t), dashPort: freePort(t)}
+	for env.dashPort == env.httpPort {
+		env.dashPort = freePort(t)
+	}
 	for _, dir := range []string{env.home, env.tmp, env.stubs} {
 		if err := os.Mkdir(dir, 0700); err != nil {
 			t.Fatal(err)
@@ -692,6 +743,7 @@ func (env *installEnv) runScript(t *testing.T, path string, rs *releaseServer, t
 		"GHOST_RELEASE_URL=" + rs.URL + "/latest/download",
 		"GHOST_LATEST_URL=" + rs.URL + "/latest/download",
 		"GHOST_HTTP_PORT=" + strconv.Itoa(env.httpPort),
+		"GHOST_DASH_PORT=" + strconv.Itoa(env.dashPort),
 	}
 	if trustServer {
 		cmd.Env = append(cmd.Env, "GHOST_INSTALL_CA_FILE="+rs.caFile)
