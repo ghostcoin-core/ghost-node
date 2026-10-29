@@ -767,6 +767,20 @@ func freeP2PPort(t *testing.T) int {
 	return 0
 }
 
+// holdDefaultP2PPort holds geth's default peer port, 30303, for TCP and UDP
+// until the test ends, as a node already running on the computer does, so a
+// test node that still listens there fails. What something else holds already
+// stays held by it.
+func holdDefaultP2PPort(t *testing.T) {
+	t.Helper()
+	if l, err := net.Listen("tcp", ":30303"); err == nil {
+		t.Cleanup(func() { l.Close() })
+	}
+	if u, err := net.ListenPacket("udp", ":30303"); err == nil {
+		t.Cleanup(func() { u.Close() })
+	}
+}
+
 // runScript runs the script at path against the release server and returns
 // its output.
 func (env *installEnv) runScript(t *testing.T, path string, rs *releaseServer, trustServer bool, extraEnv ...string) (string, error) {
@@ -1074,6 +1088,7 @@ func TestInstallScriptInstallsAndStarts(t *testing.T) {
 	rs := serveRelease(t, "linux", blob, key.sign(blob), verifier)
 	script := writeScript(t, key, sha256Hex(verifier))
 	unitDir := func(env *installEnv) string { return filepath.Join(env.home, ".config", "systemd", "user") }
+	holdDefaultP2PPort(t)
 
 	t.Run("systemd", func(t *testing.T) {
 		env := newInstallEnv(t, envOptions{systemctl: stubSystemctl, cpus: 6})
@@ -2365,6 +2380,7 @@ func TestInstallScriptP2PPort(t *testing.T) {
 		release, _ := internalNetRelease(t)
 		blob := release.tarGz(t)
 		rs := serveRelease(t, "linux", blob, key.sign(blob), verifier)
+		holdDefaultP2PPort(t)
 		env := newInstallEnv(t, envOptions{systemctl: stubSystemctl, cpus: 2})
 		stopNodeAtCleanup(t, filepath.Join(env.stubs, "service.pid"))
 		base := filepath.Join(env.home, ".ghost-node")
