@@ -1,0 +1,5 @@
+# The faucet signer joins no network: no P2P listener, no peers.
+[Node.P2P]
+ListenAddr = ""
+MaxPeers = 0
+NoDiscovery = true

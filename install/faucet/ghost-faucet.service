@@ -1,0 +1,15 @@
+[Unit]
+Description=Ghost public test network faucet (10 test GHOST, once a minute per address)
+After=ghost-node.service ghost-faucet-signer.service
+Wants=ghost-faucet-signer.service
+
+[Service]
+WorkingDirectory=%h/.ghost-faucet
+ExecStart=/usr/bin/node %h/.ghost-faucet/faucet.js
+Environment=FAUCET_PORT=8548
+Restart=always
+RestartSec=15
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target
