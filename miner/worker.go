@@ -1265,8 +1265,15 @@ func (w *worker) prepareWork(genParams *generateParams) (*environment, error) {
 		timestamp = parent.Time + 1
 	}
 	// The target gas ceiling never exceeds the consensus maximum, so that a
-	// block built here never votes the gas limit above it.
-	gasCeil := min(w.config.GasCeil, ghost.MaxBlockGasLimit)
+	// block built here never votes the gas limit above it. A ceiling of 0 is
+	// one left unset, as when a config.toml's [Eth.Miner] table names only
+	// the Etherbase: it means the default ceiling, not a limit falling to the
+	// minimum.
+	gasCeil := w.config.GasCeil
+	if gasCeil == 0 {
+		gasCeil = DefaultConfig.GasCeil
+	}
+	gasCeil = min(gasCeil, ghost.MaxBlockGasLimit)
 
 	// Construct the sealing block header.
 	header := &types.Header{
