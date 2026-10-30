@@ -1,0 +1,12 @@
+[Unit]
+Description=Ghost faucet signer: signs the faucet's test GHOST transfers; no peers, no HTTP, IPC only
+After=ghost-node.service
+
+[Service]
+ExecStart=/bin/sh %h/.ghost-faucet/signer.sh
+Restart=always
+RestartSec=10
+Nice=10
+
+[Install]
+WantedBy=default.target
