@@ -728,7 +728,7 @@ func (s *setup) configure() (string, error) {
 		origins[i] = strconv.Quote(o)
 	}
 	fmt.Fprintf(&b, "[Node]\nDataDir = %s\nHTTPHost = \"127.0.0.1\"\nHTTPPort = %d\n", dataDir, s.httpPort)
-	fmt.Fprintf(&b, "HTTPModules = [\"eth\", \"net\", \"web3\"]\nHTTPCors = [%s]\n", strings.Join(origins, ", "))
+	fmt.Fprintf(&b, "HTTPModules = [\"eth\", \"net\", \"web3\", \"ghost\"]\nHTTPCors = [%s]\n", strings.Join(origins, ", "))
 	if err := writeFileAtomic(config, []byte(b.String())); err != nil {
 		return "", fmt.Errorf("could not write the config: %w", err)
 	}

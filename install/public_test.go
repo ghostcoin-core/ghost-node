@@ -109,6 +109,11 @@ chmod 700 "$STUB_DIR/tailscale"
 	publicName2 = "node2.tail1234.ts.net"
 	loginStep   = "This is the one step the installer cannot do for you: Tailscale prints a login link below; open it in a browser, sign in to your own free Tailscale account, and allow Funnel when it asks."
 	rerunLine   = "run the line again, which is safe: curl -fsSL https://get.ghostcoin.com | sh -s -- --public"
+	// modulesLine is the only module list a public node serves: ghost holds
+	// the wallet's read-only coin tree lookups. oldModulesLine is the list
+	// installers wrote before, which --public moves to modulesLine.
+	modulesLine    = `HTTPModules = ["eth", "net", "web3", "ghost"]`
+	oldModulesLine = `HTTPModules = ["eth", "net", "web3"]`
 )
 
 // publicEnv is a Linux computer with a systemd user session, sudo, and
@@ -186,7 +191,8 @@ func vhostLine(name string) string {
 
 // checkPublicConfig checks that the config names name once in its
 // HTTPVirtualHosts line, right after the HTTPModules line, and still opens
-// the HTTP RPC on 127.0.0.1 only with only the eth, net and web3 modules.
+// the HTTP RPC on 127.0.0.1 only with only the eth, net, web3 and ghost
+// modules.
 func checkPublicConfig(t *testing.T, env *installEnv, name string) {
 	t.Helper()
 	config := readConfig(t, env)
@@ -198,15 +204,15 @@ func checkPublicConfig(t *testing.T, env *installEnv, name string) {
 		t.Fatalf("the config names HTTPVirtualHosts %d times:\n%s", n, config)
 	}
 	for i, line := range lines {
-		if line == vhostLine(name) && (i == 0 || lines[i-1] != `HTTPModules = ["eth", "net", "web3"]`) {
+		if line == vhostLine(name) && (i == 0 || lines[i-1] != modulesLine) {
 			t.Fatalf("the HTTPVirtualHosts line does not follow the HTTPModules line:\n%s", config)
 		}
 	}
 	if countLines(lines, `HTTPHost = "127.0.0.1"`) != 1 || strings.Count(config, "HTTPHost") != 1 {
 		t.Fatalf("the config does not keep the HTTP RPC on 127.0.0.1 only:\n%s", config)
 	}
-	if countLines(lines, `HTTPModules = ["eth", "net", "web3"]`) != 1 || strings.Count(config, "HTTPModules") != 1 {
-		t.Fatalf("the config's modules are not exactly eth, net and web3:\n%s", config)
+	if countLines(lines, modulesLine) != 1 || strings.Count(config, "HTTPModules") != 1 {
+		t.Fatalf("the config's modules are not exactly eth, net, web3 and ghost:\n%s", config)
 	}
 	if countLines(lines, fmt.Sprintf("HTTPPort = %d", env.httpPort)) != 1 {
 		t.Fatalf("the config's HTTP port is not %d:\n%s", env.httpPort, config)
@@ -439,26 +445,113 @@ func TestInstallScriptPublicNotLoggedIn(t *testing.T) {
 }
 
 // TestInstallScriptPublicRefusesOtherModules does not publish a node whose
-// config offers more than the eth, net and web3 modules.
+// config offers anything but the eth, net, web3 and ghost modules, nor move
+// such a config to that list.
 func TestInstallScriptPublicRefusesOtherModules(t *testing.T) {
 	rs, script := publicRelease(t, nodeRelease(t))
+	for _, modules := range []string{
+		`HTTPModules = ["eth", "net", "web3", "ghost", "rpc"]`,
+		`HTTPModules = ["eth", "net", "web3", "rpc"]`,
+		`HTTPModules = ["eth", "net", "ghost"]`,
+		`HTTPModules = ["ghost", "eth", "net", "web3"]`,
+	} {
+		t.Run(modules, func(t *testing.T) {
+			env := publicEnv(t)
+			if _, err := runMineTo(t, env, script, rs); err != nil {
+				t.Fatalf("install.sh failed: %v", err)
+			}
+			path := filepath.Join(env.home, ".ghost-node", "config.toml")
+			config := readConfig(t, env)
+			edited := strings.Replace(config, modulesLine, modules, 1)
+			if edited == config {
+				t.Fatalf("the config has no HTTPModules line to edit:\n%s", config)
+			}
+			if err := os.WriteFile(path, []byte(edited), 0600); err != nil {
+				t.Fatal(err)
+			}
+			out, err := runPublic(t, env, script, rs)
+			checkPublicFailed(t, env, out, err, "set the public name", "the config "+path+" must have one HTTPModules line, "+modulesLine)
+			if readConfig(t, env) != edited {
+				t.Fatal("a refused public step changed the config")
+			}
+		})
+	}
+}
+
+// TestInstallScriptPublicMigratesModules runs --public on a node installed
+// before the ghost module was served, whose config lists only eth, net and
+// web3: the installer moves it to eth, net, web3 and ghost, says so, restarts
+// the node before publishing it, and a re-run changes nothing more.
+func TestInstallScriptPublicMigratesModules(t *testing.T) {
+	rs, script := publicRelease(t, nodeRelease(t))
 	env := publicEnv(t)
+	const restart = "systemctl --user restart ghost-node.service"
 	if _, err := runMineTo(t, env, script, rs); err != nil {
 		t.Fatalf("install.sh failed: %v", err)
 	}
 	path := filepath.Join(env.home, ".ghost-node", "config.toml")
 	config := readConfig(t, env)
-	edited := strings.Replace(config, `HTTPModules = ["eth", "net", "web3"]`, `HTTPModules = ["eth", "net", "web3", "rpc"]`, 1)
-	if edited == config {
+	old := strings.Replace(config, modulesLine, oldModulesLine, 1)
+	if old == config {
 		t.Fatalf("the config has no HTTPModules line to edit:\n%s", config)
 	}
-	if err := os.WriteFile(path, []byte(edited), 0600); err != nil {
-		t.Fatal(err)
-	}
-	out, err := runPublic(t, env, script, rs)
-	checkPublicFailed(t, env, out, err, "set the public name", "the config "+path+" must have one HTTPModules line")
-	if readConfig(t, env) != edited {
-		t.Fatal("a refused public step changed the config")
+	vhost := oldModulesLine + "\n" + vhostLine(publicName) + "\n"
+	for name, before := range map[string]string{
+		"without public name": old,
+		"with public name":    strings.Replace(old, oldModulesLine+"\n", vhost, 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := os.WriteFile(path, []byte(before), 0600); err != nil {
+				t.Fatal(err)
+			}
+			calls := len(callLines(t, env))
+			out, err := runPublic(t, env, script, rs)
+			if err != nil {
+				t.Fatalf("install.sh --public failed: %v\n%s", err, out)
+			}
+			checkPublicConfig(t, env, publicName)
+			if after := readConfig(t, env); strings.Contains(after, oldModulesLine+"\n") {
+				t.Fatalf("the config still lists only eth, net and web3:\n%s", after)
+			}
+			want := "ghost-node: the config " + path + " now also serves the ghost module's read-only coin tree lookups"
+			if !strings.Contains(out, want) {
+				t.Fatalf("the installer did not say %q:\n%s", want, out)
+			}
+			checkPublished(t, env, out, publicName)
+			lines := callLines(t, env)[calls:]
+			// One restart for the install and one for the new config, which
+			// comes before the Funnel.
+			if n := countLines(lines, restart); n != 2 {
+				t.Fatalf("the node was restarted %d times, not once for the install and once for its new config:\n%s", n, strings.Join(lines, "\n"))
+			}
+			last := -1
+			for i, line := range lines {
+				if line == restart {
+					last = i
+				}
+			}
+			for i, line := range lines {
+				if line == funnelCall(env) && i < last {
+					t.Fatalf("the node was published before it restarted with its new config:\n%s", strings.Join(lines, "\n"))
+				}
+			}
+
+			migrated := readConfig(t, env)
+			calls = len(callLines(t, env))
+			out, err = runPublic(t, env, script, rs)
+			if err != nil {
+				t.Fatalf("the re-run failed: %v", err)
+			}
+			if after := readConfig(t, env); after != migrated {
+				t.Fatalf("the re-run changed the config:\n%s", after)
+			}
+			if strings.Contains(out, "now also serves the ghost module") {
+				t.Fatal("the re-run said it moved the module list again")
+			}
+			if n := countLines(callLines(t, env)[calls:], restart); n != 1 {
+				t.Fatalf("the re-run restarted the node %d times, not once for the install", n)
+			}
+		})
 	}
 }
 
@@ -496,7 +589,7 @@ func TestInstallScriptPublicPlainUnchanged(t *testing.T) {
 		t.Fatalf("the plain install called Tailscale or sudo:\n%s", calls)
 	}
 	config := readConfig(t, env)
-	if strings.Contains(config, "HTTPVirtualHosts") || !strings.Contains(config, "HTTPModules = [\"eth\", \"net\", \"web3\"]\nHTTPCors") {
+	if strings.Contains(config, "HTTPVirtualHosts") || !strings.Contains(config, modulesLine+"\nHTTPCors") {
 		t.Fatalf("the plain install's config changed:\n%s", config)
 	}
 	if strings.Contains(out, "public") || strings.Contains(out, "ghost-rpc") {
@@ -536,9 +629,9 @@ func TestInstallScriptPublicRealNode(t *testing.T) {
 	}
 	checkPublicConfig(t, env, publicName)
 	checkPublished(t, env, out, publicName)
-	call := func(host string) (int, string) {
+	callMethod := func(host, method string) (int, string) {
 		t.Helper()
-		req, err := http.NewRequest("POST", fmt.Sprintf("http://127.0.0.1:%d/", env.httpPort), strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}`))
+		req, err := http.NewRequest("POST", fmt.Sprintf("http://127.0.0.1:%d/", env.httpPort), strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"`+method+`","params":[]}`))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -554,6 +647,23 @@ func TestInstallScriptPublicRealNode(t *testing.T) {
 			t.Fatal(err)
 		}
 		return resp.StatusCode, string(body)
+	}
+	call := func(host string) (int, string) {
+		t.Helper()
+		return callMethod(host, "eth_chainId")
+	}
+	// The wallet's coin tree lookups are served: called without arguments
+	// they complain about the arguments, not that they do not exist.
+	for _, method := range []string{"ghost_getPageRoots", "ghost_getPageRootTail", "ghost_getTreePage", "ghost_getPageSet", "ghost_getNoteBucket"} {
+		if status, body := callMethod(publicName, method); status != http.StatusOK || !strings.Contains(body, `"error"`) || strings.Contains(body, "-32601") {
+			t.Fatalf("%s for %s gave %d %s, not an argument error", method, publicName, status, body)
+		}
+	}
+	// Nothing beyond the listed modules is served.
+	for _, method := range []string{"admin_nodeInfo", "personal_listAccounts", "debug_gcStats", "txpool_status", "miner_setExtra"} {
+		if status, body := callMethod(publicName, method); status != http.StatusOK || !strings.Contains(body, "-32601") {
+			t.Fatalf("%s for %s gave %d %s, not method not found", method, publicName, status, body)
+		}
 	}
 	if status, body := call(publicName); status != http.StatusOK || !strings.Contains(body, fmt.Sprintf(`"result":"%#x"`, ghost.InternalNetChainID)) {
 		t.Fatalf("eth_chainId for %s gave %d %s", publicName, status, body)

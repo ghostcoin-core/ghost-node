@@ -975,7 +975,7 @@ func checkInstalledAndMiningTo(t *testing.T, env *installEnv, geth string, out s
 		fmt.Sprintf("DataDir = %q\n", filepath.Join(base, "data")),
 		"HTTPHost = \"127.0.0.1\"\n",
 		fmt.Sprintf("HTTPPort = %d\n", env.httpPort),
-		"HTTPModules = [\"eth\", \"net\", \"web3\"]\n",
+		"HTTPModules = [\"eth\", \"net\", \"web3\", \"ghost\"]\n",
 		fmt.Sprintf("HTTPCors = [%q, %q]\n", webOrigins[0], webOrigins[1]),
 	} {
 		if !strings.Contains(string(config), want) {

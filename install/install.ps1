@@ -178,7 +178,7 @@ Etherbase = "{0}"
 DataDir = "{1}"
 HTTPHost = "127.0.0.1"
 HTTPPort = {2}
-HTTPModules = ["eth", "net", "web3"]
+HTTPModules = ["eth", "net", "web3", "ghost"]
 HTTPCors = ["https://ghost-webapp-alpha.vercel.app", "https://ghost-wallet-nine.vercel.app"]
 '@ -f $MineTo, $DataDir, $HttpPort
 				$Text = $Text.Replace("`r`n", "`n") + "`n"

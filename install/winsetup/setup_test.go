@@ -533,7 +533,7 @@ func TestWinSetupCleanInstall(t *testing.T) {
 		"DataDir = \"" + filepath.Join(e.home, "data") + "\"\n",
 		"HTTPHost = \"127.0.0.1\"\n",
 		"HTTPPort = 8545\n",
-		"HTTPModules = [\"eth\", \"net\", \"web3\"]\n",
+		"HTTPModules = [\"eth\", \"net\", \"web3\", \"ghost\"]\n",
 		"HTTPCors = [\"https://ghost-webapp-alpha.vercel.app\", \"https://ghost-wallet-nine.vercel.app\"]\n",
 	} {
 		if !strings.Contains(string(config), want) {
