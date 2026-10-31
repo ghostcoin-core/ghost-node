@@ -89,7 +89,10 @@ After the plain install it keeps the node running at boot and after logout
 [Tailscale](https://tailscale.com) with its official install script when it is
 missing, adds the node's Tailscale name to `HTTPVirtualHosts` in
 `~/.ghost-node/config.toml`, restarts the node, and publishes only its HTTP RPC
-(eth, net, web3; still on `127.0.0.1`) with Tailscale Funnel at `/ghost-rpc`.
+(eth, net, web3, ghost; still on `127.0.0.1`) with Tailscale Funnel at
+`/ghost-rpc`. The ghost methods are the read-only coin tree lookups the wallet
+needs to Summon; a config from an older install that lists only eth, net and
+web3 gets ghost added.
 It ends by printing the address, such as
 `https://box.tail1234.ts.net/ghost-rpc`.
 

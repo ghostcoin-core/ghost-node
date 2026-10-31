@@ -148,9 +148,10 @@
 # waits for it. The node's public name is the DNSName of Self in tailscale
 # status --self --json, without its trailing dot. The config gets
 # HTTPVirtualHosts = ["localhost", "<public name>"] after its HTTPModules line,
-# once, and the node restarts when that line changed. HTTPHost stays
-# 127.0.0.1 and the modules stay eth, net and web3; a config with any other
-# refuses to be published. Then sudo tailscale funnel --bg --set-path
+# once. HTTPHost stays 127.0.0.1 and the modules are eth, net, web3 and ghost
+# (ghost serves the wallet's read-only coin tree lookups); a config with the
+# older eth, net and web3 list moves to that list, and any other list refuses
+# to be published. The node restarts when the config changed. Then sudo tailscale funnel --bg --set-path
 # /ghost-rpc publishes the node's HTTP RPC, and only it, at
 # https://<public name>/ghost-rpc, which the closing line prints. When a public
 # step fails, the node stays installed and running and the installer says which
@@ -422,7 +423,7 @@ Etherbase = "$address"
 DataDir = "$(toml_string "$data")"
 HTTPHost = "127.0.0.1"
 HTTPPort = $http_port
-HTTPModules = ["eth", "net", "web3"]
+HTTPModules = ["eth", "net", "web3", "ghost"]
 HTTPCors = ["https://ghost-webapp-alpha.vercel.app", "https://ghost-wallet-nine.vercel.app"]
 EOF
 	mv -f "$config.new" "$config"
@@ -1331,31 +1332,46 @@ public_login() {
 }
 
 # public_config checks that the config opens the node's HTTP RPC on 127.0.0.1
-# only and with only the eth, net and web3 modules, sets public_port to its
-# port, and names public_name in its HTTPVirtualHosts line, right after the
-# HTTPModules line. It sets vhost_changed to 1 when it changed that line.
+# only and with only the eth, net, web3 and ghost modules, moving a config with
+# the older eth, net and web3 list to that list, sets public_port to its port,
+# and names public_name in its HTTPVirtualHosts line, right after the
+# HTTPModules line. It sets config_changed to 1 when it changed the config.
 public_config() {
-	vhost_changed=0
+	config_changed=0
+	m_list='["eth", "net", "web3", "ghost"]'
+	m_line="HTTPModules = $m_list"
 	[ "$(sed -n 's/^HTTPHost = //p' "$config")" = '"127.0.0.1"' ] ||
 		public_fail "set the public name" "the config $config must have one HTTPHost line, HTTPHost = \"127.0.0.1\""
-	[ "$(sed -n 's/^HTTPModules = //p' "$config")" = '["eth", "net", "web3"]' ] ||
-		public_fail "set the public name" "the config $config must have one HTTPModules line, HTTPModules = [\"eth\", \"net\", \"web3\"], so the public address offers nothing more"
+	# The older list is m_list without ghost.
+	m_text=$(sed -n 's/^HTTPModules = //p' "$config")
+	if [ "$m_text" = "$m_list" ]; then
+		m_old=0
+	elif [ "$m_text" = "${m_list%, \"ghost\"]}]" ]; then
+		m_old=1
+	else
+		public_fail "set the public name" "the config $config must have one HTTPModules line, $m_line, so the public address offers nothing more"
+	fi
 	public_port=$(sed -n 's/^HTTPPort = //p' "$config")
 	valid_port "$public_port" || public_fail "set the public name" "the config $config has no single HTTPPort line with a port number"
 	v_line="HTTPVirtualHosts = [\"localhost\", \"$public_name\"]"
-	[ "$(grep '^HTTPVirtualHosts = ' "$config")" != "$v_line" ] || return 0
+	v_old=0
+	[ "$(grep '^HTTPVirtualHosts = ' "$config")" = "$v_line" ] || v_old=1
+	[ "$m_old" = 1 ] || [ "$v_old" = 1 ] || return 0
 	while IFS= read -r v_text || [ -n "$v_text" ]; do
 		case "$v_text" in
 		'HTTPVirtualHosts = '*) continue ;;
+		'HTTPModules = '*)
+			printf '%s\n%s\n' "$m_line" "$v_line"
+			continue
+			;;
 		esac
 		printf '%s\n' "$v_text"
-		case "$v_text" in
-		'HTTPModules = '*) printf '%s\n' "$v_line" ;;
-		esac
 	done <"$config" >"$config.new" || public_fail "set the public name" "could not rewrite $config"
 	mv -f "$config.new" "$config"
-	vhost_changed=1
-	say "the config $config now lets the node answer at $public_name"
+	config_changed=1
+	[ "$m_old" = 0 ] ||
+		say "the config $config now also serves the ghost module's read-only coin tree lookups, which the Ghost Wallet needs to Summon; the node restarts to pick them up"
+	[ "$v_old" = 0 ] || say "the config $config now lets the node answer at $public_name"
 }
 
 # go_public publishes the installed node at https://<its Tailscale name>/ghost-rpc.
@@ -1365,14 +1381,14 @@ go_public() {
 	install_tailscale
 	public_login
 	public_config
-	if [ "$vhost_changed" = 1 ]; then
+	if [ "$config_changed" = 1 ]; then
 		mark_start
 		{ systemctl --user restart "$service.service" && wait_started; } ||
-			public_fail "restart the node" "the node did not start again with its public name; see its log (journalctl --user -u $service)"
+			public_fail "restart the node" "the node did not start again with its new config; see its log (journalctl --user -u $service)"
 	fi
 	as_root tailscale funnel --bg --set-path /ghost-rpc "http://127.0.0.1:$public_port" </dev/null ||
 		public_fail "publish with Tailscale Funnel" "'sudo tailscale funnel --bg --set-path /ghost-rpc http://127.0.0.1:$public_port' failed; Funnel may not be allowed for this computer in your Tailscale account"
-	say "the node runs at boot and after logout, and Tailscale Funnel publishes only its HTTP RPC (eth, net, web3)"
+	say "the node runs at boot and after logout, and Tailscale Funnel publishes only its HTTP RPC (eth, net, web3, ghost)"
 	say "the node's public address for the Ghost Wallet: https://$public_name/ghost-rpc"
 }
 

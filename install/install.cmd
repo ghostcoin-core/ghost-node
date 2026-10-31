@@ -225,7 +225,7 @@ if defined FRESH >>"%CONFIG%.new" echo [Node]
 if defined FRESH >>"%CONFIG%.new" echo DataDir = "%DATA_TOML%"
 if defined FRESH >>"%CONFIG%.new" echo HTTPHost = "127.0.0.1"
 if defined FRESH >>"%CONFIG%.new" echo HTTPPort = %HTTP_PORT%
-if defined FRESH >>"%CONFIG%.new" echo HTTPModules = ["eth", "net", "web3"]
+if defined FRESH >>"%CONFIG%.new" echo HTTPModules = ["eth", "net", "web3", "ghost"]
 if defined FRESH >>"%CONFIG%.new" echo HTTPCors = ["https://ghost-webapp-alpha.vercel.app", "https://ghost-wallet-nine.vercel.app"]
 if defined REWRITE type nul >"%CONFIG%.new"
 if defined REWRITE for /f "delims=" %%L in ('findstr /n "^" "%CONFIG%"') do (
