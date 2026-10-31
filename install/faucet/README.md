@@ -3,7 +3,9 @@
 The faucet gives test GHOST on the public test network (chain 6777972) to
 anyone who asks: `POST {"address": "0x…"}` and the node's mining account sends
 10 test GHOST there, at most once a minute per address and 30 times a minute in
-all. It answers once the transfer is in a block. The Ghost Wallet's "Get test
+all. It answers once the transfer is in a block. At most 10 transfers are
+queued or waiting for a block at once; past that it answers 503 (busy) and the
+request does not count against the address or the minute. The Ghost Wallet's "Get test
 GHOST" button calls it at `https://<host>/ghost-faucet`.
 
 It runs beside a Ghost test network node, as two systemd user services:

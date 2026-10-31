@@ -26,6 +26,8 @@ const TEST_NETWORK_CHAIN_ID = 6777972n;
 const FAUCET_WEI = 10n * 10n ** 18n;
 const ONCE_EVERY_MS = 60_000;
 const MAX_PER_MINUTE = 30;
+// Transfers queued or waiting for a receipt at once; more are turned away.
+const MAX_OUTSTANDING = 10;
 const MAX_BODY_BYTES = 1024;
 const RECEIPT_TRIES = 180;
 const TRANSFER_GAS = 150_000;
@@ -91,9 +93,13 @@ function createFaucet({ signer, rpc, now = Date.now, sleep = (ms) => new Promise
   // Addresses with a transfer queued or in flight: one at a time per address.
   const pending = new Set();
   let recent = [];
-  let queue = Promise.resolve();
+  // Transfers queued to be sent or waiting for their receipt.
+  let outstanding = 0;
+  let submitting = Promise.resolve();
 
-  async function send(to) {
+  // Signs and sends one transfer and returns its hash. Only this runs one at a
+  // time, so each transfer takes the next pending nonce.
+  async function submit(to) {
     await checkTestNetwork(rpc);
     const [nonce, gasPrice] = await Promise.all([
       rpc('eth_getTransactionCount', [signer.address, 'pending']),
@@ -110,16 +116,18 @@ function createFaucet({ signer, rpc, now = Date.now, sleep = (ms) => new Promise
       gas: '0x' + TRANSFER_GAS.toString(16),
       gasPrice: '0x' + ((BigInt(gasPrice) * 12n) / 10n).toString(16),
     });
-    const hash = await rpc('eth_sendRawTransaction', [raw]);
+    return rpc('eth_sendRawTransaction', [raw]);
+  }
+
+  // The receipt once the transfer is in a block, or null when it is not in one
+  // after RECEIPT_TRIES tries. Several transfers may wait at once.
+  async function inBlock(hash) {
     for (let tries = 0; tries < RECEIPT_TRIES; tries++) {
       const receipt = await rpc('eth_getTransactionReceipt', [hash]);
-      if (receipt && receipt.blockNumber) {
-        if (BigInt(receipt.status) !== 1n) throw new Error('the transfer failed in its block');
-        return hash;
-      }
+      if (receipt && receipt.blockNumber) return receipt;
       await sleep(1000);
     }
-    throw new Error('the transfer is not in a block yet');
+    return null;
   }
 
   async function handle(method, url, text) {
@@ -141,6 +149,11 @@ function createFaucet({ signer, rpc, now = Date.now, sleep = (ms) => new Promise
     if (pending.has(key) || (last !== undefined && at - last < ONCE_EVERY_MS)) {
       return { status: 429, json: { error: 'test GHOST goes to each address at most once a minute' } };
     }
+    // A busy faucet turns the request away before it counts against the
+    // address's minute or the minute's total.
+    if (outstanding >= MAX_OUTSTANDING) {
+      return { status: 503, json: { error: 'the faucet is busy; try again in a minute' } };
+    }
     recent = recent.filter((t) => at - t < ONCE_EVERY_MS);
     if (recent.length >= MAX_PER_MINUTE) {
       return { status: 503, json: { error: 'the faucet is busy; try again in a minute' } };
@@ -148,22 +161,39 @@ function createFaucet({ signer, rpc, now = Date.now, sleep = (ms) => new Promise
     for (const [k, t] of lastSent) if (at - t >= ONCE_EVERY_MS) lastSent.delete(k);
     lastSent.set(key, at);
     recent.push(at);
-    // One transfer at a time, so each takes the next nonce.
     pending.add(key);
-    // The minute starts again when the transfer is sent, not when it was queued.
-    const result = queue.then(() => {
-      lastSent.set(key, now());
-      return send(key);
-    });
-    queue = result.catch(() => {});
+    outstanding++;
     try {
-      const transactionHash = await result;
+      // The minute starts again when the transfer is sent, not when it was queued.
+      const submitted = submitting.then(() => {
+        lastSent.set(key, now());
+        return submit(key);
+      });
+      submitting = submitted.catch(() => {});
+      let transactionHash;
+      try {
+        transactionHash = await submitted;
+      } catch (error) {
+        // Nothing was sent: the address may ask again at once.
+        lastSent.delete(key);
+        return { status: 502, json: { error: error.message } };
+      }
+      // From here the transfer may land, so the address keeps its minute
+      // unless its block shows it moved nothing.
+      let receipt;
+      try {
+        receipt = await inBlock(transactionHash);
+      } catch (error) {
+        return { status: 502, json: { error: error.message } };
+      }
+      if (!receipt) return { status: 502, json: { error: 'the transfer is not in a block yet' } };
+      if (BigInt(receipt.status) !== 1n) {
+        lastSent.delete(key);
+        return { status: 502, json: { error: 'the transfer failed in its block' } };
+      }
       return { status: 200, json: { transactionHash } };
-    } catch (error) {
-      // Nothing was sent: the address may ask again at once.
-      lastSent.delete(key);
-      return { status: 502, json: { error: error.message } };
     } finally {
+      outstanding--;
       pending.delete(key);
     }
   }
@@ -171,7 +201,15 @@ function createFaucet({ signer, rpc, now = Date.now, sleep = (ms) => new Promise
   return { handle };
 }
 
-module.exports = { TEST_NETWORK_CHAIN_ID, FAUCET_WEI, ONCE_EVERY_MS, MAX_PER_MINUTE, createFaucet, checkTestNetwork };
+module.exports = {
+  TEST_NETWORK_CHAIN_ID,
+  FAUCET_WEI,
+  ONCE_EVERY_MS,
+  MAX_PER_MINUTE,
+  MAX_OUTSTANDING,
+  createFaucet,
+  checkTestNetwork,
+};
 
 async function main() {
   const nodeDir = process.env.GHOST_NODE_DIR || path.join(os.homedir(), '.ghost-node');
