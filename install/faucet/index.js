@@ -5,3 +5,4 @@
 // faucet.js; install-faucet.sh does not install this file.
 
 require('./faucet.test.js');
+require('./queue.test.js');
