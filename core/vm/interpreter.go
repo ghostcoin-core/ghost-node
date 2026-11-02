@@ -180,6 +180,11 @@ func (in *EVMInterpreter) Run(contract *Contract, input []byte, readOnly bool) (
 		// Get the operation from the jump table and validate the stack to ensure there are
 		// enough stack items available to perform the operation.
 		op = contract.GetOp(pc)
+		// A frozen context halts on the opcodes it forbids, before any gas
+		// or stack check. The flag was set once for the frame.
+		if contract.frozen && frozenOpcodes[op] {
+			return nil, &ErrFrozenOpcode{opcode: op}
+		}
 		operation := in.table[op]
 		cost = operation.constantGas // For tracing
 		// Validate stack

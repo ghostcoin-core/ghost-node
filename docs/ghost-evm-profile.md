@@ -174,6 +174,107 @@ with `VERIFY_GAS[0x0001] = 3,000` and `SIGVERIFY_WORD_GAS = 4`, both in
 `params/ghost/accounttx.go` and measured as described in
 [account transactions](account-transactions.md).
 
+## Frozen policies
+
+A frozen policy (spec 10, section 6) is a contract whose behaviour depends
+only on its code and its input, and which never holds a balance. Only the
+policy factory creates one. The rules are in `core/vm/frozen_policy.go`, the
+addresses, hashes and registry helpers in `params/ghost/policy.go`.
+
+### The factory
+
+The factory is a native at `0x0000000000000000000000000000000000000062`. It
+is not a precompile: it is not in the precompile set and its address is not
+warm. A `CALL` with no value reaches it; a `CALL` with value fails and moves
+nothing, and a `STATICCALL`, `CALLCODE` or `DELEGATECALL` to it fails and
+uses up its gas. A call to it inside a static frame fails as a write would.
+
+Its input is a 32-byte salt followed by the init code; its output is the
+policy address as a 32-byte word. The policy is created at
+
+```
+address = K("ghost/policy-address/v1", salt, keccak256(init_code))[12:]
+```
+
+where `K` is the tagged hash of the trees: Keccak-256 over the tag's length
+as one byte, the tag, then the inputs. The sender is not an input, so the
+same code and salt give the same address whoever creates it. The factory
+refuses an address that is reserved (below), an address that already has a
+nonce or code, and, as `CREATE2` does, init code over 49,152 bytes, runtime
+code over 24,576 bytes and runtime code that begins with `0xef`. A balance
+already at the address is burned when the policy is created; it is not a
+reason to fail.
+
+The gas is charged before the constructor runs:
+
+```
+gas = 32,000 + (6 + 2) * ceil(len(init_code) / 32) + REGISTRY_GAS
+```
+
+the gas of a `CREATE2` of the init code (the 2 per word is EIP-3860's
+initcode gas) plus `REGISTRY_GAS = 40,000` for the registry entry. The
+constructor gets the rest of the call's gas and pays the code deposit of 200
+per byte, as for `CREATE2`. A constructor that fails leaves nothing: no
+account, no code, no registry entry, and the balance at the address stays.
+
+### The registry
+
+The registry is the storage of the system account
+`0x67686f7374000000000000000000000000000009`, which gets nonce 1 when it is
+first written. Each policy has two words:
+
+| Word | Key | Value |
+|---|---|---|
+| 0 | `K("ghost/policy-registry/v1", address, 0x00)` | byte 0 is `0x01` (frozen); bytes 24 to 31 are the creation height, big-endian |
+| 1 | `K("ghost/policy-registry/v1", address, 0x01)` | Keccak-256 of the runtime code |
+
+An address is a policy exactly when its word 0 begins with `0x01`
+(`ghost.IsRegisteredPolicy`).
+
+### The frozen context
+
+A frame is frozen when the address it runs as is a registered policy, or
+when it is the constructor the factory runs. The flag is read once when the
+frame starts. A `DELEGATECALL` or `CALLCODE` frame runs as its caller, so
+policy code reached by `DELEGATECALL` from a contract that is not frozen runs
+unfrozen, without the frozen context's access to the natives.
+
+A frozen frame halts, using up its gas, on any of these opcodes, when the
+opcode runs:
+
+| Opcodes | Why |
+|---|---|
+| BALANCE, SELFBALANCE, EXTCODESIZE, EXTCODECOPY, EXTCODEHASH, SLOAD, SSTORE, TLOAD, TSTORE | state |
+| ORIGIN, CALLER, GASPRICE, GAS | the transaction, the caller and the remaining gas |
+| BLOCKHASH, COINBASE, TIMESTAMP, NUMBER, DIFFICULTY, GASLIMIT, CHAINID, BASEFEE, BLOBHASH, BLOBBASEFEE | the block and the chain |
+| LOG0 to LOG4 | logs |
+| CREATE, CREATE2, CALLCODE, DELEGATECALL, SELFDESTRUCT | creation, delegation and destruction |
+
+Its `CALL` and `STATICCALL` halt unless the target is SHA256 (0x02),
+RIPEMD160 (0x03), IDENTITY (0x04), signature verify (0x51), 0x60, 0x61, or a
+policy created in an earlier block. MODEXP, BLAKE2F, the removed
+precompiles, the factory, any contract that is not a policy and a policy
+created in the same block are refused. The natives at 0x60 and 0x61 do not
+exist yet: a call to them is allowed and, with no code there, succeeds as a
+call to an empty account.
+
+### No balance
+
+A policy's balance is always zero:
+
+* a `CALL` with value to a policy fails as a call without the balance would,
+  and nothing moves;
+* a transaction with value to a policy is invalid; with value zero it runs
+  the policy;
+* a `SELFDESTRUCT` that would move a non-zero balance to a policy halts;
+* a block whose coinbase is a policy in its post-state is invalid, including
+  a policy that block creates;
+* the factory burns a balance sent to the address before the policy exists.
+
+The reserved addresses (`ghost.IsReservedAddress`) are every address below
+`0x10000`, which holds the precompiles and the natives, and the system
+accounts, `ghost` in ASCII followed by zero bytes and a two-byte counter.
+
 ## JSON-RPC
 
 These are the namespaces a node with the Ethereum service registers. Here
@@ -217,6 +318,10 @@ WebSocket serve only the namespaces named with `--http.api` and `--ws.api`.
   `DELEGATECALL` and `STATICCALL` to the commit entry address fails and uses
   up the gas it was given. Only a top-level transaction to it commits, and it
   runs no code ([commit and reveal](private-transactions.md)).
+* **Frozen policies.** The native at 0x62 creates frozen policies, contracts
+  that may not read state or the environment, may call only a short list of
+  targets, and never hold a balance. Value sent to one fails, and a block
+  paying one as coinbase is invalid ([frozen policies](#frozen-policies)).
 * **The reveal transaction has no sender.** Type `0x50` is a native
   transaction without an account, nonce or signature; it runs no EVM code and
   credits its recipient without running the recipient's code. Blocks accept

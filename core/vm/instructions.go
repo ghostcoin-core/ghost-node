@@ -667,6 +667,9 @@ func opCall(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byt
 	// Get the arguments from the memory.
 	args := scope.Memory.GetPtr(int64(inOffset.Uint64()), int64(inSize.Uint64()))
 
+	if scope.Contract.frozen && !interpreter.evm.frozenCallAllowed(toAddr) {
+		return nil, ErrFrozenCallTarget
+	}
 	if interpreter.readOnly && !value.IsZero() {
 		return nil, ErrWriteProtection
 	}
@@ -765,6 +768,9 @@ func opStaticCall(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) 
 	// Get arguments from the memory.
 	args := scope.Memory.GetPtr(int64(inOffset.Uint64()), int64(inSize.Uint64()))
 
+	if scope.Contract.frozen && !interpreter.evm.frozenCallAllowed(toAddr) {
+		return nil, ErrFrozenCallTarget
+	}
 	ret, returnGas, err := interpreter.evm.StaticCall(scope.Contract, toAddr, args, gas)
 	if err != nil {
 		temp.Clear()
@@ -811,6 +817,9 @@ func opSelfdestruct(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext
 	}
 	beneficiary := scope.Stack.pop()
 	balance := interpreter.evm.StateDB.GetBalance(scope.Contract.Address())
+	if err := checkPolicyBeneficiary(interpreter.evm, beneficiary.Bytes20(), balance); err != nil {
+		return nil, err
+	}
 	interpreter.evm.StateDB.AddBalance(beneficiary.Bytes20(), balance)
 	interpreter.evm.StateDB.SelfDestruct(scope.Contract.Address())
 	if tracer := interpreter.evm.Config.Tracer; tracer != nil {
@@ -826,6 +835,9 @@ func opSelfdestruct6780(pc *uint64, interpreter *EVMInterpreter, scope *ScopeCon
 	}
 	beneficiary := scope.Stack.pop()
 	balance := interpreter.evm.StateDB.GetBalance(scope.Contract.Address())
+	if err := checkPolicyBeneficiary(interpreter.evm, beneficiary.Bytes20(), balance); err != nil {
+		return nil, err
+	}
 	interpreter.evm.StateDB.SubBalance(scope.Contract.Address(), balance)
 	interpreter.evm.StateDB.AddBalance(beneficiary.Bytes20(), balance)
 	interpreter.evm.StateDB.Selfdestruct6780(scope.Contract.Address())

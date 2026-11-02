@@ -25,10 +25,15 @@ import (
 	"github.com/ethereum/go-ethereum/core/ghosttree"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/params/ghost"
 	"github.com/ethereum/go-ethereum/params/types/ctypes"
 	"github.com/ethereum/go-ethereum/params/vars"
 	"github.com/ethereum/go-ethereum/trie"
 )
+
+// ErrPolicyCoinbase is returned for a block whose coinbase is a registered
+// frozen policy in the state after the block.
+var ErrPolicyCoinbase = errors.New("coinbase is a frozen policy")
 
 // BlockValidator is responsible for validating block headers, uncles and
 // processed state.
@@ -139,6 +144,12 @@ func (v *BlockValidator) ValidateState(block *types.Block, statedb *state.StateD
 	receiptSha := types.DeriveSha(receipts, trie.NewStackTrie(nil))
 	if receiptSha != header.ReceiptHash {
 		return fmt.Errorf("invalid receipt root hash (remote: %x local: %x)", header.ReceiptHash, receiptSha)
+	}
+	// A frozen policy never holds a balance, so it cannot be paid as the
+	// coinbase. The check reads the state after execution, so it also
+	// catches a policy created in this block.
+	if ghost.IsRegisteredPolicy(statedb, header.Coinbase) {
+		return fmt.Errorf("%w: %v", ErrPolicyCoinbase, header.Coinbase.Hex())
 	}
 	// Validate the tree roots of a header that carries them against the trees
 	// in the state after execution.
