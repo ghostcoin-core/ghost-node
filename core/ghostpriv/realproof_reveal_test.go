@@ -36,6 +36,7 @@ func decodedInputs(r *ghostpriv.Reveal, chainID uint64, genesis common.Hash) *gh
 	return &ghostpriv.VerifyInputs{
 		Kind:      ghosttree.Coin,
 		Purpose:   ghostpriv.PurposeReveal,
+		Version:   r.Version,
 		Binding:   r.BindingDigest(chainID, genesis),
 		ChainID:   chainID,
 		Domain:    genesis,
@@ -55,7 +56,6 @@ func decodedInputs(r *ghostpriv.Reveal, chainID uint64, genesis common.Hash) *gh
 // field, padding included, and the default verifier accepts what it decodes
 // to. One flipped proof byte in the envelope is rejected.
 func TestRealProofRevealRoundTrip(t *testing.T) {
-	t.Skip("the recorded proof binds the version 1 reveal and its 156-byte note; the version 2 proof and fixture come with PER-4099")
 	for _, f := range knownAnswerFiles {
 		t.Run(f.name, func(t *testing.T) { testRealProofRevealRoundTrip(t, loadKnownAnswerFile(t, f.file)) })
 	}
@@ -67,7 +67,7 @@ func testRealProofRevealRoundTrip(t *testing.T, ka knownAnswer) {
 		t.Fatalf("proof of %d bytes, the field holds %d", len(ka.proof), ghostpriv.ProofSize)
 	}
 	r := &ghostpriv.Reveal{
-		Version:   ghostpriv.RevealVersion,
+		Version:   ghostpriv.Version,
 		ChainID:   in.ChainID,
 		Marker:    in.Marker,
 		Root:      in.Root,
@@ -82,7 +82,7 @@ func testRealProofRevealRoundTrip(t *testing.T, ka knownAnswer) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(env) != ghostpriv.EnvelopeSize || env[0] != types.GhostRevealTxType {
+	if len(env) != ghostpriv.EnvelopeSizeV1 || env[0] != types.GhostRevealTxType {
 		t.Fatalf("envelope of %d bytes, type %#x", len(env), env[0])
 	}
 	tx, err := types.NewGhostRevealTx(env)
@@ -119,6 +119,31 @@ func testRealProofRevealRoundTrip(t *testing.T, ka knownAnswer) {
 	if err := v.VerifyReveal(decodedInputs(dec, in.ChainID, in.Domain), dec.Proof); err != nil {
 		t.Fatalf("the decoded reveal: %v", err)
 	}
+	// The inputs the node's checks and the pool build verify too.
+	if err := v.VerifyReveal(dec.VerifyInputs(in.ChainID, in.Domain), dec.Proof); err != nil {
+		t.Fatalf("the decoded reveal's own inputs: %v", err)
+	}
+
+	// The same fields and proof as a version 2 reveal, with its 380-byte
+	// note, are refused before the library is called: it verifies only the
+	// 368-byte version 1 statement.
+	t.Run("version 2 refused", func(t *testing.T) {
+		v2 := *dec
+		v2.Version = ghostpriv.RevealVersion
+		v2.Note[ghostpriv.NoteSize-1] = 0x5a
+		env2, err := v2.MarshalBinary()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(env2) != ghostpriv.EnvelopeSize {
+			t.Fatalf("version 2 envelope of %d bytes", len(env2))
+		}
+		dec2 := decode(t, env2)
+		err = v.VerifyReveal(dec2.VerifyInputs(in.ChainID, in.Domain), dec2.Proof)
+		if !errors.Is(err, ghostpriv.ErrStatementUnsupported) || !errors.Is(err, ghostpriv.ErrProofStatement) {
+			t.Fatalf("version 2 reveal: %v, want %v", err, ghostpriv.ErrStatementUnsupported)
+		}
+	})
 
 	t.Run("flipped proof byte rejected", func(t *testing.T) {
 		const offProof = 1 + 190 // the type byte, then the payload's proof field

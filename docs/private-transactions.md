@@ -103,30 +103,43 @@ payload, 1,311,290 bytes, is a fixed layout, not RLP (spec 10, section 4.1):
 
 The proof field is 1,310,720 bytes (1.25 MiB), chosen to hold every proof of
 the pinned prover without ever growing. The note is the 380-byte note of
-every commitment. There is no version 1 path: a version 1 reveal, at its old
-length of 1,311,067 bytes or at the new one, is not accepted.
+every commitment.
+
+The version 1 reveal is still accepted beside version 2, exactly as before
+version 2: the same layout up to the note, then a 156-byte remainder note
+(`ghostpriv.RevealNoteSize`), a payload of 1,311,066 bytes and an envelope of
+1,311,067 (`types.GhostRevealV1PayloadSize`, `ghostpriv.EnvelopeSizeV1`).
+Each length takes only its own version. A version 1 reveal binds with its own
+digest (below), takes 21,090,372 gas (16 x 1,311,067 + 21,000 + 92,300,
+`types.GhostRevealV1Gas`, `ghostpriv.GasPrivV1`) and pays the window fee for
+that gas; its receipt log carries the 156-byte note, which the history stores
+zero-padded on the right to 380 bytes. Removing version 1 is later work, once
+the verifier of the version 2 proof is linked.
 
 A reveal has no sender, nonce or signature: `types.Sender` returns
 `types.ErrNoSender` for it under every signer, and no signer signs it. No
-ordinary account can authorise one. Every reveal takes exactly
+ordinary account can authorise one. Every version 2 reveal takes exactly
 `G_PRIV = 21,111,656` gas (16 x 1,311,291 + 21,000 + 110,000,
-`types.GhostRevealGas`, `ghostpriv.GasPriv`) from the block gas pool; a block
-whose pool holds less is invalid. Each native type takes its own class's gas
-(spec 10, section 10): G_PRIV for `0x50`, G_POLICY for `0x53`, G_DATA for
-`0x51`. At the internal network's genesis gas limit of 30,000,000 a block
-holds one reveal of any type. Its receipt is a typed receipt of type `0x50`
-with status 1, the cumulative gas and one log.
+`types.GhostRevealGas`, `ghostpriv.GasPriv`) from the block gas pool, and a
+version 1 reveal its own 21,090,372; a block whose pool holds less is
+invalid. Each native type takes its own class's gas (spec 10, section 10):
+G_PRIV for `0x50`, G_POLICY for `0x53`, G_DATA for `0x51`. At the internal
+network's genesis gas limit of 30,000,000 a block holds one reveal of any
+type. Its receipt is a typed receipt of type `0x50` with status 1, the
+cumulative gas and one log.
 
 The checks run in this order and stop at the first failure; any failure makes
 the block invalid:
 
-1. type `0x50` and the exact envelope length (`ErrRevealLength`);
-2. version 2 (`ErrRevealVersion`);
+1. type `0x50` and an envelope of exactly 1,311,291 or 1,311,067 bytes
+   (`ErrRevealLength`);
+2. the version of that length, 2 or 1 (`ErrRevealVersion`);
 3. out and fee have their 20 leading bytes zero (`ErrRevealAmount`);
 4. the chain id is this chain's (`ErrRevealChainID`);
-5. the fee equals the window fee for G_PRIV (`ErrRevealFee`); then the
-   recipient is not a registered policy (`ErrRevealRecipient`, spec 10,
-   section 4.5): a policy never holds a balance;
+5. the fee equals the window fee for the version's gas, G_PRIV for version 2
+   (`ErrRevealFee`); then the recipient is not a registered policy
+   (`ErrRevealRecipient`, spec 10, section 4.5), for either version: a
+   policy never holds a balance;
 6. the node computes the binding digest itself;
 7. the root is the coin tree root in the header of a block of the including
    block's own ancestry, strictly below it, of any tree index
@@ -137,7 +150,8 @@ the block invalid:
 10. the verifier accepts the proof for the inputs the node computed
     (`ErrRevealProof`);
 11. nothing to read: the version 2 statement opens the input rule inside the
-    proof, and the binding carries no rule;
+    proof, and the binding carries no rule; the version 1 inputs carry the
+    empty rule as 32 zero bytes;
 12. the coin tree takes the remainder (`ErrRevealTree`).
 
 Then one atomic change: the marker is marked spent, `out` is credited to the
@@ -165,6 +179,14 @@ itself; the proof field is not covered. The remainder is the commitment the
 proof opens: a remainder is always version 2 (spec 03),
 `K("ghost/coin-commitment/v1", 0x02 0x01, F, v)`, and the node appends it to
 the coin tree as given.
+
+A version 1 reveal binds as before version 2: `K("ghost/coin-reveal-binding/v1",
+fields)` over 415 bytes, the chain id (8), version `0x0001` (2), domain (32),
+statement `0x01`, statement version `0x01`, type COIN `0x01 0x01` (2),
+purpose `0x01`, root, marker and remainder (32 each), recipient (20), out and
+fee (32 each), the rule, 32 zero bytes for the empty rule, and the 156-byte
+note. The proof system also accepts its proof over a salted coin, the same
+input with the type `0x02 0x01` (`Reveal.SaltedBindingDigest`).
 
 ### Fee
 
@@ -317,9 +339,18 @@ left-padded to 32 bytes), fee, rule and the content fingerprint `cf`, 32 bytes
 each, 193 bytes in all with `cf` at 161 to 193. `cf` rides in the first 32
 bytes of the data reveal's note slot (see `docs/data-commitments.md`); for a
 coin reveal `VerifyInputs.Cf` is zero. The pinned prover's coin statement is
-the version 1 statement with a 156-byte note: the version 2 reveal's 380-byte
-note does not fit it, so the linked verifier rejects every version 2 ordinary
-reveal until the version 2 and policy proofs are linked. The
+the version 1 statement of 368 bytes with a 156-byte note, and a release node
+verifies version 1 reveals with real proofs as before version 2. The version 2
+reveal's 380-byte note does not fit that statement, and the policy reveal's
+statement has no proof system in the library yet, so the linked verifier
+refuses both, fail-closed: `VerifyInputs.Version` names the reveal's version,
+and any ordinary reveal but version 1, and every policy reveal, is
+`ErrProofStatement` wrapping `ErrStatementUnsupported`, returned before the
+library is called and before any state change, so no statement but the
+368-byte one ever reaches it. A version 1 note with a byte set past its 156
+bytes is refused the same way. The stub verifier of the tests verifies both
+versions and the policy reveal. Version 2 and policy proofs on a release node
+come with a later change that links their verifier. The
 crate pins ghost-proofs at revision
 `450b6e1786e346c883af1009abce398b02bf1660` of the ghost repository in
 `ghostverifier/Cargo.toml` and `Cargo.lock`. A kind or purpose it
@@ -347,7 +378,8 @@ lifecycle with real proofs on a release node follows in a later change.
 `core/ghostpriv/ghostprivtest` holds the stub verifier for tests: it accepts
 exactly a proof field whose first 32 bytes are
 `K("ghost/test-proof/v1", binding digest)` and whose other bytes are zero, and
-checks nothing else. Only `_test.go` files may import it.
+checks nothing else; for a version 1 reveal it also accepts the stub of the
+salted binding digest. Only `_test.go` files may import it.
 
 ## Accounting
 
@@ -379,12 +411,14 @@ These logs have the coin tree account as address.
 |---|---|---|
 | commit, version 1 | `K("ghost/commit-receipt/v1")` | tree index (4), position (4), leaf (32), `v` (32), note (156): 228 bytes |
 | commit, salted | `K("ghost/commit-receipt/v1")` | tree index (4), position (4), leaf (32), `v` (32), note (156), salt (16): 244 bytes |
-| reveal | `K("ghost/reveal-receipt/v1")`, marker | tree index (4), position (4), remainder (32), note (380), recipient (20), out (32): 472 bytes |
+| reveal, version 2 | `K("ghost/reveal-receipt/v1")`, marker | tree index (4), position (4), remainder (32), note (380), recipient (20), out (32): 472 bytes |
+| reveal, version 1 | `K("ghost/reveal-receipt/v1")`, marker | tree index (4), position (4), remainder (32), note (156), recipient (20), out (32): 248 bytes |
 | policy reveal | `K("ghost/policy-reveal-receipt/v1")`, marker | tree index (4), position (4), remainder (32), note (380), policy address (20), out (32), instruction (32): 504 bytes |
 
 The log of a salted commit is the version 1 log with the salt appended after
 the note. The tree history takes the whole 380-byte remainder note of a
-reveal and of a policy reveal, with no padding. The
+version 2 reveal and of a policy reveal, with no padding, and the 156-byte
+note of a version 1 reveal zero-padded on the right to 380 bytes. The
 tree history reads both commit lengths and keeps the salt with the leaf and
 note ([trees and headers](trees-and-headers.md)); a reveal remainder has no
 salt there, its salt is in its note. The layout is an internal-test value,

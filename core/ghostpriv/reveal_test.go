@@ -271,7 +271,9 @@ func TestRevealCheckOrder(t *testing.T) {
 	}{
 		{"1: short, version 1", edit(func(e []byte) []byte { e[2] = 1; return e[:len(e)-1] }), nil, ghostpriv.ErrRevealLength},
 		{"1: long", edit(func(e []byte) []byte { return append(e, 0) }), nil, ghostpriv.ErrRevealLength},
-		{"1: version 1 length", edit(func(e []byte) []byte { e[2] = 1; return e[:1+1_311_066] }), nil, ghostpriv.ErrRevealLength},
+		{"1: version 1 length and one byte", edit(func(e []byte) []byte { e[2] = 1; return e[:1+1_311_067] }), nil, ghostpriv.ErrRevealLength},
+		{"1: version 1 length less one byte", edit(func(e []byte) []byte { e[2] = 1; return e[:1+1_311_065] }), nil, ghostpriv.ErrRevealLength},
+		{"2: version 2 at the version 1 length", edit(func(e []byte) []byte { return e[:1+1_311_066] }), nil, ghostpriv.ErrRevealVersion},
 		{"1: type 0x02", edit(func(e []byte) []byte { e[0] = types.DynamicFeeTxType; return e }), nil, ghostpriv.ErrRevealLength},
 		{"2: version 1, out not below 2^96", edit(func(e []byte) []byte { e[2] = 1; e[1+126] = 1; return e }), nil, ghostpriv.ErrRevealVersion},
 		{"2: version 3", edit(func(e []byte) []byte { e[2] = 3; return e }), nil, ghostpriv.ErrRevealVersion},

@@ -323,8 +323,9 @@ var (
 
 // HistoryRecords returns the tree history records of a block from its
 // receipts, in the order the block wrote them: the leaf, tree index,
-// position and note of every commit, reveal remainder, policy reveal
-// remainder and data commit (with the salt of a salted commit or data
+// position and note of every commit, reveal remainder (whose 156-byte note,
+// for a version 1 reveal, is zero-padded on the right to NoteSize), policy
+// reveal remainder and data commit (with the salt of a salted commit or data
 // commit, whose log carries it after the note), and the marker of every
 // reveal, policy reveal and data reveal as a record of ghosttree.CoinMarkers
 // or ghosttree.DataMarkers. Only the coin and data rules write logs from the
@@ -374,6 +375,11 @@ func HistoryRecords(receipts types.Receipts) ([]ghosttree.Record, error) {
 				out = append(out, salted(ghosttree.Coin, d, d[72:72+NoteSize]))
 			case l.Address == coinAccount && topic == topicReveal && len(l.Topics) == 2 && len(d) == revealLogSize:
 				out = append(out, leaf(ghosttree.Coin, d, d[40:40+NoteSize]))
+				out = append(out, ghosttree.Record{Kind: ghosttree.CoinMarkers, Leaf: l.Topics[1]})
+			case l.Address == coinAccount && topic == topicReveal && len(l.Topics) == 2 && len(d) == revealLogSizeV1:
+				// The version 1 reveal carries a RevealNoteSize note; the
+				// record holds it zero-padded on the right to NoteSize.
+				out = append(out, leaf(ghosttree.Coin, d, d[40:40+RevealNoteSize]))
 				out = append(out, ghosttree.Record{Kind: ghosttree.CoinMarkers, Leaf: l.Topics[1]})
 			case l.Address == coinAccount && topic == topicPolicyReveal && len(l.Topics) == 2 && len(d) == policyRevealLogSize:
 				out = append(out, leaf(ghosttree.Coin, d, d[40:40+NoteSize]))

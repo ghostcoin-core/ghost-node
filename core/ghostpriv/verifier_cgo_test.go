@@ -100,6 +100,7 @@ func (ka knownAnswer) inputs(t *testing.T) *ghostpriv.VerifyInputs {
 	in := &ghostpriv.VerifyInputs{
 		Kind:      ghosttree.Coin,
 		Purpose:   ghostpriv.PurposeReveal,
+		Version:   ghostpriv.RevealVersionV1,
 		ChainID:   binary.BigEndian.Uint64(p[0:8]),
 		Domain:    common.BytesToHash(p[10:42]),
 		Root:      common.BytesToHash(s[0:32]),
@@ -214,7 +215,6 @@ func TestGhostDataVerifierPlainRejection(t *testing.T) {
 // statement, followed by zeros or not, and rejects a changed proof, every
 // changed statement field and chain parameter, and every data reveal.
 func TestGhostVerifierKnownAnswer(t *testing.T) {
-	t.Skip("the recorded proof binds the version 1 reveal and its 156-byte note; the version 2 proof and fixture come with PER-4099")
 	for _, f := range knownAnswerFiles {
 		t.Run(f.name, func(t *testing.T) { testGhostVerifierKnownAnswer(t, loadKnownAnswerFile(t, f.file)) })
 	}
@@ -277,7 +277,7 @@ func testGhostVerifierKnownAnswer(t *testing.T, ka knownAnswer) {
 			"root":      func(in *ghostpriv.VerifyInputs) { in.Root[0] ^= 1 },
 			"marker":    func(in *ghostpriv.VerifyInputs) { in.Marker[31] ^= 1 },
 			"remainder": func(in *ghostpriv.VerifyInputs) { in.Remainder[7] ^= 1 },
-			"note":      func(in *ghostpriv.VerifyInputs) { in.Note[155] ^= 1 },
+			"note":      func(in *ghostpriv.VerifyInputs) { in.Note[ghostpriv.RevealNoteSize-1] ^= 1 },
 			"recipient": func(in *ghostpriv.VerifyInputs) { in.Recipient[19] ^= 1 },
 			"out":       func(in *ghostpriv.VerifyInputs) { in.Out.AddUint64(in.Out, 1) },
 			"fee":       func(in *ghostpriv.VerifyInputs) { in.Fee.SubUint64(in.Fee, 1) },
@@ -300,6 +300,35 @@ func testGhostVerifierKnownAnswer(t *testing.T, ka knownAnswer) {
 			in.Kind = ghosttree.Data
 			in.Purpose = purpose
 			rejected(t, "data reveal", v.VerifyReveal(in, proof()), errDefaultDataVerifier)
+		}
+	})
+
+	// The linked library verifies only the version 1 statement of 368 bytes.
+	// A version 2 ordinary reveal and a policy reveal are refused before it
+	// is called, even with the fields of an honest version 1 proof, and so is
+	// a version 1 note longer than its 156 bytes.
+	t.Run("version 2 and policy statements refused", func(t *testing.T) {
+		for _, verifier := range []ghostpriv.Verifier{v, ghostpriv.ActiveVerifier()} {
+			for _, version := range []uint16{0, ghostpriv.RevealVersion, 3, 0xffff} {
+				in := clone()
+				in.Version = version
+				err := verifier.VerifyReveal(in, proof())
+				rejected(t, "ordinary reveal of another version", err, ghostpriv.ErrStatementUnsupported)
+				rejected(t, "ordinary reveal of another version", err, ghostpriv.ErrProofStatement)
+			}
+			in := clone()
+			in.Purpose = ghostpriv.PurposePolicySpend
+			err := verifier.VerifyReveal(in, proof())
+			rejected(t, "policy reveal", err, ghostpriv.ErrStatementUnsupported)
+			rejected(t, "policy reveal", err, ghostpriv.ErrProofStatement)
+
+			in = clone()
+			in.Note[ghostpriv.RevealNoteSize] = 1
+			err = verifier.VerifyReveal(in, proof())
+			rejected(t, "version 1 note past 156 bytes", err, ghostpriv.ErrProofStatement)
+			if errors.Is(err, ghostpriv.ErrProofRejected) {
+				t.Errorf("version 1 note past 156 bytes reached the verifier: %v", err)
+			}
 		}
 	})
 }

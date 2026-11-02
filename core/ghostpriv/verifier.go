@@ -29,6 +29,13 @@ import (
 // node was built without the proof verifier, so it cannot confirm any proof.
 var ErrNoVerifier = errors.New("no reveal proof verifier in this node")
 
+// ErrStatementUnsupported is the answer of the linked proof verifier, given
+// without calling it, to a statement it has no proof system for: a version 2
+// ordinary reveal and a policy reveal. Their statements are not those of the
+// linked library's C interface, so they are refused, fail-closed, before any
+// state change, until a verifier that supports them is linked.
+var ErrStatementUnsupported = errors.New("linked proof verifier does not verify this statement version")
+
 // VerifyInputs are the public inputs of a reveal's proof, as the node
 // computes them: never taken from the proof.
 //
@@ -38,13 +45,15 @@ var ErrNoVerifier = errors.New("no reveal proof verifier in this node")
 // PurposeReveal or PurposeRevoke. For a data reveal Recipient is the
 // verifier-or-recipient field, which credits nothing, Cf is the content
 // fingerprint the reveal carries, and Remainder, Out, Rule and Note are zero.
-// For a coin reveal Cf is zero, and Note is the version 2 reveal's 380-byte
-// remainder note, which the proof binds as it is. The policy fields, from
-// Policy to Instr, are set for a policy reveal only; a policy reveal's
-// Recipient is zero.
+// For a coin reveal Cf is zero and Version is the reveal's version: Note is
+// the version 2 reveal's 380-byte remainder note, or the version 1 reveal's
+// RevealNoteSize note in its first RevealNoteSize bytes with the rest zero,
+// which the proof binds as it is. The policy fields, from Policy to Instr,
+// are set for a policy reveal only; a policy reveal's Recipient is zero.
 type VerifyInputs struct {
 	Kind      ghosttree.Kind
 	Purpose   byte
+	Version   uint16      // the reveal payload's version
 	Binding   common.Hash // the binding digest
 	ChainID   uint64
 	Domain    common.Hash // the genesis block hash

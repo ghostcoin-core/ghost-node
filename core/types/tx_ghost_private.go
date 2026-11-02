@@ -43,15 +43,28 @@ const (
 	// byte and the payload.
 	GhostRevealEnvelopeSize = 1 + GhostRevealPayloadSize
 
-	// GhostRevealGas is G_PRIV, the gas every ordinary reveal takes from the
-	// block gas pool: 16 per envelope byte, 21,000 and the verification
-	// charge of 110,000 (spec 10, section 10).
+	// GhostRevealGas is G_PRIV, the gas every version 2 ordinary reveal takes
+	// from the block gas pool: 16 per envelope byte, 21,000 and the
+	// verification charge of 110,000 (spec 10, section 10).
 	GhostRevealGas = 21_111_656
+
+	// GhostRevealV1PayloadSize is the length of a version 1 reveal's payload,
+	// with its 156-byte remainder note. The version 1 reveal is still
+	// accepted, with its layout, gas and proof as before version 2.
+	GhostRevealV1PayloadSize = 1_311_066
+
+	// GhostRevealV1EnvelopeSize is the length of a version 1 reveal's
+	// envelope, the type byte and the payload.
+	GhostRevealV1EnvelopeSize = 1 + GhostRevealV1PayloadSize
+
+	// GhostRevealV1Gas is the gas every version 1 reveal takes from the block
+	// gas pool, as before version 2: 16 per envelope byte, 21,000 and 92,300.
+	GhostRevealV1Gas = 21_090_372
 )
 
 var (
-	// ErrGhostRevealLength is returned for a reveal whose envelope is not
-	// exactly GhostRevealEnvelopeSize bytes.
+	// ErrGhostRevealLength is returned for a reveal whose envelope is neither
+	// GhostRevealEnvelopeSize nor GhostRevealV1EnvelopeSize bytes.
 	ErrGhostRevealLength = errors.New("reveal envelope has the wrong length")
 
 	// ErrNoSender is returned by Sender for a transaction that has no sender
@@ -107,7 +120,15 @@ func (tx *GhostRevealTx) chainID() *big.Int {
 
 func (tx *GhostRevealTx) accessList() AccessList { return nil }
 func (tx *GhostRevealTx) data() []byte           { return nil }
-func (tx *GhostRevealTx) gas() uint64            { return GhostRevealGas }
+
+// gas is the gas of the reveal's layout: GhostRevealV1Gas for a version 1
+// payload, G_PRIV for any other.
+func (tx *GhostRevealTx) gas() uint64 {
+	if len(tx.Payload) == GhostRevealV1PayloadSize {
+		return GhostRevealV1Gas
+	}
+	return GhostRevealGas
+}
 
 // The fee of a reveal is a field of its payload, priced from the window's
 // base fee; it has no gas price.
@@ -134,9 +155,11 @@ func (tx *GhostRevealTx) encode(b *bytes.Buffer) error {
 	return err
 }
 
+// decode takes a payload of either layout, version 2 or version 1; which
+// version it carries is checked when a block includes it.
 func (tx *GhostRevealTx) decode(input []byte) error {
-	if len(input) != GhostRevealPayloadSize {
-		return fmt.Errorf("%w: %d bytes, want %d", ErrGhostRevealLength, len(input)+1, GhostRevealEnvelopeSize)
+	if len(input) != GhostRevealPayloadSize && len(input) != GhostRevealV1PayloadSize {
+		return fmt.Errorf("%w: %d bytes, want %d or %d", ErrGhostRevealLength, len(input)+1, GhostRevealEnvelopeSize, GhostRevealV1EnvelopeSize)
 	}
 	tx.Payload = common.CopyBytes(input)
 	return nil

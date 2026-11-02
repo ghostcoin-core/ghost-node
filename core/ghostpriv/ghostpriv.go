@@ -38,12 +38,14 @@ import (
 	"github.com/holiman/uint256"
 )
 
-// The hash tags of the coin rules. The ordinary reveal binds with the version
-// 2 tag (spec 10, section 4.2); the policy reveal has a binding and a receipt
-// of its own (spec 10, sections 5 and 7.5).
+// The hash tags of the coin rules. The version 2 ordinary reveal binds with
+// the version 2 tag (spec 10, section 4.2), the version 1 reveal with the
+// version 1 tag as before; the policy reveal has a binding and a receipt of
+// its own (spec 10, sections 5 and 7.5).
 const (
 	TagCommitment          = "ghost/coin-commitment/v1"
 	TagRevealBinding       = "ghost/coin-reveal-binding/v2"
+	TagRevealBindingV1     = "ghost/coin-reveal-binding/v1"
 	TagCommitReceipt       = "ghost/commit-receipt/v1"
 	TagRevealReceipt       = "ghost/reveal-receipt/v1"
 	TagPolicyRevealBinding = "ghost/policy-reveal-binding/v1"
@@ -67,6 +69,12 @@ const (
 	// plaintext and a 16-byte tag (spec 10, section 3.2).
 	NoteSize = ghosttree.NoteBytes
 
+	// RevealNoteSize is the length of the remainder's note in the version 1
+	// coin reveal payload, which keeps its 156-byte slot: the proof binds
+	// that slot as it is. The history stores such a remainder note
+	// zero-padded on the right to NoteSize.
+	RevealNoteSize = 156
+
 	// DataNoteSlot is the length of the note slot of the data reveal payload
 	// (spec 10, section 10.5): the content fingerprint cf (32 bytes), then
 	// DataNoteSlot - 32 bytes that must be zero.
@@ -80,10 +88,14 @@ const (
 	// parameters the proof verifier takes and of commit data without a salt.
 	Version uint16 = 0x0001
 
-	// RevealVersion is the only version of the ordinary reveal payload, with
-	// its 380-byte remainder note (spec 10, section 4). A version 1 reveal is
-	// not accepted.
+	// RevealVersion is the version of the ordinary reveal payload with its
+	// 380-byte remainder note (spec 10, section 4).
 	RevealVersion uint16 = 0x0002
+
+	// RevealVersionV1 is the version of the ordinary reveal payload with its
+	// RevealNoteSize remainder note, accepted with its own layout, binding,
+	// gas and proof statement as before version 2.
+	RevealVersionV1 uint16 = 0x0001
 
 	// PolicyRevealVersion is the only version of the policy reveal payload
 	// (spec 10, section 5.1).
@@ -95,8 +107,13 @@ const (
 	// types CoinV2 and DataV2.
 	SaltedCommitVersion uint16 = 0x0003
 
-	// GasPriv is G_PRIV, the gas of the ordinary class, the coin reveal.
+	// GasPriv is G_PRIV, the gas of the ordinary class, the version 2 coin
+	// reveal.
 	GasPriv = types.GhostRevealGas
+
+	// GasPrivV1 is the gas of the version 1 coin reveal, the G_PRIV of
+	// before version 2; its fee is priced for this gas.
+	GasPrivV1 = types.GhostRevealV1Gas
 
 	// GasPolicy is G_POLICY, the gas of the policy reveal.
 	GasPolicy = types.GhostPolicyRevealGas

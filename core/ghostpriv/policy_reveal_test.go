@@ -863,10 +863,10 @@ func TestOrdinaryRevealV2Recipient(t *testing.T) {
 
 // TestOrdinaryRevealV2Decode checks the version 2 ordinary reveal: a payload
 // of 1,311,290 bytes, the 380-byte note at its end round-tripping through
-// MarshalBinary and DecodeReveal, version 2 only (a version 1 reveal is not
-// accepted, at its old length or the new one), the 607-byte binding under
-// the version 2 tag with the type COIN version 2, and the 380-byte note in
-// the verifier's inputs and the receipt log.
+// MarshalBinary and DecodeReveal, version 2 at its length only (version 1
+// has a length of its own, and no third length is a reveal), the 607-byte
+// binding under the version 2 tag with the type COIN version 2, and the
+// 380-byte note in the verifier's inputs and the receipt log.
 func TestOrdinaryRevealV2Decode(t *testing.T) {
 	if types.GhostRevealPayloadSize != 1_311_290 || ghostpriv.PayloadSize != 1_311_290 || ghostpriv.EnvelopeSize != 1_311_291 {
 		t.Fatalf("payload %d, envelope %d", ghostpriv.PayloadSize, ghostpriv.EnvelopeSize)
@@ -896,18 +896,26 @@ func TestOrdinaryRevealV2Decode(t *testing.T) {
 		t.Fatalf("transaction: %v", err)
 	}
 
-	// Version 1 is not accepted, at the old length or the new one.
+	// Each length takes its own version only: version 1 at the version 2
+	// length, and version 2 at the version 1 length, are ErrRevealVersion;
+	// any third length is ErrRevealLength.
 	v1 := append([]byte{}, env...)
 	binary.BigEndian.PutUint16(v1[1:3], 1)
 	if _, err := ghostpriv.DecodeReveal(v1); !errors.Is(err, ghostpriv.ErrRevealVersion) {
-		t.Errorf("version 1 at the new length: %v", err)
+		t.Errorf("version 1 at the version 2 length: %v", err)
 	}
-	old := v1[:1+1_311_066]
-	if _, err := ghostpriv.DecodeReveal(old); !errors.Is(err, ghostpriv.ErrRevealLength) {
-		t.Errorf("version 1 at the old length: %v", err)
+	if _, err := ghostpriv.DecodeReveal(env[:1+1_311_066]); !errors.Is(err, ghostpriv.ErrRevealVersion) {
+		t.Errorf("version 2 at the version 1 length: %v", err)
 	}
-	if _, err := types.NewGhostRevealTx(old); err == nil {
-		t.Error("a version 1 envelope wrapped as a transaction")
+	for _, n := range []int{1 + 1_311_065, 1 + 1_311_067, 1 + 1_311_289, 1 + 1_311_291} {
+		e := make([]byte, n)
+		copy(e, env)
+		if _, err := ghostpriv.DecodeReveal(e); !errors.Is(err, ghostpriv.ErrRevealLength) {
+			t.Errorf("envelope of %d bytes: %v", n, err)
+		}
+		if _, err := types.NewGhostRevealTx(e); err == nil {
+			t.Errorf("an envelope of %d bytes wrapped as a transaction", n)
+		}
 	}
 
 	// The binding: 607 bytes under the version 2 tag, type COIN version 2,
@@ -922,7 +930,7 @@ func TestOrdinaryRevealV2Decode(t *testing.T) {
 		t.Fatal("binding digest is not K over the input under the version 2 tag")
 	}
 	vin := r.VerifyInputs(chainID, genesis)
-	if vin.Note != r.Note || vin.Binding != r.BindingDigest(chainID, genesis) || vin.Kind != ghosttree.Coin || vin.Purpose != ghostpriv.PurposeReveal {
+	if vin.Note != r.Note || vin.Binding != r.BindingDigest(chainID, genesis) || vin.Kind != ghosttree.Coin || vin.Purpose != ghostpriv.PurposeReveal || vin.Version != ghostpriv.RevealVersion {
 		t.Fatal("the verifier's inputs do not carry the note and the binding")
 	}
 
@@ -939,4 +947,184 @@ func TestOrdinaryRevealV2Decode(t *testing.T) {
 	if len(ls.logs) != 1 || len(ls.logs[0].Data) != 8+32+380+20+32 || !bytes.Equal(ls.logs[0].Data[40:420], rv.Note[:]) {
 		t.Fatal("the receipt log does not carry the 380-byte note")
 	}
+}
+
+// asV1 turns r into a version 1 reveal of the same fields: version 1, the
+// note cut to its first 156 bytes, and the stub proof of the version 1
+// binding.
+func asV1(f *fixture, r *ghostpriv.Reveal) *ghostpriv.Reveal {
+	r.Version = ghostpriv.RevealVersionV1
+	for i := ghostpriv.RevealNoteSize; i < ghostpriv.NoteSize; i++ {
+		r.Note[i] = 0
+	}
+	f.prove(r)
+	return r
+}
+
+// TestOrdinaryRevealV2KeepsVersion1 checks that the version 1 ordinary
+// reveal is still accepted beside version 2, as before version 2: its
+// envelope of 1,311,067 bytes with the 156-byte note, its 415-byte binding
+// under the version 1 tag with the type COIN version 1 and the empty rule,
+// the statement version 1 in the verifier's inputs, its gas of 21,090,372
+// and the window fee for that gas, not for G_PRIV, and its receipt log of
+// the 156-byte note, which the history records zero-padded. A block with it
+// imports, taking exactly that gas. A version 1 reveal to a registered
+// policy is refused like a version 2 one.
+func TestOrdinaryRevealV2KeepsVersion1(t *testing.T) {
+	useStub(t)
+	if types.GhostRevealV1PayloadSize != 1_311_066 || ghostpriv.EnvelopeSizeV1 != 1_311_067 || types.GhostRevealV1Gas != 21_090_372 || ghostpriv.GasPrivV1 != 16*1_311_067+21_000+92_300 {
+		t.Fatalf("version 1 payload %d, gas %d", types.GhostRevealV1PayloadSize, types.GhostRevealV1Gas)
+	}
+
+	t.Run("layout and binding", func(t *testing.T) {
+		r := layoutReveal()
+		r.Version = ghostpriv.RevealVersionV1
+		r.Note = [ghostpriv.NoteSize]byte{}
+		for i := 0; i < ghostpriv.RevealNoteSize; i++ {
+			r.Note[i] = byte(i) | 0x40
+		}
+		env, err := r.MarshalBinary()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(env) != 1_311_067 || binary.BigEndian.Uint16(env[1:3]) != 1 || !bytes.Equal(env[len(env)-156:], r.Note[:156]) {
+			t.Fatalf("envelope of %d bytes", len(env))
+		}
+		tx, err := types.NewGhostRevealTx(env)
+		if err != nil || tx.Size() != 1_311_067 || tx.Gas() != 21_090_372 || !bytes.Equal(tx.GhostRevealEnvelope(), env) {
+			t.Fatalf("transaction: %v", err)
+		}
+		dec, err := ghostpriv.DecodeReveal(env)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if dec.Version != 1 || dec.Note != r.Note || !dec.IsV1() || dec.Gas() != ghostpriv.GasPrivV1 {
+			t.Fatal("decode does not give back the version and the note")
+		}
+		if again, err := dec.MarshalBinary(); err != nil || !bytes.Equal(again, env) {
+			t.Fatal("re-encoding differs")
+		}
+
+		const chainID = 6_777_971
+		genesis := filled(0x88)
+		in := r.BindingInput(chainID, genesis)
+		if len(in) != 415 || !bytes.Equal(in[42:44], []byte{0x01, 0x01}) || !bytes.Equal(in[44:46], ghostpriv.Coin[:]) ||
+			!bytes.Equal(in[227:259], make([]byte, 32)) || !bytes.Equal(in[259:], r.Note[:156]) {
+			t.Fatalf("binding input of %d bytes", len(in))
+		}
+		if r.BindingDigest(chainID, genesis) != ghosttree.K("ghost/coin-reveal-binding/v1", in) {
+			t.Fatal("binding digest is not K over the input under the version 1 tag")
+		}
+		v2 := *r
+		v2.Version = ghostpriv.RevealVersion
+		if v2.BindingDigest(chainID, genesis) == r.BindingDigest(chainID, genesis) {
+			t.Fatal("version 1 and version 2 of the same fields bind alike")
+		}
+		vin := dec.VerifyInputs(chainID, genesis)
+		if vin.Version != 1 || vin.Note != r.Note || vin.Binding != r.BindingDigest(chainID, genesis) || vin.Rule != (common.Hash{}) {
+			t.Fatal("the verifier's inputs are not the version 1 statement")
+		}
+
+		// A version 1 note longer than its slot cannot be encoded.
+		long := *r
+		long.Note[156] = 1
+		if _, err := long.MarshalBinary(); err == nil {
+			t.Fatal("a version 1 reveal with a note past 156 bytes encoded")
+		}
+	})
+
+	t.Run("in a block", func(t *testing.T) {
+		f := newFixture(t, ghost.InternalNetGasLimit, nil)
+		var (
+			c         = testCoin("version 1", oneGhost)
+			recipient = common.Address{0x9e, 0x01}
+			out       = u256(ghostAmount(1, 4))
+			fee       ghostpriv.Fee
+			rest      coin
+			tx        *types.Transaction
+		)
+		blocks, _ := f.generate(5, func(i int, b *core.BlockGen) {
+			switch i {
+			case 0:
+				b.AddTx(f.commitTx(keyA, 0, c))
+			case 4:
+				fee = genWindowFeeGas(t, b, ghostpriv.GasPrivV1)
+				left := new(uint256.Int).Sub(c.value, out)
+				rest = testCoin("version 1 rest", left.Sub(left, fee.Total).ToBig())
+				tx = revealTx(t, asV1(f, f.newReveal(genParentRoot(b), testMarker("version 1"), rest, recipient, out, fee.Total)))
+				b.AddTx(tx)
+			}
+		})
+		chain := f.newChain()
+		f.insert(chain, blocks)
+		block := blocks[4]
+		if tx.Size() != 1_311_067 || block.GasUsed() != ghostpriv.GasPrivV1 {
+			t.Fatalf("reveal of %d bytes, block gas %d", tx.Size(), block.GasUsed())
+		}
+		rs := chain.GetReceiptsByHash(block.Hash())
+		if len(rs) != 1 || rs[0].Type != types.GhostRevealTxType || rs[0].Status != types.ReceiptStatusSuccessful || rs[0].GasUsed != ghostpriv.GasPrivV1 || len(rs[0].Logs) != 1 {
+			t.Fatalf("receipts %+v", rs)
+		}
+		l := rs[0].Logs[0]
+		if len(l.Data) != 8+32+156+20+32 || !bytes.Equal(l.Data[40:196], rest.note[:156]) || !bytes.Equal(l.Data[196:216], recipient[:]) {
+			t.Fatalf("log data of %d bytes", len(l.Data))
+		}
+		records, err := ghostpriv.HistoryRecords(rs)
+		if err != nil || len(records) != 2 || records[0].Leaf != rest.commitment() ||
+			!bytes.Equal(records[0].Note[:156], rest.note[:156]) || !bytes.Equal(records[0].Note[156:], make([]byte, 380-156)) {
+			t.Fatalf("history records %v, %v", records, err)
+		}
+		st, err := chain.StateAt(block.Root())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !st.GetBalance(recipient).Eq(out) || !ghosttree.IsSpent(st, ghosttree.Coin, testMarker("version 1")) {
+			t.Fatal("the version 1 reveal did not pay out and spend its marker")
+		}
+		if hidden, err := ghostpriv.Hidden(st); err != nil || !hidden.Eq(rest.value) {
+			t.Fatalf("hidden %v (%v), want %v", hidden, err, rest.value)
+		}
+	})
+
+	t.Run("fee for its own gas, recipient check", func(t *testing.T) {
+		s := newPolicyScenario(t, 5)
+		feeV1, feeV2 := s.fee(t, ghostpriv.GasPrivV1), s.fee(t, ghostpriv.GasPriv)
+		if feeV1.Eq(feeV2) {
+			t.Fatal("the version 1 and version 2 fees are equal")
+		}
+		out := u256(ghostAmount(1, 4))
+		reveal := func(recipient common.Address, fee *uint256.Int) []byte {
+			rest := new(uint256.Int).Sub(s.c.value, new(uint256.Int).Add(out, fee))
+			return envelope(t, asV1(s.f, s.f.newReveal(s.root(), testMarker("v1 fee"), testCoin("v1 fee rest", rest.ToBig()), recipient, out, fee)))
+		}
+		for _, tt := range []struct {
+			name  string
+			env   []byte
+			want  error
+			calls int
+		}{
+			{"its own fee", reveal(common.Address{0x9e, 0x02}, feeV1), nil, 1},
+			{"the fee of G_PRIV", reveal(common.Address{0x9e, 0x02}, feeV2), ghostpriv.ErrRevealFee, 0},
+			{"to a policy", reveal(testPolicy, feeV1), ghostpriv.ErrRevealRecipient, 0},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				cp := s.st.Copy()
+				counter := &countingVerifier{}
+				before := snapshotPolicy(cp, s.miner)
+				err := ghostpriv.ApplyReveal(cp, s.env, counter, tt.env)
+				if !errors.Is(err, tt.want) || (tt.want == nil && err != nil) || counter.calls != tt.calls {
+					t.Fatalf("%v with %d proofs verified, want %v and %d", err, counter.calls, tt.want, tt.calls)
+				}
+				if tt.want == nil {
+					if counter.last.Version != ghostpriv.RevealVersionV1 {
+						t.Fatalf("verifier saw version %d", counter.last.Version)
+					}
+					return
+				}
+				if after := snapshotPolicy(cp, s.miner); after != before {
+					t.Fatal("a rejected reveal changed the state")
+				}
+			})
+		}
+	})
 }
