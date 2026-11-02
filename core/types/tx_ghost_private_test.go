@@ -262,8 +262,9 @@ func TestGhostDataRevealTxRoundTrip(t *testing.T) {
 		t.Fatal("a data reveal gave a coin reveal envelope")
 	}
 
-	// A coin reveal is another transaction, of another size: neither
-	// envelope wraps as the other type, whatever its type byte.
+	// A version 2 coin reveal is another transaction, of another size: it
+	// does not wrap as a data reveal, whatever its type byte, and a data
+	// reveal envelope does not wrap as a coin reveal.
 	coinEnv := testRevealEnvelope()
 	coinTx, err := NewGhostRevealTx(coinEnv)
 	if err != nil {
@@ -284,8 +285,26 @@ func TestGhostDataRevealTxRoundTrip(t *testing.T) {
 	if _, err := NewGhostRevealTx(env); err == nil {
 		t.Fatal("a data reveal envelope wrapped as a coin reveal")
 	}
-	if _, err := NewGhostRevealTx(append([]byte{GhostRevealTxType}, env[1:]...)); err == nil {
-		t.Fatal("a data-sized envelope wrapped as a coin reveal")
+	// A data-sized payload under the coin type byte has the length of the
+	// version 1 coin reveal: it wraps as a coin reveal of that layout, with
+	// its own gas and a hash of its own, and its version and fields are
+	// checked when a block includes it.
+	v1Tx, err := NewGhostRevealTx(append([]byte{GhostRevealTxType}, env[1:]...))
+	if err != nil {
+		t.Fatalf("a version 1 sized coin envelope: %v", err)
+	}
+	if v1Tx.Type() != GhostRevealTxType || v1Tx.Size() != GhostRevealV1EnvelopeSize || v1Tx.Gas() != GhostRevealV1Gas || v1Tx.Hash() == tx.Hash() {
+		t.Fatalf("version 1 coin reveal: type %#x size %d gas %d", v1Tx.Type(), v1Tx.Size(), v1Tx.Gas())
+	}
+	if v1Tx.GhostDataRevealEnvelope() != nil || tx.GhostRevealEnvelope() != nil {
+		t.Fatal("one type gave the other's envelope")
+	}
+	for _, n := range []int{GhostRevealV1EnvelopeSize - 1, GhostRevealV1EnvelopeSize + 1, GhostRevealEnvelopeSize + 1} {
+		e := make([]byte, n)
+		e[0] = GhostRevealTxType
+		if _, err := NewGhostRevealTx(e); !errors.Is(err, ErrGhostRevealLength) {
+			t.Fatalf("a coin envelope of %d bytes: %v", n, err)
+		}
 	}
 
 	// Binary.
