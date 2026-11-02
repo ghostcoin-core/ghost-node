@@ -62,8 +62,9 @@ const (
 
 var (
 	// ErrProofStatement is returned, without calling the proof verifier, for
-	// a statement it does not verify: anything but a coin reveal, or a data
-	// reveal or revoke. A policy reveal is one of them.
+	// a statement it does not verify: anything but a version 1 coin reveal,
+	// or a data reveal or revoke. A version 2 coin reveal and a policy reveal
+	// are among them, and their error also wraps ErrStatementUnsupported.
 	ErrProofStatement = errors.New("reveal proof verifier checks only coin reveals and data reveals and revokes")
 
 	// ErrProofRejected is returned for every answer of the proof verifier
@@ -97,10 +98,23 @@ func (ghostVerifier) VerifyReveal(in *VerifyInputs, proof []byte) error {
 	var statement []byte
 	switch {
 	case in.Kind == ghosttree.Coin && in.Purpose == PurposeReveal:
-		statement = ghostCoinStatement(in)
+		// The linked library verifies the version 1 statement only. A
+		// version 2 ordinary reveal, whose 380-byte note makes a longer
+		// statement, is refused without calling it.
+		if in.Version != RevealVersionV1 {
+			return fmt.Errorf("%w: %w: ordinary reveal version %d", ErrProofStatement, ErrStatementUnsupported, in.Version)
+		}
+		var err error
+		if statement, err = ghostCoinStatement(in); err != nil {
+			return err
+		}
 		verify = func(p, s, q *C.uint8_t, pl, sl, ql C.size_t) C.int32_t {
 			return C.ghost_verify_coin_reveal(p, pl, s, sl, q, ql)
 		}
+	case in.Kind == ghosttree.Coin && in.Purpose == PurposePolicySpend:
+		// The policy reveal's statement (S4) has no proof system in the
+		// linked library yet.
+		return fmt.Errorf("%w: %w: policy reveal", ErrProofStatement, ErrStatementUnsupported)
 	case in.Kind == ghosttree.Data && (in.Purpose == PurposeReveal || in.Purpose == PurposeRevoke):
 		statement = ghostDataStatement(in)
 		verify = func(p, s, q *C.uint8_t, pl, sl, ql C.size_t) C.int32_t {
@@ -175,13 +189,19 @@ func ghostChainParams(in *VerifyInputs) []byte {
 	return append(b, in.Domain[:]...)
 }
 
-// ghostCoinStatement returns the coin reveal statement: the root, marker and
-// remainder (32 each), the remainder's note, the recipient (20), out and fee
-// as 32-byte amount words and the rule (32). A nil amount is zero. The note
-// is the version 2 reveal's 380 bytes, so the statement is longer than the
-// version 1 statement of ghost_proofs.h, and the linked verifier rejects it
-// until the version 2 proof is linked.
-func ghostCoinStatement(in *VerifyInputs) []byte {
+// ghostCoinStatement returns the version 1 coin reveal statement of
+// ghost_proofs.h, of GHOST_PROOFS_COIN_REVEAL_BYTES: the root, marker and
+// remainder (32 each), the remainder's note (156), the recipient (20), out
+// and fee as 32-byte amount words and the rule (32). A nil amount is zero.
+// A note with a non-zero byte past RevealNoteSize is no version 1 note and
+// is ErrProofStatement, as is a statement of any other length: no other
+// statement ever reaches the library.
+func ghostCoinStatement(in *VerifyInputs) ([]byte, error) {
+	for _, b := range in.Note[RevealNoteSize:] {
+		if b != 0 {
+			return nil, fmt.Errorf("%w: version 1 reveal note longer than %d bytes", ErrProofStatement, RevealNoteSize)
+		}
+	}
 	out, fee := in.Out, in.Fee
 	if out == nil {
 		out = new(uint256.Int)
@@ -193,11 +213,15 @@ func ghostCoinStatement(in *VerifyInputs) []byte {
 	b = append(b, in.Root[:]...)
 	b = append(b, in.Marker[:]...)
 	b = append(b, in.Remainder[:]...)
-	b = append(b, in.Note[:]...)
+	b = append(b, in.Note[:RevealNoteSize]...)
 	b = append(b, in.Recipient[:]...)
 	b = append(b, amountWord(out)...)
 	b = append(b, amountWord(fee)...)
-	return append(b, in.Rule[:]...)
+	b = append(b, in.Rule[:]...)
+	if len(b) != ghostCoinRevealBytes {
+		return nil, fmt.Errorf("%w: coin reveal statement of %d bytes, the verifier takes %d", ErrProofStatement, len(b), ghostCoinRevealBytes)
+	}
+	return b, nil
 }
 
 // ghostDataStatement returns the data reveal statement: the purpose (1) in

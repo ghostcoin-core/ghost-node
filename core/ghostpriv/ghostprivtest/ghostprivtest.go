@@ -29,11 +29,15 @@
 // A stub proof is the proof field of a reveal whose first 32 bytes are
 // K("ghost/test-proof/v1", binding digest) and whose other bytes are zero.
 // The binding digest is the node's: the version 2 ordinary reveal's, of type
-// COIN version 2, the policy reveal's or the data reveal's. The stub checks
-// nothing else: membership, the marker's derivation and conservation are the
-// real proof's job. Ordinary, policy and data reveals have binding digests of
-// their own, with their own tags, so the stub proof of one never verifies
-// another, nor a reveal's a revoke.
+// COIN version 2, the version 1 ordinary reveal's, the policy reveal's or the
+// data reveal's. A version 1 ordinary reveal has two binding digests, as the
+// real verifier accepts one of an unsalted or a salted coin: the node's
+// BindingDigest, of type COIN version 1, and SaltedBindingDigest, the same
+// input with type COIN version 2; the stub of either verifies. The stub
+// checks nothing else: membership, the marker's derivation and conservation
+// are the real proof's job. Ordinary reveals of each version, policy and data
+// reveals have binding digests of their own, with their own tags, so the stub
+// proof of one never verifies another, nor a reveal's a revoke.
 package ghostprivtest
 
 import (
@@ -72,8 +76,12 @@ func (Verifier) VerifyReveal(in *ghostpriv.VerifyInputs, proof []byte) error {
 	if in.Kind != ghosttree.Coin && in.Kind != ghosttree.Data {
 		return ErrStubProof
 	}
-	if common.BytesToHash(proof[:32]) != ghosttree.K(TagTestProof, in.Binding[:]) {
-		return ErrStubProof
+	have := common.BytesToHash(proof[:32])
+	if have != ghosttree.K(TagTestProof, in.Binding[:]) {
+		salted, ok := saltedBinding(in)
+		if !ok || have != ghosttree.K(TagTestProof, salted[:]) {
+			return ErrStubProof
+		}
 	}
 	for _, b := range proof[32:] {
 		if b != 0 {
@@ -81,4 +89,30 @@ func (Verifier) VerifyReveal(in *ghostpriv.VerifyInputs, proof []byte) error {
 		}
 	}
 	return nil
+}
+
+// saltedBinding returns the binding digest of a version 1 coin reveal over a
+// salted coin, type CoinV2, rebuilt from the inputs. It reports false for
+// any other statement, which has one binding only, and for inputs whose
+// unsalted digest is not the node's binding, so the salted digest always
+// covers the very fields the node bound.
+func saltedBinding(in *ghostpriv.VerifyInputs) (common.Hash, bool) {
+	if in.Kind != ghosttree.Coin || in.Purpose != ghostpriv.PurposeReveal || in.Version != ghostpriv.RevealVersionV1 || in.Out == nil || in.Fee == nil {
+		return common.Hash{}, false
+	}
+	r := &ghostpriv.Reveal{
+		Version:   ghostpriv.RevealVersionV1,
+		ChainID:   in.ChainID,
+		Marker:    in.Marker,
+		Root:      in.Root,
+		Remainder: in.Remainder,
+		Recipient: in.Recipient,
+		Out:       in.Out,
+		Fee:       in.Fee,
+		Note:      in.Note,
+	}
+	if in.Rule != (common.Hash{}) || r.BindingDigest(in.ChainID, in.Domain) != in.Binding {
+		return common.Hash{}, false
+	}
+	return r.SaltedBindingDigest(in.ChainID, in.Domain), true
 }

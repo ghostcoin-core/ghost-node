@@ -109,8 +109,9 @@ A data reveal is the typed transaction `0x51 || payload`, 1,311,067 bytes,
 with hash `keccak256(0x51 || payload)`. Its payload of 1,311,066 bytes keeps
 the size and proof format it always had; the version 2 coin reveal, whose
 remainder note grew to 380 bytes, is 224 bytes longer (spec 10, section
-10.5). It is a type of its own so that a coin reveal and a data reveal can
-never be taken for each other. The payload has the offsets of the coin
+10.5), and the version 1 coin reveal, still accepted, has the same length. It
+is a type of its own so that a coin reveal and a data reveal can never be
+taken for each other. The payload has the offsets of the coin
 reveal up to the note, then its own note slot:
 
 | Offset | Length | Field |
@@ -172,9 +173,10 @@ The checks run in this order and stop at the first failure; any failure makes
 the block invalid:
 
 1. type `0x51` and the exact envelope length (`ErrDataRevealLength`); a coin
-   reveal envelope, type `0x50`, fails here, and a data reveal sent as type
-   `0x50`, being shorter than a coin reveal, fails the coin reveal's length
-   check;
+   reveal envelope, type `0x50`, fails here. A data reveal sent as type
+   `0x50` has the length and version of a version 1 coin reveal and fails the
+   coin reveal's checks: the fee, or the root, a data tree root being no coin
+   tree root, or else the binding, whose tag and fields differ;
 2. version 1 (`ErrDataRevealVersion`);
 3. out and fee have their 20 leading bytes zero (`ErrDataRevealAmount`);
 4. the chain id is this chain's (`ErrDataRevealChainID`);

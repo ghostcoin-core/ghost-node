@@ -37,8 +37,8 @@ import (
 // bytes, or 430), version 1 and 429 or 431 bytes are ErrCommitData. The
 // receipt logs of both commits carry the whole 380-byte note, and
 // HistoryRecords returns it, as it returns the whole 380-byte remainder note
-// of a version 2 reveal; a reveal log of the old 156-byte note is no
-// receipt.
+// of a version 2 reveal; a version 1 reveal's 156-byte remainder note is
+// recorded zero-padded to 380 bytes.
 func TestNote380Commit(t *testing.T) {
 	if ghostpriv.NoteSize != 380 {
 		t.Fatalf("NoteSize %d, want 380", ghostpriv.NoteSize)
@@ -198,15 +198,30 @@ func TestNote380Commit(t *testing.T) {
 		t.Errorf("reveal marker record %+v", r)
 	}
 
-	// A commit log of the old 156-byte note is no receipt of the coin rules,
-	// nor is a reveal log of the version 1 note.
+	// A commit log of the old 156-byte note is no receipt of the coin rules.
 	old := &types.Log{Address: coinLog.Address, Topics: coinLog.Topics, Data: append(append([]byte{}, coinLog.Data[:72+156]...), salt...)}
 	if _, err := ghostpriv.HistoryRecords(types.Receipts{{Logs: []*types.Log{old}}}); !errors.Is(err, ghostpriv.ErrReceiptLog) {
 		t.Errorf("commit log of a 156-byte note: %v, want %v", err, ghostpriv.ErrReceiptLog)
 	}
-	oldReveal := &types.Log{Address: revealLog.Address, Topics: revealLog.Topics, Data: revealLogData(c.note[:156])}
-	if _, err := ghostpriv.HistoryRecords(types.Receipts{{Logs: []*types.Log{oldReveal}}}); !errors.Is(err, ghostpriv.ErrReceiptLog) {
-		t.Errorf("reveal log of a 156-byte note: %v, want %v", err, ghostpriv.ErrReceiptLog)
+	// A version 1 reveal's log keeps its 156-byte note, which the record
+	// holds zero-padded on the right to 380 bytes. A note of any other
+	// length is no receipt.
+	v1Reveal := &types.Log{Address: revealLog.Address, Topics: revealLog.Topics, Data: revealLogData(c.note[:ghostpriv.RevealNoteSize])}
+	records, err = ghostpriv.HistoryRecords(types.Receipts{{Logs: []*types.Log{v1Reveal}}})
+	if err != nil || len(records) != 2 {
+		t.Fatalf("version 1 reveal log: %d records, %v", len(records), err)
+	}
+	if r := records[0]; r.Kind != ghosttree.Coin || r.Leaf != remainder || !bytes.Equal(r.Note[:156], c.note[:156]) || !bytes.Equal(r.Note[156:], make([]byte, 380-156)) || r.Salt != nil {
+		t.Errorf("version 1 reveal remainder record: kind %v leaf %x note %x", r.Kind, r.Leaf, r.Note[:])
+	}
+	if r := records[1]; r.Kind != ghosttree.CoinMarkers || r.Leaf != testMarker("note 380") {
+		t.Errorf("version 1 reveal marker record %+v", r)
+	}
+	for _, n := range []int{155, 157, 379} {
+		odd := &types.Log{Address: revealLog.Address, Topics: revealLog.Topics, Data: revealLogData(c.note[:n])}
+		if _, err := ghostpriv.HistoryRecords(types.Receipts{{Logs: []*types.Log{odd}}}); !errors.Is(err, ghostpriv.ErrReceiptLog) {
+			t.Errorf("reveal log of a %d-byte note: %v, want %v", n, err, ghostpriv.ErrReceiptLog)
+		}
 	}
 }
 

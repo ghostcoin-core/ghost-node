@@ -212,6 +212,7 @@ func (r *PolicyReveal) VerifyInputs(chainID uint64, genesis common.Hash) *Verify
 	return &VerifyInputs{
 		Kind:           ghosttree.Coin,
 		Purpose:        PurposePolicySpend,
+		Version:        r.Version,
 		Binding:        r.BindingDigest(chainID, genesis),
 		ChainID:        chainID,
 		Domain:         genesis,

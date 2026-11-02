@@ -61,7 +61,7 @@ const (
 	MaxReveals = 16
 
 	// MaxBytes is the most envelope bytes the pool holds, 16 envelopes of
-	// the version 2 coin reveal, the larger of the two types the pool takes.
+	// the version 2 coin reveal, the largest of the envelopes the pool takes.
 	MaxBytes = MaxReveals * types.GhostRevealEnvelopeSize
 
 	// PeerRevealsPerBlock is the number of reveals a peer may have the node
@@ -257,7 +257,8 @@ type Pool struct {
 	mu         sync.RWMutex
 	head       *types.Header
 	state      *state.StateDB
-	fee        classFees // the coin reveal fees of the next block, for G_PRIV
+	fee        classFees // the version 2 coin reveal fees of the next block, for G_PRIV
+	feeV1      classFees // the version 1 coin reveal fees of the next block, for its gas
 	dataFee    classFees // the data reveal fees of the next block, for G_DATA
 	all        map[common.Hash]*entry
 	order      []common.Hash // hashes of the held reveals, first seen first
@@ -321,10 +322,10 @@ func (p *Pool) Init(gasTip uint64, head *types.Header, reserve txpool.AddressRes
 	if err != nil {
 		return err
 	}
-	fee, dataFee := p.windowFees(head, ghostpriv.GasPriv), p.windowFees(head, ghostpriv.GasData)
+	fee, feeV1, dataFee := p.windowFees(head, ghostpriv.GasPriv), p.windowFees(head, ghostpriv.GasPrivV1), p.windowFees(head, ghostpriv.GasData)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.head, p.state, p.fee, p.dataFee = head, st, fee, dataFee
+	p.head, p.state, p.fee, p.feeV1, p.dataFee = head, st, fee, feeV1, dataFee
 	return nil
 }
 
@@ -351,9 +352,9 @@ func (p *Pool) Reset(oldHead, newHead *types.Header) {
 		log.Error("Reveal pool cannot reset to the new head", "number", newHead.Number, "hash", newHead.Hash(), "err", err)
 		return
 	}
-	fee, dataFee := p.windowFees(newHead, ghostpriv.GasPriv), p.windowFees(newHead, ghostpriv.GasData)
+	fee, feeV1, dataFee := p.windowFees(newHead, ghostpriv.GasPriv), p.windowFees(newHead, ghostpriv.GasPrivV1), p.windowFees(newHead, ghostpriv.GasData)
 	p.mu.Lock()
-	p.head, p.state, p.fee, p.dataFee = newHead, st, fee, dataFee
+	p.head, p.state, p.fee, p.feeV1, p.dataFee = newHead, st, fee, feeV1, dataFee
 	now := time.Now()
 	for _, b := range p.peers {
 		b.tokens = PeerRevealsPerBlock
@@ -649,11 +650,15 @@ func (p *Pool) cheapRules(r revealFields) error {
 		}
 		return fmt.Errorf("%w: have %d, chain %v", ghostpriv.ErrDataRevealChainID, r.chainID, id)
 	}
-	// Each class pays the window fee for its own gas: a coin reveal that of
-	// G_PRIV, a data reveal, from its reserve, that of G_DATA.
+	// Each class pays the window fee for its own gas: a version 2 coin
+	// reveal that of G_PRIV, a version 1 coin reveal that of its own gas, a
+	// data reveal, from its reserve, that of G_DATA.
 	errFee, fees := ghostpriv.ErrRevealFee, p.fee
-	if !coin {
+	switch {
+	case !coin:
 		errFee, fees = ghostpriv.ErrDataRevealFee, p.dataFee
+	case r.v1:
+		fees = p.feeV1
 	}
 	switch {
 	case fees.cur != nil && !fees.cur.Eq(r.fee) && fees.prev == nil:
@@ -791,17 +796,18 @@ func (p *Pool) FilterAnnounced(peer string, kinds []byte, sizes []uint32, hashes
 	defer p.mu.Unlock()
 	now := time.Now()
 	for i, hash := range hashes {
-		var size uint32
+		var sized bool
 		switch kinds[i] {
 		case types.GhostRevealTxType:
-			size = types.GhostRevealEnvelopeSize
+			// The version 2 or the version 1 layout.
+			sized = sizes[i] == types.GhostRevealEnvelopeSize || sizes[i] == types.GhostRevealV1EnvelopeSize
 		case types.GhostDataRevealTxType:
-			size = types.GhostDataRevealEnvelopeSize
+			sized = sizes[i] == types.GhostDataRevealEnvelopeSize
 		default:
 			keep[i] = true
 			continue
 		}
-		if sizes[i] != size {
+		if !sized {
 			continue
 		}
 		if _, ok := p.all[hash]; ok {
@@ -1108,6 +1114,7 @@ type revealFields struct {
 	key     markerKey
 	chainID uint64
 	fee     *uint256.Int
+	v1      bool // a version 1 coin reveal, whose fee is priced for its own gas
 }
 
 // decode decodes a reveal's fields, running the first three reveal checks
@@ -1119,7 +1126,7 @@ func decode(tx *types.Transaction) (revealFields, error) {
 		if err != nil {
 			return revealFields{}, err
 		}
-		return revealFields{key: markerKey{kind: ghosttree.Coin, marker: r.Marker}, chainID: r.ChainID, fee: r.Fee}, nil
+		return revealFields{key: markerKey{kind: ghosttree.Coin, marker: r.Marker}, chainID: r.ChainID, fee: r.Fee, v1: r.IsV1()}, nil
 	case types.GhostDataRevealTxType:
 		r, err := ghostpriv.DecodeDataReveal(tx.GhostDataRevealEnvelope())
 		if err != nil {

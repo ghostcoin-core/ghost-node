@@ -103,7 +103,9 @@ func newRealProof(t *testing.T) *realProof {
 	if start := ghostpriv.WindowStart(2); start != 0 {
 		t.Fatalf("block 2 is in the window of block %d", start)
 	}
-	fee, err := ghostpriv.WindowFee(f.genesis.BaseFee())
+	// The recorded reveal is a version 1 reveal, whose fee is priced for its
+	// own gas.
+	fee, err := ghostpriv.WindowFeeGas(f.genesis.BaseFee(), ghostpriv.GasPrivV1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +130,7 @@ func newRealProof(t *testing.T) *realProof {
 	rest = rest[32+ghostpriv.SaltSize:]
 	s := rest[:realStatementBytes]
 	r := &ghostpriv.Reveal{
-		Version:   ghostpriv.RevealVersion,
+		Version:   ghostpriv.Version,
 		ChainID:   gspec.Config.GetChainID().Uint64(),
 		Root:      common.BytesToHash(s[0:32]),
 		Marker:    common.BytesToHash(s[32:64]),
@@ -323,21 +325,94 @@ type acceptAll struct{}
 
 func (acceptAll) VerifyReveal(*ghostpriv.VerifyInputs, []byte) error { return nil }
 
+// releaseVerifierVersions checks, on the state of block 1 with the default,
+// linked verifier, that a version 2 reveal of the recorded coin, which
+// passes every check before the proof, is refused by the verifier with
+// ErrStatementUnsupported and leaves the state as it was, that the pool on
+// block 1 refuses and does not hold it, and that the recorded version 1
+// reveal then applies on that same state.
+func (rp *realProof) releaseVerifierVersions(t *testing.T, p *Pool) {
+	t.Helper()
+	if v := ghostpriv.ActiveVerifier(); v != ghostpriv.DefaultVerifier() {
+		t.Fatalf("active verifier %T, want the default", v)
+	}
+	feeV2, err := ghostpriv.WindowFeeGas(rp.genesis.BaseFee(), ghostpriv.GasPriv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v2 := cloneReveal(rp.reveal)
+	v2.Version = ghostpriv.RevealVersion
+	v2.Fee = feeV2.Total
+	v2.Note[ghostpriv.NoteSize-1] = 0x5a
+	v2tx := rp.revealTx(v2)
+	if v2tx.Size() != types.GhostRevealEnvelopeSize || v2tx.Gas() != ghostpriv.GasPriv {
+		t.Fatalf("version 2 reveal of %d bytes and %d gas", v2tx.Size(), v2tx.Gas())
+	}
+
+	st, err := rp.chain.StateAt(rp.blocks[0].Root())
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := &ghostpriv.BlockEnv{
+		Header:  rp.blocks[1].Header(),
+		Chain:   rp.chain,
+		ChainID: rp.gspec.Config.GetChainID(),
+		Genesis: rp.genesis.Hash(),
+	}
+	before := st.IntermediateRoot(true)
+	in, out := ghostpriv.Totals(st)
+	coinbase := st.GetBalance(env.Header.Coinbase)
+
+	err = ghostpriv.ApplyReveal(st, env, ghostpriv.DefaultVerifier(), v2tx.GhostRevealEnvelope())
+	if !errors.Is(err, ghostpriv.ErrRevealProof) || !errors.Is(err, ghostpriv.ErrStatementUnsupported) {
+		t.Fatalf("version 2 reveal: %v, want %v and %v", err, ghostpriv.ErrRevealProof, ghostpriv.ErrStatementUnsupported)
+	}
+	if after := st.IntermediateRoot(true); after != before {
+		t.Fatalf("state root %x after the refused reveal, was %x", after, before)
+	}
+	if ghosttree.IsSpent(st, ghosttree.Coin, v2.Marker) || !st.GetBalance(realRecipient).IsZero() || len(st.Logs()) != 0 {
+		t.Fatal("the refused version 2 reveal changed the marker, the recipient or the logs")
+	}
+	if in2, out2 := ghostpriv.Totals(st); !in2.Eq(in) || !out2.Eq(out) || !st.GetBalance(env.Header.Coinbase).Eq(coinbase) {
+		t.Fatal("the refused version 2 reveal changed the totals or the coinbase")
+	}
+
+	requireErr(t, p.Add([]*types.Transaction{v2tx}, true, true)[0], ghostpriv.ErrRevealProof, "version 2 reveal over RPC")
+	if p.Has(v2tx.Hash()) || len(p.PendingReveals()) != 0 {
+		t.Fatal("pool holds the version 2 reveal")
+	}
+
+	// The recorded version 1 reveal still verifies and applies.
+	if err := ghostpriv.ApplyReveal(st, env, ghostpriv.DefaultVerifier(), rp.revealTx(rp.reveal).GhostRevealEnvelope()); err != nil {
+		t.Fatalf("recorded version 1 reveal: %v", err)
+	}
+	if !ghosttree.IsSpent(st, ghosttree.Coin, rp.reveal.Marker) || st.GetBalance(realRecipient).ToBig().Cmp(realOut) != 0 {
+		t.Fatal("the version 1 reveal did not spend the marker and pay the recipient")
+	}
+}
+
 // TestRealProofRevealPoolAndBlock takes a reveal carrying a real proof of
 // the pinned prover through the default verifier end to end: the pool
 // admits it, a generated block includes it, and that block imports with the
 // reveal's receipt and state change.
 func TestRealProofRevealPoolAndBlock(t *testing.T) {
-	t.Skip("the recorded proof binds the version 1 reveal and its 156-byte note; the version 2 proof and fixture come with PER-4099")
 	rp := newRealProof(t)
 	tx := rp.revealTx(rp.reveal)
-	if tx.Size() != types.GhostRevealEnvelopeSize {
+	if tx.Size() != types.GhostRevealV1EnvelopeSize {
 		t.Fatalf("reveal of %d bytes", tx.Size())
 	}
 
 	// The pool on block 1 admits the reveal for block 2.
 	rp.newChain(rp.makeBlocks())
 	p := rp.newPool()
+
+	// The release verifier refuses a version 2 reveal of the same coin
+	// before any state change, and still verifies the recorded version 1
+	// reveal.
+	t.Run("version 2 refused without a state change", func(t *testing.T) {
+		rp.releaseVerifierVersions(t, p)
+	})
+
 	if err := p.Add([]*types.Transaction{tx}, true, true)[0]; err != nil {
 		t.Fatalf("pool refused the real reveal: %v", err)
 	}
@@ -368,16 +443,16 @@ func TestRealProofRevealPoolAndBlock(t *testing.T) {
 		t.Fatal("pool still holds the included reveal")
 	}
 
-	// The receipt: typed 0x50, status 1, exactly G_PRIV gas, one log.
-	if block.GasUsed() != ghostpriv.GasPriv {
-		t.Errorf("block 2 gas used %d, want %d", block.GasUsed(), ghostpriv.GasPriv)
+	// The receipt: typed 0x50, status 1, exactly the version 1 gas, one log.
+	if block.GasUsed() != ghostpriv.GasPrivV1 {
+		t.Errorf("block 2 gas used %d, want %d", block.GasUsed(), ghostpriv.GasPrivV1)
 	}
 	rs := rp.chain.GetReceiptsByHash(block.Hash())
 	if len(rs) != 1 {
 		t.Fatalf("%d receipts", len(rs))
 	}
 	r := rs[0]
-	if r.Type != types.GhostRevealTxType || r.Status != types.ReceiptStatusSuccessful || r.GasUsed != ghostpriv.GasPriv || r.TxHash != tx.Hash() {
+	if r.Type != types.GhostRevealTxType || r.Status != types.ReceiptStatusSuccessful || r.GasUsed != ghostpriv.GasPrivV1 || r.TxHash != tx.Hash() {
 		t.Errorf("receipt: %+v", r)
 	}
 	if len(r.Logs) != 1 {
@@ -390,7 +465,7 @@ func TestRealProofRevealPoolAndBlock(t *testing.T) {
 	wantData := binary.BigEndian.AppendUint32(nil, 0)
 	wantData = binary.BigEndian.AppendUint32(wantData, 1) // the commitment is at 0
 	wantData = append(wantData, rp.reveal.Remainder[:]...)
-	wantData = append(wantData, rp.reveal.Note[:]...)
+	wantData = append(wantData, rp.reveal.Note[:ghostpriv.RevealNoteSize]...)
 	wantData = append(wantData, realRecipient[:]...)
 	outWord := rp.reveal.Out.Bytes32()
 	wantData = append(wantData, outWord[:]...)
@@ -433,7 +508,6 @@ func TestRealProofRevealPoolAndBlock(t *testing.T) {
 // a block carrying one, made while a test-only verifier accepted it, is
 // refused on import with ErrRevealProof and leaves the head where it was.
 func TestRealProofTamperedRevealRejected(t *testing.T) {
-	t.Skip("the recorded proof binds the version 1 reveal and its 156-byte note; the version 2 proof and fixture come with PER-4099")
 	rp := newRealProof(t)
 	for name, r := range rp.tamperedReveals() {
 		t.Run(name, func(t *testing.T) {

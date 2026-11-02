@@ -47,13 +47,21 @@ const (
 	// followed by zeros.
 	ProofSize = 1_310_720
 
-	// PayloadSize is the length of the payload, EnvelopeSize of the type
-	// byte and the payload.
+	// PayloadSize is the length of the version 2 payload, EnvelopeSize of
+	// the type byte and the payload.
 	PayloadSize  = types.GhostRevealPayloadSize
 	EnvelopeSize = types.GhostRevealEnvelopeSize
 
+	// PayloadSizeV1 is the length of the version 1 payload, with its
+	// RevealNoteSize note, EnvelopeSizeV1 of the type byte and the payload.
+	PayloadSizeV1  = types.GhostRevealV1PayloadSize
+	EnvelopeSizeV1 = types.GhostRevealV1EnvelopeSize
+
 	// BindingSize is the length of the binding digest's input, version 2.
 	BindingSize = 607
+
+	// BindingSizeV1 is the length of the version 1 binding digest's input.
+	BindingSizeV1 = 415
 )
 
 // Fixed fields of the binding digests.
@@ -61,7 +69,7 @@ const (
 	statementCoinReveal        = 0x01
 	statementDataReveal        = 0x02
 	statementPolicyReveal      = 0x04
-	statementVersion           = 0x01 // of the data and the policy reveal statements
+	statementVersion           = 0x01 // of the data, the policy and the version 1 ordinary reveal statements
 	statementCoinRevealVersion = 0x02 // of the ordinary reveal statement, S1 version 2
 	purposeReveal              = PurposeReveal
 )
@@ -80,8 +88,8 @@ const (
 // check that needed it. ErrRevealRecipient runs between the fee and the
 // binding (spec 10, section 4.5).
 var (
-	ErrRevealLength    = errors.New("reveal is not a 0x50 envelope of 1,311,291 bytes")
-	ErrRevealVersion   = errors.New("reveal version is not 2")
+	ErrRevealLength    = errors.New("reveal is not a 0x50 envelope of 1,311,291 or 1,311,067 bytes")
+	ErrRevealVersion   = errors.New("reveal version is not that of its layout, 2 or 1")
 	ErrRevealAmount    = errors.New("reveal out or fee not below 2^96")
 	ErrRevealChainID   = errors.New("reveal chain id is not this chain's")
 	ErrRevealFee       = errors.New("reveal fee is not the window fee")
@@ -94,7 +102,10 @@ var (
 	ErrRevealChainInfo = errors.New("chain information for the reveal unavailable")
 )
 
-// Reveal is a decoded ordinary reveal payload, version 2.
+// Reveal is a decoded ordinary reveal payload, version 2 or version 1. The
+// two versions share every offset up to the note; a version 2 reveal carries
+// a NoteSize note, a version 1 reveal a RevealNoteSize note, held in the
+// first RevealNoteSize bytes of Note with the rest zero.
 type Reveal struct {
 	Version   uint16
 	ChainID   uint64
@@ -108,14 +119,47 @@ type Reveal struct {
 	Note      [NoteSize]byte
 }
 
+// IsV1 reports whether the reveal is a version 1 reveal, of the layout with
+// the RevealNoteSize note.
+func (r *Reveal) IsV1() bool { return r.Version == RevealVersionV1 }
+
+// Gas returns the gas of the reveal's version: GasPrivV1 for version 1,
+// G_PRIV for any other. Its fee is the window fee for that gas.
+func (r *Reveal) Gas() uint64 {
+	if r.IsV1() {
+		return GasPrivV1
+	}
+	return GasPriv
+}
+
+// noteBytes returns the note as the reveal's version carries it: the first
+// RevealNoteSize bytes for version 1, all NoteSize bytes for any other.
+func (r *Reveal) noteBytes() []byte {
+	if r.IsV1() {
+		return r.Note[:RevealNoteSize]
+	}
+	return r.Note[:]
+}
+
 // MarshalBinary returns the reveal's envelope: the type byte 0x50 and the
-// payload of EnvelopeSize - 1 bytes. A shorter proof is padded with zeros;
-// a longer one is an error.
+// payload, of EnvelopeSizeV1 - 1 bytes for a version 1 reveal and of
+// EnvelopeSize - 1 bytes for any other version. A shorter proof is padded
+// with zeros; a longer one is an error, as is a version 1 note with a
+// non-zero byte past RevealNoteSize, which the layout cannot hold.
 func (r *Reveal) MarshalBinary() ([]byte, error) {
 	if len(r.Proof) > ProofSize {
 		return nil, fmt.Errorf("proof of %d bytes, the field holds %d", len(r.Proof), ProofSize)
 	}
-	env := make([]byte, EnvelopeSize)
+	size := EnvelopeSize
+	if r.IsV1() {
+		for _, b := range r.Note[RevealNoteSize:] {
+			if b != 0 {
+				return nil, fmt.Errorf("version 1 reveal note longer than %d bytes", RevealNoteSize)
+			}
+		}
+		size = EnvelopeSizeV1
+	}
+	env := make([]byte, size)
 	env[0] = types.GhostRevealTxType
 	p := env[1:]
 	binary.BigEndian.PutUint16(p[offVersion:], r.Version)
@@ -131,16 +175,24 @@ func (r *Reveal) MarshalBinary() ([]byte, error) {
 		copy(p[offFee:offProof], amountWord(r.Fee))
 	}
 	copy(p[offProof:offNote], r.Proof)
-	copy(p[offNote:], r.Note[:])
+	copy(p[offNote:], r.noteBytes())
 	return env, nil
 }
 
 // DecodeReveal decodes a reveal envelope and runs the first three checks:
-// the type byte and exact length (ErrRevealLength), version 2
-// (ErrRevealVersion), and out and fee below 2^96 (ErrRevealAmount). There is
-// no version 1 path: a version 1 reveal, of any length, is refused.
+// the type byte and exact length (ErrRevealLength), the version of the
+// layout, 2 for an envelope of EnvelopeSize bytes and 1 for one of
+// EnvelopeSizeV1 bytes (ErrRevealVersion), and out and fee below 2^96
+// (ErrRevealAmount).
 func DecodeReveal(envelope []byte) (*Reveal, error) {
-	if len(envelope) != EnvelopeSize || envelope[0] != types.GhostRevealTxType {
+	want := RevealVersion
+	switch {
+	case len(envelope) == 0 || envelope[0] != types.GhostRevealTxType:
+		return nil, fmt.Errorf("%w: %d bytes", ErrRevealLength, len(envelope))
+	case len(envelope) == EnvelopeSize:
+	case len(envelope) == EnvelopeSizeV1:
+		want = RevealVersionV1
+	default:
 		return nil, fmt.Errorf("%w: %d bytes", ErrRevealLength, len(envelope))
 	}
 	p := envelope[1:]
@@ -154,8 +206,8 @@ func DecodeReveal(envelope []byte) (*Reveal, error) {
 		Proof:     common.CopyBytes(p[offProof:offNote]),
 	}
 	copy(r.Note[:], p[offNote:])
-	if r.Version != RevealVersion {
-		return nil, fmt.Errorf("%w: %d", ErrRevealVersion, r.Version)
+	if r.Version != want {
+		return nil, fmt.Errorf("%w: %d in an envelope of %d bytes", ErrRevealVersion, r.Version, len(envelope))
 	}
 	var err error
 	if r.Out, err = readAmount(p[offOut:offFee]); err != nil {
@@ -167,21 +219,51 @@ func DecodeReveal(envelope []byte) (*Reveal, error) {
 	return r, nil
 }
 
-// BindingDigest returns the binding digest the proof must commit to,
-// K("ghost/coin-reveal-binding/v2", fields) over the 607 bytes of
-// BindingInput (spec 10, section 4.2).
+// BindingDigest returns the binding digest the proof must commit to. For a
+// version 2 reveal it is K("ghost/coin-reveal-binding/v2", fields) over the
+// 607 bytes of BindingInput (spec 10, section 4.2); for a version 1 reveal
+// it is K("ghost/coin-reveal-binding/v1", fields) over the 415 bytes of the
+// version 1 BindingInput, of type COIN version 1.
 func (r *Reveal) BindingDigest(chainID uint64, genesis common.Hash) common.Hash {
+	if r.IsV1() {
+		return ghosttree.K(TagRevealBindingV1, r.bindingInputV1(chainID, genesis, Coin))
+	}
 	return ghosttree.K(TagRevealBinding, r.BindingInput(chainID, genesis))
 }
 
-// BindingInput returns the 607 bytes the binding digest hashes: the chain id
-// (8), the version 2 (2), the domain, which is the genesis hash (32), the
-// statement 0x01 and its version 0x02 (1 each), the type COIN version 2
-// (2), the purpose (1), the root, marker and remainder (32 each), the
-// recipient (20), out and fee (32 each) and the remainder note (380). The
-// node supplies the version, statement, type and purpose; there is no rule
-// field, and the proof is not covered.
+// SaltedBindingDigest returns the binding digest of the same reveal over a
+// salted coin. For a version 1 reveal it is BindingDigest with the type
+// CoinV2 in place of Coin: the proof system accepts a version 1 reveal whose
+// proof commits to either; the node passes its verifier only BindingDigest,
+// and a verifier that checks the binding itself, such as the test stub,
+// computes this one from the inputs. A version 2 reveal binds the type CoinV2
+// already, so for it this is BindingDigest.
+func (r *Reveal) SaltedBindingDigest(chainID uint64, genesis common.Hash) common.Hash {
+	if r.IsV1() {
+		return ghosttree.K(TagRevealBindingV1, r.bindingInputV1(chainID, genesis, CoinV2))
+	}
+	return r.BindingDigest(chainID, genesis)
+}
+
+// BindingInput returns the bytes the binding digest hashes.
+//
+// For a version 2 reveal they are 607: the chain id (8), the version 2 (2),
+// the domain, which is the genesis hash (32), the statement 0x01 and its
+// version 0x02 (1 each), the type COIN version 2 (2), the purpose (1), the
+// root, marker and remainder (32 each), the recipient (20), out and fee (32
+// each) and the remainder note (380). The node supplies the version,
+// statement, type and purpose; there is no rule field, and the proof is not
+// covered.
+//
+// For a version 1 reveal they are 415: the chain id (8), the version 1 (2),
+// the domain (32), the statement 0x01 and its version 0x01 (1 each), the
+// type COIN (2), the purpose (1), the root, marker and remainder (32 each),
+// the recipient (20), out and fee (32 each), the rule, 32 zero bytes for the
+// empty rule, and the note (156).
 func (r *Reveal) BindingInput(chainID uint64, genesis common.Hash) []byte {
+	if r.IsV1() {
+		return r.bindingInputV1(chainID, genesis, Coin)
+	}
 	out, fee := r.Out, r.Fee
 	if out == nil {
 		out = new(uint256.Int)
@@ -206,9 +288,39 @@ func (r *Reveal) BindingInput(chainID uint64, genesis common.Hash) []byte {
 	return b
 }
 
+// bindingInputV1 returns the version 1 BindingInput with typ as the coin
+// type. The version is always 1 and the rule always empty: the node supplies
+// them.
+func (r *Reveal) bindingInputV1(chainID uint64, genesis common.Hash, typ [2]byte) []byte {
+	out, fee := r.Out, r.Fee
+	if out == nil {
+		out = new(uint256.Int)
+	}
+	if fee == nil {
+		fee = new(uint256.Int)
+	}
+	b := make([]byte, 0, BindingSizeV1)
+	b = binary.BigEndian.AppendUint64(b, chainID)
+	b = binary.BigEndian.AppendUint16(b, RevealVersionV1)
+	b = append(b, genesis[:]...)
+	b = append(b, statementCoinReveal, statementVersion)
+	b = append(b, typ[:]...)
+	b = append(b, purposeReveal)
+	b = append(b, r.Root[:]...)
+	b = append(b, r.Marker[:]...)
+	b = append(b, r.Remainder[:]...)
+	b = append(b, r.Recipient[:]...)
+	b = append(b, amountWord(out)...)
+	b = append(b, amountWord(fee)...)
+	b = append(b, make([]byte, 32)...) // the empty rule
+	b = append(b, r.Note[:RevealNoteSize]...)
+	return b
+}
+
 // VerifyInputs returns the inputs the verifier receives for the reveal's
-// proof on the chain of chainID and genesis. Both a block's checks and the
-// pool build them here, so they never disagree.
+// proof on the chain of chainID and genesis, with the reveal's version as
+// the statement version. Both a block's checks and the pool build them here,
+// so they never disagree.
 func (r *Reveal) VerifyInputs(chainID uint64, genesis common.Hash) *VerifyInputs {
 	out, fee := new(uint256.Int), new(uint256.Int)
 	if r.Out != nil {
@@ -220,6 +332,7 @@ func (r *Reveal) VerifyInputs(chainID uint64, genesis common.Hash) *VerifyInputs
 	return &VerifyInputs{
 		Kind:      ghosttree.Coin,
 		Purpose:   purposeReveal,
+		Version:   r.Version,
 		Binding:   r.BindingDigest(chainID, genesis),
 		ChainID:   chainID,
 		Domain:    genesis,
@@ -380,10 +493,12 @@ func CheckReveal(st StateDB, env *BlockEnv, verifier Verifier, envelope []byte) 
 	}
 	chainID := env.ChainID.Uint64()
 	// Check 5: the fee of the including block's window or of the window
-	// before it, which must cover G_PRIV times the including block's base
-	// fee. The fee returned is the one that matched, split by the cover rule
-	// into the burn and the tip, never above that window's nominal tip.
-	fee, err := env.windowFee(r.Fee, GasPriv)
+	// before it, priced for the gas of the reveal's version (G_PRIV for
+	// version 2, GasPrivV1 for version 1), which must cover that gas times
+	// the including block's base fee. The fee returned is the one that
+	// matched, split by the cover rule into the burn and the tip, never above
+	// that window's nominal tip.
+	fee, err := env.windowFee(r.Fee, r.Gas())
 	if err != nil {
 		return nil, Fee{}, err
 	}
@@ -413,7 +528,9 @@ func CheckReveal(st StateDB, env *BlockEnv, verifier Verifier, envelope []byte) 
 	}
 	// Check 10: the proof, for the inputs the node computed. Check 11 has
 	// nothing to read: the version 2 statement opens the input rule inside
-	// the proof, and the binding carries no rule.
+	// the proof, and the binding carries no rule; the version 1 inputs carry
+	// the empty rule as 32 zero bytes. A verifier that has no proof system
+	// for the reveal's statement version refuses it here, before any change.
 	if verifier == nil {
 		verifier = DefaultVerifier()
 	}
@@ -423,17 +540,22 @@ func CheckReveal(st StateDB, env *BlockEnv, verifier Verifier, envelope []byte) 
 	return r, fee, nil
 }
 
-// revealLogSize is the length of the data of a reveal's receipt log: the
-// location (8), the remainder (32), its note (380), the recipient (20) and
-// out (32).
-const revealLogSize = 8 + 32 + NoteSize + 20 + 32
+// revealLogSize is the length of the data of a version 2 reveal's receipt
+// log: the location (8), the remainder (32), its note (380), the recipient
+// (20) and out (32). revealLogSizeV1 is that of a version 1 reveal, whose
+// note is RevealNoteSize bytes.
+const (
+	revealLogSize   = 8 + 32 + NoteSize + 20 + 32
+	revealLogSizeV1 = 8 + 32 + RevealNoteSize + 20 + 32
+)
 
 // ApplyReveal checks a reveal and makes its one atomic change: it marks the
 // marker spent, credits out to the recipient as a plain balance credit,
-// burns G_PRIV times the larger of the window price and the block's base fee,
-// pays the rest of the fee to the coinbase as the tip, appends the
-// remainder with the receipt log and adds out plus fee to the total out. The
-// gas is the caller's. On an error nothing is changed.
+// burns the gas of the reveal's version times the larger of the window price
+// and the block's base fee, pays the rest of the fee to the coinbase as the
+// tip, appends the remainder with the receipt log, which carries the note as
+// the version has it, and adds out plus fee to the total out. The gas is the
+// caller's. On an error nothing is changed.
 func ApplyReveal(st StateDB, env *BlockEnv, verifier Verifier, envelope []byte) error {
 	r, fee, err := CheckReveal(st, env, verifier, envelope)
 	if err != nil {
@@ -470,7 +592,7 @@ func ApplyReveal(st StateDB, env *BlockEnv, verifier Verifier, envelope []byte) 
 	data := make([]byte, 0, revealLogSize)
 	data = append(data, loc...)
 	data = append(data, r.Remainder[:]...)
-	data = append(data, r.Note[:]...)
+	data = append(data, r.noteBytes()...)
 	data = append(data, r.Recipient[:]...)
 	data = append(data, amountWord(r.Out)...)
 	st.AddLog(&types.Log{
