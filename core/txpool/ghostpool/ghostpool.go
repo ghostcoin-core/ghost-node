@@ -322,7 +322,7 @@ func (p *Pool) Init(gasTip uint64, head *types.Header, reserve txpool.AddressRes
 	if err != nil {
 		return err
 	}
-	fee, feeV1, dataFee := p.windowFees(head, ghostpriv.GasPriv), p.windowFees(head, ghostpriv.GasPrivV1), p.windowFees(head, ghostpriv.GasData)
+	fee, feeV1, dataFee := p.windowFees(head)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.head, p.state, p.fee, p.feeV1, p.dataFee = head, st, fee, feeV1, dataFee
@@ -352,7 +352,7 @@ func (p *Pool) Reset(oldHead, newHead *types.Header) {
 		log.Error("Reveal pool cannot reset to the new head", "number", newHead.Number, "hash", newHead.Hash(), "err", err)
 		return
 	}
-	fee, feeV1, dataFee := p.windowFees(newHead, ghostpriv.GasPriv), p.windowFees(newHead, ghostpriv.GasPrivV1), p.windowFees(newHead, ghostpriv.GasData)
+	fee, feeV1, dataFee := p.windowFees(newHead)
 	p.mu.Lock()
 	p.head, p.state, p.fee, p.feeV1, p.dataFee = newHead, st, fee, feeV1, dataFee
 	now := time.Now()
@@ -699,28 +699,45 @@ func (p *Pool) eligibleRoot(head *types.Header, kind ghosttree.Kind, root common
 	return false, err
 }
 
-// windowFees are the fees, for the class whose gas is gas, that the block
-// that would come next on head accepts: that of its fee window and that of
-// the window before it, nil when the window does not exist, for the first
-// window, or an ancestor it needs is not available: the reveal checks then
-// refuse the reveal themselves. The walk reads at most the headers of the two
-// windows, seven of them.
-func (p *Pool) windowFees(head *types.Header, gas uint64) classFees {
+// windowFees are the fees of each class that the block that would come next
+// on head accepts, for the version 2 coin reveal (G_PRIV), the version 1
+// coin reveal (its own gas) and the data reveal (G_DATA): that of its fee
+// window and that of the window before it, nil when the window does not
+// exist, for the first window, or an ancestor it needs is not available: the
+// reveal checks then refuse the reveal themselves. The headers are walked
+// once for all classes, reading at most those of the two windows, seven of
+// them.
+func (p *Pool) windowFees(head *types.Header) (fee, feeV1, dataFee classFees) {
+	cur, prev := p.windowStarts(head)
+	class := func(gas uint64) classFees {
+		c := classFees{cur: feeTotal(cur, gas)}
+		if c.cur != nil {
+			c.prev = feeTotal(prev, gas)
+		}
+		return c
+	}
+	return class(ghostpriv.GasPriv), class(ghostpriv.GasPrivV1), class(ghostpriv.GasData)
+}
+
+// windowStarts returns the first header of the fee window of the block that
+// would come next on head and that of the window before it, nil when the
+// window does not exist, for the first window, or an ancestor is not
+// available.
+func (p *Pool) windowStarts(head *types.Header) (cur, prev *types.Header) {
 	next := p.nextHeader(head)
 	start := ghostpriv.WindowStart(next.Number.Uint64())
 	h := next
 	if next.Number.Uint64() > start {
 		h = p.ancestor(head, start)
 	}
-	cur := feeTotal(h, gas)
-	if cur == nil || start == 0 {
-		return classFees{cur: cur}
+	if h == nil || h.BaseFee == nil || start == 0 {
+		return h, nil
 	}
 	from := h
 	if h == next {
 		from = head
 	}
-	return classFees{cur: cur, prev: feeTotal(p.ancestor(from, start-4), gas)}
+	return h, p.ancestor(from, start-4)
 }
 
 // ancestor returns the header at height n of h's ancestry, h itself at its
