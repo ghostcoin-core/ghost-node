@@ -28,7 +28,7 @@ import (
 // through the page-root list.
 const (
 	PageLeaves = 4096 // positions per page, a constant of the protocol
-	NoteBytes  = 156  // bytes of the note stored with each leaf
+	NoteBytes  = 380  // bytes of the note stored with each leaf: 12 nonce, 352 plaintext, 16 tag
 
 	// PageLevels is the number of node levels inside a page: the page root
 	// is the level-11 node, Z_12 for an empty page.

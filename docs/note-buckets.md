@@ -4,7 +4,9 @@ A wallet restoring from its keys does not have to read every page of a tree.
 Every note starts with a 3-byte lookup tag (its nonce; spec 01 section 9,
 spec 05 section 8), and the node serves, for one tree at an anchor, the notes
 whose tag starts with a given bit prefix: one bucket. The node never derives a
-tag, as it has no key; it only reads bytes 0 to 2 of the 156-byte note. The
+tag, as it has no key; it only reads bytes 0 to 2 of the 380-byte note
+(`ghosttree.NoteBytes`: 12-byte nonce, 352 bytes of plaintext, 16-byte tag;
+spec 10 section 3.2). The
 code is `ghosttree.ReadNoteBucket` in `core/ghosttree/buckets.go` and the
 `ghost_getNoteBucket` method in `internal/ethapi/ghostbuckets.go`.
 
@@ -53,7 +55,7 @@ leaves give `m = 8`, 3,650,000,000 give `m = 19`, 2^36 leaves or more give 24.
 | `entries` | the filled positions whose note's tag starts with the prefix, in increasing position order |
 
 Each entry is `{position, leaf, note, salt}`: the position as a hex quantity,
-the leaf `C`, the 156-byte note and the 16-byte salt of a salted commit.
+the leaf `C`, the 380-byte note and the 16-byte salt of a salted commit.
 `salt` is left out for a leaf without one, as in a page entry. Only positions
 filled at or before the anchor are returned.
 

@@ -98,7 +98,7 @@ type Reveal struct {
 	Out       *uint256.Int
 	Fee       *uint256.Int
 	Proof     []byte // ProofSize bytes, or fewer to be padded with zeros
-	Note      [NoteSize]byte
+	Note      [RevealNoteSize]byte
 }
 
 // MarshalBinary returns the reveal's envelope: the type byte 0x50 and the
@@ -447,7 +447,7 @@ func ApplyReveal(st StateDB, env *BlockEnv, verifier Verifier, envelope []byte) 
 	st.AddBalance(r.Recipient, r.Out)
 	st.AddBalance(env.Header.Coinbase, fee.Tip)
 
-	data := make([]byte, 0, 8+32+NoteSize+20+32)
+	data := make([]byte, 0, 8+32+RevealNoteSize+20+32)
 	data = append(data, loc...)
 	data = append(data, r.Remainder[:]...)
 	data = append(data, r.Note[:]...)
@@ -493,8 +493,9 @@ func PurposeField(purpose byte) common.Hash { return common.Hash{31: purpose} }
 // layout: the remainder field holds the purpose, the recipient field is the
 // verifier-or-recipient field, and out must be zero. The remainder's note
 // slot, which a data reveal has no use for, carries the content fingerprint
-// cf in its first 32 bytes; the other NoteSize - 32 bytes, Note, must be
-// zero. Any 32 bytes are a valid cf: the proof binds it.
+// cf in its first 32 bytes; the other DataNoteSlot - 32 bytes, Note, must be
+// zero. Any 32 bytes are a valid cf: the proof binds it. The slot keeps its
+// 156 bytes whatever the length of a commitment's note.
 type DataReveal struct {
 	Version  uint16
 	ChainID  uint64
@@ -506,7 +507,7 @@ type DataReveal struct {
 	Fee      *uint256.Int
 	Proof    []byte      // ProofSize bytes, or fewer to be padded with zeros
 	Cf       common.Hash // the content fingerprint, bytes 0..32 of the note slot
-	Note     [NoteSize - 32]byte
+	Note     [DataNoteSlot - 32]byte
 }
 
 // MarshalBinary returns the data reveal's envelope: the type byte 0x51 and
@@ -695,7 +696,7 @@ func checkDataReveal(st StateDB, env *BlockEnv, verifier Verifier, envelope []by
 	if !r.Out.IsZero() {
 		return nil, 0, Fee{}, fmt.Errorf("%w: out %v", ErrDataRevealShape, r.Out)
 	}
-	if r.Note != ([NoteSize - 32]byte{}) {
+	if r.Note != ([DataNoteSlot - 32]byte{}) {
 		return nil, 0, Fee{}, fmt.Errorf("%w: a note", ErrDataRevealShape)
 	}
 	// Check 8: the node's own binding digest, in the verifier's inputs.

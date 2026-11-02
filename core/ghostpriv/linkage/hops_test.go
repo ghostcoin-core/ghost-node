@@ -90,11 +90,13 @@ func (h *hop) put(seg *segment, name string, off, width int, r role, isInt bool)
 	seg.spans = append(seg.spans, span{off: off, end: off + width, name: name, role: r})
 }
 
-// putNote records a note and its 32-byte words as sub-fields.
-func (h *hop) putNote(seg *segment, name string, off int) {
-	h.put(seg, name, off, ghostpriv.NoteSize, roleNone, false)
-	for w := 0; w < ghostpriv.NoteSize; w += 32 {
-		end := min(w+32, ghostpriv.NoteSize)
+// putNote records a note of size bytes and its 32-byte words as sub-fields:
+// a commitment's note is ghostpriv.NoteSize bytes, the version 1 reveal's
+// note slot ghostpriv.RevealNoteSize.
+func (h *hop) putNote(seg *segment, name string, off, size int) {
+	h.put(seg, name, off, size, roleNone, false)
+	for w := 0; w < size; w += 32 {
+		end := min(w+32, size)
 		h.put(seg, fmt.Sprintf("%s[%d:%d]", name, w, end), off+w, end-w, roleNone, false)
 	}
 }
@@ -160,7 +162,7 @@ func (h *hop) decodeReveal(raw []byte) error {
 	h.put(seg, "payload.proof", revProof, ghostpriv.ProofSize, roleNone, false)
 	h.put(seg, "payload.proof[0:32]", revProof, 32, roleNone, false)
 	h.put(seg, "payload.proof[32:]", revProof+32, ghostpriv.ProofSize-32, roleNone, false)
-	h.putNote(seg, "payload.note", revNote)
+	h.putNote(seg, "payload.note", revNote, ghostpriv.RevealNoteSize)
 	h.segments = append(h.segments, *seg)
 	return nil
 }
@@ -232,7 +234,7 @@ func (h *hop) decodeAccountTx(raw []byte) error {
 			h.put(seg, "transaction.data.version", start, 2, roleVersion, true)
 			h.put(seg, "transaction.data.F", start+2, 32, roleNone, false)
 			h.put(seg, "transaction.data.salt", start+34, ghostpriv.SaltSize, roleNone, false)
-			h.putNote(seg, "transaction.data.note", start+34+ghostpriv.SaltSize)
+			h.putNote(seg, "transaction.data.note", start+34+ghostpriv.SaltSize, ghostpriv.NoteSize)
 		}
 	}
 	if len(content) != 0 {
@@ -250,7 +252,7 @@ var (
 
 const (
 	commitLogSize = 8 + 32 + 32 + ghostpriv.NoteSize + ghostpriv.SaltSize
-	revealLogSize = 8 + 32 + ghostpriv.NoteSize + 20 + 32
+	revealLogSize = 8 + 32 + ghostpriv.RevealNoteSize + 20 + 32
 )
 
 // decodeLog records the topics and data of log i; the data of a commit or
@@ -273,14 +275,14 @@ func (h *hop) decodeLog(i int, l *types.Log) {
 			h.put(seg, name+".position", 4, 4, roleNone, true)
 			h.put(seg, name+".leaf", 8, 32, roleNone, false)
 			h.put(seg, name+".amount", 40, 32, roleNone, true)
-			h.putNote(seg, name+".note", 72)
+			h.putNote(seg, name+".note", 72, ghostpriv.NoteSize)
 		case l.Topics[0] == revealTopic && len(l.Data) == revealLogSize:
 			h.put(seg, name+".tree", 0, 4, roleNone, true)
 			h.put(seg, name+".position", 4, 4, roleNone, true)
 			h.put(seg, name+".remainder", 8, 32, roleNone, false)
-			h.putNote(seg, name+".note", 40)
-			h.put(seg, name+".recipient", 40+ghostpriv.NoteSize, 20, roleNone, false)
-			h.put(seg, name+".out", 60+ghostpriv.NoteSize, 32, roleNone, true)
+			h.putNote(seg, name+".note", 40, ghostpriv.RevealNoteSize)
+			h.put(seg, name+".recipient", 40+ghostpriv.RevealNoteSize, 20, roleNone, false)
+			h.put(seg, name+".out", 60+ghostpriv.RevealNoteSize, 32, roleNone, true)
 		}
 	}
 	h.segments = append(h.segments, *seg)

@@ -90,7 +90,7 @@ func revealLog(index, position uint32, remainder coin, recipient common.Address,
 	data := binary.BigEndian.AppendUint32(nil, index)
 	data = binary.BigEndian.AppendUint32(data, position)
 	data = append(data, leaf[:]...)
-	data = append(data, remainder.note...)
+	data = append(data, remainder.note[:ghostpriv.RevealNoteSize]...) // the version 1 reveal's note slot
 	data = append(data, recipient[:]...)
 	return append(data, word[:]...)
 }

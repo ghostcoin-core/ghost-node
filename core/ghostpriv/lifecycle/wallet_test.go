@@ -127,8 +127,9 @@ func newReveal(n *node, spend, rest coin, root common.Hash, recipient common.Add
 		Recipient: recipient,
 		Out:       new(uint256.Int).Set(out),
 		Fee:       new(uint256.Int).Set(fee),
-		Note:      rest.note(),
 	}
+	note := rest.note()
+	copy(r.Note[:], note[:]) // the version 1 reveal's note slot
 	r.Proof = ghostprivtest.Proof(r.BindingDigest(r.ChainID, n.chain.Genesis().Hash()))
 	return r
 }
@@ -142,7 +143,7 @@ var (
 
 const (
 	commitLogSize = 8 + 32 + 32 + ghostpriv.NoteSize + ghostpriv.SaltSize
-	revealLogSize = 8 + 32 + ghostpriv.NoteSize + 20 + 32
+	revealLogSize = 8 + 32 + ghostpriv.RevealNoteSize + 20 + 32
 )
 
 // leafLog is an append to the coin tree read from a receipt.
@@ -209,8 +210,8 @@ func parseCoinLog(t *testing.T, l *types.Log) (leaf leafLog, reveal *revealLog, 
 			leaf:     common.BytesToHash(d[8:40]),
 			block:    l.BlockNumber,
 		}
-		copy(leaf.note[:], d[40:40+ghostpriv.NoteSize])
-		rest := d[40+ghostpriv.NoteSize:]
+		copy(leaf.note[:], d[40:40+ghostpriv.RevealNoteSize])
+		rest := d[40+ghostpriv.RevealNoteSize:]
 		reveal = &revealLog{
 			marker:    l.Topics[1],
 			remainder: leaf.leaf,

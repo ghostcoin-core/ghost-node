@@ -420,8 +420,9 @@ func buildFixture(t *testing.T) *fixture {
 			Recipient: recipient,
 			Out:       out,
 			Fee:       fee.Total,
-			Note:      rest.note(),
 		}
+		note := rest.note()
+		copy(r.Note[:], note[:]) // the version 1 reveal's note slot
 		r.Proof = ghostprivtest.Proof(r.BindingDigest(chainID, genesis))
 		env, err := r.MarshalBinary()
 		if err != nil {

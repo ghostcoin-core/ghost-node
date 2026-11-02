@@ -59,8 +59,20 @@ const (
 // Sizes and constants of the coin rules.
 const (
 	// NoteSize is the length of a note, the encrypted data stored with a
-	// leaf.
+	// leaf: 380 bytes for every commitment, a 12-byte nonce, 352 bytes of
+	// plaintext and a 16-byte tag (spec 10, section 3.2).
 	NoteSize = ghosttree.NoteBytes
+
+	// RevealNoteSize is the length of the remainder's note in the version 1
+	// coin reveal payload, which keeps its 156-byte slot: the proof binds
+	// that slot as it is. The history stores such a remainder note
+	// zero-padded on the right to NoteSize.
+	RevealNoteSize = 156
+
+	// DataNoteSlot is the length of the note slot of the data reveal payload
+	// (spec 10, section 10.5): the content fingerprint cf (32 bytes), then
+	// DataNoteSlot - 32 bytes that must be zero.
+	DataNoteSlot = 156
 
 	// SaltSize is the length of the per-coin salt a salted commit carries in
 	// the clear.
@@ -71,8 +83,10 @@ const (
 	Version uint16 = 0x0001
 
 	// SaltedCommitVersion is the version of salted commit data, which carries
-	// the salt between F and the note.
-	SaltedCommitVersion uint16 = 0x0002
+	// the salt between F and the 380-byte note. It is the only commit data
+	// the node accepts; the commitment of such data keeps the version 2
+	// types CoinV2 and DataV2.
+	SaltedCommitVersion uint16 = 0x0003
 
 	// GasPriv is G_PRIV, the gas of every reveal.
 	GasPriv = types.GhostRevealGas
