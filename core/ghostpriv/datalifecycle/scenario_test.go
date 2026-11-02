@@ -91,7 +91,7 @@ func (s *scenario) dataCommitTx(n *node, data []byte, value *big.Int) *types.Tra
 	return accountCallTx(s.t, n.chain, s.funder, n.headState().GetNonce(s.payer), ghost.DataCommitEntryAddress, value, data, dataCommitGas)
 }
 
-// commitData is the 190 bytes of the data commit of a wallet's file.
+// commitData is the 430 bytes of the data commit of a wallet's file.
 func commitData(t *testing.T, w *wallet, plaintext []byte) []byte {
 	t.Helper()
 	note := w.note(plaintext)

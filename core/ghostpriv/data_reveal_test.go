@@ -401,7 +401,7 @@ func TestDataRevealCarriesFingerprint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if dec.Cf != cf || dec.Note != ([ghostpriv.NoteSize - 32]byte{}) {
+	if dec.Cf != cf || dec.Note != ([ghostpriv.DataNoteSlot - 32]byte{}) {
 		t.Fatalf("decoded cf %x, note %x", dec.Cf, dec.Note)
 	}
 	if again, err := dec.MarshalBinary(); err != nil || !bytes.Equal(again, enc) {

@@ -44,7 +44,7 @@ func fixedReveal() *ghostpriv.Reveal {
 		Out:       uint256.NewInt(5000),
 		Fee:       uint256.NewInt(21),
 	}
-	r.Note[0], r.Note[ghostpriv.NoteSize-1] = 0x55, 0x66
+	r.Note[0], r.Note[ghostpriv.RevealNoteSize-1] = 0x55, 0x66
 	return r
 }
 

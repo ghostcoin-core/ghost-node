@@ -37,7 +37,8 @@ var ErrNoVerifier = errors.New("no reveal proof verifier in this node")
 // PurposeReveal or PurposeRevoke. For a data reveal Recipient is the
 // verifier-or-recipient field, which credits nothing, Cf is the content
 // fingerprint the reveal carries, and Remainder, Out, Rule and Note are zero.
-// For a coin reveal Cf is zero.
+// For a coin reveal Cf is zero, and Note is the version 1 reveal's
+// RevealNoteSize remainder note, which the proof binds as it is.
 type VerifyInputs struct {
 	Kind      ghosttree.Kind
 	Purpose   byte
@@ -51,7 +52,7 @@ type VerifyInputs struct {
 	Out       *uint256.Int
 	Fee       *uint256.Int
 	Rule      common.Hash // 32 zero bytes, the empty rule
-	Note      [NoteSize]byte
+	Note      [RevealNoteSize]byte
 	Cf        common.Hash // the content fingerprint, data reveals only
 }
 

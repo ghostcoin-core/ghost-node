@@ -160,7 +160,9 @@ when the header has them, and leaves them out otherwise.
 Tree data is served in pages of `PageLeaves = 4096` consecutive positions
 (spec 05, section 8): page `p` of a tree holds positions `4096 p` to
 `4096 p + 4095`. The page size is a constant of the protocol. Each leaf is
-stored with its note of `NoteBytes = 156` bytes. The code is in
+stored with its note of `NoteBytes = 380` bytes, the same for every
+commitment: a 12-byte nonce, 352 bytes of plaintext and a 16-byte tag (spec
+10, section 3.2). The code is in
 `core/ghosttree/pages.go`:
 
 - `PageRoot(kind, leaves)` is the level-11 node over a page, with the empty
@@ -210,11 +212,13 @@ index holds as many markers as a tree index holds leaves before the next
 index starts. A marker list has no page roots and no header root. The head
 is the block whose ancestry the store holds; no block has the zero hash.
 
-A leaf record is 196 bytes: block number (8), leaf (32) and note (156). The
-record of a salted commit or salted data commit is 16 bytes longer, with the
-16-byte salt after the note; the 196-byte length still decodes, as a leaf
-without a salt. A version 1 commit, a reveal remainder (whose salt is in its
-note) and a marker have no salt.
+A leaf record is 420 bytes: block number (8), leaf (32) and note (380). The
+record of a salted commit or salted data commit is 16 bytes longer, 436
+bytes, with the 16-byte salt after the note; the 420-byte length still
+decodes, as a leaf without a salt. A record of any other length, the 196 bytes
+of the earlier 156-byte note included, is corrupt history: there is no chain
+with such records to migrate. A version 1 commit, a reveal remainder (whose
+salt is in its note) and a marker have no salt.
 
 `ApplyBlock(hash, number, records)` adds the records of a block that became
 canonical, in the order the block appended them; `RevertBlock(hash)` removes
@@ -253,9 +257,9 @@ and data rules write from the tree accounts:
 
 | Receipt log | Records |
 |---|---|
-| commit | coin leaf at the logged tree index and position, with its note, and with its salt when the log is the 244-byte log of a salted commit |
-| reveal | coin leaf of the remainder with its note, and the marker in the coin marker list |
-| data commit | data leaf at the logged tree index and position, with its note, and with its salt when the log is the 212-byte log of a salted data commit |
+| commit | coin leaf at the logged tree index and position, with its 380-byte note, and with its salt when the log is the 468-byte log of a salted commit |
+| reveal | coin leaf of the remainder with its note, and the marker in the coin marker list; the version 1 reveal carries a 156-byte note (`ghostpriv.RevealNoteSize`), stored zero-padded on the right to 380 bytes |
+| data commit | data leaf at the logged tree index and position, with its 380-byte note, and with its salt when the log is the 436-byte log of a salted data commit |
 | data reveal (and revoke) | the marker in the data marker list |
 
 A log of a tree account that is none of these, a block without its body, or a
@@ -353,7 +357,7 @@ for both kinds:
 | `treeIndex` | hex quantity | as asked |
 | `page` | hex quantity | as asked |
 | `filled` | hex quantity | number of entries, 0 to 4096 |
-| `entries` | array of `{leaf, note, salt}` | the filled positions from the first of the page, in order: `leaf` a 32-byte hex hash, `note` the 156-byte note as hex, `salt` the 16-byte salt of a salted commit as hex, left out when the leaf has none (a version 1 commit, or a reveal remainder, whose salt is in its note) |
+| `entries` | array of `{leaf, note, salt}` | the filled positions from the first of the page, in order: `leaf` a 32-byte hex hash, `note` the 380-byte note as hex, `salt` the 16-byte salt of a salted commit as hex, left out when the leaf has none (a version 1 commit, or a reveal remainder, whose salt is in its note) |
 
 ```json
 {"kind": "coin", "treeIndex": "0x0", "page": "0x0", "filled": "0x2",

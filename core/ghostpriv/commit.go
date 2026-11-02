@@ -30,21 +30,22 @@ import (
 
 const (
 	// CommitDataSize is the length of the old version 1 commit data: the
-	// version (2 bytes), F (32) and the note (156). The node refuses it from
+	// version (2 bytes), F (32) and the note. The node refuses it from
 	// genesis: two version 1 commits to one key share a marker, so the
 	// second coin could never be revealed.
 	CommitDataSize = 2 + 32 + NoteSize
 
-	// SaltedCommitDataSize is the length of salted commit data, version 2:
-	// the version (2 bytes), F (32), the salt (16) and the note (156).
+	// SaltedCommitDataSize is the length of salted commit data, version 3:
+	// the version (2 bytes), F (32), the salt (16) and the note (380), 430
+	// bytes.
 	SaltedCommitDataSize = 2 + 32 + SaltSize + NoteSize
 )
 
 var (
 	// ErrCommitData is returned for commit data that is not exactly
-	// SaltedCommitDataSize bytes of SaltedCommitVersion, the version 1
-	// layout included.
-	ErrCommitData = errors.New("commit data is not 206 bytes of version 2")
+	// SaltedCommitDataSize bytes of SaltedCommitVersion: the version 1 and
+	// version 2 layouts, and any other length, included.
+	ErrCommitData = errors.New("commit data is not 430 bytes of version 3")
 
 	// ErrCommitZeroF is returned for an all-zero F.
 	ErrCommitZeroF = errors.New("commit F is zero")
@@ -82,7 +83,8 @@ func (c *Commit) Commitment() common.Hash {
 }
 
 // commitVersion is the commitment format version of parsed commit data, told
-// by its salt: data with a salt is version 2, data without one version 1.
+// by its salt: data with a salt is SaltedCommitVersion, data without one
+// version 1.
 func commitVersion(salt *[SaltSize]byte) uint16 {
 	if salt != nil {
 		return SaltedCommitVersion
@@ -108,8 +110,9 @@ func SaltedCommitData(f common.Hash, salt []byte, note []byte) ([]byte, error) {
 }
 
 // parseCommitData splits commit data into F, the salt and the note: exactly
-// SaltedCommitDataSize bytes of SaltedCommitVersion. Anything else, the 190
-// bytes of version 1 included, is ErrCommitData.
+// SaltedCommitDataSize bytes of SaltedCommitVersion. Anything else, the
+// version 1 layout and the 206 bytes of version 2 with a 156-byte note
+// included, is ErrCommitData.
 func parseCommitData(data []byte) (f common.Hash, salt *[SaltSize]byte, note [NoteSize]byte, err error) {
 	var version uint16
 	if len(data) >= 2 {
@@ -127,8 +130,8 @@ func parseCommitData(data []byte) (f common.Hash, salt *[SaltSize]byte, note [No
 }
 
 // ParseCommit checks the data and value of a top-level call to the commit
-// entry address, in the order of the coin rules: exactly 206 bytes of
-// version 2 (ErrCommitData), F not zero
+// entry address, in the order of the coin rules: exactly 430 bytes of
+// version 3 (ErrCommitData), F not zero
 // (ErrCommitZeroF), then 1 <= value <= V_MAX (ErrCommitAmount). The
 // commitment is computed from F and the value; nothing in the data can set
 // it, and the salt only rides along to the receipt and the history.
@@ -230,7 +233,7 @@ func (c *DataCommit) Commitment() common.Hash {
 }
 
 // ParseDataCommit checks the data and value of a top-level call to the data
-// commit entry address, in this order: exactly 206 bytes of version 2, the
+// commit entry address, in this order: exactly 430 bytes of version 3, the
 // layout of a coin commit (ErrCommitData), F not zero (ErrCommitZeroF), then
 // a value of exactly DataReserve (ErrDataCommitValue). The commitment is
 // computed from F and the reserve; nothing in the data can set it.
@@ -308,7 +311,8 @@ var (
 
 // HistoryRecords returns the tree history records of a block from its
 // receipts, in the order the block wrote them: the leaf, tree index,
-// position and note of every commit, reveal remainder and data commit (with
+// position and note of every commit, reveal remainder (whose 156-byte note
+// is zero-padded on the right to NoteSize) and data commit (with
 // the salt of a salted commit or data commit, whose log carries it after the
 // note), and
 // the marker of every reveal and data reveal as a record of
@@ -357,8 +361,10 @@ func HistoryRecords(receipts types.Receipts) ([]ghosttree.Record, error) {
 				out = append(out, leaf(ghosttree.Coin, d, d[72:]))
 			case l.Address == coinAccount && topic == topicCommit && len(l.Topics) == 1 && len(d) == commitLog+SaltSize:
 				out = append(out, salted(ghosttree.Coin, d, d[72:72+NoteSize]))
-			case l.Address == coinAccount && topic == topicReveal && len(l.Topics) == 2 && len(d) == 8+32+NoteSize+20+32:
-				out = append(out, leaf(ghosttree.Coin, d, d[40:40+NoteSize]))
+			case l.Address == coinAccount && topic == topicReveal && len(l.Topics) == 2 && len(d) == 8+32+RevealNoteSize+20+32:
+				// The version 1 reveal carries a RevealNoteSize note; the
+				// record holds it zero-padded on the right to NoteSize.
+				out = append(out, leaf(ghosttree.Coin, d, d[40:40+RevealNoteSize]))
 				out = append(out, ghosttree.Record{Kind: ghosttree.CoinMarkers, Leaf: l.Topics[1]})
 			case l.Address == dataAccount && topic == topicDataCommit && len(l.Topics) == 1 && len(d) == dataCommitLog:
 				out = append(out, leaf(ghosttree.Data, d, d[40:]))

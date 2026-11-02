@@ -51,25 +51,28 @@ those of [trees and headers](trees-and-headers.md).
 
 A data commit is any transaction type the node already accepts, sent top level
 to the data commit entry address with value exactly `DATA_RESERVE` and the data of a coin
-commit: the 206 bytes of salted commit data, version 2
-(`ghostpriv.SaltedCommitData`):
+commit: the 430 bytes of salted commit data, version 3
+(`ghostpriv.SaltedCommitData`, spec 10 section 3.2):
 
 | Offset | Length | Field |
 |---|---|---|
-| 0 | 2 | version, `0x0002` |
+| 0 | 2 | version, `0x0003` |
 | 2 | 32 | `F_d` |
 | 34 | 16 | salt |
-| 50 | 156 | note |
+| 50 | 380 | note: 12-byte nonce, 352 bytes of plaintext, 16-byte tag |
 
-The node refuses the old 190 bytes of version 1 data without a salt from
-genesis: a new chain has no version 1 leaves, and two version 1 commits to one
-key would share a marker.
+Every note on chain, of a data commit as of a coin commit, is 380 bytes
+(`ghostpriv.NoteSize = ghosttree.NoteBytes`). The node refuses the earlier
+version 2 data (206 bytes, a 156-byte note) and the old version 1 data
+without a salt from genesis: a new chain has no leaves of either, and two
+version 1 commits to one key would share a marker.
 
 The salt is carried in the clear so that a wallet can read it back with the
 leaf and note. The node computes the commitment itself,
 `D = K("ghost/data-commitment/v1", DATA, DATA_RESERVE, F_d)`
-(`ghostpriv.DataCommitmentVersion`), with `DATA` `0x02 0x02` for the 206
-bytes of version 2 and `DATA_RESERVE` as a 32-byte word
+(`ghostpriv.DataCommitmentVersion`), with `DATA` `0x02 0x02` for the 430
+bytes of version 3 (the version 2 commitment layout, spec 10 section 3.2:
+only the note is longer) and `DATA_RESERVE` as a 32-byte word
 (`00..0003782dace9d90000`), so the leaf binds the reserve the commit burned.
 The salt is already in `F_d` and the node never uses it. The commitment never
 equals a coin commitment.
@@ -78,9 +81,9 @@ The checks run in this order and stop at the first failure; each failure makes
 the transaction invalid, so a block carrying it is invalid:
 
 1. ordinary validity: nonce, sender without code, fee caps, intrinsic gas;
-2. data of exactly 206 bytes with version 2 (`ErrCommitData`); anything
-   else, the 190 bytes of version 1, an extra field or another version
-   included, is rejected;
+2. data of exactly 430 bytes with version 3 (`ErrCommitData`); anything
+   else, version 1, the 206 bytes of version 2, an extra field, a missing
+   byte or another version included, is rejected;
 3. `F_d` not all zero (`ErrCommitZeroF`);
 4. value exactly `DATA_RESERVE` (`ErrDataCommitValue`); 0, one wei more or
    less, or any other value is rejected;
@@ -124,7 +127,10 @@ other. The payload has the coin reveal's offsets:
 The verifier-or-recipient field names who the reveal is for; it credits
 nothing and no code runs for it. A data reveal has no remainder, so the
 remainder's note slot carries the content fingerprint `cf` in its first 32
-bytes; the width and gas of the payload are the coin reveal's. Any 32 bytes
+bytes; the width and gas of the payload are the coin reveal's. The slot keeps
+its 156 bytes (`ghostpriv.DataNoteSlot`, spec 10 section 10.5) although a
+commitment's note is 380 bytes, so `DataReveal.Note` is the 124 bytes after
+`cf`. Any 32 bytes
 are a valid `cf`: the node checks it against nothing, and the proof binds it.
 A data reveal with out, or with a non-zero byte in the other 124 bytes of the
 slot, is rejected.
@@ -251,8 +257,8 @@ Both logs have the data tree account as address.
 
 | Log | Topics | Data |
 |---|---|---|
-| data commit, version 1 | `K("ghost/data-commit-receipt/v1")` | tree index (4), position (4), leaf (32), note (156): 196 bytes |
-| data commit, salted | `K("ghost/data-commit-receipt/v1")` | tree index (4), position (4), leaf (32), note (156), salt (16): 212 bytes |
+| data commit, version 1 | `K("ghost/data-commit-receipt/v1")` | tree index (4), position (4), leaf (32), note (380): 420 bytes |
+| data commit, salted | `K("ghost/data-commit-receipt/v1")` | tree index (4), position (4), leaf (32), note (380), salt (16): 436 bytes |
 | data reveal | `K("ghost/data-reveal-receipt/v1")`, marker | purpose (1), verifier-or-recipient field (20) |
 
 The log of a salted data commit is the version 1 log with the salt appended
@@ -266,8 +272,7 @@ rejected.
 
 - `ghostpriv.DataCommitment(F_d)`, `ghostpriv.ParseDataCommit` and
   `ghostpriv.ApplyDataCommit`; a data commit's data is
-  `ghostpriv.SaltedCommitData(F_d, salt, note)`, or for version 1
-  `ghostpriv.CommitData(F_d, note)`;
+  `ghostpriv.SaltedCommitData(F_d, salt, note)` with a 380-byte note;
 - `ghostpriv.DataReveal` with `MarshalBinary` (the envelope), `BindingDigest`
   and `BindingInput`; `ghostpriv.DecodeDataReveal` (checks 1 to 3);
   `ghostpriv.PurposeField`, `ghostpriv.PurposeReveal` and
