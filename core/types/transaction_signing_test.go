@@ -121,7 +121,7 @@ func TestCheckTxType(t *testing.T) {
 	for typ := 0; typ < 256; typ++ {
 		err := checkTxTypeByte(byte(typ))
 		switch typ {
-		case GhostRevealTxType, GhostDataRevealTxType, GhostAccountTxType:
+		case GhostRevealTxType, GhostDataRevealTxType, GhostAccountTxType, GhostPolicyRevealTxType:
 			if err != nil {
 				t.Errorf("type %#x refused: %v", typ, err)
 			}
