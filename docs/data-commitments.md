@@ -105,10 +105,13 @@ and uses up the gas it was given, as for the commit entry address.
 
 ## Data reveal
 
-A data reveal is the typed transaction `0x51 || payload`, 1,311,067 bytes, the
-size of the coin reveal, with hash `keccak256(0x51 || payload)`. It is a type
-of its own so that a coin reveal and a data reveal can never be taken for each
-other. The payload has the coin reveal's offsets:
+A data reveal is the typed transaction `0x51 || payload`, 1,311,067 bytes,
+with hash `keccak256(0x51 || payload)`. Its payload of 1,311,066 bytes keeps
+the size and proof format it always had; the version 2 coin reveal, whose
+remainder note grew to 380 bytes, is 224 bytes longer (spec 10, section
+10.5). It is a type of its own so that a coin reveal and a data reveal can
+never be taken for each other. The payload has the offsets of the coin
+reveal up to the note, then its own note slot:
 
 | Offset | Length | Field |
 |---|---|---|
@@ -127,18 +130,19 @@ other. The payload has the coin reveal's offsets:
 The verifier-or-recipient field names who the reveal is for; it credits
 nothing and no code runs for it. A data reveal has no remainder, so the
 remainder's note slot carries the content fingerprint `cf` in its first 32
-bytes; the width and gas of the payload are the coin reveal's. The slot keeps
-its 156 bytes (`ghostpriv.DataNoteSlot`, spec 10 section 10.5) although a
-commitment's note is 380 bytes, so `DataReveal.Note` is the 124 bytes after
-`cf`. Any 32 bytes
+bytes. The slot keeps its 156 bytes (`ghostpriv.DataNoteSlot`, spec 10
+section 10.5) although a commitment's note, and a coin reveal's, is 380
+bytes, so `DataReveal.Note` is the 124 bytes after `cf`. Any 32 bytes
 are a valid `cf`: the node checks it against nothing, and the proof binds it.
 A data reveal with out, or with a non-zero byte in the other 124 bytes of the
 slot, is rejected.
 
 Like the coin reveal a data reveal has no sender, nonce or signature
-(`types.Sender` returns `types.ErrNoSender`), takes exactly
-`G_PRIV = 21,090,372` gas from the block gas pool, and has a typed receipt of
-type `0x51` with status 1, the cumulative gas and one log.
+(`types.Sender` returns `types.ErrNoSender`). It takes exactly its own class's
+gas, `G_DATA = 21,090,372` (16 x 1,311,067 + 21,000 + 92,300,
+`types.GhostDataRevealGas`, `ghostpriv.GasData`), from the block gas pool, a
+constant of its own and no longer the coin reveal's `G_PRIV`, and has a typed
+receipt of type `0x51` with status 1, the cumulative gas and one log.
 
 ### Purposes
 
@@ -169,7 +173,8 @@ the block invalid:
 
 1. type `0x51` and the exact envelope length (`ErrDataRevealLength`); a coin
    reveal envelope, type `0x50`, fails here, and a data reveal sent as type
-   `0x50` fails the coin checks;
+   `0x50`, being shorter than a coin reveal, fails the coin reveal's length
+   check;
 2. version 1 (`ErrDataRevealVersion`);
 3. out and fee have their 20 leading bytes zero (`ErrDataRevealAmount`);
 4. the chain id is this chain's (`ErrDataRevealChainID`);
@@ -225,10 +230,14 @@ reveal never verifies a data reveal.
 ### Fee
 
 A data reveal or revoke pays its fee from the reserve its data commit burned
-(spec 04, sections 3 and 6). The fee check is the coin reveal's (spec 07,
-section 5): the fee field must equal the window fee of the including block's
-window or of the window before it, and must cover `G_PRIV` times the including
-block's base fee (the cover rule); any other fee, zero included, is
+(spec 04, sections 3 and 6). The fee check is the coin reveal's rule (spec
+07, section 5) for the data class's own gas: the fee field must equal the
+window fee for `G_DATA` of the including block's window or of the window
+before it (`ghostpriv.WindowFeeGas(b_ref, ghostpriv.GasData)`), and must cover
+`G_DATA` times the including block's base fee (the cover rule,
+`Fee.CoverGas(beta, ghostpriv.GasData)`); the window fee of the ordinary
+class, for `G_PRIV`, is another value and is refused; any other fee, zero
+included, is
 `ErrDataRevealFee`. A window fee above `DATA_RESERVE` cannot be paid and is
 `ErrDataRevealFeeAboveReserve`, wrapped by `ErrDataRevealFee`. Both run
 before the proof is verified. No public account pays a data reveal's fee and
@@ -236,8 +245,9 @@ the unused rest of the reserve is not refunded.
 
 In the spec's worked example, files A and B are committed (`total_in`
 500,000,000,000,000,000 wei), A is revealed in the first window, whose
-reference base fee is 1,000,000,000 wei: fee 26,100,495,343,659,410, burned
-23,727,723,039,690,372, tip 2,372,772,303,969,038, and `total_out` becomes
+reference base fee is 1,000,000,000 wei: fee 26,100,495,343,659,410 (the fee
+for `G_DATA`), burned 23,727,723,039,690,372, tip 2,372,772,303,969,038, and
+`total_out` becomes
 250,000,000,000,000,000; B is revoked in the next window and `total_out`
 becomes 500,000,000,000,000,000.
 
@@ -282,7 +292,10 @@ rejected.
 - `ghostpriv.DataReserve`, the reserve every data commit burns;
 - `types.NewGhostDataRevealTx(envelope)`, which wraps an envelope into a
   transaction of type `0x51`, `Transaction.GhostDataRevealEnvelope` and
-  `Transaction.IsGhostReveal`, true for both reveal types.
+  `Transaction.IsGhostReveal`, true for the native transactions without an
+  account: the coin reveal `0x50`, the data reveal `0x51` and the policy
+  reveal `0x53`;
+- `types.GhostDataRevealGas` and `ghostpriv.GasData`, `G_DATA`.
 
 ## What is not here
 

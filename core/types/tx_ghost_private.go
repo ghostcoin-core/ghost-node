@@ -27,24 +27,26 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
-// The native reveal transaction (docs/private-transactions.md). Its envelope
-// is the type byte followed by a payload of fixed layout that is not RLP; it
-// has no sender, no nonce and no signature, and its consensus checks are in
-// core/ghostpriv.
+// The native reveal transaction (docs/private-transactions.md), the ordinary
+// class. Its envelope is the type byte followed by a payload of fixed layout
+// that is not RLP; it has no sender, no nonce and no signature, and its
+// consensus checks are in core/ghostpriv.
 const (
 	// GhostRevealTxType is the type byte of a reveal.
 	GhostRevealTxType = 0x50
 
-	// GhostRevealPayloadSize is the length of a reveal's payload.
-	GhostRevealPayloadSize = 1_311_066
+	// GhostRevealPayloadSize is the length of a reveal's payload, version 2
+	// with its 380-byte remainder note (spec 10, section 4.1).
+	GhostRevealPayloadSize = 1_311_290
 
 	// GhostRevealEnvelopeSize is the length of a reveal's envelope, the type
 	// byte and the payload.
 	GhostRevealEnvelopeSize = 1 + GhostRevealPayloadSize
 
-	// GhostRevealGas is G_PRIV, the gas every reveal takes from the block gas
-	// pool.
-	GhostRevealGas = 21_090_372
+	// GhostRevealGas is G_PRIV, the gas every ordinary reveal takes from the
+	// block gas pool: 16 per envelope byte, 21,000 and the verification
+	// charge of 110,000 (spec 10, section 10).
+	GhostRevealGas = 21_111_656
 )
 
 var (
@@ -146,32 +148,38 @@ func (tx *GhostRevealTx) hash() common.Hash {
 }
 
 // The native data reveal transaction (docs/data-commitments.md). It is a
-// type of its own, 0x51, with the payload size and field offsets of the coin
-// reveal, so that a coin reveal and a data reveal can never be taken for each
-// other. Like the coin reveal it has no sender, nonce or signature, and its
-// consensus checks are in core/ghostpriv.
+// type of its own, 0x51, with the field offsets of the version 1 coin reveal
+// and its 156-byte note slot, so that a coin reveal and a data reveal can
+// never be taken for each other. Like the coin reveal it has no sender, nonce
+// or signature, and its consensus checks are in core/ghostpriv.
 const (
 	// GhostDataRevealTxType is the type byte of a data reveal.
 	GhostDataRevealTxType = 0x51
 
-	// GhostDataRevealPayloadSize is the length of a data reveal's payload,
-	// that of the coin reveal.
-	GhostDataRevealPayloadSize = GhostRevealPayloadSize
+	// GhostDataRevealPayloadSize is the length of a data reveal's payload. It
+	// keeps its size when the coin reveal's note grows (spec 10, section
+	// 10.5).
+	GhostDataRevealPayloadSize = 1_311_066
 
 	// GhostDataRevealEnvelopeSize is the length of a data reveal's envelope,
 	// the type byte and the payload.
 	GhostDataRevealEnvelopeSize = 1 + GhostDataRevealPayloadSize
 
-	// GhostDataRevealGas is the gas every data reveal takes from the block
-	// gas pool, G_PRIV as for the coin reveal.
-	GhostDataRevealGas = GhostRevealGas
+	// GhostDataRevealGas is G_DATA, the gas every data reveal takes from the
+	// block gas pool: 16 per envelope byte, 21,000 and the data verification
+	// charge of 92,300 (spec 10, section 10).
+	GhostDataRevealGas = 21_090_372
 )
 
 // IsGhostReveal reports whether tx is a native transaction without an
-// account: a coin reveal (0x50) or a data reveal (0x51).
+// account: a coin reveal (0x50), a data reveal (0x51) or a policy reveal
+// (0x53).
 func (tx *Transaction) IsGhostReveal() bool {
-	t := tx.Type()
-	return t == GhostRevealTxType || t == GhostDataRevealTxType
+	switch tx.Type() {
+	case GhostRevealTxType, GhostDataRevealTxType, GhostPolicyRevealTxType:
+		return true
+	}
+	return false
 }
 
 // GhostDataRevealTx is the payload of a data reveal, kept as its exact bytes.

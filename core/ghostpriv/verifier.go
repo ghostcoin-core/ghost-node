@@ -32,13 +32,16 @@ var ErrNoVerifier = errors.New("no reveal proof verifier in this node")
 // VerifyInputs are the public inputs of a reveal's proof, as the node
 // computes them: never taken from the proof.
 //
-// Kind and Purpose name the statement: a coin reveal is Kind ghosttree.Coin
-// with PurposeReveal; a data reveal is Kind ghosttree.Data with
+// Kind and Purpose name the statement: an ordinary coin reveal is Kind
+// ghosttree.Coin with PurposeReveal; a policy reveal is Kind ghosttree.Coin
+// with PurposePolicySpend; a data reveal is Kind ghosttree.Data with
 // PurposeReveal or PurposeRevoke. For a data reveal Recipient is the
 // verifier-or-recipient field, which credits nothing, Cf is the content
 // fingerprint the reveal carries, and Remainder, Out, Rule and Note are zero.
-// For a coin reveal Cf is zero, and Note is the version 1 reveal's
-// RevealNoteSize remainder note, which the proof binds as it is.
+// For a coin reveal Cf is zero, and Note is the version 2 reveal's 380-byte
+// remainder note, which the proof binds as it is. The policy fields, from
+// Policy to Instr, are set for a policy reveal only; a policy reveal's
+// Recipient is zero.
 type VerifyInputs struct {
 	Kind      ghosttree.Kind
 	Purpose   byte
@@ -52,8 +55,15 @@ type VerifyInputs struct {
 	Out       *uint256.Int
 	Fee       *uint256.Int
 	Rule      common.Hash // 32 zero bytes, the empty rule
-	Note      [RevealNoteSize]byte
+	Note      [NoteSize]byte
 	Cf        common.Hash // the content fingerprint, data reveals only
+
+	Policy         common.Address // the policy address
+	PolicyCodeHash common.Hash    // the policy's code hash
+	ParamsHash     common.Hash
+	ActionTag      common.Hash
+	ActionSalt     common.Hash
+	Instr          common.Hash
 }
 
 // HoldInputs are the public inputs of a proof of holding of a data

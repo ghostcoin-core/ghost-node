@@ -151,6 +151,13 @@ func commitTx(t *testing.T, key *mldsa44.PrivateKey, signer types.Signer, nonce 
 // window.
 func (f *fixture) windowFee(number int) *uint256.Int {
 	f.t.Helper()
+	return f.windowFeeGas(number, ghostpriv.GasPriv)
+}
+
+// windowFeeGas is windowFee for the class whose gas is gas: G_DATA for a
+// data reveal.
+func (f *fixture) windowFeeGas(number int, gas uint64) *uint256.Int {
+	f.t.Helper()
 	start := ghostpriv.WindowStart(uint64(number))
 	var bRef *big.Int
 	switch {
@@ -159,7 +166,7 @@ func (f *fixture) windowFee(number int) *uint256.Int {
 	default:
 		bRef = f.headerAt(int(start)).BaseFee
 	}
-	fee, err := ghostpriv.WindowFee(bRef)
+	fee, err := ghostpriv.WindowFeeGas(bRef, gas)
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -191,7 +198,7 @@ func (f *fixture) revealWithRoot(marker common.Hash, recipient common.Address, f
 	genesis := f.genesis
 	chainID := f.gspec.Config.GetChainID().Uint64()
 	r := &ghostpriv.Reveal{
-		Version:   ghostpriv.Version,
+		Version:   ghostpriv.RevealVersion,
 		ChainID:   chainID,
 		Marker:    marker,
 		Root:      root,
@@ -217,7 +224,7 @@ func (f *fixture) revealWithRoot(marker common.Hash, recipient common.Address, f
 func (f *fixture) unproven(marker common.Hash, fee *uint256.Int, root common.Hash) *types.Transaction {
 	f.t.Helper()
 	r := &ghostpriv.Reveal{
-		Version: ghostpriv.Version,
+		Version: ghostpriv.RevealVersion,
 		ChainID: f.gspec.Config.GetChainID().Uint64(),
 		Marker:  marker,
 		Root:    root,
@@ -627,10 +634,10 @@ func TestGhostPoolAcceptsPreviousWindowFee(t *testing.T) {
 }
 
 // TestGhostPoolDataRevealWindowFee checks the pool's cheap fee rule for data
-// reveals, which pay the window fee of a coin reveal from their reserve: in
-// window 4 a data reveal at the window's fee or at the previous window's is
-// admitted, and one at a zero fee or any other fee is refused with
-// ErrDataRevealFee.
+// reveals, which pay the window fee for their own gas G_DATA from their
+// reserve: in window 4 a data reveal at the window's fee or at the previous
+// window's is admitted, and one at a zero fee, at the coin reveal's fee for
+// G_PRIV or any other fee is refused with ErrDataRevealFee.
 func TestGhostPoolDataRevealWindowFee(t *testing.T) {
 	f := newFixture(t, 6, nil)
 	p := f.newPool()
@@ -639,9 +646,13 @@ func TestGhostPoolDataRevealWindowFee(t *testing.T) {
 		f.insert(n)
 		f.reset(p, old)
 	}
-	fee0, fee4 := f.windowFee(3), f.windowFee(7)
+	fee0, fee4 := f.windowFeeGas(3, ghostpriv.GasData), f.windowFeeGas(7, ghostpriv.GasData)
 	if fee0.Eq(fee4) {
 		t.Fatalf("window fees are not distinct: %v", fee0)
+	}
+	coinFee4 := f.windowFee(7)
+	if coinFee4.Eq(fee4) {
+		t.Fatalf("the coin and data reveal fees are both %v", fee4)
 	}
 	chainID := f.gspec.Config.GetChainID().Uint64()
 	fields := func(i int, fee *uint256.Int) revealFields {
@@ -660,6 +671,7 @@ func TestGhostPoolDataRevealWindowFee(t *testing.T) {
 		"the window's fee + 1": new(uint256.Int).AddUint64(fee4, 1),
 		"the previous fee - 1": new(uint256.Int).SubUint64(fee0, 1),
 		"the data reserve":     ghostpriv.DataReserve,
+		"the coin reveal fee":  coinFee4,
 	} {
 		err := p.cheapRules(fields(2, fee))
 		if !errors.Is(err, ghostpriv.ErrDataRevealFee) || errors.Is(err, ghostpriv.ErrRevealFee) {
@@ -966,9 +978,9 @@ func TestGhostPoolFloodOfSlowChecksLeavesLocalSlot(t *testing.T) {
 		return tx
 	}
 	chainID := f.gspec.Config.GetChainID().Uint64()
-	badVersion := encode(&ghostpriv.Reveal{Version: ghostpriv.Version + 1, ChainID: chainID, Marker: testMarker(201), Fee: fee})
+	badVersion := encode(&ghostpriv.Reveal{Version: ghostpriv.RevealVersion + 1, ChainID: chainID, Marker: testMarker(201), Fee: fee})
 	requireErr(t, p.AddFromPeer("peer-x", []*types.Transaction{badVersion})[0], ghostpriv.ErrRevealVersion, "reveal of another version")
-	badChain := encode(&ghostpriv.Reveal{Version: ghostpriv.Version, ChainID: chainID + 1, Marker: testMarker(202), Fee: fee})
+	badChain := encode(&ghostpriv.Reveal{Version: ghostpriv.RevealVersion, ChainID: chainID + 1, Marker: testMarker(202), Fee: fee})
 	requireErr(t, p.AddFromPeer("peer-x", []*types.Transaction{badChain})[0], ghostpriv.ErrRevealChainID, "reveal of another chain")
 	p.mu.RLock()
 	tokens := p.peers["peer-x"].tokens
@@ -1272,7 +1284,7 @@ func TestGhostPoolRefusesBadRootBeforeProof(t *testing.T) {
 
 	// The backstop runs before the proof too.
 	overdraw := encodeReveal(t, &ghostpriv.Reveal{
-		Version: ghostpriv.Version,
+		Version: ghostpriv.RevealVersion,
 		ChainID: f.gspec.Config.GetChainID().Uint64(),
 		Marker:  testMarker(5),
 		Root:    genesisRoot,
@@ -1317,7 +1329,7 @@ func TestGhostPoolRemembersRejectedHashes(t *testing.T) {
 
 	bad := f.unproven(testMarker(1), fee, genesisRoot)
 	requireErr(t, addOne(p, "peer-a", bad), ghostpriv.ErrRevealProof, "reveal without a proof")
-	badVersion := encodeReveal(t, &ghostpriv.Reveal{Version: ghostpriv.Version + 1, ChainID: f.gspec.Config.GetChainID().Uint64(), Marker: testMarker(2), Fee: fee})
+	badVersion := encodeReveal(t, &ghostpriv.Reveal{Version: ghostpriv.RevealVersion + 1, ChainID: f.gspec.Config.GetChainID().Uint64(), Marker: testMarker(2), Fee: fee})
 	requireErr(t, addOne(p, "peer-a", badVersion), ghostpriv.ErrRevealVersion, "reveal of another version")
 	if checks := verifier.checks.Load(); checks != 1 {
 		t.Fatalf("%d proofs verified, want one", checks)

@@ -44,6 +44,13 @@ var (
 	// Like the tree accounts, it holds no code and no balance and gets
 	// nonce 1 when it is first written.
 	PolicyRegistryAccount = common.HexToAddress("0x67686f7374000000000000000000000000000009")
+
+	// EscrowAccount is ESCROW_ACCOUNT, the native account whose storage
+	// holds the escrow slots a policy reveal opens (spec 10, section 7.1),
+	// eight words per slot under keys derived from the marker. It emits the
+	// slot logs. Like the tree accounts, it holds no code and no balance and
+	// gets nonce 1 when it is first written.
+	EscrowAccount = common.HexToAddress("0x67686f7374000000000000000000000000000008")
 )
 
 // The hash tags of the policy address and of the registry keys.

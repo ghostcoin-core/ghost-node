@@ -90,7 +90,7 @@ func revealLog(index, position uint32, remainder coin, recipient common.Address,
 	data := binary.BigEndian.AppendUint32(nil, index)
 	data = binary.BigEndian.AppendUint32(data, position)
 	data = append(data, leaf[:]...)
-	data = append(data, remainder.note[:ghostpriv.RevealNoteSize]...) // the version 1 reveal's note slot
+	data = append(data, remainder.note[:ghostpriv.NoteSize]...) // the version 2 reveal's 380-byte note
 	data = append(data, recipient[:]...)
 	return append(data, word[:]...)
 }
@@ -224,7 +224,7 @@ func TestRevealMintsAndAppendsRemainder(t *testing.T) {
 		if want := revealLog(0, position, rests[k], to, outs[k]); !bytes.Equal(l.Data, want) {
 			t.Errorf("log %d data\n%x\nwant\n%x", k, l.Data, want)
 		}
-		if len(l.Data) != 4+4+32+156+20+32 {
+		if len(l.Data) != 4+4+32+380+20+32 {
 			t.Errorf("log %d data has %d bytes", k, len(l.Data))
 		}
 	}
@@ -269,10 +269,12 @@ func TestRevealCheckOrder(t *testing.T) {
 		prep func(*state.StateDB)
 		want error
 	}{
-		{"1: short, version 2", edit(func(e []byte) []byte { e[2] = 2; return e[:len(e)-1] }), nil, ghostpriv.ErrRevealLength},
+		{"1: short, version 1", edit(func(e []byte) []byte { e[2] = 1; return e[:len(e)-1] }), nil, ghostpriv.ErrRevealLength},
 		{"1: long", edit(func(e []byte) []byte { return append(e, 0) }), nil, ghostpriv.ErrRevealLength},
+		{"1: version 1 length", edit(func(e []byte) []byte { e[2] = 1; return e[:1+1_311_066] }), nil, ghostpriv.ErrRevealLength},
 		{"1: type 0x02", edit(func(e []byte) []byte { e[0] = types.DynamicFeeTxType; return e }), nil, ghostpriv.ErrRevealLength},
-		{"2: version 2, out not below 2^96", edit(func(e []byte) []byte { e[2] = 2; e[1+126] = 1; return e }), nil, ghostpriv.ErrRevealVersion},
+		{"2: version 1, out not below 2^96", edit(func(e []byte) []byte { e[2] = 1; e[1+126] = 1; return e }), nil, ghostpriv.ErrRevealVersion},
+		{"2: version 3", edit(func(e []byte) []byte { e[2] = 3; return e }), nil, ghostpriv.ErrRevealVersion},
 		{"2: version 0", edit(func(e []byte) []byte { e[2] = 0; return e }), nil, ghostpriv.ErrRevealVersion},
 		{"3: out not below 2^96, wrong chain", edit(func(e []byte) []byte { e[1+126+19] = 1; e[1+9] ^= 1; return e }), nil, ghostpriv.ErrRevealAmount},
 		{"3: fee not below 2^96", edit(func(e []byte) []byte { e[1+158] = 1; return e }), nil, ghostpriv.ErrRevealAmount},
@@ -490,8 +492,8 @@ func TestRevealFeeMustEqualWindowFee(t *testing.T) {
 		price, base, tip, totalFee string
 	}
 	for _, tt := range []answer{
-		{1_000_000_000, "1125050001", "23727723039690372", "2372772303969038", "26100495343659410"},
-		{1_100_000_000, "1237555001", "26100495341550372", "2610049534155038", "28710544875705410"},
+		{1_000_000_000, "1125050001", "23751668603911656", "2375166860391166", "26126835464302822"},
+		{1_100_000_000, "1237555001", "26126835462191656", "2612683546219166", "28739519008410822"},
 	} {
 		fee, err := ghostpriv.WindowFee(big.NewInt(tt.bRef))
 		if err != nil {
@@ -986,7 +988,7 @@ func TestRevealRootLookupUsesIndex(t *testing.T) {
 		}
 	}
 	checkData := func(chainReader ghostpriv.ChainReader, root common.Hash) error {
-		r := f.newDataReveal(root, testDataMarker("lookup"), ghostpriv.PurposeReveal, addrC, chainWindowFee(t, chain, env.Header).Total)
+		r := f.newDataReveal(root, testDataMarker("lookup"), ghostpriv.PurposeReveal, addrC, chainDataFee(t, chain, env.Header).Total)
 		e := *env
 		e.Chain = chainReader
 		_, _, err := ghostpriv.CheckDataReveal(st.Copy(), &e, stub, dataEnvelope(t, r))

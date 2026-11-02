@@ -84,12 +84,13 @@ any other way, such as a `SELFDESTRUCT` beneficiary, is not intercepted.
 
 ## Reveal
 
-A reveal is the typed transaction `0x50 || payload`, 1,311,067 bytes, with
-hash `keccak256(0x50 || payload)`. The payload is a fixed layout, not RLP:
+A reveal, the ordinary class, is the typed transaction `0x50 || payload`,
+version 2, 1,311,291 bytes, with hash `keccak256(0x50 || payload)`. The
+payload, 1,311,290 bytes, is a fixed layout, not RLP (spec 10, section 4.1):
 
 | Offset | Length | Field |
 |---|---|---|
-| 0 | 2 | version, `0x0001` |
+| 0 | 2 | version, `0x0002` |
 | 2 | 8 | chain id |
 | 10 | 32 | marker |
 | 42 | 32 | root |
@@ -98,27 +99,34 @@ hash `keccak256(0x50 || payload)`. The payload is a fixed layout, not RLP:
 | 126 | 32 | out (amount word) |
 | 158 | 32 | fee (amount word) |
 | 190 | 1,310,720 | proof, then zeros |
-| 1,310,910 | 156 | note of the remainder |
+| 1,310,910 | 380 | note of the remainder |
 
-The proof field is 1,310,720 bytes (1.25 MiB) for version 1, chosen to hold
-every proof of the pinned prover (about 1.19 MB) without ever growing.
+The proof field is 1,310,720 bytes (1.25 MiB), chosen to hold every proof of
+the pinned prover without ever growing. The note is the 380-byte note of
+every commitment. There is no version 1 path: a version 1 reveal, at its old
+length of 1,311,067 bytes or at the new one, is not accepted.
 
 A reveal has no sender, nonce or signature: `types.Sender` returns
 `types.ErrNoSender` for it under every signer, and no signer signs it. No
 ordinary account can authorise one. Every reveal takes exactly
-`G_PRIV = 21,090,372` gas (16 x 1,311,067 + 21,000 + 92,300) from the block
-gas pool; a block whose pool holds less is invalid. At the internal network's
-genesis gas limit of 30,000,000 a block holds one reveal. Its receipt is a typed receipt of type `0x50` with status 1,
-the cumulative gas and one log.
+`G_PRIV = 21,111,656` gas (16 x 1,311,291 + 21,000 + 110,000,
+`types.GhostRevealGas`, `ghostpriv.GasPriv`) from the block gas pool; a block
+whose pool holds less is invalid. Each native type takes its own class's gas
+(spec 10, section 10): G_PRIV for `0x50`, G_POLICY for `0x53`, G_DATA for
+`0x51`. At the internal network's genesis gas limit of 30,000,000 a block
+holds one reveal of any type. Its receipt is a typed receipt of type `0x50`
+with status 1, the cumulative gas and one log.
 
 The checks run in this order and stop at the first failure; any failure makes
 the block invalid:
 
 1. type `0x50` and the exact envelope length (`ErrRevealLength`);
-2. version 1 (`ErrRevealVersion`);
+2. version 2 (`ErrRevealVersion`);
 3. out and fee have their 20 leading bytes zero (`ErrRevealAmount`);
 4. the chain id is this chain's (`ErrRevealChainID`);
-5. the fee equals the window fee (`ErrRevealFee`);
+5. the fee equals the window fee for G_PRIV (`ErrRevealFee`); then the
+   recipient is not a registered policy (`ErrRevealRecipient`, spec 10,
+   section 4.5): a policy never holds a balance;
 6. the node computes the binding digest itself;
 7. the root is the coin tree root in the header of a block of the including
    block's own ancestry, strictly below it, of any tree index
@@ -128,7 +136,8 @@ the block invalid:
 9. backstop: `out + fee <= total_in - total_out` (`ErrRevealBackstop`);
 10. the verifier accepts the proof for the inputs the node computed
     (`ErrRevealProof`);
-11. the rule is the empty rule: the node supplies 32 zero bytes;
+11. nothing to read: the version 2 statement opens the input rule inside the
+    proof, and the binding carries no rule;
 12. the coin tree takes the remainder (`ErrRevealTree`).
 
 Then one atomic change: the marker is marked spent, `out` is credited to the
@@ -146,26 +155,144 @@ roots is left for later.
 
 ### Binding digest
 
-`K("ghost/coin-reveal-binding/v1", fields)` over 415 bytes: chain id (8),
-version (2), domain (32, the genesis block hash), statement `0x01`, statement
-version `0x01`, type `0x01 0x01` (2), purpose `0x01`, root, marker and
-remainder (32 each), recipient (20), out and fee (32 each), rule (32 zero
-bytes) and the remainder's note (156). The node fills in the chain id,
-version, domain and rule itself; the proof field is not covered. The binding's
-type field is part of the binding layout and does not change with the
-commitment format version. The remainder is the commitment the proof opens: a
-remainder is always version 2 (spec 03), `K("ghost/coin-commitment/v1",
-0x02 0x01, F, v)`, and the node appends it to the coin tree as given.
+`K("ghost/coin-reveal-binding/v2", fields)` over 607 bytes (spec 10, section
+4.2): chain id (8), version `0x0002` (2), domain (32, the genesis block hash),
+statement `0x01`, statement version `0x02`, type COIN version 2 `0x02 0x01`
+(2), purpose `0x01`, root, marker and remainder (32 each), recipient (20), out
+and fee (32 each) and the remainder's note (380). There is no rule field. The
+node fills in the chain id, version, domain, statement, type and purpose
+itself; the proof field is not covered. The remainder is the commitment the
+proof opens: a remainder is always version 2 (spec 03),
+`K("ghost/coin-commitment/v1", 0x02 0x01, F, v)`, and the node appends it to
+the coin tree as given.
 
 ### Fee
 
 For an including block at height `H`, the window is `w = floor(H / 4)` and
 `b_ref` is the base fee of block `4w`, found in the including block's ancestry
 (the including block itself when `H = 4w`). With `U0 = b_ref` and
-`U(j+1) = U(j) + floor(U(j)/8) + floor(U(j)/20000) + 1`, the price is `U3`,
-the base part `G_PRIV * price`, the tip `ceil(base part / 10)` and the fee
-`base part + tip`. For `b_ref = 10^9` the fee is 33036375802978007; for
-`b_ref = 1.1 * 10^9` it is 36340013362396340.
+`U(j+1) = U(j) + floor(U(j)/8) + floor(U(j)/20000) + 1`, the price is `U1`.
+Each class has its own fee in the same window, for its own gas `G_class`: the
+base part `G_class * price`, the tip `ceil(base part / 10)` and the fee
+`base part + tip` (`ghostpriv.WindowFeeGas(b_ref, gas)`; `WindowFee(b_ref)` is
+the G_PRIV form). The cover rule burns `G_class * max(price, beta)` for the
+including block's base fee `beta` and pays the rest as the tip
+(`Fee.CoverGas(beta, gas)`; `Fee.Cover(beta)` is the G_PRIV form). For
+`b_ref = 10^9` the ordinary fee is 26,126,835,464,302,822 wei, the policy fee
+26,328,012,405,281,638 and the data fee 26,100,495,343,659,410; for
+`b_ref = 1.1 * 10^9` the ordinary fee is 28,739,519,008,410,822. At
+`b_ref = 10^9` the cover limit of the ordinary and the policy fee is
+1,237,555,001.
+
+## Policy reveal
+
+A policy reveal (spec 10, section 5) spends a coin of the coin tree into an
+escrow slot held for a frozen policy (see `docs/ghost-evm-profile.md`). It is
+the typed transaction `0x53 || payload`, version 1, 1,311,451 bytes, with hash
+`keccak256(0x53 || payload)` (`types.NewGhostPolicyRevealTx`). Like the other
+reveals it has no sender, nonce or signature. It takes exactly
+`G_POLICY = 21,274,216` gas (16 x 1,311,451 + 21,000 + 110,000 + 160,000 for
+the slot opening, `types.GhostPolicyRevealGas`, `ghostpriv.GasPolicy`). Its
+receipt is a typed receipt of type `0x53`. The payload, 1,311,450 bytes:
+
+| Offset | Length | Field |
+|---|---|---|
+| 0 | 2 | version, `0x0001` |
+| 2 | 8 | chain id |
+| 10 | 32 | marker |
+| 42 | 32 | root |
+| 74 | 32 | remainder commitment, of value zero |
+| 106 | 32 | out (amount word) |
+| 138 | 32 | fee (amount word) |
+| 170 | 20 | policy address |
+| 190 | 32 | policy code hash |
+| 222 | 32 | parameters hash |
+| 254 | 32 | action tag |
+| 286 | 32 | action salt |
+| 318 | 32 | instruction |
+| 350 | 1,310,720 | proof, then zeros |
+| 1,311,070 | 380 | note of the remainder |
+
+The binding is `K("ghost/policy-reveal-binding/v1", fields)` over 767 bytes:
+chain id (8), version `0x0001` (2), domain (32), statement `0x04`, statement
+version `0x01`, type COIN version 2 `0x02 0x01` (2), purpose `0x05` (policy
+spend), root, marker and remainder (32 each), out and fee (32 each), the
+policy address (20), its code hash, the parameters hash, the action tag, the
+action salt and the instruction (32 each) and the remainder note (380).
+
+The checks (`ghostpriv.CheckPolicyReveal`) run in this order, stop at the
+first failure, and run the proof last:
+
+1. shape: type `0x53`, the exact length (`ErrPolicyRevealLength`) and version
+   1 (`ErrPolicyRevealVersion`);
+2. encoding: out and fee are amount words (`ErrPolicyRevealAmount`);
+3. the chain id is this chain's (`ErrPolicyRevealChainID`);
+4. the fee equals the window fee for G_POLICY and the cover rule holds
+   (`ErrPolicyRevealFee`);
+5. the node computes the binding digest itself;
+6. the root is an eligible coin tree root (`ErrPolicyRevealRoot`);
+7. the marker is not zero and not in the coin marker set, which the ordinary
+   reveal shares, so a coin spent by one class cannot be spent by the other
+   (`ErrPolicyRevealMarker`);
+8. backstop: `out + fee` is at most the hidden total
+   (`ErrPolicyRevealBackstop`);
+9. the policy address is a frozen policy the registry records as created in
+   an earlier block, its registered code hash and its `EXTCODEHASH` both equal
+   the policy code hash, and it is not a reserved address
+   (`ErrPolicyRevealPolicy`);
+10. the coin tree has room for the remainder (`ErrPolicyRevealTree`);
+11. the verifier accepts the proof (`ErrPolicyRevealProof`).
+
+Then one atomic change (`ghostpriv.ApplyPolicyReveal`), which a
+reorganisation rewinds with the block: the marker is marked spent; the
+remainder is appended with its note and the policy reveal receipt; when
+`out > 0` the escrow slot of the marker opens with `remaining = out`, and when
+`out = 0` no slot opens; the fee is paid, `G_POLICY * max(price, beta)` burned
+and the rest to the coinbase; `out + fee` is added to `total_out` and `out`
+to `total_escrow`. No balance is credited but the tip, and no code runs. The
+linked proof verifier does not verify the policy statement yet, so a release
+node refuses every policy reveal at the proof; the reveal pool does not take
+type `0x53` yet.
+
+### Escrow slots
+
+A slot lives in the storage of `ESCROW_ACCOUNT`
+(`ghost.EscrowAccount`, `0x67686f7374000000000000000000000000000008`), which
+holds no code and gets nonce 1 when first written. Word `i` of the slot of a
+marker is at `K("ghost/escrow-slot/v1", marker, i as one byte)`:
+
+| Word | Bytes | Field |
+|---|---|---|
+| 0 | 0 to 19, 20, 21 to 28 | policy address, open (1 or 0), action nonce |
+| 1 | 0 to 11, 12 to 23, 24 to 31 | remaining, out, opening height |
+| 2 | 0 to 7, 8 to 19, 20 to 31 | opening timestamp, paid, recommitted |
+| 3 | 0 to 11, 12 to 23 | action debits, forfeited |
+| 4 to 7 | 0 to 31 | parameters hash, action tag, action salt, instruction |
+
+Amounts are below 2^96 and take 12 bytes; integers are big-endian and the
+unused bytes zero. A slot closes when `remaining` reaches zero or on a close;
+words 4 to 7 are then cleared and words 0 to 3 kept with `open = 0`, and a
+closed slot is never reopened. Every slot change goes through the helpers of
+`core/ghostpriv/escrow.go` (`OpenEscrowSlot`, `PayEscrowSlot`,
+`RecommitEscrowSlot`, `CloseEscrowSlot`, `DebitEscrowSlot`), which keep for
+every slot `out = remaining + paid + recommitted + action_debits + forfeited`
+and apply the accounting table of spec 10, section 7.3:
+
+| Event | `total_in` | `total_out` | `total_escrow` |
+|---|---|---|---|
+| a slot opens with `out` (and the reveal's fee) | unchanged | `+ out + fee` | `+ out` |
+| recommit `amount` | `+ amount` | unchanged | `- amount` |
+| pay `amount` | unchanged | unchanged | `- amount`, to a balance |
+| action debit `debit` | unchanged | unchanged | `- debit` |
+| close | unchanged | unchanged | `- remaining`, forfeited |
+
+The policy reveal calls only the opening; the escrow natives that call the
+others come with a later change. The slot logs come from the escrow account,
+with topic 0 `K(name)` and topic 1 the marker: `ghost/slot-opened/v1` with
+the policy address, out and the instruction (32 bytes each),
+`ghost/slot-paid/v1` with the destination and the amount,
+`ghost/slot-recommitted/v1` with the amount and `ghost/slot-closed/v1` with
+the forfeited value.
 
 ## Proof verifier
 
@@ -189,7 +316,10 @@ or `0x03` in the codes of ghost-proofs, to which the node maps its own
 left-padded to 32 bytes), fee, rule and the content fingerprint `cf`, 32 bytes
 each, 193 bytes in all with `cf` at 161 to 193. `cf` rides in the first 32
 bytes of the data reveal's note slot (see `docs/data-commitments.md`); for a
-coin reveal `VerifyInputs.Cf` is zero and the coin statement is unchanged. The
+coin reveal `VerifyInputs.Cf` is zero. The pinned prover's coin statement is
+the version 1 statement with a 156-byte note: the version 2 reveal's 380-byte
+note does not fit it, so the linked verifier rejects every version 2 ordinary
+reveal until the version 2 and policy proofs are linked. The
 crate pins ghost-proofs at revision
 `450b6e1786e346c883af1009abce398b02bf1660` of the ghost repository in
 `ghostverifier/Cargo.toml` and `Cargo.lock`. A kind or purpose it
@@ -221,15 +351,21 @@ checks nothing else. Only `_test.go` files may import it.
 
 ## Accounting
 
-The totals account holds `total_in` in slot 0 and `total_out` in slot 1, 32-byte
-big-endian, and gets nonce 1 when first written so that the empty-account
-cleanup never deletes it. The hidden total is `total_in - total_out`
-(`ghostpriv.Hidden`). After every block:
+The totals account holds `total_in` in slot 0, `total_out` in slot 1 and
+`total_escrow` in slot 2, 32-byte big-endian, and gets nonce 1 when first
+written so that the empty-account cleanup never deletes it. The hidden total
+is `total_in - total_out` (`ghostpriv.Hidden`); it covers unspent
+commitments, not escrow. `total_escrow` (`ghostpriv.TotalEscrow`) is the sum
+of `remaining` over all escrow slots, and the public supply leaves it out:
+public supply is issuance less burned base fees, the hidden total and
+`total_escrow`. Forfeited escrow stays out of supply for good. After every
+block:
 
-    sum of public balances + hidden total
+    sum of public balances + hidden total + total_escrow
       = sum of block rewards and genesis allocations
         - (base fee * gas used of every ordinary transaction
-           + base part of every reveal)
+           + burned part of every reveal + forfeited escrow
+           + burned and tipped action debits)
 
 `TestAccountingInvariantRandomized` checks this after every block of a seeded
 random run of transfers, commits and reveals. The seed is fixed by default,
@@ -237,16 +373,18 @@ printed, and set with `GHOST_INVARIANT_SEED`.
 
 ## Receipts
 
-Both logs have the coin tree account as address.
+These logs have the coin tree account as address.
 
 | Log | Topics | Data |
 |---|---|---|
 | commit, version 1 | `K("ghost/commit-receipt/v1")` | tree index (4), position (4), leaf (32), `v` (32), note (156): 228 bytes |
 | commit, salted | `K("ghost/commit-receipt/v1")` | tree index (4), position (4), leaf (32), `v` (32), note (156), salt (16): 244 bytes |
-| reveal | `K("ghost/reveal-receipt/v1")`, marker | tree index (4), position (4), remainder (32), note (156), recipient (20), out (32) |
+| reveal | `K("ghost/reveal-receipt/v1")`, marker | tree index (4), position (4), remainder (32), note (380), recipient (20), out (32): 472 bytes |
+| policy reveal | `K("ghost/policy-reveal-receipt/v1")`, marker | tree index (4), position (4), remainder (32), note (380), policy address (20), out (32), instruction (32): 504 bytes |
 
 The log of a salted commit is the version 1 log with the salt appended after
-the note; the logs of version 1 commits and of reveals do not change. The
+the note. The tree history takes the whole 380-byte remainder note of a
+reveal and of a policy reveal, with no padding. The
 tree history reads both commit lengths and keeps the salt with the leaf and
 note ([trees and headers](trees-and-headers.md)); a reveal remainder has no
 salt there, its salt is in its note. The layout is an internal-test value,
@@ -257,12 +395,18 @@ index does not fit four bytes is rejected.
 
 For the wallet and the tests that build on this:
 
-- `ghostpriv.Reveal` with `MarshalBinary` (the envelope), `BindingDigest` and
-  `BindingInput`; `ghostpriv.DecodeReveal` (checks 1 to 3);
+- `ghostpriv.Reveal` with `MarshalBinary` (the envelope), `BindingDigest`,
+  `BindingInput` and `VerifyInputs`; `ghostpriv.DecodeReveal` (checks 1 to 3);
+- `ghostpriv.PolicyReveal` with the same methods,
+  `ghostpriv.DecodePolicyReveal` (checks 1 and 2), `CheckPolicyReveal` and
+  `ApplyPolicyReveal`; `types.NewGhostPolicyRevealTx(envelope)`;
+- the escrow slot helpers of `core/ghostpriv/escrow.go`, `ReadEscrowSlot`,
+  `EscrowSlotKey` and `TotalEscrow`;
 - `ghostpriv.SaltedCommitData(F, salt, note)`, the 206 bytes of a salted
   commit (`SaltedCommitVersion`, `SaltedCommitDataSize`);
 - `ghostpriv.Commitment(F, v)`;
-- `ghostpriv.WindowFee(b_ref)` and `ghostpriv.WindowStart(H)`;
+- `ghostpriv.WindowFee(b_ref)`, `ghostpriv.WindowFeeGas(b_ref, gas)` and
+  `ghostpriv.WindowStart(H)`;
 - `ghostpriv.CheckReveal` and `ghostpriv.ApplyReveal`, which block processing
   calls;
 - `types.NewGhostRevealTx(envelope)`, which wraps an envelope into a

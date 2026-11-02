@@ -32,10 +32,10 @@ import (
 // version (2).
 const bindingTypeOffset = 8 + 2 + 32 + 2
 
-// fixedReveal is a coin reveal with every field set.
+// fixedReveal is a version 2 coin reveal with every field set.
 func fixedReveal() *ghostpriv.Reveal {
 	r := &ghostpriv.Reveal{
-		Version:   ghostpriv.Version,
+		Version:   ghostpriv.RevealVersion,
 		ChainID:   7,
 		Marker:    common.HexToHash("0x11"),
 		Root:      common.HexToHash("0x22"),
@@ -44,26 +44,8 @@ func fixedReveal() *ghostpriv.Reveal {
 		Out:       uint256.NewInt(5000),
 		Fee:       uint256.NewInt(21),
 	}
-	r.Note[0], r.Note[ghostpriv.RevealNoteSize-1] = 0x55, 0x66
+	r.Note[0], r.Note[ghostpriv.NoteSize-1] = 0x55, 0x66
 	return r
-}
-
-// coinInputs returns the inputs CheckReveal gives the verifier for r.
-func coinInputs(r *ghostpriv.Reveal, genesis common.Hash) *ghostpriv.VerifyInputs {
-	return &ghostpriv.VerifyInputs{
-		Kind:      ghosttree.Coin,
-		Purpose:   ghostpriv.PurposeReveal,
-		Binding:   r.BindingDigest(r.ChainID, genesis),
-		ChainID:   r.ChainID,
-		Domain:    genesis,
-		Root:      r.Root,
-		Marker:    r.Marker,
-		Remainder: r.Remainder,
-		Recipient: r.Recipient,
-		Out:       new(uint256.Int).Set(r.Out),
-		Fee:       new(uint256.Int).Set(r.Fee),
-		Note:      r.Note,
-	}
 }
 
 // proofUnder returns a stub-shaped proof under another tag.
@@ -74,87 +56,61 @@ func proofUnder(tag string, binding common.Hash) []byte {
 	return proof
 }
 
-// The stub accepts the stub of a coin reveal's unsalted (V1) binding and of
-// its salted (V2) binding, as the real verifier accepts both, and nothing
-// else.
+// The version 2 coin reveal has one binding, of type COIN version 2; the
+// stub accepts its stub and nothing else, not the stub of the same input
+// with the version 1 type 0x01 0x01.
 func TestStubAcceptsSaltedCoinBinding(t *testing.T) {
 	genesis := common.HexToHash("0x99")
 	r := fixedReveal()
-	in := coinInputs(r, genesis)
+	in := r.VerifyInputs(r.ChainID, genesis)
 
-	// The V2 binding is the V1 input with the type 0x02 0x01.
-	v1In := r.BindingInput(r.ChainID, genesis)
-	if got := v1In[bindingTypeOffset : bindingTypeOffset+2]; !bytes.Equal(got, ghostpriv.Coin[:]) {
-		t.Fatalf("V1 binding type %x, want %x", got, ghostpriv.Coin)
+	bin := r.BindingInput(r.ChainID, genesis)
+	if got := bin[bindingTypeOffset : bindingTypeOffset+2]; !bytes.Equal(got, ghostpriv.CoinV2[:]) {
+		t.Fatalf("binding type %x, want %x", got, ghostpriv.CoinV2)
 	}
-	v2In := bytes.Clone(v1In)
-	copy(v2In[bindingTypeOffset:], ghostpriv.CoinV2[:])
-	v1 := r.BindingDigest(r.ChainID, genesis)
-	v2 := r.SaltedBindingDigest(r.ChainID, genesis)
-	if want := ghosttree.K(ghostpriv.TagRevealBinding, v1In); v1 != want {
-		t.Fatalf("V1 binding %x, want %x", v1, want)
+	binding := r.BindingDigest(r.ChainID, genesis)
+	if want := ghosttree.K(ghostpriv.TagRevealBinding, bin); binding != want || in.Binding != want {
+		t.Fatalf("binding %x, want %x", binding, want)
 	}
-	if want := ghosttree.K(ghostpriv.TagRevealBinding, v2In); v2 != want {
-		t.Fatalf("V2 binding %x, want %x", v2, want)
-	}
-	if v1 == v2 {
-		t.Fatal("V1 and V2 bindings are equal")
-	}
+	v1In := bytes.Clone(bin)
+	copy(v1In[bindingTypeOffset:], ghostpriv.Coin[:])
+	v1 := ghosttree.K(ghostpriv.TagRevealBinding, v1In)
 
 	var v ghostprivtest.Verifier
-	if err := v.VerifyReveal(in, ghostprivtest.Proof(v1)); err != nil {
-		t.Errorf("V1 stub rejected: %v", err)
+	if err := v.VerifyReveal(in, ghostprivtest.Proof(binding)); err != nil {
+		t.Errorf("stub rejected: %v", err)
 	}
-	if err := v.VerifyReveal(in, ghostprivtest.Proof(v2)); err != nil {
-		t.Errorf("V2 stub rejected: %v", err)
-	}
-
 	for name, proof := range map[string][]byte{
-		"zero proof":        make([]byte, ghostpriv.ProofSize),
-		"V1 under bad tag":  proofUnder("ghost/test-proof/v2", v1),
-		"V2 under bad tag":  proofUnder("ghost/test-proof/v2", v2),
-		"V2 under real tag": proofUnder(ghostpriv.TagRevealBinding, v2),
-		"V2 untagged":       append(v2.Bytes(), make([]byte, ghostpriv.ProofSize-32)...),
+		"zero proof":           make([]byte, ghostpriv.ProofSize),
+		"version 1 type":       ghostprivtest.Proof(v1),
+		"under bad tag":        proofUnder("ghost/test-proof/v2", binding),
+		"under the binding":    proofUnder(ghostpriv.TagRevealBinding, binding),
+		"untagged":             append(binding.Bytes(), make([]byte, ghostpriv.ProofSize-32)...),
+		"short of the field":   ghostprivtest.Proof(binding)[:ghostpriv.ProofSize-1],
+		"another reveal's tag": ghostprivtest.Proof(ghosttree.K(ghostpriv.TagPolicyRevealBinding, bin)),
 	} {
 		if err := v.VerifyReveal(in, proof); err == nil {
 			t.Errorf("%s accepted", name)
 		}
 	}
 
-	// A V2 stub with a stray byte after the digest is not the stub.
-	stray := ghostprivtest.Proof(v2)
+	// A stub with a stray byte after the digest is not the stub.
+	stray := ghostprivtest.Proof(binding)
 	stray[ghostpriv.ProofSize-1] = 1
 	if err := v.VerifyReveal(in, stray); err == nil {
-		t.Error("V2 stub with a nonzero tail accepted")
+		t.Error("stub with a nonzero tail accepted")
 	}
 
-	// The V2 stub of one reveal does not verify another: change the out.
+	// The stub of one reveal does not verify another: change the out, or
+	// one byte of the 380-byte note.
 	other := fixedReveal()
 	other.Out = uint256.NewInt(5001)
-	if err := v.VerifyReveal(coinInputs(other, genesis), ghostprivtest.Proof(v2)); err == nil {
-		t.Error("V2 stub of another reveal accepted")
+	if err := v.VerifyReveal(other.VerifyInputs(other.ChainID, genesis), ghostprivtest.Proof(binding)); err == nil {
+		t.Error("stub of another reveal accepted")
 	}
-
-	// A data reveal has no salted binding: the coin V2 stub does not verify
-	// it, while its own stub still does.
-	data := &ghostpriv.VerifyInputs{
-		Kind:      ghosttree.Data,
-		Purpose:   ghostpriv.PurposeReveal,
-		Binding:   v1,
-		ChainID:   in.ChainID,
-		Domain:    in.Domain,
-		Root:      in.Root,
-		Marker:    in.Marker,
-		Remainder: in.Remainder,
-		Recipient: in.Recipient,
-		Out:       in.Out,
-		Fee:       in.Fee,
-		Note:      in.Note,
-	}
-	if err := v.VerifyReveal(data, ghostprivtest.Proof(v2)); err == nil {
-		t.Error("coin V2 stub accepted for a data reveal")
-	}
-	if err := v.VerifyReveal(data, ghostprivtest.Proof(v1)); err != nil {
-		t.Errorf("data reveal stub rejected: %v", err)
+	other = fixedReveal()
+	other.Note[200] ^= 1
+	if err := v.VerifyReveal(other.VerifyInputs(other.ChainID, genesis), ghostprivtest.Proof(binding)); err == nil {
+		t.Error("stub of a reveal with another note accepted")
 	}
 }

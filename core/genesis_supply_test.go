@@ -356,7 +356,7 @@ func TestSupplyChangesOnlyByRewardAndReveal(t *testing.T) {
 	rest := new(uint256.Int).Sub(uint256.MustFromBig(commitValue), out)
 	rest.Sub(rest, fee.Total)
 	r := &ghostpriv.Reveal{
-		Version:   ghostpriv.Version,
+		Version:   ghostpriv.RevealVersion,
 		ChainID:   c.chain.Config().GetChainID().Uint64(),
 		Marker:    ghosttree.K("ghost/test-supply/marker"),
 		Root:      *c.head().CoinTreeRoot,
@@ -384,9 +384,21 @@ func TestSupplyChangesOnlyByRewardAndReveal(t *testing.T) {
 	check("empty block after the reveal", miner, blockEffect{})
 
 	// The hidden set holds what was committed less what reveals took out.
+	// No escrow slot was opened, so total_escrow, which the public supply
+	// also leaves out, is zero.
 	hidden, err := ghostpriv.Hidden(c.stateAt(c.head()))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if escrow := ghostpriv.TotalEscrow(c.stateAt(c.head())); !escrow.IsZero() {
+		t.Fatalf("total escrow %v, want 0", escrow)
+	}
+	// Public supply is issuance less burned base fees, the hidden total and
+	// total_escrow: here the minted rewards and reveal credits less what was
+	// burned and committed, of which the hidden set holds the rest.
+	supply := new(big.Int).Sub(minted, removed)
+	if total := totalBalance(t, c.stateAt(c.head())); total.Cmp(supply) != 0 {
+		t.Fatalf("public supply %v, want %v", total, supply)
 	}
 	wantHidden := new(big.Int).Sub(commitValue, new(big.Int).Add(out.ToBig(), fee.Total.ToBig()))
 	if hidden.ToBig().Cmp(wantHidden) != 0 {

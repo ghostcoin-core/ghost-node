@@ -1009,22 +1009,24 @@ func (w *worker) applyTransaction(env *environment, tx *types.Transaction) (*typ
 }
 
 // applyReveal runs a reveal, the native transaction without an account, as
-// block processing does: it takes G_PRIV gas from the block gas pool, runs
-// the checks of the reveal's type with the active verifier against the
-// sealing block's own ancestry and makes the reveal's change. If anything
-// fails, state and gas pool are reverted.
+// block processing does: it takes the gas of the reveal's class from the
+// block gas pool (G_PRIV, G_DATA or G_POLICY), runs the checks of the
+// reveal's type with the active verifier against the sealing block's own
+// ancestry and makes the reveal's change. If anything fails, state and gas
+// pool are reverted.
 func (w *worker) applyReveal(env *environment, tx *types.Transaction) (*types.Receipt, error) {
 	var (
 		snap   = env.state.Snapshot()
 		gp     = env.gasPool.Gas()
 		header = env.header
+		gas    = tx.Gas()
 	)
 	fail := func(err error) (*types.Receipt, error) {
 		env.state.RevertToSnapshot(snap)
 		env.gasPool.SetGas(gp)
 		return nil, err
 	}
-	if err := env.gasPool.SubGas(types.GhostRevealGas); err != nil {
+	if err := env.gasPool.SubGas(gas); err != nil {
 		return fail(err)
 	}
 	renv := &ghostpriv.BlockEnv{
@@ -1039,6 +1041,8 @@ func (w *worker) applyReveal(env *environment, tx *types.Transaction) (*types.Re
 		err = ghostpriv.ApplyReveal(env.state, renv, ghostpriv.ActiveVerifier(), tx.GhostRevealEnvelope())
 	case types.GhostDataRevealTxType:
 		err = ghostpriv.ApplyDataReveal(env.state, renv, ghostpriv.ActiveVerifier(), tx.GhostDataRevealEnvelope())
+	case types.GhostPolicyRevealTxType:
+		err = ghostpriv.ApplyPolicyReveal(env.state, renv, ghostpriv.ActiveVerifier(), tx.GhostPolicyRevealEnvelope())
 	default:
 		err = fmt.Errorf("%w: type %#x is not a reveal", types.ErrTxTypeNotSupported, tx.Type())
 	}
@@ -1052,7 +1056,7 @@ func (w *worker) applyReveal(env *environment, tx *types.Transaction) (*types.Re
 	} else {
 		root = env.state.IntermediateRoot(eip161d).Bytes()
 	}
-	header.GasUsed += types.GhostRevealGas
+	header.GasUsed += gas
 
 	receipt := &types.Receipt{
 		Type:              tx.Type(),
@@ -1060,7 +1064,7 @@ func (w *worker) applyReveal(env *environment, tx *types.Transaction) (*types.Re
 		Status:            types.ReceiptStatusSuccessful,
 		CumulativeGasUsed: header.GasUsed,
 		TxHash:            tx.Hash(),
-		GasUsed:           types.GhostRevealGas,
+		GasUsed:           gas,
 		EffectiveGasPrice: new(big.Int),
 		Logs:              env.state.GetLogs(tx.Hash(), header.Number.Uint64(), common.Hash{}),
 		BlockNumber:       new(big.Int).Set(header.Number),
@@ -1071,8 +1075,10 @@ func (w *worker) applyReveal(env *environment, tx *types.Transaction) (*types.Re
 }
 
 // commitReveals fills the sealing block with reveals, in the order given,
-// while the gas pool holds G_PRIV. A reveal that fails its checks is left
-// out; the pool drops it when it rechecks on the next head.
+// while the gas pool holds the gas of the smallest class, G_DATA. A reveal
+// whose own class's gas the pool no longer holds is passed over for those
+// after it; a reveal that fails its checks is left out, and the pool drops
+// it when it rechecks on the next head.
 func (w *worker) commitReveals(env *environment, reveals []*types.Transaction, interrupt *atomic.Int32) error {
 	if env.gasPool == nil {
 		env.gasPool = new(core.GasPool).AddGas(env.header.GasLimit)
@@ -1083,11 +1089,15 @@ func (w *worker) commitReveals(env *environment, reveals []*types.Transaction, i
 				return signalToErr(signal)
 			}
 		}
-		if env.gasPool.Gas() < types.GhostRevealGas {
-			log.Trace("Not enough gas left for a reveal", "left", env.gasPool.Gas(), "needed", types.GhostRevealGas)
+		if env.gasPool.Gas() < types.GhostDataRevealGas {
+			log.Trace("Not enough gas left for a reveal", "left", env.gasPool.Gas(), "needed", types.GhostDataRevealGas)
 			break
 		}
 		if !tx.IsGhostReveal() {
+			continue
+		}
+		if env.gasPool.Gas() < tx.Gas() {
+			log.Trace("Not enough gas left for the reveal's class", "hash", tx.Hash(), "left", env.gasPool.Gas(), "needed", tx.Gas())
 			continue
 		}
 		env.state.SetTxContext(tx.Hash(), env.tcount)

@@ -895,7 +895,7 @@ func TestWorkerIncludesPendingReveal(t *testing.T) {
 	out := uint256.NewInt(1_000_000)
 	recipient := common.Address{0x52, 0x45, 0x56}
 	r := &ghostpriv.Reveal{
-		Version:   ghostpriv.Version,
+		Version:   ghostpriv.RevealVersion,
 		ChainID:   chainID.Uint64(),
 		Marker:    ghosttree.K("ghost/test-marker", []byte("synthetic worker marker")),
 		Root:      *genesis.Header().CoinTreeRoot,

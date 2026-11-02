@@ -60,8 +60,9 @@ const (
 	// MaxReveals is the most reveals the pool holds.
 	MaxReveals = 16
 
-	// MaxBytes is the most envelope bytes the pool holds, 16 envelopes.
-	MaxBytes = 20_977_072
+	// MaxBytes is the most envelope bytes the pool holds, 16 envelopes of
+	// the version 2 coin reveal, the larger of the two types the pool takes.
+	MaxBytes = MaxReveals * types.GhostRevealEnvelopeSize
 
 	// PeerRevealsPerBlock is the number of reveals a peer may have the node
 	// fetch or take from it per chain head: each announced reveal the node
@@ -256,8 +257,8 @@ type Pool struct {
 	mu         sync.RWMutex
 	head       *types.Header
 	state      *state.StateDB
-	fee        *uint256.Int // the reveal fee of the next block, nil if unknown
-	prevFee    *uint256.Int // that of the window before, nil if none or unknown
+	fee        classFees // the coin reveal fees of the next block, for G_PRIV
+	dataFee    classFees // the data reveal fees of the next block, for G_DATA
 	all        map[common.Hash]*entry
 	order      []common.Hash // hashes of the held reveals, first seen first
 	markers    map[markerKey]common.Hash
@@ -300,8 +301,18 @@ func New(chain BlockChain) *Pool {
 	}
 }
 
-// Filter accepts the coin reveal and the data reveal.
-func (p *Pool) Filter(tx *types.Transaction) bool { return tx.IsGhostReveal() }
+// Filter accepts the coin reveal and the data reveal. The policy reveal,
+// though a reveal, is not taken: the pool has no admission rules for it yet.
+func (p *Pool) Filter(tx *types.Transaction) bool {
+	return tx.IsGhostReveal() && tx.Type() != types.GhostPolicyRevealTxType
+}
+
+// classFees are the fees of one reveal class the block that would come next
+// on the head accepts: that of its fee window and that of the window before
+// it, each nil when unknown or, for prev, when there is none.
+type classFees struct {
+	cur, prev *uint256.Int
+}
 
 // Init sets the head the pool checks against. A reveal has no account, so
 // the pool reserves none.
@@ -310,10 +321,10 @@ func (p *Pool) Init(gasTip uint64, head *types.Header, reserve txpool.AddressRes
 	if err != nil {
 		return err
 	}
-	fee, prevFee := p.windowFees(head)
+	fee, dataFee := p.windowFees(head, ghostpriv.GasPriv), p.windowFees(head, ghostpriv.GasData)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.head, p.state, p.fee, p.prevFee = head, st, fee, prevFee
+	p.head, p.state, p.fee, p.dataFee = head, st, fee, dataFee
 	return nil
 }
 
@@ -340,9 +351,9 @@ func (p *Pool) Reset(oldHead, newHead *types.Header) {
 		log.Error("Reveal pool cannot reset to the new head", "number", newHead.Number, "hash", newHead.Hash(), "err", err)
 		return
 	}
-	fee, prevFee := p.windowFees(newHead)
+	fee, dataFee := p.windowFees(newHead, ghostpriv.GasPriv), p.windowFees(newHead, ghostpriv.GasData)
 	p.mu.Lock()
-	p.head, p.state, p.fee, p.prevFee = newHead, st, fee, prevFee
+	p.head, p.state, p.fee, p.dataFee = newHead, st, fee, dataFee
 	now := time.Now()
 	for _, b := range p.peers {
 		b.tokens = PeerRevealsPerBlock
@@ -638,16 +649,17 @@ func (p *Pool) cheapRules(r revealFields) error {
 		}
 		return fmt.Errorf("%w: have %d, chain %v", ghostpriv.ErrDataRevealChainID, r.chainID, id)
 	}
-	// A data reveal pays the window fee of a coin reveal, from its reserve.
-	errFee := ghostpriv.ErrRevealFee
+	// Each class pays the window fee for its own gas: a coin reveal that of
+	// G_PRIV, a data reveal, from its reserve, that of G_DATA.
+	errFee, fees := ghostpriv.ErrRevealFee, p.fee
 	if !coin {
-		errFee = ghostpriv.ErrDataRevealFee
+		errFee, fees = ghostpriv.ErrDataRevealFee, p.dataFee
 	}
 	switch {
-	case p.fee != nil && !p.fee.Eq(r.fee) && p.prevFee == nil:
-		return fmt.Errorf("%w: have %v, want %v", errFee, r.fee, p.fee)
-	case p.fee != nil && !p.fee.Eq(r.fee) && !p.prevFee.Eq(r.fee):
-		return fmt.Errorf("%w: have %v, want %v or %v", errFee, r.fee, p.fee, p.prevFee)
+	case fees.cur != nil && !fees.cur.Eq(r.fee) && fees.prev == nil:
+		return fmt.Errorf("%w: have %v, want %v", errFee, r.fee, fees.cur)
+	case fees.cur != nil && !fees.cur.Eq(r.fee) && !fees.prev.Eq(r.fee):
+		return fmt.Errorf("%w: have %v, want %v or %v", errFee, r.fee, fees.cur, fees.prev)
 	}
 	if p.state != nil && ghosttree.IsSpent(p.state, r.key.kind, r.key.marker) {
 		if coin {
@@ -682,26 +694,28 @@ func (p *Pool) eligibleRoot(head *types.Header, kind ghosttree.Kind, root common
 	return false, err
 }
 
-// windowFees are the coin and data reveal fees the block that would come next on head
-// accepts: that of its fee window and that of the window before it, nil when
-// the window does not exist, for the first window, or an ancestor it needs
-// is not available: the reveal checks then refuse the reveal themselves. The
-// walk reads at most the headers of the two windows, seven of them.
-func (p *Pool) windowFees(head *types.Header) (cur, prev *uint256.Int) {
+// windowFees are the fees, for the class whose gas is gas, that the block
+// that would come next on head accepts: that of its fee window and that of
+// the window before it, nil when the window does not exist, for the first
+// window, or an ancestor it needs is not available: the reveal checks then
+// refuse the reveal themselves. The walk reads at most the headers of the two
+// windows, seven of them.
+func (p *Pool) windowFees(head *types.Header, gas uint64) classFees {
 	next := p.nextHeader(head)
 	start := ghostpriv.WindowStart(next.Number.Uint64())
 	h := next
 	if next.Number.Uint64() > start {
 		h = p.ancestor(head, start)
 	}
-	if cur = feeTotal(h); cur == nil || start == 0 {
-		return cur, nil
+	cur := feeTotal(h, gas)
+	if cur == nil || start == 0 {
+		return classFees{cur: cur}
 	}
 	from := h
 	if h == next {
 		from = head
 	}
-	return cur, feeTotal(p.ancestor(from, start-4))
+	return classFees{cur: cur, prev: feeTotal(p.ancestor(from, start-4), gas)}
 }
 
 // ancestor returns the header at height n of h's ancestry, h itself at its
@@ -713,13 +727,13 @@ func (p *Pool) ancestor(h *types.Header, n uint64) *types.Header {
 	return h
 }
 
-// feeTotal is the window fee of a window whose first block is h, nil when h
-// or its base fee is missing or cannot be priced.
-func feeTotal(h *types.Header) *uint256.Int {
+// feeTotal is the window fee for gas of a window whose first block is h, nil
+// when h or its base fee is missing or cannot be priced.
+func feeTotal(h *types.Header, gas uint64) *uint256.Int {
 	if h == nil || h.BaseFee == nil {
 		return nil
 	}
-	fee, err := ghostpriv.WindowFee(h.BaseFee)
+	fee, err := ghostpriv.WindowFeeGas(h.BaseFee, gas)
 	if err != nil {
 		return nil
 	}
@@ -777,13 +791,17 @@ func (p *Pool) FilterAnnounced(peer string, kinds []byte, sizes []uint32, hashes
 	defer p.mu.Unlock()
 	now := time.Now()
 	for i, hash := range hashes {
+		var size uint32
 		switch kinds[i] {
-		case types.GhostRevealTxType, types.GhostDataRevealTxType:
+		case types.GhostRevealTxType:
+			size = types.GhostRevealEnvelopeSize
+		case types.GhostDataRevealTxType:
+			size = types.GhostDataRevealEnvelopeSize
 		default:
 			keep[i] = true
 			continue
 		}
-		if sizes[i] != types.GhostRevealEnvelopeSize {
+		if sizes[i] != size {
 			continue
 		}
 		if _, ok := p.all[hash]; ok {
@@ -988,20 +1006,7 @@ func decodeForCheck(tx *types.Transaction, genesis common.Hash) (*checkedReveal,
 			return nil, err
 		}
 		return &checkedReveal{
-			in: &ghostpriv.VerifyInputs{
-				Kind:      ghosttree.Coin,
-				Purpose:   ghostpriv.PurposeReveal,
-				Binding:   r.BindingDigest(r.ChainID, genesis),
-				ChainID:   r.ChainID,
-				Domain:    genesis,
-				Root:      r.Root,
-				Marker:    r.Marker,
-				Remainder: r.Remainder,
-				Recipient: r.Recipient,
-				Out:       new(uint256.Int).Set(r.Out),
-				Fee:       new(uint256.Int).Set(r.Fee),
-				Note:      r.Note,
-			},
+			in:          r.VerifyInputs(r.ChainID, genesis),
 			proof:       common.CopyBytes(r.Proof),
 			errProof:    ghostpriv.ErrRevealProof,
 			errRoot:     ghostpriv.ErrRevealRoot,

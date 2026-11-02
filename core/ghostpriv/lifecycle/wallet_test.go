@@ -119,7 +119,7 @@ func (c coin) note() [ghostpriv.NoteSize]byte { return c.owner.note(c.index, c.v
 // its binding digest on the network's chain.
 func newReveal(n *node, spend, rest coin, root common.Hash, recipient common.Address, out, fee *uint256.Int) *ghostpriv.Reveal {
 	r := &ghostpriv.Reveal{
-		Version:   ghostpriv.Version,
+		Version:   ghostpriv.RevealVersion,
 		ChainID:   n.chain.Config().GetChainID().Uint64(),
 		Marker:    spend.marker(),
 		Root:      root,
@@ -129,7 +129,7 @@ func newReveal(n *node, spend, rest coin, root common.Hash, recipient common.Add
 		Fee:       new(uint256.Int).Set(fee),
 	}
 	note := rest.note()
-	copy(r.Note[:], note[:]) // the version 1 reveal's note slot
+	copy(r.Note[:], note[:]) // the version 2 reveal's 380-byte note
 	r.Proof = ghostprivtest.Proof(r.BindingDigest(r.ChainID, n.chain.Genesis().Hash()))
 	return r
 }
@@ -143,7 +143,7 @@ var (
 
 const (
 	commitLogSize = 8 + 32 + 32 + ghostpriv.NoteSize + ghostpriv.SaltSize
-	revealLogSize = 8 + 32 + ghostpriv.RevealNoteSize + 20 + 32
+	revealLogSize = 8 + 32 + ghostpriv.NoteSize + 20 + 32
 )
 
 // leafLog is an append to the coin tree read from a receipt.
@@ -210,8 +210,8 @@ func parseCoinLog(t *testing.T, l *types.Log) (leaf leafLog, reveal *revealLog, 
 			leaf:     common.BytesToHash(d[8:40]),
 			block:    l.BlockNumber,
 		}
-		copy(leaf.note[:], d[40:40+ghostpriv.RevealNoteSize])
-		rest := d[40+ghostpriv.RevealNoteSize:]
+		copy(leaf.note[:], d[40:40+ghostpriv.NoteSize])
+		rest := d[40+ghostpriv.NoteSize:]
 		reveal = &revealLog{
 			marker:    l.Topics[1],
 			remainder: leaf.leaf,

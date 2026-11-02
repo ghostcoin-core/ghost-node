@@ -1995,7 +1995,7 @@ func TestSendRawRevealTransaction(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := &ghostpriv.Reveal{
-		Version:   ghostpriv.Version,
+		Version:   ghostpriv.RevealVersion,
 		ChainID:   chainID.Uint64(),
 		Marker:    ghosttree.K("ghost/test-marker", []byte("synthetic rpc marker")),
 		Root:      *genesis.Header().CoinTreeRoot,

@@ -36,8 +36,9 @@ import (
 // and a data commit with the version 2 commitment types; version 2 (206
 // bytes, or 430), version 1 and 429 or 431 bytes are ErrCommitData. The
 // receipt logs of both commits carry the whole 380-byte note, and
-// HistoryRecords returns it; a version 1 reveal's 156-byte remainder note is
-// recorded zero-padded to 380 bytes.
+// HistoryRecords returns it, as it returns the whole 380-byte remainder note
+// of a version 2 reveal; a reveal log of the old 156-byte note is no
+// receipt.
 func TestNote380Commit(t *testing.T) {
 	if ghostpriv.NoteSize != 380 {
 		t.Fatalf("NoteSize %d, want 380", ghostpriv.NoteSize)
@@ -159,22 +160,24 @@ func TestNote380Commit(t *testing.T) {
 		t.Fatalf("data commit log of %d bytes\n%x", len(dataLog.Data), dataLog.Data)
 	}
 
-	// A version 1 reveal's log keeps its 156-byte note.
+	// A version 2 reveal's log carries its 380-byte note.
 	remainder := ghostpriv.CommitmentVersion(ghostpriv.SaltedCommitVersion, ghosttree.K("ghost/test-coin-f", []byte("rest")), uint256.NewInt(5))
-	revealData := binary.BigEndian.AppendUint32(nil, 0)
-	revealData = binary.BigEndian.AppendUint32(revealData, 1)
-	revealData = append(revealData, remainder[:]...)
-	revealData = append(revealData, c.note[:ghostpriv.RevealNoteSize]...)
-	revealData = append(revealData, common.Address{0x7a}.Bytes()...)
-	revealData = append(revealData, make([]byte, 32)...)
+	revealLogData := func(note []byte) []byte {
+		d := binary.BigEndian.AppendUint32(nil, 0)
+		d = binary.BigEndian.AppendUint32(d, 1)
+		d = append(d, remainder[:]...)
+		d = append(d, note...)
+		d = append(d, common.Address{0x7a}.Bytes()...)
+		return append(d, make([]byte, 32)...)
+	}
 	revealLog := &types.Log{
 		Address: ghosttree.TreeAccount(ghosttree.Coin),
 		Topics:  []common.Hash{ghosttree.K(ghostpriv.TagRevealReceipt), testMarker("note 380")},
-		Data:    revealData,
+		Data:    revealLogData(c.note),
 	}
 
-	// HistoryRecords returns the whole note of each commit, and the reveal
-	// remainder's note zero-padded on the right.
+	// HistoryRecords returns the whole note of each commit and of the reveal
+	// remainder.
 	records, err := ghostpriv.HistoryRecords(types.Receipts{{Logs: []*types.Log{coinLog}}, {Logs: []*types.Log{dataLog, revealLog}}})
 	if err != nil {
 		t.Fatal(err)
@@ -188,17 +191,22 @@ func TestNote380Commit(t *testing.T) {
 			t.Errorf("record %d: kind %v note %x salt %v", i, r.Kind, r.Note[:], r.Salt)
 		}
 	}
-	if r := records[2]; r.Kind != ghosttree.Coin || r.Leaf != remainder || !bytes.Equal(r.Note[:156], c.note[:156]) || !bytes.Equal(r.Note[156:], make([]byte, 380-156)) || r.Salt != nil {
+	if r := records[2]; r.Kind != ghosttree.Coin || r.Leaf != remainder || !bytes.Equal(r.Note[:], c.note) || r.Salt != nil {
 		t.Errorf("reveal remainder record: kind %v leaf %x note %x", r.Kind, r.Leaf, r.Note[:])
 	}
 	if r := records[3]; r.Kind != ghosttree.CoinMarkers || r.Leaf != testMarker("note 380") {
 		t.Errorf("reveal marker record %+v", r)
 	}
 
-	// A commit log of the old 156-byte note is no receipt of the coin rules.
+	// A commit log of the old 156-byte note is no receipt of the coin rules,
+	// nor is a reveal log of the version 1 note.
 	old := &types.Log{Address: coinLog.Address, Topics: coinLog.Topics, Data: append(append([]byte{}, coinLog.Data[:72+156]...), salt...)}
 	if _, err := ghostpriv.HistoryRecords(types.Receipts{{Logs: []*types.Log{old}}}); !errors.Is(err, ghostpriv.ErrReceiptLog) {
 		t.Errorf("commit log of a 156-byte note: %v, want %v", err, ghostpriv.ErrReceiptLog)
+	}
+	oldReveal := &types.Log{Address: revealLog.Address, Topics: revealLog.Topics, Data: revealLogData(c.note[:156])}
+	if _, err := ghostpriv.HistoryRecords(types.Receipts{{Logs: []*types.Log{oldReveal}}}); !errors.Is(err, ghostpriv.ErrReceiptLog) {
+		t.Errorf("reveal log of a 156-byte note: %v, want %v", err, ghostpriv.ErrReceiptLog)
 	}
 }
 
@@ -245,26 +253,23 @@ func TestDataRevealNoteSlot(t *testing.T) {
 	}
 }
 
-// TestRevealKeepsNoteSlot checks that the version 1 coin reveal keeps its
-// 156-byte remainder note: the payload field, the verifier's input and the
-// binding digest input are unchanged, and the envelope is 1,311,067 bytes.
+// TestRevealKeepsNoteSlot checks that the version 2 coin reveal carries a
+// 380-byte remainder note: the payload field, the verifier's input and the
+// end of the binding digest input, and the envelope is 1,311,291 bytes.
 func TestRevealKeepsNoteSlot(t *testing.T) {
-	if ghostpriv.RevealNoteSize != 156 {
-		t.Fatalf("RevealNoteSize %d, want 156", ghostpriv.RevealNoteSize)
-	}
 	var (
 		r  ghostpriv.Reveal
 		in ghostpriv.VerifyInputs
 	)
-	if len(r.Note) != 156 || len(in.Note) != 156 {
+	if len(r.Note) != 380 || len(in.Note) != 380 {
 		t.Fatalf("reveal note of %d bytes, verifier note of %d", len(r.Note), len(in.Note))
 	}
-	if ghostpriv.EnvelopeSize != 1_311_067 || ghostpriv.PayloadSize != 1_311_066 || 190+ghostpriv.ProofSize+ghostpriv.RevealNoteSize != 1_311_066 {
+	if ghostpriv.EnvelopeSize != 1_311_291 || ghostpriv.PayloadSize != 1_311_290 || 190+ghostpriv.ProofSize+ghostpriv.NoteSize != 1_311_290 {
 		t.Fatalf("reveal envelope %d, payload %d", ghostpriv.EnvelopeSize, ghostpriv.PayloadSize)
 	}
 	note := testNote(0x41)
 	r = ghostpriv.Reveal{
-		Version: ghostpriv.Version,
+		Version: ghostpriv.RevealVersion,
 		ChainID: 7,
 		Out:     uint256.NewInt(1),
 		Fee:     uint256.NewInt(2),
@@ -275,13 +280,13 @@ func TestRevealKeepsNoteSlot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(env) != 1_311_067 || !bytes.Equal(env[len(env)-156:], note[:156]) {
-		t.Fatalf("reveal envelope of %d bytes ends %x", len(env), env[len(env)-156:])
+	if len(env) != 1_311_291 || !bytes.Equal(env[len(env)-380:], note) {
+		t.Fatalf("reveal envelope of %d bytes ends %x", len(env), env[len(env)-380:])
 	}
-	if ghostpriv.BindingSize != 415 {
-		t.Fatalf("BindingSize %d, want 415", ghostpriv.BindingSize)
+	if ghostpriv.BindingSize != 607 {
+		t.Fatalf("BindingSize %d, want 607", ghostpriv.BindingSize)
 	}
-	if b := r.BindingInput(7, common.Hash{0x01}); len(b) != 415 || !bytes.Equal(b[len(b)-156:], note[:156]) {
+	if b := r.BindingInput(7, common.Hash{0x01}); len(b) != 607 || !bytes.Equal(b[len(b)-380:], note) {
 		t.Fatalf("binding input of %d bytes", len(b))
 	}
 	dec, err := ghostpriv.DecodeReveal(env)
