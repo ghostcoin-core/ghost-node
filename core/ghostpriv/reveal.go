@@ -25,11 +25,12 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/ghosttree"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/params/ghost"
 	"github.com/holiman/uint256"
 )
 
 // Offsets and lengths of the reveal payload, which is a fixed layout and not
-// RLP.
+// RLP. The data reveal shares the offsets up to the note slot.
 const (
 	offVersion   = 0
 	offChainID   = 2
@@ -51,34 +52,40 @@ const (
 	PayloadSize  = types.GhostRevealPayloadSize
 	EnvelopeSize = types.GhostRevealEnvelopeSize
 
-	// BindingSize is the length of the binding digest's input.
-	BindingSize = 415
+	// BindingSize is the length of the binding digest's input, version 2.
+	BindingSize = 607
 )
 
-// Fixed fields of the binding digest.
+// Fixed fields of the binding digests.
 const (
-	statementCoinReveal = 0x01
-	statementDataReveal = 0x02
-	statementVersion    = 0x01
-	purposeReveal       = PurposeReveal
+	statementCoinReveal        = 0x01
+	statementDataReveal        = 0x02
+	statementPolicyReveal      = 0x04
+	statementVersion           = 0x01 // of the data and the policy reveal statements
+	statementCoinRevealVersion = 0x02 // of the ordinary reveal statement, S1 version 2
+	purposeReveal              = PurposeReveal
 )
 
-// The purposes of a data reveal. The coin reveal has only PurposeReveal.
+// The purposes of a statement. The coin reveal has only PurposeReveal, the
+// policy reveal only PurposePolicySpend.
 const (
-	PurposeReveal byte = 0x01 // a one-time reveal of the data
-	PurposeRevoke byte = 0x02 // a revoke, which spends the marker for good
+	PurposeReveal      byte = 0x01 // a coin spend, or a one-time reveal of the data
+	PurposeRevoke      byte = 0x02 // a revoke, which spends the marker for good
+	PurposePolicySpend byte = 0x05 // a coin spent into a policy's escrow slot
 )
 
 // The errors of the reveal checks, one per check, in the order they run.
 // Check 6 computes the binding digest and check 11 has nothing to read, so
 // neither can fail; ErrRevealChainInfo wraps a missing ancestor under the
-// check that needed it.
+// check that needed it. ErrRevealRecipient runs between the fee and the
+// binding (spec 10, section 4.5).
 var (
-	ErrRevealLength    = errors.New("reveal is not a 0x50 envelope of 1,311,067 bytes")
-	ErrRevealVersion   = errors.New("reveal version is not 1")
+	ErrRevealLength    = errors.New("reveal is not a 0x50 envelope of 1,311,291 bytes")
+	ErrRevealVersion   = errors.New("reveal version is not 2")
 	ErrRevealAmount    = errors.New("reveal out or fee not below 2^96")
 	ErrRevealChainID   = errors.New("reveal chain id is not this chain's")
 	ErrRevealFee       = errors.New("reveal fee is not the window fee")
+	ErrRevealRecipient = errors.New("reveal recipient is a registered policy")
 	ErrRevealRoot      = errors.New("reveal root is not an ancestor's coin tree root")
 	ErrRevealMarker    = errors.New("reveal marker already used")
 	ErrRevealBackstop  = errors.New("reveal takes more than the hidden set holds")
@@ -87,7 +94,7 @@ var (
 	ErrRevealChainInfo = errors.New("chain information for the reveal unavailable")
 )
 
-// Reveal is a decoded reveal payload.
+// Reveal is a decoded ordinary reveal payload, version 2.
 type Reveal struct {
 	Version   uint16
 	ChainID   uint64
@@ -98,7 +105,7 @@ type Reveal struct {
 	Out       *uint256.Int
 	Fee       *uint256.Int
 	Proof     []byte // ProofSize bytes, or fewer to be padded with zeros
-	Note      [RevealNoteSize]byte
+	Note      [NoteSize]byte
 }
 
 // MarshalBinary returns the reveal's envelope: the type byte 0x50 and the
@@ -129,8 +136,9 @@ func (r *Reveal) MarshalBinary() ([]byte, error) {
 }
 
 // DecodeReveal decodes a reveal envelope and runs the first three checks:
-// the type byte and exact length (ErrRevealLength), version 1
-// (ErrRevealVersion), and out and fee below 2^96 (ErrRevealAmount).
+// the type byte and exact length (ErrRevealLength), version 2
+// (ErrRevealVersion), and out and fee below 2^96 (ErrRevealAmount). There is
+// no version 1 path: a version 1 reveal, of any length, is refused.
 func DecodeReveal(envelope []byte) (*Reveal, error) {
 	if len(envelope) != EnvelopeSize || envelope[0] != types.GhostRevealTxType {
 		return nil, fmt.Errorf("%w: %d bytes", ErrRevealLength, len(envelope))
@@ -146,7 +154,7 @@ func DecodeReveal(envelope []byte) (*Reveal, error) {
 		Proof:     common.CopyBytes(p[offProof:offNote]),
 	}
 	copy(r.Note[:], p[offNote:])
-	if r.Version != Version {
+	if r.Version != RevealVersion {
 		return nil, fmt.Errorf("%w: %d", ErrRevealVersion, r.Version)
 	}
 	var err error
@@ -160,33 +168,20 @@ func DecodeReveal(envelope []byte) (*Reveal, error) {
 }
 
 // BindingDigest returns the binding digest the proof must commit to,
-// K("ghost/coin-reveal-binding/v1", fields) over the 415 bytes of
-// BindingInput.
+// K("ghost/coin-reveal-binding/v2", fields) over the 607 bytes of
+// BindingInput (spec 10, section 4.2).
 func (r *Reveal) BindingDigest(chainID uint64, genesis common.Hash) common.Hash {
 	return ghosttree.K(TagRevealBinding, r.BindingInput(chainID, genesis))
 }
 
-// SaltedBindingDigest returns the binding digest of the same reveal over a
-// salted coin: BindingDigest with the type CoinV2 in place of Coin. The
-// proof system accepts a coin reveal whose proof commits to either; the node
-// passes its verifier only BindingDigest, and a verifier that checks the
-// binding itself, such as the test stub, computes this one from the inputs.
-func (r *Reveal) SaltedBindingDigest(chainID uint64, genesis common.Hash) common.Hash {
-	return ghosttree.K(TagRevealBinding, r.bindingInput(chainID, genesis, CoinV2))
-}
-
-// BindingInput returns the 415 bytes the binding digest hashes: the chain
-// id (8), the version (2), the domain, which is the genesis hash (32), the
-// statement and its version (1 each), the type COIN (2), the purpose (1),
-// the root, marker and remainder (32 each), the recipient (20), out and fee
-// (32 each), the rule, 32 zero bytes for the empty rule, and the note (156).
-// The version is always 1 and the rule always empty: the node supplies them.
+// BindingInput returns the 607 bytes the binding digest hashes: the chain id
+// (8), the version 2 (2), the domain, which is the genesis hash (32), the
+// statement 0x01 and its version 0x02 (1 each), the type COIN version 2
+// (2), the purpose (1), the root, marker and remainder (32 each), the
+// recipient (20), out and fee (32 each) and the remainder note (380). The
+// node supplies the version, statement, type and purpose; there is no rule
+// field, and the proof is not covered.
 func (r *Reveal) BindingInput(chainID uint64, genesis common.Hash) []byte {
-	return r.bindingInput(chainID, genesis, Coin)
-}
-
-// bindingInput returns BindingInput with typ as the coin type.
-func (r *Reveal) bindingInput(chainID uint64, genesis common.Hash, typ [2]byte) []byte {
 	out, fee := r.Out, r.Fee
 	if out == nil {
 		out = new(uint256.Int)
@@ -196,10 +191,10 @@ func (r *Reveal) bindingInput(chainID uint64, genesis common.Hash, typ [2]byte) 
 	}
 	b := make([]byte, 0, BindingSize)
 	b = binary.BigEndian.AppendUint64(b, chainID)
-	b = binary.BigEndian.AppendUint16(b, Version)
+	b = binary.BigEndian.AppendUint16(b, RevealVersion)
 	b = append(b, genesis[:]...)
-	b = append(b, statementCoinReveal, statementVersion)
-	b = append(b, typ[:]...)
+	b = append(b, statementCoinReveal, statementCoinRevealVersion)
+	b = append(b, CoinV2[:]...)
 	b = append(b, purposeReveal)
 	b = append(b, r.Root[:]...)
 	b = append(b, r.Marker[:]...)
@@ -207,9 +202,35 @@ func (r *Reveal) bindingInput(chainID uint64, genesis common.Hash, typ [2]byte) 
 	b = append(b, r.Recipient[:]...)
 	b = append(b, amountWord(out)...)
 	b = append(b, amountWord(fee)...)
-	b = append(b, make([]byte, 32)...) // the empty rule
 	b = append(b, r.Note[:]...)
 	return b
+}
+
+// VerifyInputs returns the inputs the verifier receives for the reveal's
+// proof on the chain of chainID and genesis. Both a block's checks and the
+// pool build them here, so they never disagree.
+func (r *Reveal) VerifyInputs(chainID uint64, genesis common.Hash) *VerifyInputs {
+	out, fee := new(uint256.Int), new(uint256.Int)
+	if r.Out != nil {
+		out.Set(r.Out)
+	}
+	if r.Fee != nil {
+		fee.Set(r.Fee)
+	}
+	return &VerifyInputs{
+		Kind:      ghosttree.Coin,
+		Purpose:   purposeReveal,
+		Binding:   r.BindingDigest(chainID, genesis),
+		ChainID:   chainID,
+		Domain:    genesis,
+		Root:      r.Root,
+		Marker:    r.Marker,
+		Remainder: r.Remainder,
+		Recipient: r.Recipient,
+		Out:       out,
+		Fee:       fee,
+		Note:      r.Note,
+	}
 }
 
 // ChainReader gives the headers of the including block's ancestry by hash
@@ -244,10 +265,11 @@ func (env *BlockEnv) parent(h *types.Header) *types.Header {
 	return p
 }
 
-// windowFeeOf returns the fee of the window that starts at the header of the
-// first block of h's fee window, found by walking the parent links from h; h
-// itself when it starts the window. It also returns that first header.
-func (env *BlockEnv) windowFeeOf(h *types.Header) (Fee, *types.Header, error) {
+// windowFeeOf returns the fee, for the class whose gas is gas, of the window
+// that starts at the header of the first block of h's fee window, found by
+// walking the parent links from h; h itself when it starts the window. It
+// also returns that first header.
+func (env *BlockEnv) windowFeeOf(h *types.Header, gas uint64) (Fee, *types.Header, error) {
 	start := WindowStart(h.Number.Uint64())
 	for h.Number.Uint64() > start {
 		if h = env.parent(h); h == nil {
@@ -257,28 +279,29 @@ func (env *BlockEnv) windowFeeOf(h *types.Header) (Fee, *types.Header, error) {
 	if h.BaseFee == nil {
 		return Fee{}, nil, fmt.Errorf("%w: block %d has no base fee", ErrRevealChainInfo, start)
 	}
-	fee, err := WindowFee(h.BaseFee)
+	fee, err := WindowFeeGas(h.BaseFee, gas)
 	if err != nil {
 		return Fee{}, nil, err
 	}
 	return fee, h, nil
 }
 
-// windowFee returns the window fee that paid equals, the fee of the
-// including block's window, else that of the window before it, split by the
-// cover rule for the including block's base fee. The first window has none
-// before it. The previous window is read only when the current fee does not
-// match, so the walk reads at most the headers of the two windows. Any other
-// fee, or one that fails the cover rule, is ErrRevealFee.
-func (env *BlockEnv) windowFee(paid *uint256.Int) (Fee, error) {
-	fee, err := env.matchFee(paid)
+// windowFee returns the window fee, for the class whose gas is gas, that
+// paid equals: the fee of the including block's window, else that of the
+// window before it, split by the cover rule for the including block's base
+// fee and the same gas. The first window has none before it. The previous
+// window is read only when the current fee does not match, so the walk reads
+// at most the headers of the two windows. Any other fee, or one that fails
+// the cover rule, is ErrRevealFee.
+func (env *BlockEnv) windowFee(paid *uint256.Int, gas uint64) (Fee, error) {
+	fee, err := env.matchFee(paid, gas)
 	if err != nil {
 		return Fee{}, err
 	}
 	if env.Header.BaseFee == nil {
 		return Fee{}, fmt.Errorf("%w: %w: including block has no base fee", ErrRevealFee, ErrRevealChainInfo)
 	}
-	split, err := fee.Cover(env.Header.BaseFee)
+	split, err := fee.CoverGas(env.Header.BaseFee, gas)
 	if err != nil {
 		return Fee{}, fmt.Errorf("%w: %w", ErrRevealFee, err)
 	}
@@ -286,8 +309,8 @@ func (env *BlockEnv) windowFee(paid *uint256.Int) (Fee, error) {
 }
 
 // matchFee returns the window fee that paid equals, by the rule of windowFee.
-func (env *BlockEnv) matchFee(paid *uint256.Int) (Fee, error) {
-	cur, start, err := env.windowFeeOf(env.Header)
+func (env *BlockEnv) matchFee(paid *uint256.Int, gas uint64) (Fee, error) {
+	cur, start, err := env.windowFeeOf(env.Header, gas)
 	if err != nil {
 		return Fee{}, fmt.Errorf("%w: %w", ErrRevealFee, err)
 	}
@@ -301,7 +324,7 @@ func (env *BlockEnv) matchFee(paid *uint256.Int) (Fee, error) {
 	if last == nil {
 		return Fee{}, fmt.Errorf("%w: have %v, want %v: %w: ancestor at height %d", ErrRevealFee, paid, cur.Total, ErrRevealChainInfo, start.Number.Uint64()-1)
 	}
-	prev, _, err := env.windowFeeOf(last)
+	prev, _, err := env.windowFeeOf(last, gas)
 	if err != nil {
 		return Fee{}, fmt.Errorf("%w: have %v, want %v: %w", ErrRevealFee, paid, cur.Total, err)
 	}
@@ -360,12 +383,17 @@ func CheckReveal(st StateDB, env *BlockEnv, verifier Verifier, envelope []byte) 
 	// before it, which must cover G_PRIV times the including block's base
 	// fee. The fee returned is the one that matched, split by the cover rule
 	// into the burn and the tip, never above that window's nominal tip.
-	fee, err := env.windowFee(r.Fee)
+	fee, err := env.windowFee(r.Fee, GasPriv)
 	if err != nil {
 		return nil, Fee{}, err
 	}
-	// Check 6: the node's own binding digest.
-	binding := r.BindingDigest(chainID, env.Genesis)
+	// The recipient check of spec 10, section 4.5: a policy never holds a
+	// balance, so a reveal may not credit one.
+	if ghost.IsRegisteredPolicy(st, r.Recipient) {
+		return nil, Fee{}, fmt.Errorf("%w: %v", ErrRevealRecipient, r.Recipient)
+	}
+	// Check 6: the node's own binding digest, in the verifier's inputs.
+	in := r.VerifyInputs(chainID, env.Genesis)
 	// Check 7: the root.
 	if !env.rootEligible(ghosttree.Coin, r.Root) {
 		return nil, Fee{}, fmt.Errorf("%w: %x", ErrRevealRoot, r.Root)
@@ -383,30 +411,22 @@ func CheckReveal(st StateDB, env *BlockEnv, verifier Verifier, envelope []byte) 
 	if need := new(uint256.Int).Add(r.Out, r.Fee); need.Gt(hidden) {
 		return nil, Fee{}, fmt.Errorf("%w: out plus fee %v, hidden %v", ErrRevealBackstop, need, hidden)
 	}
-	// Check 10: the proof, for the inputs the node computed. Check 11, the
-	// rule, is the empty rule, which the inputs carry as 32 zero bytes.
+	// Check 10: the proof, for the inputs the node computed. Check 11 has
+	// nothing to read: the version 2 statement opens the input rule inside
+	// the proof, and the binding carries no rule.
 	if verifier == nil {
 		verifier = DefaultVerifier()
-	}
-	in := &VerifyInputs{
-		Kind:      ghosttree.Coin,
-		Purpose:   purposeReveal,
-		Binding:   binding,
-		ChainID:   chainID,
-		Domain:    env.Genesis,
-		Root:      r.Root,
-		Marker:    r.Marker,
-		Remainder: r.Remainder,
-		Recipient: r.Recipient,
-		Out:       new(uint256.Int).Set(r.Out),
-		Fee:       new(uint256.Int).Set(r.Fee),
-		Note:      r.Note,
 	}
 	if err := verifier.VerifyReveal(in, common.CopyBytes(r.Proof)); err != nil {
 		return nil, Fee{}, fmt.Errorf("%w: %w", ErrRevealProof, err)
 	}
 	return r, fee, nil
 }
+
+// revealLogSize is the length of the data of a reveal's receipt log: the
+// location (8), the remainder (32), its note (380), the recipient (20) and
+// out (32).
+const revealLogSize = 8 + 32 + NoteSize + 20 + 32
 
 // ApplyReveal checks a reveal and makes its one atomic change: it marks the
 // marker spent, credits out to the recipient as a plain balance credit,
@@ -447,7 +467,7 @@ func ApplyReveal(st StateDB, env *BlockEnv, verifier Verifier, envelope []byte) 
 	st.AddBalance(r.Recipient, r.Out)
 	st.AddBalance(env.Header.Coinbase, fee.Tip)
 
-	data := make([]byte, 0, 8+32+RevealNoteSize+20+32)
+	data := make([]byte, 0, revealLogSize)
 	data = append(data, loc...)
 	data = append(data, r.Remainder[:]...)
 	data = append(data, r.Note[:]...)
@@ -489,13 +509,14 @@ var (
 // bytes then the purpose.
 func PurposeField(purpose byte) common.Hash { return common.Hash{31: purpose} }
 
-// DataReveal is a decoded data reveal payload. It has the coin reveal's
-// layout: the remainder field holds the purpose, the recipient field is the
+// DataReveal is a decoded data reveal payload. It has the field offsets of
+// the coin reveal up to the note, and a note slot of its own of DataNoteSlot
+// bytes: the remainder field holds the purpose, the recipient field is the
 // verifier-or-recipient field, and out must be zero. The remainder's note
 // slot, which a data reveal has no use for, carries the content fingerprint
 // cf in its first 32 bytes; the other DataNoteSlot - 32 bytes, Note, must be
 // zero. Any 32 bytes are a valid cf: the proof binds it. The slot keeps its
-// 156 bytes whatever the length of a commitment's note.
+// 156 bytes whatever the length of a commitment's or a coin reveal's note.
 type DataReveal struct {
 	Version  uint16
 	ChainID  uint64
@@ -675,11 +696,12 @@ func checkDataReveal(st StateDB, env *BlockEnv, verifier Verifier, envelope []by
 		return nil, 0, Fee{}, fmt.Errorf("%w: have %d, chain %v", ErrDataRevealChainID, r.ChainID, env.ChainID)
 	}
 	chainID := env.ChainID.Uint64()
-	// Check 5: the fee, as a coin reveal's: the fee of the including block's
-	// window or of the window before it, which must cover G_PRIV times the
-	// including block's base fee. The reserve the data commit burned pays
-	// it, so it can be no more than DataReserve.
-	fee, err := env.windowFee(r.Fee)
+	// Check 5: the fee, by the coin reveal's rule for the data class's own
+	// gas: the fee of the including block's window or of the window before
+	// it, priced for G_DATA, which must cover G_DATA times the including
+	// block's base fee. The reserve the data commit burned pays it, so it can
+	// be no more than DataReserve.
+	fee, err := env.windowFee(r.Fee, GasData)
 	if err != nil {
 		return nil, 0, Fee{}, fmt.Errorf("%w: %w", ErrDataRevealFee, err)
 	}

@@ -165,7 +165,7 @@ func TestLinkageThreeHopsRealDesign(t *testing.T) {
 				t.Fatalf("%s: the layout here reads %s as %x, the coin rules as %x", h.name, name, got, want)
 			}
 		}
-		if r.Version != ghostpriv.Version || r.ChainID != s.w.chainID {
+		if r.Version != ghostpriv.RevealVersion || r.ChainID != s.w.chainID {
 			t.Fatalf("%s: version %d, chain id %d", h.name, r.Version, r.ChainID)
 		}
 		if !s.w.roots[r.Root] {

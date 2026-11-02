@@ -63,7 +63,7 @@ const (
 var (
 	// ErrProofStatement is returned, without calling the proof verifier, for
 	// a statement it does not verify: anything but a coin reveal, or a data
-	// reveal or revoke.
+	// reveal or revoke. A policy reveal is one of them.
 	ErrProofStatement = errors.New("reveal proof verifier checks only coin reveals and data reveals and revokes")
 
 	// ErrProofRejected is returned for every answer of the proof verifier
@@ -176,8 +176,11 @@ func ghostChainParams(in *VerifyInputs) []byte {
 }
 
 // ghostCoinStatement returns the coin reveal statement: the root, marker and
-// remainder (32 each), the remainder's note (156), the recipient (20), out
-// and fee as 32-byte amount words and the rule (32). A nil amount is zero.
+// remainder (32 each), the remainder's note, the recipient (20), out and fee
+// as 32-byte amount words and the rule (32). A nil amount is zero. The note
+// is the version 2 reveal's 380 bytes, so the statement is longer than the
+// version 1 statement of ghost_proofs.h, and the linked verifier rejects it
+// until the version 2 proof is linked.
 func ghostCoinStatement(in *VerifyInputs) []byte {
 	out, fee := in.Out, in.Fee
 	if out == nil {

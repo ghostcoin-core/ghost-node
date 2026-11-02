@@ -105,7 +105,7 @@ func (w *whitelist) roleValue(r role, v []byte) string {
 			return reasonChainID
 		}
 	case roleVersion:
-		if n, ok := smallInt(v); ok && n == uint64(ghostpriv.Version) {
+		if n, ok := smallInt(v); ok && (n == uint64(ghostpriv.Version) || n == uint64(ghostpriv.RevealVersion)) {
 			return reasonVersion
 		}
 	case roleScheme:

@@ -412,7 +412,7 @@ func buildFixture(t *testing.T) *fixture {
 
 	reveal := func(spend, rest coin, recipient common.Address, out *uint256.Int, fee ghostpriv.Fee) *types.Transaction {
 		r := &ghostpriv.Reveal{
-			Version:   ghostpriv.Version,
+			Version:   ghostpriv.RevealVersion,
 			ChainID:   chainID,
 			Marker:    spend.marker(),
 			Root:      *c.head().CoinTreeRoot,

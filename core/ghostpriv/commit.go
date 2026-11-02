@@ -167,6 +167,18 @@ func ApplyCommit(st StateDB, height uint64, from common.Address, c *Commit) erro
 	if st.GetBalance(from).Lt(c.Value) {
 		return fmt.Errorf("%w: address %v", ErrCommitFunds, from.Hex())
 	}
+	if err := appendCommit(st, height, c); err != nil {
+		return err
+	}
+	st.SubBalance(from, c.Value)
+	return nil
+}
+
+// appendCommit makes the effects of a commit but the burn, commit step 10 of
+// spec 03 without the debit: it appends the commitment to the coin tree with
+// the receipt log, which carries the note and the salt, and adds the value to
+// the total in. On an error nothing is changed.
+func appendCommit(st StateDB, height uint64, c *Commit) error {
 	leaf := c.Commitment()
 	snap := st.Snapshot()
 	res, err := ghosttree.Append(st, ghosttree.Coin, height, leaf)
@@ -182,7 +194,6 @@ func ApplyCommit(st StateDB, height uint64, from common.Address, c *Commit) erro
 		st.RevertToSnapshot(snap)
 		return err
 	}
-	st.SubBalance(from, c.Value)
 
 	data := make([]byte, 0, 8+32+32+NoteSize+SaltSize)
 	data = append(data, loc...)
@@ -303,22 +314,22 @@ func ApplyDataCommit(st StateDB, height uint64, from common.Address, c *DataComm
 var ErrReceiptLog = errors.New("tree account log is not a receipt of the coin or data rules")
 
 var (
-	topicCommit     = ghosttree.K(TagCommitReceipt)
-	topicReveal     = ghosttree.K(TagRevealReceipt)
-	topicDataCommit = ghosttree.K(TagDataCommitReceipt)
-	topicDataReveal = ghosttree.K(TagDataRevealReceipt)
+	topicCommit       = ghosttree.K(TagCommitReceipt)
+	topicReveal       = ghosttree.K(TagRevealReceipt)
+	topicPolicyReveal = ghosttree.K(TagPolicyRevealReceipt)
+	topicDataCommit   = ghosttree.K(TagDataCommitReceipt)
+	topicDataReveal   = ghosttree.K(TagDataRevealReceipt)
 )
 
 // HistoryRecords returns the tree history records of a block from its
 // receipts, in the order the block wrote them: the leaf, tree index,
-// position and note of every commit, reveal remainder (whose 156-byte note
-// is zero-padded on the right to NoteSize) and data commit (with
-// the salt of a salted commit or data commit, whose log carries it after the
-// note), and
-// the marker of every reveal and data reveal as a record of
-// ghosttree.CoinMarkers or ghosttree.DataMarkers. Only the coin and data rules
-// write logs from the tree accounts, which hold no code; a log of a tree
-// account that is not one of their receipt logs is ErrReceiptLog.
+// position and note of every commit, reveal remainder, policy reveal
+// remainder and data commit (with the salt of a salted commit or data
+// commit, whose log carries it after the note), and the marker of every
+// reveal, policy reveal and data reveal as a record of ghosttree.CoinMarkers
+// or ghosttree.DataMarkers. Only the coin and data rules write logs from the
+// tree accounts, which hold no code; a log of a tree account that is not one
+// of their receipt logs is ErrReceiptLog.
 func HistoryRecords(receipts types.Receipts) ([]ghosttree.Record, error) {
 	var (
 		coinAccount = ghosttree.TreeAccount(ghosttree.Coin)
@@ -361,10 +372,11 @@ func HistoryRecords(receipts types.Receipts) ([]ghosttree.Record, error) {
 				out = append(out, leaf(ghosttree.Coin, d, d[72:]))
 			case l.Address == coinAccount && topic == topicCommit && len(l.Topics) == 1 && len(d) == commitLog+SaltSize:
 				out = append(out, salted(ghosttree.Coin, d, d[72:72+NoteSize]))
-			case l.Address == coinAccount && topic == topicReveal && len(l.Topics) == 2 && len(d) == 8+32+RevealNoteSize+20+32:
-				// The version 1 reveal carries a RevealNoteSize note; the
-				// record holds it zero-padded on the right to NoteSize.
-				out = append(out, leaf(ghosttree.Coin, d, d[40:40+RevealNoteSize]))
+			case l.Address == coinAccount && topic == topicReveal && len(l.Topics) == 2 && len(d) == revealLogSize:
+				out = append(out, leaf(ghosttree.Coin, d, d[40:40+NoteSize]))
+				out = append(out, ghosttree.Record{Kind: ghosttree.CoinMarkers, Leaf: l.Topics[1]})
+			case l.Address == coinAccount && topic == topicPolicyReveal && len(l.Topics) == 2 && len(d) == policyRevealLogSize:
+				out = append(out, leaf(ghosttree.Coin, d, d[40:40+NoteSize]))
 				out = append(out, ghosttree.Record{Kind: ghosttree.CoinMarkers, Leaf: l.Topics[1]})
 			case l.Address == dataAccount && topic == topicDataCommit && len(l.Topics) == 1 && len(d) == dataCommitLog:
 				out = append(out, leaf(ghosttree.Data, d, d[40:]))

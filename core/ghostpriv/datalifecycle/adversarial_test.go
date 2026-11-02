@@ -306,8 +306,8 @@ func (c *countingVerifier) VerifyReveal(in *ghostpriv.VerifyInputs, proof []byte
 // TestDataLifecycleCRD5 shows a data commitment mints nothing: its commit
 // burns the reserve and nothing more; a data reveal presented to the coin
 // reveal is refused at the type check with no proof verified, no marker
-// recorded and no balance changed, and refused by every node under the coin
-// type byte, where its data root is no coin root; a data commit with a value
+// recorded and no balance changed, and under the coin type byte it is still
+// no coin reveal, being shorter than one; a data commit with a value
 // other than the reserve is refused at the value check and burns nothing.
 func TestDataLifecycleCRD5(t *testing.T) {
 	s := newScenario(t)
@@ -335,12 +335,14 @@ func TestDataLifecycleCRD5(t *testing.T) {
 		t.Fatal("a marker was recorded")
 	}
 
-	// The data payload under the coin type byte fails the coin checks.
-	coinTx, err := types.NewGhostRevealTx(append([]byte{types.GhostRevealTxType}, env[1:]...))
-	if err != nil {
-		t.Fatal(err)
+	// The data payload under the coin type byte is not a coin reveal: the
+	// version 2 coin reveal is longer, so it neither decodes nor wraps as a
+	// transaction.
+	relabelled := append([]byte{types.GhostRevealTxType}, env[1:]...)
+	requireErr(t, ghostpriv.ApplyReveal(st, n.env(header), counter, relabelled), ghostpriv.ErrRevealLength, "a data payload under the coin type byte")
+	if _, err := types.NewGhostRevealTx(relabelled); err == nil {
+		t.Fatal("a data payload under the coin type byte wrapped as a coin reveal")
 	}
-	s.rejectTx(n, ghostpriv.ErrRevealRoot, nil, coinTx)
 
 	// A data commit with a value other than the reserve is refused and
 	// nothing is burned.
@@ -879,7 +881,7 @@ func TestDataLifecycleCRD18(t *testing.T) {
 	}
 	header := n.nextHeader(n.head(), address("CR-D18 coinbase"))
 	header.BaseFee = new(big.Int).Mul(gwei, big.NewInt(20))
-	fee, err := ghostpriv.WindowFee(header.BaseFee)
+	fee, err := ghostpriv.WindowFeeGas(header.BaseFee, ghostpriv.GasData)
 	if err != nil {
 		t.Fatal(err)
 	}

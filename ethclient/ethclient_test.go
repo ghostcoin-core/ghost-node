@@ -1370,7 +1370,7 @@ func TestCommitAndRevealOverRPCAreMined(t *testing.T) {
 			t.Fatal(err)
 		}
 		r := &ghostpriv.Reveal{
-			Version:   ghostpriv.Version,
+			Version:   ghostpriv.RevealVersion,
 			ChainID:   chainID.Uint64(),
 			Marker:    marker,
 			Root:      *genesis.Header().CoinTreeRoot,

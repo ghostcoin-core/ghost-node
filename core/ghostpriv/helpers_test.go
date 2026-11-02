@@ -241,7 +241,7 @@ func (f *fixture) commitTx(key *mldsa44.PrivateKey, nonce uint64, c coin) *types
 // binding digest on this chain.
 func (f *fixture) newReveal(root, marker common.Hash, remainder coin, recipient common.Address, out, fee *uint256.Int) *ghostpriv.Reveal {
 	r := &ghostpriv.Reveal{
-		Version:   ghostpriv.Version,
+		Version:   ghostpriv.RevealVersion,
 		ChainID:   f.chainID,
 		Marker:    marker,
 		Root:      root,
@@ -278,8 +278,16 @@ func revealTx(t *testing.T, r *ghostpriv.Reveal) *types.Transaction {
 	return tx
 }
 
-// genWindowFee is the fee of a reveal in the block being generated.
+// genWindowFee is the fee of an ordinary reveal in the block being
+// generated.
 func genWindowFee(t *testing.T, b *core.BlockGen) ghostpriv.Fee {
+	t.Helper()
+	return genWindowFeeGas(t, b, ghostpriv.GasPriv)
+}
+
+// genWindowFeeGas is the fee of a reveal of the class whose gas is gas in the
+// block being generated.
+func genWindowFeeGas(t *testing.T, b *core.BlockGen, gas uint64) ghostpriv.Fee {
 	t.Helper()
 	h := b.Number().Uint64()
 	start := ghostpriv.WindowStart(h)
@@ -287,7 +295,7 @@ func genWindowFee(t *testing.T, b *core.BlockGen) ghostpriv.Fee {
 	if start != h {
 		bRef = b.PrevBlock(int(start) - 1).BaseFee()
 	}
-	fee, err := ghostpriv.WindowFee(bRef)
+	fee, err := ghostpriv.WindowFeeGas(bRef, gas)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,20 +344,34 @@ func nextEnv(t *testing.T, chain *core.BlockChain, parent *types.Header, coinbas
 	}, st
 }
 
-// chainWindowFee is the fee of a reveal in the block of env, on the
-// canonical chain.
+// chainWindowFee is the fee of an ordinary reveal in the block of env, on
+// the canonical chain.
 func chainWindowFee(t *testing.T, chain *core.BlockChain, header *types.Header) ghostpriv.Fee {
+	t.Helper()
+	return chainWindowFeeGas(t, chain, header, ghostpriv.GasPriv)
+}
+
+// chainWindowFeeGas is the fee of a reveal of the class whose gas is gas in
+// the block of env, on the canonical chain.
+func chainWindowFeeGas(t *testing.T, chain *core.BlockChain, header *types.Header, gas uint64) ghostpriv.Fee {
 	t.Helper()
 	h := header.Number.Uint64()
 	bRef := header.BaseFee
 	if start := ghostpriv.WindowStart(h); start != h {
 		bRef = chain.GetHeaderByNumber(start).BaseFee
 	}
-	fee, err := ghostpriv.WindowFee(bRef)
+	fee, err := ghostpriv.WindowFeeGas(bRef, gas)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return fee
+}
+
+// chainDataFee is the fee of a data reveal in the block of header, for
+// G_DATA.
+func chainDataFee(t *testing.T, chain *core.BlockChain, header *types.Header) ghostpriv.Fee {
+	t.Helper()
+	return chainWindowFeeGas(t, chain, header, ghostpriv.GasData)
 }
 
 func u256(v *big.Int) *uint256.Int { return uint256.MustFromBig(v) }

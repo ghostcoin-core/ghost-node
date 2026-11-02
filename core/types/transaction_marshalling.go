@@ -173,6 +173,13 @@ func (tx *Transaction) MarshalJSON() ([]byte, error) {
 		payload := hexutil.Bytes(common.CopyBytes(itx.Payload))
 		enc.Input = &payload
 
+	case *GhostPolicyRevealTx:
+		// A policy reveal, like a coin reveal: only its payload and the
+		// chain ID field of the payload.
+		enc.ChainID = (*hexutil.Big)(itx.chainID())
+		payload := hexutil.Bytes(common.CopyBytes(itx.Payload))
+		enc.Input = &payload
+
 	case *GhostAccountTx:
 		// An account transaction carries no V, R, S: its signature is the
 		// scheme, the public key and the signature bytes.
@@ -460,6 +467,16 @@ func (tx *Transaction) UnmarshalJSON(input []byte) error {
 			return errors.New("missing required field 'input' in transaction")
 		}
 		var itx GhostDataRevealTx
+		if err := itx.decode(*dec.Input); err != nil {
+			return err
+		}
+		inner = &itx
+
+	case GhostPolicyRevealTxType:
+		if dec.Input == nil {
+			return errors.New("missing required field 'input' in transaction")
+		}
+		var itx GhostPolicyRevealTx
 		if err := itx.decode(*dec.Input); err != nil {
 			return err
 		}

@@ -91,8 +91,8 @@ func (h *hop) put(seg *segment, name string, off, width int, r role, isInt bool)
 }
 
 // putNote records a note of size bytes and its 32-byte words as sub-fields:
-// a commitment's note is ghostpriv.NoteSize bytes, the version 1 reveal's
-// note slot ghostpriv.RevealNoteSize.
+// a commitment's note and the version 2 reveal's remainder note are each
+// ghostpriv.NoteSize bytes.
 func (h *hop) putNote(seg *segment, name string, off, size int) {
 	h.put(seg, name, off, size, roleNone, false)
 	for w := 0; w < size; w += 32 {
@@ -162,7 +162,7 @@ func (h *hop) decodeReveal(raw []byte) error {
 	h.put(seg, "payload.proof", revProof, ghostpriv.ProofSize, roleNone, false)
 	h.put(seg, "payload.proof[0:32]", revProof, 32, roleNone, false)
 	h.put(seg, "payload.proof[32:]", revProof+32, ghostpriv.ProofSize-32, roleNone, false)
-	h.putNote(seg, "payload.note", revNote, ghostpriv.RevealNoteSize)
+	h.putNote(seg, "payload.note", revNote, ghostpriv.NoteSize)
 	h.segments = append(h.segments, *seg)
 	return nil
 }
@@ -252,7 +252,7 @@ var (
 
 const (
 	commitLogSize = 8 + 32 + 32 + ghostpriv.NoteSize + ghostpriv.SaltSize
-	revealLogSize = 8 + 32 + ghostpriv.RevealNoteSize + 20 + 32
+	revealLogSize = 8 + 32 + ghostpriv.NoteSize + 20 + 32
 )
 
 // decodeLog records the topics and data of log i; the data of a commit or
@@ -280,9 +280,9 @@ func (h *hop) decodeLog(i int, l *types.Log) {
 			h.put(seg, name+".tree", 0, 4, roleNone, true)
 			h.put(seg, name+".position", 4, 4, roleNone, true)
 			h.put(seg, name+".remainder", 8, 32, roleNone, false)
-			h.putNote(seg, name+".note", 40, ghostpriv.RevealNoteSize)
-			h.put(seg, name+".recipient", 40+ghostpriv.RevealNoteSize, 20, roleNone, false)
-			h.put(seg, name+".out", 60+ghostpriv.RevealNoteSize, 32, roleNone, true)
+			h.putNote(seg, name+".note", 40, ghostpriv.NoteSize)
+			h.put(seg, name+".recipient", 40+ghostpriv.NoteSize, 20, roleNone, false)
+			h.put(seg, name+".out", 60+ghostpriv.NoteSize, 32, roleNone, true)
 		}
 	}
 	h.segments = append(h.segments, *seg)

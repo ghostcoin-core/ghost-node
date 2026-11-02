@@ -38,12 +38,16 @@ import (
 	"github.com/holiman/uint256"
 )
 
-// The hash tags of the coin rules.
+// The hash tags of the coin rules. The ordinary reveal binds with the version
+// 2 tag (spec 10, section 4.2); the policy reveal has a binding and a receipt
+// of its own (spec 10, sections 5 and 7.5).
 const (
-	TagCommitment    = "ghost/coin-commitment/v1"
-	TagRevealBinding = "ghost/coin-reveal-binding/v1"
-	TagCommitReceipt = "ghost/commit-receipt/v1"
-	TagRevealReceipt = "ghost/reveal-receipt/v1"
+	TagCommitment          = "ghost/coin-commitment/v1"
+	TagRevealBinding       = "ghost/coin-reveal-binding/v2"
+	TagCommitReceipt       = "ghost/commit-receipt/v1"
+	TagRevealReceipt       = "ghost/reveal-receipt/v1"
+	TagPolicyRevealBinding = "ghost/policy-reveal-binding/v1"
+	TagPolicyRevealReceipt = "ghost/policy-reveal-receipt/v1"
 )
 
 // The hash tags of the data rules, none shared with a coin rule, so that no
@@ -63,12 +67,6 @@ const (
 	// plaintext and a 16-byte tag (spec 10, section 3.2).
 	NoteSize = ghosttree.NoteBytes
 
-	// RevealNoteSize is the length of the remainder's note in the version 1
-	// coin reveal payload, which keeps its 156-byte slot: the proof binds
-	// that slot as it is. The history stores such a remainder note
-	// zero-padded on the right to NoteSize.
-	RevealNoteSize = 156
-
 	// DataNoteSlot is the length of the note slot of the data reveal payload
 	// (spec 10, section 10.5): the content fingerprint cf (32 bytes), then
 	// DataNoteSlot - 32 bytes that must be zero.
@@ -78,9 +76,18 @@ const (
 	// the clear.
 	SaltSize = ghosttree.SaltBytes
 
-	// Version is the only version of the reveal payload and the version of
-	// commit data without a salt.
+	// Version is the version of the data reveal payload, of the chain
+	// parameters the proof verifier takes and of commit data without a salt.
 	Version uint16 = 0x0001
+
+	// RevealVersion is the only version of the ordinary reveal payload, with
+	// its 380-byte remainder note (spec 10, section 4). A version 1 reveal is
+	// not accepted.
+	RevealVersion uint16 = 0x0002
+
+	// PolicyRevealVersion is the only version of the policy reveal payload
+	// (spec 10, section 5.1).
+	PolicyRevealVersion uint16 = 0x0001
 
 	// SaltedCommitVersion is the version of salted commit data, which carries
 	// the salt between F and the 380-byte note. It is the only commit data
@@ -88,8 +95,14 @@ const (
 	// types CoinV2 and DataV2.
 	SaltedCommitVersion uint16 = 0x0003
 
-	// GasPriv is G_PRIV, the gas of every reveal.
+	// GasPriv is G_PRIV, the gas of the ordinary class, the coin reveal.
 	GasPriv = types.GhostRevealGas
+
+	// GasPolicy is G_POLICY, the gas of the policy reveal.
+	GasPolicy = types.GhostPolicyRevealGas
+
+	// GasData is G_DATA, the gas of the data reveal.
+	GasData = types.GhostDataRevealGas
 )
 
 // The types of a commitment, COIN and DATA, at each commitment format
@@ -134,6 +147,7 @@ var (
 // *state.StateDB.
 type StateDB interface {
 	ghosttree.StateDB
+	GetCodeHash(addr common.Address) common.Hash
 	GetBalance(addr common.Address) *uint256.Int
 	AddBalance(addr common.Address, amount *uint256.Int)
 	SubBalance(addr common.Address, amount *uint256.Int)
@@ -205,9 +219,19 @@ func DataCommitmentVersion(version uint16, f common.Hash) common.Hash {
 
 // Slots of the totals account.
 const (
-	SlotTotalIn  = 0 // value that entered the hidden set
-	SlotTotalOut = 1 // value that left it
+	SlotTotalIn     = 0 // value that entered the hidden set
+	SlotTotalOut    = 1 // value that left it
+	SlotTotalEscrow = 2 // value held in open escrow slots (spec 10, section 7.3)
 )
+
+// TotalEscrow returns total_escrow, the value held in escrow slots: the sum
+// of remaining over every slot. It left the hidden set with the policy
+// reveal that opened its slot, is in no balance, and is not public supply:
+// public supply is issuance less burned base fees, the hidden total and
+// total_escrow. An absent account reads as zero.
+func TotalEscrow(st StateDB) *uint256.Int {
+	return new(uint256.Int).SetBytes32(st.GetState(ghost.PrivTotalsAccount, ghosttree.Slot(SlotTotalEscrow)).Bytes())
+}
 
 // Totals returns the total that entered the hidden set and the total that
 // left it. An absent account reads as zero for both.
@@ -246,6 +270,18 @@ func addTotal(st StateDB, slot uint64, v *uint256.Int) error {
 	return nil
 }
 
+// subTotal takes v from a slot of the totals account. A total that would go
+// below zero is ErrTotals, and nothing is written.
+func subTotal(st StateDB, slot uint64, v *uint256.Int) error {
+	key := ghosttree.Slot(slot)
+	cur := new(uint256.Int).SetBytes32(st.GetState(ghost.PrivTotalsAccount, key).Bytes())
+	if v.Gt(cur) {
+		return fmt.Errorf("%w: slot %d below zero", ErrTotals, slot)
+	}
+	st.SetState(ghost.PrivTotalsAccount, key, common.Hash(new(uint256.Int).Sub(cur, v).Bytes32()))
+	return nil
+}
+
 // receiptLocation is the tree index and position of an append, four bytes
 // each.
 func receiptLocation(res ghosttree.AppendResult) ([]byte, error) {
@@ -262,13 +298,16 @@ func receiptLocation(res ghosttree.AppendResult) ([]byte, error) {
 // the window's reference base fee in the window price (spec 07, section 4).
 const FeeSteps = 1
 
-// Fee is the fee of a reveal in one fee window. WindowFee gives the nominal
-// split, Burn the base part and Tip the nominal tip; Cover gives the split of
-// one including block.
+// Fee is the fee of a reveal of one class in one fee window, priced for the
+// class's gas G_class: G_PRIV for the ordinary reveal, G_POLICY for the
+// policy reveal and G_DATA for the data reveal (spec 10, section 10). Each
+// class has its own fee in the same window. WindowFeeGas gives the nominal
+// split, Burn the base part and Tip the nominal tip; CoverGas gives the split
+// of one including block.
 type Fee struct {
 	Price    *uint256.Int // U_FeeSteps, the price per gas
-	BasePart *uint256.Int // G_PRIV times the price
-	Burn     *uint256.Int // credited to nobody: G_PRIV * max(price, base fee)
+	BasePart *uint256.Int // G_class times the price
+	Burn     *uint256.Int // credited to nobody: G_class * max(price, base fee)
 	Tip      *uint256.Int // to the coinbase: the total less the burn
 	Total    *uint256.Int // base part plus nominal tip, the payload's fee field
 }
@@ -277,15 +316,20 @@ type Fee struct {
 // or too large to price.
 var ErrBaseFee = errors.New("reference base fee out of range")
 
-// ErrRevealCover is returned, wrapped in ErrRevealFee, for a reveal whose
-// fee cannot pay G_PRIV times the including block's base fee.
+// ErrRevealCover is returned, wrapped in the fee error of the reveal's type,
+// for a reveal whose fee cannot pay its class's gas times the including
+// block's base fee.
 var ErrRevealCover = errors.New("fee below the cover limit of the base fee")
 
-// Cover applies the cover rule of spec 07, section 5, to the window fee f
-// in a block with base fee beta: burn = G_PRIV * max(price, beta) and tip =
-// total - burn. A negative tip is ErrRevealCover; a missing or unpriceable
-// base fee is ErrBaseFee. The tip is never above the nominal tip.
-func (f Fee) Cover(beta *big.Int) (Fee, error) {
+// Cover is CoverGas for G_PRIV, the ordinary class.
+func (f Fee) Cover(beta *big.Int) (Fee, error) { return f.CoverGas(beta, GasPriv) }
+
+// CoverGas applies the cover rule of spec 07, section 5, to the window fee f
+// of the class whose gas is gas, in a block with base fee beta: burn = gas *
+// max(price, beta) and tip = total - burn. A negative tip is ErrRevealCover;
+// a missing or unpriceable base fee is ErrBaseFee. The tip is never above the
+// nominal tip. f must be the window fee of the same gas.
+func (f Fee) CoverGas(beta *big.Int, gas uint64) (Fee, error) {
 	if beta == nil || beta.Sign() < 0 {
 		return Fee{}, ErrBaseFee
 	}
@@ -296,7 +340,7 @@ func (f Fee) Cover(beta *big.Int) (Fee, error) {
 	if b.Lt(f.Price) {
 		b = f.Price
 	}
-	burn, overflow := new(uint256.Int).MulOverflow(uint256.NewInt(GasPriv), b)
+	burn, overflow := new(uint256.Int).MulOverflow(uint256.NewInt(gas), b)
 	if overflow || burn.Gt(f.Total) {
 		return Fee{}, fmt.Errorf("%w: base fee %v, fee %v", ErrRevealCover, beta, f.Total)
 	}
@@ -306,11 +350,15 @@ func (f Fee) Cover(beta *big.Int) (Fee, error) {
 	return out, nil
 }
 
-// WindowFee returns the fee of every reveal in a window whose first block has
-// the base fee bRef: U0 = bRef, U(j+1) = U(j) + floor(U(j)/8) +
-// floor(U(j)/20000) + 1, price = U(FeeSteps), base part = G_PRIV * price,
-// tip = ceil(base part / 10), fee = base part + tip.
-func WindowFee(bRef *big.Int) (Fee, error) {
+// WindowFee is WindowFeeGas for G_PRIV, the fee of every ordinary reveal in
+// the window.
+func WindowFee(bRef *big.Int) (Fee, error) { return WindowFeeGas(bRef, GasPriv) }
+
+// WindowFeeGas returns the fee of every reveal of the class whose gas is gas
+// in a window whose first block has the base fee bRef: U0 = bRef, U(j+1) =
+// U(j) + floor(U(j)/8) + floor(U(j)/20000) + 1, price = U(FeeSteps), base
+// part = gas * price, tip = ceil(base part / 10), fee = base part + tip.
+func WindowFeeGas(bRef *big.Int, gas uint64) (Fee, error) {
 	if bRef == nil || bRef.Sign() < 0 {
 		return Fee{}, ErrBaseFee
 	}
@@ -332,7 +380,7 @@ func WindowFee(bRef *big.Int) (Fee, error) {
 		}
 		u = next
 	}
-	base, overflow := new(uint256.Int).MulOverflow(uint256.NewInt(GasPriv), u)
+	base, overflow := new(uint256.Int).MulOverflow(uint256.NewInt(gas), u)
 	if overflow {
 		return Fee{}, ErrBaseFee
 	}

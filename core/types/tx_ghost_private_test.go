@@ -39,6 +39,40 @@ func testRevealEnvelope() []byte {
 	return env
 }
 
+func testDataRevealEnvelope() []byte {
+	env := make([]byte, GhostDataRevealEnvelopeSize)
+	env[0] = GhostDataRevealTxType
+	for i := 1; i < 400; i++ {
+		env[i] = byte(i)
+	}
+	env[GhostDataRevealEnvelopeSize-1] = 0xee
+	return env
+}
+
+// TestRevealSizesAndGas pins the ordinary reveal's version 2 payload, with
+// its 380-byte note, and its gas G_PRIV, and the data reveal's own payload,
+// which keeps its 156-byte note slot, and its own gas G_DATA.
+func TestRevealSizesAndGas(t *testing.T) {
+	if GhostRevealPayloadSize != 1_311_290 || GhostRevealEnvelopeSize != 1_311_291 {
+		t.Errorf("coin reveal payload %d, envelope %d", GhostRevealPayloadSize, GhostRevealEnvelopeSize)
+	}
+	if GhostDataRevealPayloadSize != 1_311_066 || GhostDataRevealEnvelopeSize != 1_311_067 {
+		t.Errorf("data reveal payload %d, envelope %d", GhostDataRevealPayloadSize, GhostDataRevealEnvelopeSize)
+	}
+	if GhostRevealGas != 21_111_656 {
+		t.Errorf("G_PRIV %d", GhostRevealGas)
+	}
+	if 16*GhostRevealEnvelopeSize+21_000+110_000 != 21_111_656 {
+		t.Errorf("G_PRIV is not 16 per envelope byte, 21,000 and 110,000")
+	}
+	if GhostDataRevealGas != 21_090_372 {
+		t.Errorf("G_DATA %d", GhostDataRevealGas)
+	}
+	if 16*GhostDataRevealEnvelopeSize+21_000+92_300 != 21_090_372 {
+		t.Errorf("G_DATA is not 16 per envelope byte, 21,000 and 92,300")
+	}
+}
+
 // TestPrivateTxRoundTrip wraps a reveal envelope into a transaction and
 // checks its hash, size and every encoding round trip, that it has no sender
 // under any signer, and that its receipt round-trips as a typed receipt.
@@ -199,16 +233,12 @@ func TestPrivateTxRoundTrip(t *testing.T) {
 	}
 }
 
-// TestGhostDataRevealTxRoundTrip wraps a data reveal envelope, type 0x51 with
-// the coin reveal's size, into a transaction and checks its hash, size and
-// every encoding round trip, that it has no sender, that it is never taken
-// for a coin reveal or the other way round, and its typed receipt.
+// TestGhostDataRevealTxRoundTrip wraps a data reveal envelope, type 0x51 of
+// its own size, into a transaction and checks its hash, size and every
+// encoding round trip, that it has no sender, that it is never taken for a
+// coin reveal or the other way round, and its typed receipt.
 func TestGhostDataRevealTxRoundTrip(t *testing.T) {
-	if GhostDataRevealEnvelopeSize != GhostRevealEnvelopeSize || GhostDataRevealPayloadSize != GhostRevealPayloadSize {
-		t.Fatalf("data reveal envelope of %d bytes, coin reveal %d", GhostDataRevealEnvelopeSize, GhostRevealEnvelopeSize)
-	}
-	env := testRevealEnvelope()
-	env[0] = GhostDataRevealTxType
+	env := testDataRevealEnvelope()
 	tx, err := NewGhostDataRevealTx(env)
 	if err != nil {
 		t.Fatal(err)
@@ -232,14 +262,15 @@ func TestGhostDataRevealTxRoundTrip(t *testing.T) {
 		t.Fatal("a data reveal gave a coin reveal envelope")
 	}
 
-	// The same payload as a coin reveal is another transaction.
-	coinEnv := append([]byte{GhostRevealTxType}, env[1:]...)
+	// A coin reveal is another transaction, of another size: neither
+	// envelope wraps as the other type, whatever its type byte.
+	coinEnv := testRevealEnvelope()
 	coinTx, err := NewGhostRevealTx(coinEnv)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if coinTx.Hash() == tx.Hash() {
-		t.Fatal("a coin reveal and a data reveal of one payload share a hash")
+		t.Fatal("a coin reveal and a data reveal share a hash")
 	}
 	if coinTx.GhostDataRevealEnvelope() != nil {
 		t.Fatal("a coin reveal gave a data reveal envelope")
@@ -247,8 +278,14 @@ func TestGhostDataRevealTxRoundTrip(t *testing.T) {
 	if _, err := NewGhostDataRevealTx(coinEnv); err == nil {
 		t.Fatal("a coin reveal envelope wrapped as a data reveal")
 	}
+	if _, err := NewGhostDataRevealTx(append([]byte{GhostDataRevealTxType}, coinEnv[1:]...)); err == nil {
+		t.Fatal("a coin-sized envelope wrapped as a data reveal")
+	}
 	if _, err := NewGhostRevealTx(env); err == nil {
 		t.Fatal("a data reveal envelope wrapped as a coin reveal")
+	}
+	if _, err := NewGhostRevealTx(append([]byte{GhostRevealTxType}, env[1:]...)); err == nil {
+		t.Fatal("a data-sized envelope wrapped as a coin reveal")
 	}
 
 	// Binary.

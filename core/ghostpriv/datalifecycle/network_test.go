@@ -212,12 +212,13 @@ func (n *node) nextHeader(parent *types.Header, coinbase common.Address) *types.
 	}
 }
 
-// applyReveal is the miner's side of a coin or data reveal: G_PRIV gas from
-// the pool, the checks and change of the transaction's own type with the
-// active verifier, and the receipt. Importing nodes run their own block
-// processing over it.
+// applyReveal is the miner's side of a coin or data reveal: the gas of the
+// transaction's class from the pool, G_PRIV or G_DATA, the checks and change
+// of the transaction's own type with the active verifier, and the receipt.
+// Importing nodes run their own block processing over it.
 func (n *node) applyReveal(gp *core.GasPool, st *state.StateDB, header *types.Header, tx *types.Transaction) (*types.Receipt, error) {
-	if err := gp.SubGas(types.GhostRevealGas); err != nil {
+	gas := tx.Gas()
+	if err := gp.SubGas(gas); err != nil {
 		return nil, err
 	}
 	var err error
@@ -231,13 +232,13 @@ func (n *node) applyReveal(gp *core.GasPool, st *state.StateDB, header *types.He
 		return nil, err
 	}
 	st.Finalise(true)
-	header.GasUsed += types.GhostRevealGas
+	header.GasUsed += gas
 	receipt := &types.Receipt{
 		Type:              tx.Type(),
 		Status:            types.ReceiptStatusSuccessful,
 		CumulativeGasUsed: header.GasUsed,
 		TxHash:            tx.Hash(),
-		GasUsed:           types.GhostRevealGas,
+		GasUsed:           gas,
 		EffectiveGasPrice: new(big.Int),
 		Logs:              st.GetLogs(tx.Hash(), header.Number.Uint64(), common.Hash{}),
 	}
@@ -255,9 +256,9 @@ func (n *node) env(header *types.Header) *ghostpriv.BlockEnv {
 	}
 }
 
-// revealFee is the reveal fee of the block with header on this node, split
-// by the cover rule for its base fee: the fee of its window, whose first
-// block is header itself or an ancestor on the node's chain.
+// revealFee is the data reveal fee, for G_DATA, of the block with header on
+// this node, split by the cover rule for its base fee: the fee of its window,
+// whose first block is header itself or an ancestor on the node's chain.
 func (n *node) revealFee(header *types.Header) ghostpriv.Fee {
 	n.t.Helper()
 	bRef := header.BaseFee
@@ -270,11 +271,11 @@ func (n *node) revealFee(header *types.Header) ghostpriv.Fee {
 		}
 		bRef = h.BaseFee
 	}
-	fee, err := ghostpriv.WindowFee(bRef)
+	fee, err := ghostpriv.WindowFeeGas(bRef, ghostpriv.GasData)
 	if err != nil {
 		n.t.Fatal(err)
 	}
-	if fee, err = fee.Cover(header.BaseFee); err != nil {
+	if fee, err = fee.CoverGas(header.BaseFee, ghostpriv.GasData); err != nil {
 		n.t.Fatal(err)
 	}
 	return fee

@@ -109,7 +109,7 @@ func newRealData(t *testing.T) *realData {
 	if root := f.genesis.Header().DataMarkerRoot; root == nil || *root != ghosttree.EmptyMarkerSetRoot {
 		t.Fatalf("genesis data marker set is not empty; %s", realDataRegenerate)
 	}
-	fee, err := ghostpriv.WindowFee(f.genesis.BaseFee())
+	fee, err := ghostpriv.WindowFeeGas(f.genesis.BaseFee(), ghostpriv.GasData)
 	if err != nil {
 		t.Fatal(err)
 	}
