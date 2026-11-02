@@ -227,6 +227,14 @@ func (evm *EVM) Call(caller ContractRef, addr common.Address, input []byte, gas 
 	if ghost.IsCommitEntry(addr) {
 		return nil, 0, ErrCommitEntryCall
 	}
+	if addr == ghost.PolicyFactoryAddress {
+		return evm.callPolicyFactory(caller, input, gas, value)
+	}
+	// A policy never holds a balance: a call with value to one fails as a
+	// call without the balance would, and nothing moves.
+	if !value.IsZero() && ghost.IsRegisteredPolicy(evm.StateDB, addr) {
+		return nil, gas, ErrPolicyValue
+	}
 	// Fail if we're trying to transfer more than the available balance
 	if !value.IsZero() && !evm.Context.CanTransfer(evm.StateDB, caller.Address(), value) {
 		return nil, gas, ErrInsufficientBalance
@@ -283,6 +291,7 @@ func (evm *EVM) Call(caller ContractRef, addr common.Address, input []byte, gas 
 			// The depth-check is already done, and precompiles handled above
 			contract := NewContract(caller, AccountRef(addrCopy), value, gas)
 			contract.SetCallCode(&addrCopy, evm.StateDB.GetCodeHash(addrCopy), code)
+			contract.frozen = ghost.IsRegisteredPolicy(evm.StateDB, addrCopy)
 			ret, err = run(evm, contract, input, false)
 			gas = contract.Gas
 		}
@@ -317,6 +326,9 @@ func (evm *EVM) CallCode(caller ContractRef, addr common.Address, input []byte, 
 	if ghost.IsCommitEntry(addr) {
 		return nil, 0, ErrCommitEntryCall
 	}
+	if addr == ghost.PolicyFactoryAddress {
+		return nil, 0, ErrPolicyFactoryCall
+	}
 	// Fail if we're trying to transfer more than the available balance
 	// Note although it's noop to transfer X ether to caller itself. But
 	// if caller doesn't have enough balance, it would be an error to allow
@@ -343,6 +355,7 @@ func (evm *EVM) CallCode(caller ContractRef, addr common.Address, input []byte, 
 		// The contract is a scoped environment for this execution context only.
 		contract := NewContract(caller, AccountRef(caller.Address()), value, gas)
 		contract.SetCallCode(&addrCopy, evm.StateDB.GetCodeHash(addrCopy), evm.StateDB.GetCode(addrCopy))
+		contract.frozen = callerFrozen(caller)
 		ret, err = run(evm, contract, input, false)
 		gas = contract.Gas
 	}
@@ -368,6 +381,9 @@ func (evm *EVM) DelegateCall(caller ContractRef, addr common.Address, input []by
 	if ghost.IsCommitEntry(addr) {
 		return nil, 0, ErrCommitEntryCall
 	}
+	if addr == ghost.PolicyFactoryAddress {
+		return nil, 0, ErrPolicyFactoryCall
+	}
 	var snapshot = evm.StateDB.Snapshot()
 
 	// Invoke tracer hooks that signal entering/exiting a call frame
@@ -390,6 +406,10 @@ func (evm *EVM) DelegateCall(caller ContractRef, addr common.Address, input []by
 		// Initialise a new contract and make initialise the delegate values
 		contract := NewContract(caller, AccountRef(caller.Address()), nil, gas).AsDelegate()
 		contract.SetCallCode(&addrCopy, evm.StateDB.GetCodeHash(addrCopy), evm.StateDB.GetCode(addrCopy))
+		// The code runs in the caller's context, so it is frozen only if the
+		// caller is: policy code reached by DELEGATECALL from a contract
+		// that is not frozen runs without the frozen context's natives.
+		contract.frozen = callerFrozen(caller)
 		ret, err = run(evm, contract, input, false)
 		gas = contract.Gas
 	}
@@ -413,6 +433,9 @@ func (evm *EVM) StaticCall(caller ContractRef, addr common.Address, input []byte
 	}
 	if ghost.IsCommitEntry(addr) {
 		return nil, 0, ErrCommitEntryCall
+	}
+	if addr == ghost.PolicyFactoryAddress {
+		return nil, 0, ErrPolicyFactoryCall
 	}
 	// We take a snapshot here. This is a bit counter-intuitive, and could probably be skipped.
 	// However, even a staticcall is considered a 'touch'. On mainnet, static calls were introduced
@@ -446,6 +469,7 @@ func (evm *EVM) StaticCall(caller ContractRef, addr common.Address, input []byte
 		// The contract is a scoped environment for this execution context only.
 		contract := NewContract(caller, AccountRef(addrCopy), new(uint256.Int), gas)
 		contract.SetCallCode(&addrCopy, evm.StateDB.GetCodeHash(addrCopy), evm.StateDB.GetCode(addrCopy))
+		contract.frozen = len(contract.Code) != 0 && ghost.IsRegisteredPolicy(evm.StateDB, addrCopy)
 		// When an error was returned by the EVM or when setting the creation code
 		// above we revert to the snapshot and consume any gas remaining. Additionally
 		// when we're in Homestead this also counts for code storage gas errors.

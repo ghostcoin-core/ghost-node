@@ -33,6 +33,11 @@ import (
 	"github.com/holiman/uint256"
 )
 
+// ErrPolicyNoBalance is returned for a transaction with a non-zero value to a
+// registered frozen policy, which never holds a balance. The transaction is
+// invalid, like one the sender cannot pay for.
+var ErrPolicyNoBalance = errors.New("value sent to a frozen policy")
+
 // ExecutionResult includes all output after executing given evm
 // message no matter the execution itself is successful or not.
 type ExecutionResult struct {
@@ -425,6 +430,11 @@ func (st *StateTransition) preCheck() error {
 				}
 			}
 		}
+	}
+	// A frozen policy never holds a balance: a transaction that sends it
+	// value is invalid. Value zero calls the policy as any contract.
+	if msg.To != nil && msg.Value != nil && msg.Value.Sign() != 0 && ghost.IsRegisteredPolicy(st.state, *msg.To) {
+		return fmt.Errorf("%w: address %v, recipient %v", ErrPolicyNoBalance, msg.From.Hex(), msg.To.Hex())
 	}
 	if msg.To != nil && ghost.IsCommitEntry(*msg.To) {
 		if err := st.checkCommit(); err != nil {

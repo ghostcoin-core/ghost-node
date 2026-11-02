@@ -58,6 +58,11 @@ type Contract struct {
 
 	Gas   uint64
 	value *uint256.Int
+
+	// frozen is set when the frame runs in a frozen context: its address
+	// is a registered policy, or it is a policy's constructor. It is read
+	// from the registry once, when the frame is set up.
+	frozen bool
 }
 
 // NewContract returns a new contract environment for the execution of EVM.
