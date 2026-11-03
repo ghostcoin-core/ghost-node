@@ -383,7 +383,9 @@ func TestFrozenPolicyCallTargets(t *testing.T) {
 		{"ripemd160", at(0x03), true, true},
 		{"identity", at(0x04), true, true},
 		{"signature verify", at(0x51), true, false},
-		{"0x60", at(0x60), true, true},
+		// The escrow natives run; an empty input names no function and
+		// fails revert-style.
+		{"0x60", at(0x60), true, false},
 		{"0x61", at(0x61), true, true},
 		{"older policy", older, true, true},
 		{"ecrecover", at(0x01), false, false},

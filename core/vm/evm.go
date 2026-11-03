@@ -149,6 +149,10 @@ type EVM struct {
 	// callErrorTemp holds any errors caused during the execution of system opcodes (0xf0)
 	// NOTE: it's being used only for tracers
 	CallErrorTemp error
+
+	// action is the policy action whose policy call runs, nil outside one;
+	// actionMarker and actionSettle at 0x60 read it (escrow_natives.go).
+	action *ActionContext
 }
 
 // NewEVM returns a new EVM. The returned EVM is not thread safe and should
@@ -227,8 +231,14 @@ func (evm *EVM) Call(caller ContractRef, addr common.Address, input []byte, gas 
 	if ghost.IsCommitEntry(addr) {
 		return nil, 0, ErrCommitEntryCall
 	}
+	if ghost.IsEscrowNativeAccount(addr) {
+		return nil, 0, ErrEscrowAccountCall
+	}
 	if addr == ghost.PolicyFactoryAddress {
 		return evm.callPolicyFactory(caller, input, gas, value)
+	}
+	if addr == ghost.EscrowNativeAddress {
+		return evm.callEscrowNative(CALL, caller, input, gas, value)
 	}
 	// A policy never holds a balance: a call with value to one fails as a
 	// call without the balance would, and nothing moves.
@@ -326,8 +336,14 @@ func (evm *EVM) CallCode(caller ContractRef, addr common.Address, input []byte, 
 	if ghost.IsCommitEntry(addr) {
 		return nil, 0, ErrCommitEntryCall
 	}
+	if ghost.IsEscrowNativeAccount(addr) {
+		return nil, 0, ErrEscrowAccountCall
+	}
 	if addr == ghost.PolicyFactoryAddress {
 		return nil, 0, ErrPolicyFactoryCall
+	}
+	if addr == ghost.EscrowNativeAddress {
+		return evm.callEscrowNative(CALLCODE, caller, input, gas, value)
 	}
 	// Fail if we're trying to transfer more than the available balance
 	// Note although it's noop to transfer X ether to caller itself. But
@@ -381,8 +397,14 @@ func (evm *EVM) DelegateCall(caller ContractRef, addr common.Address, input []by
 	if ghost.IsCommitEntry(addr) {
 		return nil, 0, ErrCommitEntryCall
 	}
+	if ghost.IsEscrowNativeAccount(addr) {
+		return nil, 0, ErrEscrowAccountCall
+	}
 	if addr == ghost.PolicyFactoryAddress {
 		return nil, 0, ErrPolicyFactoryCall
+	}
+	if addr == ghost.EscrowNativeAddress {
+		return evm.callEscrowNative(DELEGATECALL, caller, input, gas, nil)
 	}
 	var snapshot = evm.StateDB.Snapshot()
 
@@ -434,8 +456,14 @@ func (evm *EVM) StaticCall(caller ContractRef, addr common.Address, input []byte
 	if ghost.IsCommitEntry(addr) {
 		return nil, 0, ErrCommitEntryCall
 	}
+	if ghost.IsEscrowNativeAccount(addr) {
+		return nil, 0, ErrEscrowAccountCall
+	}
 	if addr == ghost.PolicyFactoryAddress {
 		return nil, 0, ErrPolicyFactoryCall
+	}
+	if addr == ghost.EscrowNativeAddress {
+		return evm.callEscrowNative(STATICCALL, caller, input, gas, nil)
 	}
 	// We take a snapshot here. This is a bit counter-intuitive, and could probably be skipped.
 	// However, even a staticcall is considered a 'touch'. On mainnet, static calls were introduced

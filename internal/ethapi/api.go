@@ -1630,6 +1630,10 @@ func newRPCTransactionFrom(tx *types.Transaction, blockHash common.Hash, blockNu
 		result.Input = hexutil.Bytes(tx.GhostPolicyRevealEnvelope()[1:])
 		result.ChainID = (*hexutil.Big)(tx.ChainId())
 
+	case types.GhostPolicyActionTxType:
+		result.Input = hexutil.Bytes(tx.GhostPolicyActionEnvelope()[1:])
+		result.ChainID = (*hexutil.Big)(tx.ChainId())
+
 	case types.GhostAccountTxType:
 		scheme, publicKey, _, _ := tx.GhostAccountAuth()
 		id := types.GhostScheme(scheme)

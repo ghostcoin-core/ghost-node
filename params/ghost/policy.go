@@ -33,8 +33,9 @@ var (
 
 	// EscrowNativeAddress and StatementCheckerAddress are the natives a
 	// frozen context may call besides the hash precompiles, the
-	// signature-verify precompile and older policies. They are reserved
-	// here; the natives themselves come with later changes.
+	// signature-verify precompile and older policies. The escrow natives at
+	// 0x60 are in core/vm/escrow_natives.go; the statement checker comes
+	// with a later change.
 	EscrowNativeAddress     = common.BytesToAddress([]byte{0x60})
 	StatementCheckerAddress = common.BytesToAddress([]byte{0x61})
 
@@ -51,7 +52,22 @@ var (
 	// slot logs. Like the tree accounts, it holds no code and no balance and
 	// gets nonce 1 when it is first written.
 	EscrowAccount = common.HexToAddress("0x67686f7374000000000000000000000000000008")
+
+	// ActionCallerAddress is ACTION_CALLER, the account a policy action
+	// (type 0x54) calls its policy from, and the ORIGIN of that call (spec
+	// 10, section 8). It holds no code, no balance and no storage, and signs
+	// nothing: no transaction is ever sent from it.
+	ActionCallerAddress = common.HexToAddress("0x67686f737400000000000000000000000000000a")
 )
+
+// IsEscrowNativeAccount reports whether addr is one of the three native
+// accounts of the escrow (spec 10, section 7.1): ESCROW_ACCOUNT, the
+// POLICY_REGISTRY account and ACTION_CALLER. Like the commit entry
+// addresses, no call from inside the EVM may reach them; their storage is
+// written only by the node's own rules.
+func IsEscrowNativeAccount(addr common.Address) bool {
+	return addr == EscrowAccount || addr == PolicyRegistryAccount || addr == ActionCallerAddress
+}
 
 // The hash tags of the policy address and of the registry keys.
 const (

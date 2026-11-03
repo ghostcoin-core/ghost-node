@@ -50,6 +50,13 @@ var ErrStatementUnsupported = errors.New("linked proof verifier does not verify 
 // RevealNoteSize note in its first RevealNoteSize bytes with the rest zero,
 // which the proof binds as it is. The policy fields, from Policy to Instr,
 // are set for a policy reveal only; a policy reveal's Recipient is zero.
+//
+// A policy action is Kind ghosttree.Coin with PurposeAction: its proof shows
+// knowledge of the action key behind the slot's ActionTag and ActionSalt and
+// binds the action. Marker is the slot's marker, Policy to Instr are the
+// slot's, and the action fields, from ActionNonce to CalldataHash, are set;
+// Root, Remainder, Recipient, Rule, Note and Cf are zero and Out and Fee are
+// zero amounts. The action fields are zero for every other statement.
 type VerifyInputs struct {
 	Kind      ghosttree.Kind
 	Purpose   byte
@@ -73,6 +80,12 @@ type VerifyInputs struct {
 	ActionTag      common.Hash
 	ActionSalt     common.Hash
 	Instr          common.Hash
+
+	ActionNonce       uint64       // the slot's action nonce the action spends
+	ExpectedRemaining *uint256.Int // the slot's remaining before the action
+	Debit             *uint256.Int // the exact amount the action takes
+	Expiry            uint64       // the last block height the action is valid in
+	CalldataHash      common.Hash  // ActionCalldataHash of the policy call's calldata
 }
 
 // HoldInputs are the public inputs of a proof of holding of a data

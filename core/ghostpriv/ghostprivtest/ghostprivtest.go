@@ -38,6 +38,12 @@
 // are the real proof's job. Ordinary reveals of each version, policy and data
 // reveals have binding digests of their own, with their own tags, so the stub
 // proof of one never verifies another, nor a reveal's a revoke.
+//
+// A policy action's stub proof is the same over the action's binding digest,
+// in its own, shorter proof field of ghostpriv.ActionProofSize bytes
+// (ActionProof): the inputs are Kind ghosttree.Coin with purpose
+// ghostpriv.PurposeAction. A proof field of the reveal size never verifies
+// an action, nor an action's a reveal.
 package ghostprivtest
 
 import (
@@ -64,13 +70,31 @@ func Proof(binding common.Hash) []byte {
 	return proof
 }
 
+// ActionProof returns the stub proof of a policy action's binding digest:
+// the whole proof field of an action, ghostpriv.ActionProofSize bytes.
+func ActionProof(binding common.Hash) []byte {
+	proof := make([]byte, ghostpriv.ActionProofSize)
+	tag := ghosttree.K(TagTestProof, binding[:])
+	copy(proof, tag[:])
+	return proof
+}
+
 // Verifier is the stub verifier: it accepts exactly the stub proof of the
-// binding digest the node computed, for a coin, policy or data reveal.
+// binding digest the node computed, for a coin, policy or data reveal and
+// for a policy action.
 type Verifier struct{}
 
 // VerifyReveal implements ghostpriv.Verifier.
 func (Verifier) VerifyReveal(in *ghostpriv.VerifyInputs, proof []byte) error {
-	if in == nil || len(proof) != ghostpriv.ProofSize {
+	if in == nil {
+		return ErrStubProof
+	}
+	// An action's proof field has its own length, and only an action's.
+	size := ghostpriv.ProofSize
+	if in.Kind == ghosttree.Coin && in.Purpose == ghostpriv.PurposeAction {
+		size = ghostpriv.ActionProofSize
+	}
+	if len(proof) != size {
 		return ErrStubProof
 	}
 	if in.Kind != ghosttree.Coin && in.Kind != ghosttree.Data {

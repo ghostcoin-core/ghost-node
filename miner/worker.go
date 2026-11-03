@@ -957,9 +957,12 @@ func (w *worker) commitTransaction(env *environment, tx *types.Transaction) ([]*
 		receipt *types.Receipt
 		err     error
 	)
-	if tx.IsGhostReveal() {
+	switch {
+	case tx.Type() == types.GhostPolicyActionTxType:
+		receipt, err = w.applyPolicyAction(env, tx)
+	case tx.IsGhostReveal():
 		receipt, err = w.applyReveal(env, tx)
-	} else {
+	default:
 		receipt, err = w.applyTransaction(env, tx)
 	}
 	if err != nil {
@@ -1006,6 +1009,25 @@ func (w *worker) applyTransaction(env *environment, tx *types.Transaction) (*typ
 		env.gasPool.SetGas(gp)
 	}
 	return receipt, err
+}
+
+// applyPolicyAction runs a policy action (type 0x54) as block processing
+// does, through core.ApplyPolicyAction: G_ACTION from the block gas pool,
+// checks 1 to 10 with the active verifier against the sealing block's own
+// ancestry, the debit, burn and tip, and the policy call. If anything fails,
+// state and gas pool are reverted.
+func (w *worker) applyPolicyAction(env *environment, tx *types.Transaction) (*types.Receipt, error) {
+	var (
+		snap = env.state.Snapshot()
+		gp   = env.gasPool.Gas()
+	)
+	receipt, err := core.ApplyPolicyAction(w.chainConfig, w.chain, env.gasPool, env.state, env.header, w.chain.Genesis().Hash(), common.Hash{}, tx, &env.header.GasUsed, *w.chain.GetVMConfig())
+	if err != nil {
+		env.state.RevertToSnapshot(snap)
+		env.gasPool.SetGas(gp)
+		return nil, err
+	}
+	return receipt, nil
 }
 
 // applyReveal runs a reveal, the native transaction without an account, as
@@ -1075,10 +1097,11 @@ func (w *worker) applyReveal(env *environment, tx *types.Transaction) (*types.Re
 }
 
 // commitReveals fills the sealing block with reveals, in the order given,
-// while the gas pool holds the gas of the smallest class, G_DATA. A reveal
-// whose own class's gas the pool no longer holds is passed over for those
-// after it; a reveal that fails its checks is left out, and the pool drops
-// it when it rechecks on the next head.
+// while the gas pool holds the gas of the smallest native class, G_ACTION of
+// the policy action. A reveal whose own class's gas the pool no longer holds
+// is passed over for those after it; a reveal that fails its checks is left
+// out, and the pool drops it when it rechecks on the next head. A policy
+// action given here runs through core.ApplyPolicyAction.
 func (w *worker) commitReveals(env *environment, reveals []*types.Transaction, interrupt *atomic.Int32) error {
 	if env.gasPool == nil {
 		env.gasPool = new(core.GasPool).AddGas(env.header.GasLimit)
@@ -1089,8 +1112,8 @@ func (w *worker) commitReveals(env *environment, reveals []*types.Transaction, i
 				return signalToErr(signal)
 			}
 		}
-		if env.gasPool.Gas() < types.GhostDataRevealGas {
-			log.Trace("Not enough gas left for a reveal", "left", env.gasPool.Gas(), "needed", types.GhostDataRevealGas)
+		if env.gasPool.Gas() < types.GhostPolicyActionGas {
+			log.Trace("Not enough gas left for a reveal", "left", env.gasPool.Gas(), "needed", types.GhostPolicyActionGas)
 			break
 		}
 		if !tx.IsGhostReveal() {
