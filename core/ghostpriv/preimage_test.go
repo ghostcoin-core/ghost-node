@@ -229,4 +229,6 @@ func TestPreimageBindingSeparatedFromAction(t *testing.T) {
 // verifierFunc is a ghostpriv.Verifier that is not a PreimageVerifier.
 type verifierFunc func(*ghostpriv.VerifyInputs, []byte) error
 
-func (f verifierFunc) VerifyReveal(in *ghostpriv.VerifyInputs, proof []byte) error { return f(in, proof) }
+func (f verifierFunc) VerifyReveal(in *ghostpriv.VerifyInputs, proof []byte) error {
+	return f(in, proof)
+}
