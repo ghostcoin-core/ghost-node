@@ -118,10 +118,18 @@ func factoryInput(salt common.Hash, initCode []byte) []byte {
 	return append(salt.Bytes(), initCode...)
 }
 
-// frozenTracer records the faults and the frames the interpreter reports.
+// frozenTracer records the faults and the frames the interpreter reports,
+// and the gas each entered frame got and used.
 type frozenTracer struct {
 	faults []tracedFault
 	frames []tracedFrame
+	open   []uint64
+	exits  []tracedExit
+}
+
+type tracedExit struct {
+	gas, used uint64
+	err       error
 }
 
 type tracedFault struct {
@@ -139,9 +147,29 @@ func (f *frozenTracer) CaptureTxEnd(uint64)   {}
 func (f *frozenTracer) CaptureStart(*EVM, common.Address, common.Address, bool, []byte, uint64, *big.Int) {
 }
 func (f *frozenTracer) CaptureEnd([]byte, uint64, error) {}
-func (f *frozenTracer) CaptureEnter(OpCode, common.Address, common.Address, []byte, uint64, *big.Int) {
+func (f *frozenTracer) CaptureEnter(_ OpCode, _ common.Address, _ common.Address, _ []byte, gas uint64, _ *big.Int) {
+	f.open = append(f.open, gas)
 }
-func (f *frozenTracer) CaptureExit([]byte, uint64, error) {}
+
+func (f *frozenTracer) CaptureExit(_ []byte, used uint64, err error) {
+	var gas uint64
+	if n := len(f.open); n > 0 {
+		gas, f.open = f.open[n-1], f.open[:n-1]
+	}
+	f.exits = append(f.exits, tracedExit{gas, used, err})
+}
+
+// frozenHaltUsedAllGas reports whether the entered frame that halted on op
+// as a frozen opcode used all the gas it got.
+func (f *frozenTracer) frozenHaltUsedAllGas(op OpCode) bool {
+	for _, x := range f.exits {
+		var fe *ErrFrozenOpcode
+		if errors.As(x.err, &fe) && fe.Opcode() == op {
+			return x.gas > 0 && x.used == x.gas
+		}
+	}
+	return false
+}
 
 func (f *frozenTracer) CaptureState(pc uint64, op OpCode, gas, cost uint64, scope *ScopeContext, rData []byte, depth int, err error) {
 	if err != nil {
@@ -184,6 +212,13 @@ func (f *frozenTracer) hasFault(target error) bool {
 type policyEnv struct {
 	t     *testing.T
 	state *state.StateDB
+	block func(*BlockContext) // when set, changes the block context of each EVM
+	tx    *TxContext          // when set, the transaction context of each EVM
+}
+
+// testBlockHash is the hash the tests' block contexts give for block n.
+func testBlockHash(n uint64) common.Hash {
+	return common.BigToHash(new(big.Int).SetUint64(0xb10c_0000 + n))
 }
 
 func newPolicyEnv(t *testing.T) *policyEnv {
@@ -219,6 +254,7 @@ func (e *policyEnv) evm(number uint64, tracer EVMLogger) preparedEVM {
 			db.SubBalance(from, amount)
 			db.AddBalance(to, amount)
 		},
+		GetHash:     testBlockHash,
 		BlockNumber: new(big.Int).SetUint64(number),
 		Time:        ghost.InternalNetTimestamp + number,
 		Difficulty:  big.NewInt(1),
@@ -226,11 +262,18 @@ func (e *policyEnv) evm(number uint64, tracer EVMLogger) preparedEVM {
 		BaseFee:     new(big.Int),
 		BlobBaseFee: new(big.Int),
 	}
+	if e.block != nil {
+		e.block(&ctx)
+	}
+	txCtx := TxContext{GasPrice: new(big.Int)}
+	if e.tx != nil {
+		txCtx = *e.tx
+	}
 	cfg := Config{}
 	if tracer != nil {
 		cfg.Tracer = tracer
 	}
-	evm := NewEVM(ctx, TxContext{GasPrice: new(big.Int)}, e.state, ghost.InternalNetGenesis().Config, cfg)
+	evm := NewEVM(ctx, txCtx, e.state, ghost.InternalNetGenesis().Config, cfg)
 	return preparedEVM{EVM: evm, state: e.state}
 }
 
@@ -275,21 +318,145 @@ func (e *policyEnv) slot(addr common.Address, i int64) *big.Int {
 	return e.state.GetState(addr, common.BigToHash(big.NewInt(i))).Big()
 }
 
+// valuesCode runs each snippet, which pushes one word, and returns the
+// words in order. As init code it stores the words as the policy's code.
+func valuesCode(snippets ...[]byte) []byte {
+	var code []byte
+	for i, s := range snippets {
+		off := i * 32
+		code = cat(code, s, []byte{byte(PUSH2), byte(off >> 8), byte(off), byte(MSTORE)})
+	}
+	n := len(snippets) * 32
+	return cat(code, []byte{byte(PUSH2), byte(n >> 8), byte(n), byte(PUSH1), 0, byte(RETURN)})
+}
+
+// ops makes one snippet of each opcode.
+func ops(list ...OpCode) [][]byte {
+	out := make([][]byte, len(list))
+	for i, op := range list {
+		out[i] = []byte{byte(op)}
+	}
+	return out
+}
+
+// words splits b into 32-byte words.
+func words(b []byte) []*big.Int {
+	var out []*big.Int
+	for len(b) >= 32 {
+		out = append(out, new(big.Int).SetBytes(b[:32]))
+		b = b[32:]
+	}
+	return out
+}
+
+func addrBig(a common.Address) *big.Int { return new(big.Int).SetBytes(a.Bytes()) }
+
+// The gas the relays of a depth-3 run pass on.
+const (
+	relayTopGas    = 5_000_000
+	relayMiddleGas = 3_000_000
+)
+
+// depthRelayCode calls the address in its first calldata word with op (CALL
+// with no value, or STATICCALL), the rest of its calldata as input and gas
+// gas, and returns the success flag as a word followed by the call's return
+// data. It runs as a policy too.
+func depthRelayCode(op OpCode, gas uint32) []byte {
+	code := []byte{
+		byte(PUSH1), 32, byte(CALLDATASIZE), byte(SUB),
+		byte(PUSH1), 32, byte(PUSH1), 0, byte(CALLDATACOPY),
+		byte(PUSH1), 0, byte(PUSH1), 0,
+		byte(PUSH1), 32, byte(CALLDATASIZE), byte(SUB),
+		byte(PUSH1), 0,
+	}
+	if op == CALL {
+		code = append(code, byte(PUSH1), 0)
+	}
+	code = append(code, byte(PUSH1), 0, byte(CALLDATALOAD))
+	code = append(code, byte(PUSH4), byte(gas>>24), byte(gas>>16), byte(gas>>8), byte(gas), byte(op))
+	return cat(code, []byte{
+		byte(PUSH1), 0, byte(MSTORE),
+		byte(RETURNDATASIZE), byte(PUSH1), 0, byte(PUSH1), 32, byte(RETURNDATACOPY),
+		byte(RETURNDATASIZE), byte(PUSH1), 32, byte(ADD), byte(PUSH1), 0, byte(RETURN),
+	})
+}
+
+// depth3 runs a policy at call depth 3: an ordinary contract at depth 1
+// calls a policy at depth 2, which calls the policy under test with CALL or,
+// for a static frozen frame, STATICCALL.
+type depth3 struct {
+	env         *policyEnv
+	top, middle common.Address
+}
+
+// newDepth3 creates the middle policy in block 1 with salt.
+func (e *policyEnv) newDepth3(salt int, static bool) depth3 {
+	e.t.Helper()
+	op := CALL
+	if static {
+		op = STATICCALL
+	}
+	middle := e.mustCreatePolicy(1, saltOf(salt), depthRelayCode(op, relayMiddleGas))
+	top := common.BytesToAddress([]byte{0xc0, 0xde, byte(op)})
+	e.setContract(top, depthRelayCode(CALL, relayTopGas))
+	return depth3{env: e, top: top, middle: middle}
+}
+
+// run calls inner at depth 3 with input in block number and returns whether
+// the frame at depth 3 succeeded and its output.
+func (d depth3) run(number uint64, tracer *frozenTracer, inner common.Address, input []byte) (bool, []byte) {
+	t := d.env.t
+	t.Helper()
+	ret, _, err := d.env.evm(number, tracer).Call(AccountRef(policySender), d.top, cat(addrWord(d.middle), addrWord(inner), input), policyTestGas, new(uint256.Int))
+	if err != nil || len(ret) < 64 {
+		t.Fatalf("the ordinary caller fails: %v (output %x)", err, ret)
+	}
+	if new(big.Int).SetBytes(ret[:32]).Sign() == 0 {
+		t.Fatal("the policy at depth 2 fails")
+	}
+	return new(big.Int).SetBytes(ret[32:64]).Sign() != 0, ret[64:]
+}
+
+// construct runs initCode as the constructor of a policy in block number
+// and returns the policy address, the gas the factory call leaves, its
+// error and, when it succeeds, the code the constructor returned.
+func (e *policyEnv) construct(number uint64, salt common.Hash, initCode []byte, tracer *frozenTracer) (common.Address, []byte, uint64, error) {
+	addr := ghost.PolicyAddress(salt, crypto.Keccak256Hash(initCode))
+	_, left, err := e.evm(number, tracer).Call(AccountRef(policySender), ghost.PolicyFactoryAddress, factoryInput(salt, initCode), policyTestGas, new(uint256.Int))
+	if err != nil {
+		return addr, nil, left, err
+	}
+	return addr, e.state.GetCode(addr), left, nil
+}
+
+// plain runs code as an ordinary contract at addr, at depth 1 in block
+// number, and returns its output.
+func (e *policyEnv) plain(number uint64, addr common.Address, code, input []byte) []byte {
+	e.t.Helper()
+	e.setContract(addr, code)
+	ret, _, err := e.evm(number, nil).Call(AccountRef(policySender), addr, input, policyTestGas, new(uint256.Int))
+	if err != nil {
+		e.t.Fatalf("the ordinary contract fails: %v", err)
+	}
+	return ret
+}
+
 // TestFrozenPolicyOpcodes checks RP-10 for the opcode table: every opcode a
 // frozen context forbids halts the policy's constructor, which then leaves
 // no policy, and halts a policy running at call depth 3 (an ordinary
 // contract at depth 1 calls a policy, which calls the policy at depth 3),
-// whose caller sees the failure. The same code without the opcode passes.
+// whose caller sees the failure. The same code without the opcode passes,
+// and so does the code with an opcode spec 10, section 6.2 allows.
 func TestFrozenPolicyOpcodes(t *testing.T) {
 	forbidden := []OpCode{
-		BALANCE, ORIGIN, CALLER, GASPRICE, EXTCODESIZE, EXTCODECOPY, EXTCODEHASH,
-		BLOCKHASH, COINBASE, TIMESTAMP, NUMBER, DIFFICULTY, GASLIMIT, CHAINID,
-		SELFBALANCE, BASEFEE, BLOBHASH, BLOBBASEFEE,
-		SLOAD, SSTORE, GAS, TLOAD, TSTORE,
-		LOG0, LOG1, LOG2, LOG3, LOG4,
-		CREATE, CALLCODE, DELEGATECALL, CREATE2, SELFDESTRUCT,
+		BALANCE, SELFBALANCE,
+		CALLCODE, DELEGATECALL,
+		CREATE, CREATE2,
+		SELFDESTRUCT,
+		BLOBHASH, BLOBBASEFEE,
 	}
-	// The table is exactly this list: no other opcode is refused.
+	// The table is exactly this list: no other opcode is refused by the
+	// per-opcode check.
 	want := make(map[OpCode]bool)
 	for _, op := range forbidden {
 		want[op] = true
@@ -299,6 +466,38 @@ func TestFrozenPolicyOpcodes(t *testing.T) {
 			t.Errorf("opcode %v: frozen %v, want %v", OpCode(b), frozenOpcodes[b], want[OpCode(b)])
 		}
 	}
+	// EXTCODESIZE, EXTCODECOPY and EXTCODEHASH, and only they, are checked
+	// per address.
+	for b := 0; b < 256; b++ {
+		op := OpCode(b)
+		wantExt := op == EXTCODESIZE || op == EXTCODECOPY || op == EXTCODEHASH
+		if frozenExtcodeOpcodes[b] != wantExt {
+			t.Errorf("opcode %v: checked per address %v, want %v", op, frozenExtcodeOpcodes[b], wantExt)
+		}
+	}
+	// The opcodes the node refused before spec 10, section 6.2 and that
+	// the spec allows.
+	allowed := []OpCode{
+		ORIGIN, CALLER, GASPRICE, CALLVALUE, GAS,
+		BLOCKHASH, COINBASE, TIMESTAMP, NUMBER, DIFFICULTY, GASLIMIT, CHAINID, BASEFEE,
+		SLOAD, SSTORE, TLOAD, TSTORE,
+		LOG0, LOG1, LOG2, LOG3, LOG4,
+	}
+	t.Run("allowed", func(t *testing.T) {
+		for i, op := range allowed {
+			env := newPolicyEnv(t)
+			initCode := deployCode(cat(zeros(7), []byte{byte(op)}), []byte{byte(STOP)})
+			if addr, _, _, err := env.construct(1, saltOf(i), initCode, new(frozenTracer)); err != nil || !ghost.IsRegisteredPolicy(env.state, addr) {
+				t.Errorf("%v in the constructor: %v", op, err)
+			}
+			d := env.newDepth3(1000, false)
+			inner := env.mustCreatePolicy(1, saltOf(100+i), cat(zeros(7), []byte{byte(op)}, returnOneCode))
+			tracer := new(frozenTracer)
+			if ok, out := d.run(2, tracer, inner, nil); !ok || new(big.Int).SetBytes(out).Cmp(common.Big1) != 0 {
+				t.Errorf("%v at depth 3 fails: %v", op, tracer.faults)
+			}
+		}
+	})
 	t.Run("constructor", func(t *testing.T) {
 		for i, op := range append([]OpCode{JUMPDEST}, forbidden...) {
 			env := newPolicyEnv(t)
@@ -354,6 +553,519 @@ func TestFrozenPolicyOpcodes(t *testing.T) {
 			}
 		}
 	})
+}
+
+// checkWords compares the words of out with want, one label per word.
+func checkWords(t *testing.T, what string, labels []string, out []byte, want []*big.Int) {
+	t.Helper()
+	got := words(out)
+	if len(got) != len(want) || len(out) != 32*len(want) {
+		t.Errorf("%s: %d bytes of output, want %d words", what, len(out), len(want))
+		return
+	}
+	for i := range want {
+		if got[i].Cmp(want[i]) != 0 {
+			t.Errorf("%s: %s is %#x, want %#x", what, labels[i], got[i], want[i])
+		}
+	}
+}
+
+// TestFrozenPolicyChainFacts checks that BLOCKHASH, COINBASE, TIMESTAMP,
+// NUMBER, DIFFICULTY, GASLIMIT, CHAINID and BASEFEE run in a frozen frame,
+// in the constructor and at depth 3, and push the values an ordinary
+// contract gets in the same block.
+func TestFrozenPolicyChainFacts(t *testing.T) {
+	env := newPolicyEnv(t)
+	coinbase := common.HexToAddress("0xc014ba5e00000000000000000000000000000001")
+	env.block = func(ctx *BlockContext) {
+		ctx.Coinbase = coinbase
+		ctx.Difficulty = big.NewInt(0x1234)
+		ctx.BaseFee = big.NewInt(7)
+	}
+	labels := []string{"BLOCKHASH(1)", "COINBASE", "TIMESTAMP", "NUMBER", "DIFFICULTY", "GASLIMIT", "CHAINID", "BASEFEE"}
+	code := valuesCode(append([][]byte{{byte(PUSH1), 1, byte(BLOCKHASH)}},
+		ops(COINBASE, TIMESTAMP, NUMBER, DIFFICULTY, GASLIMIT, CHAINID, BASEFEE)...)...)
+	want := []*big.Int{
+		testBlockHash(1).Big(),
+		addrBig(coinbase),
+		new(big.Int).SetUint64(ghost.InternalNetTimestamp + 2),
+		big.NewInt(2),
+		big.NewInt(0x1234),
+		big.NewInt(30_000_000),
+		ghost.InternalNetGenesis().Config.GetChainID(),
+		big.NewInt(7),
+	}
+	if want[6] == nil || want[6].Sign() == 0 {
+		t.Fatal("the internal network has no chain id")
+	}
+
+	// The base VM: an ordinary contract in block 2.
+	base := env.plain(2, common.HexToAddress("0xba5e"), code, nil)
+	checkWords(t, "ordinary contract", labels, base, want)
+
+	// The constructor of a policy in block 2 returns the words as its code.
+	tracer := new(frozenTracer)
+	addr, out, _, err := env.construct(2, saltOf(1), code, tracer)
+	if err != nil || !ghost.IsRegisteredPolicy(env.state, addr) {
+		t.Fatalf("the constructor fails: %v (faults %v)", err, tracer.faults)
+	}
+	checkWords(t, "constructor", labels, out, want)
+
+	// A policy at depth 3 in block 2.
+	inner := env.mustCreatePolicy(1, saltOf(2), code)
+	d := env.newDepth3(1000, false)
+	tracer = new(frozenTracer)
+	ok, out := d.run(2, tracer, inner, nil)
+	if !ok {
+		t.Fatalf("the policy at depth 3 fails: %v", tracer.faults)
+	}
+	checkWords(t, "depth 3", labels, out, want)
+}
+
+// TestFrozenPolicyCallerOriginGas checks that CALLER, ORIGIN, GASPRICE, GAS
+// and CALLVALUE run in a frozen frame. In the constructor CALLER is the
+// factory, at depth 3 it is the calling policy, and ORIGIN and GASPRICE are
+// the transaction's; in a policy action, called from ACTION_CALLER with the
+// transaction context core.ApplyPolicyAction gives it, ORIGIN is
+// ACTION_CALLER and GASPRICE is zero. CALLVALUE is zero throughout.
+func TestFrozenPolicyCallerOriginGas(t *testing.T) {
+	env := newPolicyEnv(t)
+	env.tx = &TxContext{Origin: policySender, GasPrice: big.NewInt(9)}
+	code := valuesCode(ops(CALLER, ORIGIN, GASPRICE, GAS, CALLVALUE)...)
+	check := func(what string, out []byte, caller, origin common.Address, gasPrice int64, gasBelow uint64) {
+		t.Helper()
+		w := words(out)
+		if len(w) != 5 {
+			t.Fatalf("%s: %d bytes of output", what, len(out))
+		}
+		if w[0].Cmp(addrBig(caller)) != 0 {
+			t.Errorf("%s: CALLER %#x, want %v", what, w[0], caller)
+		}
+		if w[1].Cmp(addrBig(origin)) != 0 {
+			t.Errorf("%s: ORIGIN %#x, want %v", what, w[1], origin)
+		}
+		if w[2].Cmp(big.NewInt(gasPrice)) != 0 {
+			t.Errorf("%s: GASPRICE %v, want %d", what, w[2], gasPrice)
+		}
+		if w[3].Sign() == 0 || w[3].Cmp(new(big.Int).SetUint64(gasBelow)) >= 0 {
+			t.Errorf("%s: GAS %v, want between 0 and %d", what, w[3], gasBelow)
+		}
+		if w[4].Sign() != 0 {
+			t.Errorf("%s: CALLVALUE %v, want 0", what, w[4])
+		}
+	}
+
+	tracer := new(frozenTracer)
+	_, out, _, err := env.construct(2, saltOf(1), code, tracer)
+	if err != nil {
+		t.Fatalf("the constructor fails: %v (faults %v)", err, tracer.faults)
+	}
+	check("constructor", out, ghost.PolicyFactoryAddress, policySender, 9, policyTestGas)
+
+	inner := env.mustCreatePolicy(1, saltOf(2), code)
+	d := env.newDepth3(1000, false)
+	tracer = new(frozenTracer)
+	ok, out := d.run(2, tracer, inner, nil)
+	if !ok {
+		t.Fatalf("the policy at depth 3 fails: %v", tracer.faults)
+	}
+	check("depth 3", out, d.middle, policySender, 9, relayMiddleGas)
+
+	// A policy action: the call core.ApplyPolicyAction makes.
+	env.tx = &TxContext{Origin: ghost.ActionCallerAddress, GasPrice: new(big.Int)}
+	ret, _, err := env.evm(2, nil).Call(AccountRef(ghost.ActionCallerAddress), inner, nil, 1_000_000, new(uint256.Int))
+	if err != nil {
+		t.Fatalf("the policy action's call fails: %v", err)
+	}
+	check("policy action", ret, ghost.ActionCallerAddress, ghost.ActionCallerAddress, 0, 1_000_000)
+}
+
+// TestFrozenPolicyOwnStorage checks that SLOAD, SSTORE, TLOAD and TSTORE
+// run in a frozen frame and act on the frame's own account only: a value a
+// policy writes lands in the policy's storage and not in its callers', and
+// a read returns the policy's own value.
+func TestFrozenPolicyOwnStorage(t *testing.T) {
+	env := newPolicyEnv(t)
+	code := cat(
+		[]byte{byte(PUSH1), 0x2a, byte(PUSH1), 0, byte(SSTORE)},
+		[]byte{byte(PUSH1), 0x2b, byte(PUSH1), 0, byte(TSTORE)},
+		valuesCode(
+			[]byte{byte(PUSH1), 1, byte(SLOAD)},
+			[]byte{byte(PUSH1), 0, byte(SLOAD)},
+			[]byte{byte(PUSH1), 0, byte(TLOAD)},
+		),
+	)
+	labels := []string{"SLOAD(1)", "SLOAD(0)", "TLOAD(0)"}
+	key0, key1 := common.Hash{}, common.BigToHash(common.Big1)
+	transient := func(addr common.Address) *big.Int { return env.state.GetTransientState(addr, key0).Big() }
+
+	// The constructor.
+	tracer := new(frozenTracer)
+	addr, out, _, err := env.construct(2, saltOf(1), code, tracer)
+	if err != nil {
+		t.Fatalf("the constructor fails: %v (faults %v)", err, tracer.faults)
+	}
+	checkWords(t, "constructor", labels, out, []*big.Int{big.NewInt(0), big.NewInt(0x2a), big.NewInt(0x2b)})
+	if got := env.slot(addr, 0); got.Int64() != 0x2a {
+		t.Errorf("constructor: the policy's slot 0 is %v, want 0x2a", got)
+	}
+	if got := transient(addr); got.Int64() != 0x2b {
+		t.Errorf("constructor: the policy's transient slot 0 is %v, want 0x2b", got)
+	}
+	for _, other := range []common.Address{ghost.PolicyFactoryAddress, policySender} {
+		if env.slot(other, 0).Sign() != 0 || transient(other).Sign() != 0 {
+			t.Errorf("constructor: %v's storage changed", other)
+		}
+	}
+
+	// At depth 3, each account has its own value in slot 1.
+	inner := env.mustCreatePolicy(1, saltOf(2), code)
+	d := env.newDepth3(1000, false)
+	env.state.SetState(inner, key1, common.BigToHash(big.NewInt(0x77)))
+	env.state.SetState(d.middle, key1, common.BigToHash(big.NewInt(0x66)))
+	env.state.SetState(d.top, key1, common.BigToHash(big.NewInt(0x55)))
+	tracer = new(frozenTracer)
+	ok, out := d.run(2, tracer, inner, nil)
+	if !ok {
+		t.Fatalf("the policy at depth 3 fails: %v", tracer.faults)
+	}
+	checkWords(t, "depth 3", labels, out, []*big.Int{big.NewInt(0x77), big.NewInt(0x2a), big.NewInt(0x2b)})
+	if got := env.slot(inner, 0); got.Int64() != 0x2a {
+		t.Errorf("depth 3: the policy's slot 0 is %v, want 0x2a", got)
+	}
+	if got := transient(inner); got.Int64() != 0x2b {
+		t.Errorf("depth 3: the policy's transient slot 0 is %v, want 0x2b", got)
+	}
+	for name, c := range map[string]struct {
+		addr  common.Address
+		slot1 int64
+	}{"the calling policy": {d.middle, 0x66}, "the ordinary caller": {d.top, 0x55}} {
+		if env.slot(c.addr, 0).Sign() != 0 || transient(c.addr).Sign() != 0 {
+			t.Errorf("depth 3: the write landed in %s", name)
+		}
+		if got := env.slot(c.addr, 1); got.Int64() != c.slot1 {
+			t.Errorf("depth 3: %s's slot 1 is %v, want %#x", name, got, c.slot1)
+		}
+	}
+}
+
+// TestFrozenPolicyStaticWrites checks that SSTORE and TSTORE fail with
+// ErrWriteProtection, not a frozen opcode error, in a static frozen frame (a
+// policy at depth 3 reached by STATICCALL, and a STATICCALL straight into
+// the policy), and that SLOAD and TLOAD still run there.
+func TestFrozenPolicyStaticWrites(t *testing.T) {
+	env := newPolicyEnv(t)
+	static := env.newDepth3(1000, true)
+	writer := map[OpCode]common.Address{}
+	for i, op := range []OpCode{SSTORE, TSTORE} {
+		writer[op] = env.mustCreatePolicy(1, saltOf(i), cat([]byte{byte(PUSH1), 0x2a, byte(PUSH1), 0, byte(op)}, returnOneCode))
+	}
+	sload := env.mustCreatePolicy(1, saltOf(10), valuesCode([]byte{byte(PUSH1), 0, byte(SLOAD)}))
+	tload := env.mustCreatePolicy(1, saltOf(11), valuesCode([]byte{byte(PUSH1), 0, byte(TLOAD)}))
+	env.state.SetState(sload, common.Hash{}, common.BigToHash(big.NewInt(0x77)))
+
+	for _, op := range []OpCode{SSTORE, TSTORE} {
+		tracer := new(frozenTracer)
+		if ok, _ := static.run(2, tracer, writer[op], nil); ok {
+			t.Errorf("%v in a static frozen frame succeeds", op)
+		}
+		if !tracer.hasFault(ErrWriteProtection) {
+			t.Errorf("%v in a static frozen frame: faults %v, want %v", op, tracer.faults, ErrWriteProtection)
+		}
+		if d := tracer.frozenOpcodeFault(op); d != -1 {
+			t.Errorf("%v in a static frozen frame: frozen opcode fault at depth %d", op, d)
+		}
+		if env.slot(writer[op], 0).Sign() != 0 || env.state.GetTransientState(writer[op], common.Hash{}) != (common.Hash{}) {
+			t.Errorf("%v in a static frozen frame wrote", op)
+		}
+		_, _, err := env.evm(2, nil).StaticCall(AccountRef(policySender), writer[op], nil, 1_000_000)
+		if !errors.Is(err, ErrWriteProtection) {
+			t.Errorf("%v under a STATICCALL into the policy: error %v, want %v", op, err, ErrWriteProtection)
+		}
+	}
+	// The same writers run under CALL.
+	plainCall := env.newDepth3(1001, false)
+	for _, op := range []OpCode{SSTORE, TSTORE} {
+		tracer := new(frozenTracer)
+		if ok, _ := plainCall.run(2, tracer, writer[op], nil); !ok {
+			t.Errorf("%v in a frozen frame under CALL fails: %v", op, tracer.faults)
+		}
+	}
+	if got := env.slot(writer[SSTORE], 0); got.Int64() != 0x2a {
+		t.Errorf("SSTORE under CALL: slot 0 is %v, want 0x2a", got)
+	}
+
+	for _, c := range []struct {
+		op   OpCode
+		addr common.Address
+		want int64
+	}{{SLOAD, sload, 0x77}, {TLOAD, tload, 0}} {
+		tracer := new(frozenTracer)
+		ok, out := static.run(2, tracer, c.addr, nil)
+		if !ok {
+			t.Errorf("%v in a static frozen frame fails: %v", c.op, tracer.faults)
+			continue
+		}
+		checkWords(t, c.op.String()+" in a static frozen frame", []string{c.op.String()}, out, []*big.Int{big.NewInt(c.want)})
+	}
+}
+
+// logCode emits LOGn of the word 0xab with topics 1 to n.
+func logCode(n int) []byte {
+	code := []byte{byte(PUSH1), 0xab, byte(PUSH1), 0, byte(MSTORE)}
+	for j := n; j >= 1; j-- {
+		code = append(code, byte(PUSH1), byte(j))
+	}
+	return append(code, byte(PUSH1), 32, byte(PUSH1), 0, byte(LOG0)+byte(n))
+}
+
+// TestFrozenPolicyLogs checks that LOG0 to LOG4 run in a frozen frame, in
+// the constructor and at depth 3, and that the log names the policy as its
+// emitter; in a static frozen frame they fail with ErrWriteProtection and
+// leave no log.
+func TestFrozenPolicyLogs(t *testing.T) {
+	env := newPolicyEnv(t)
+	d := env.newDepth3(1000, false)
+	static := env.newDepth3(1001, true)
+	checkLog := func(what string, before int, emitter common.Address, n int) {
+		t.Helper()
+		logs := env.state.Logs()
+		if len(logs) != before+1 {
+			t.Errorf("%s: %d new logs, want 1", what, len(logs)-before)
+			return
+		}
+		l := logs[len(logs)-1]
+		if l.Address != emitter {
+			t.Errorf("%s: emitter %v, want %v", what, l.Address, emitter)
+		}
+		if len(l.Topics) != n {
+			t.Errorf("%s: %d topics, want %d", what, len(l.Topics), n)
+		}
+		for j, topic := range l.Topics {
+			if topic != common.BigToHash(big.NewInt(int64(j+1))) {
+				t.Errorf("%s: topic %d is %x", what, j, topic)
+			}
+		}
+		if string(l.Data) != string(common.LeftPadBytes([]byte{0xab}, 32)) {
+			t.Errorf("%s: data %x", what, l.Data)
+		}
+	}
+	for n := 0; n <= 4; n++ {
+		op := OpCode(byte(LOG0) + byte(n))
+
+		before := len(env.state.Logs())
+		tracer := new(frozenTracer)
+		addr, _, _, err := env.construct(2, saltOf(10+n), deployCode(logCode(n), []byte{byte(STOP)}), tracer)
+		if err != nil {
+			t.Errorf("%v in the constructor fails: %v (faults %v)", op, err, tracer.faults)
+		} else {
+			checkLog(op.String()+" in the constructor", before, addr, n)
+		}
+
+		inner := env.mustCreatePolicy(1, saltOf(20+n), cat(logCode(n), returnOneCode))
+		before = len(env.state.Logs())
+		tracer = new(frozenTracer)
+		if ok, _ := d.run(2, tracer, inner, nil); !ok {
+			t.Errorf("%v at depth 3 fails: %v", op, tracer.faults)
+		} else {
+			checkLog(op.String()+" at depth 3", before, inner, n)
+		}
+
+		before = len(env.state.Logs())
+		tracer = new(frozenTracer)
+		if ok, _ := static.run(2, tracer, inner, nil); ok {
+			t.Errorf("%v in a static frozen frame succeeds", op)
+		}
+		if !tracer.hasFault(ErrWriteProtection) || tracer.frozenOpcodeFault(op) != -1 {
+			t.Errorf("%v in a static frozen frame: faults %v, want %v", op, tracer.faults, ErrWriteProtection)
+		}
+		if got := len(env.state.Logs()); got != before {
+			t.Errorf("%v in a static frozen frame left %d logs", op, got-before)
+		}
+	}
+}
+
+// extcodeSnippet pushes the word op gives for the address target pushes:
+// the code size, the code hash, or the first 32 bytes of the code.
+func extcodeSnippet(op OpCode, target []byte) []byte {
+	if op == EXTCODECOPY {
+		return cat([]byte{byte(PUSH1), 32, byte(PUSH1), 0, byte(PUSH2), 0x10, 0x00}, target,
+			[]byte{byte(EXTCODECOPY), byte(PUSH2), 0x10, 0x00, byte(MLOAD)})
+	}
+	return cat(target, []byte{byte(op)})
+}
+
+// extcodeWant is the word extcodeSnippet pushes for an account with code.
+func extcodeWant(op OpCode, code []byte) *big.Int {
+	switch op {
+	case EXTCODESIZE:
+		return big.NewInt(int64(len(code)))
+	case EXTCODEHASH:
+		return crypto.Keccak256Hash(code).Big()
+	}
+	head := code
+	if len(head) > 32 {
+		head = head[:32]
+	}
+	return new(big.Int).SetBytes(common.RightPadBytes(head, 32))
+}
+
+// TestFrozenPolicyExtcodeOnlyPolicies checks that EXTCODESIZE, EXTCODECOPY
+// and EXTCODEHASH in a frozen frame give the code size, code and code hash of
+// another policy and of the frame's own policy, and that on any other
+// address (an ordinary contract, an empty account, a precompile, the natives
+// 0x60 and 0x61, the factory) they halt the frame with a frozen opcode error
+// that uses all its gas, in the constructor and at depth 3.
+func TestFrozenPolicyExtcodeOnlyPolicies(t *testing.T) {
+	env := newPolicyEnv(t)
+	other := env.mustCreatePolicy(1, saltOf(1), returnOneCode)
+	ordinary := common.HexToAddress("0xbeef")
+	env.setContract(ordinary, returnOneCode)
+	d := env.newDepth3(1000, false)
+	at := func(b byte) common.Address { return common.BytesToAddress([]byte{b}) }
+	type target struct {
+		name string
+		addr common.Address
+	}
+	refused := []target{
+		{"an ordinary contract", ordinary},
+		{"an empty account", common.HexToAddress("0x00000000000000000000000000000000000e0e01")},
+		{"the precompile 0x02", at(0x02)},
+		{"the native 0x60", at(0x60)},
+		{"the native 0x61", at(0x61)},
+		{"the factory", ghost.PolicyFactoryAddress},
+	}
+	for i, op := range []OpCode{EXTCODESIZE, EXTCODECOPY, EXTCODEHASH} {
+		runtime := valuesCode([]byte{byte(PUSH1), 0}, extcodeSnippet(op, []byte{byte(PUSH1), 0, byte(CALLDATALOAD)}))
+		inner := env.mustCreatePolicy(1, saltOf(10+i), runtime)
+
+		// At depth 3.
+		for _, tg := range []target{{"another policy", other}, {"its own address", inner}} {
+			tracer := new(frozenTracer)
+			ok, out := d.run(2, tracer, inner, addrWord(tg.addr))
+			if !ok {
+				t.Errorf("%v of %s at depth 3 fails: %v", op, tg.name, tracer.faults)
+				continue
+			}
+			if w := words(out); len(w) != 2 || w[1].Cmp(extcodeWant(op, env.state.GetCode(tg.addr))) != 0 {
+				t.Errorf("%v of %s at depth 3: output %x", op, tg.name, out)
+			}
+		}
+		for _, tg := range refused {
+			tracer := new(frozenTracer)
+			if ok, _ := d.run(2, tracer, inner, addrWord(tg.addr)); ok {
+				t.Errorf("%v of %s at depth 3 runs", op, tg.name)
+			}
+			if dep := tracer.frozenOpcodeFault(op); dep != 3 {
+				t.Errorf("%v of %s: frozen opcode fault at depth %d, want 3", op, tg.name, dep)
+			}
+			if !tracer.frozenHaltUsedAllGas(op) {
+				t.Errorf("%v of %s at depth 3 does not use all its gas", op, tg.name)
+			}
+		}
+
+		// In the constructor.
+		tracer := new(frozenTracer)
+		_, out, _, err := env.construct(2, saltOf(20+i), valuesCode([]byte{byte(PUSH1), 0}, extcodeSnippet(op, pushAddr(other))), tracer)
+		if err != nil {
+			t.Errorf("%v of another policy in the constructor fails: %v", op, err)
+		} else if w := words(out); len(w) != 2 || w[1].Cmp(extcodeWant(op, returnOneCode)) != 0 {
+			t.Errorf("%v of another policy in the constructor: output %x", op, out)
+		}
+		for j, tg := range refused {
+			tracer := new(frozenTracer)
+			initCode := valuesCode([]byte{byte(PUSH1), 0}, extcodeSnippet(op, pushAddr(tg.addr)))
+			addr, _, left, err := env.construct(2, saltOf(100+10*i+j), initCode, tracer)
+			var fe *ErrFrozenOpcode
+			if !errors.As(err, &fe) || fe.Opcode() != op {
+				t.Errorf("%v of %s in the constructor: error %v, want a frozen opcode error", op, tg.name, err)
+			}
+			if left != 0 || !tracer.frozenHaltUsedAllGas(op) {
+				t.Errorf("%v of %s in the constructor: %d gas left", op, tg.name, left)
+			}
+			if dep := tracer.frozenOpcodeFault(op); dep != 1 {
+				t.Errorf("%v of %s in the constructor: halted at depth %d, want 1", op, tg.name, dep)
+			}
+			if ghost.IsRegisteredPolicy(env.state, addr) {
+				t.Errorf("%v of %s in the constructor: the policy exists", op, tg.name)
+			}
+		}
+
+		// An ordinary contract reads any address.
+		out = env.plain(2, common.BytesToAddress([]byte{0x0b, 0xad, byte(op)}), runtime, addrWord(ordinary))
+		if w := words(out); len(w) != 2 || w[1].Cmp(extcodeWant(op, returnOneCode)) != 0 {
+			t.Errorf("%v of an ordinary contract from an ordinary contract: output %x", op, out)
+		}
+	}
+}
+
+// TestFrozenPolicyStillForbidden checks RP-10 for what a frozen context may
+// still not do: BALANCE, SELFBALANCE, CALLCODE, DELEGATECALL, CREATE,
+// CREATE2, SELFDESTRUCT, BLOBHASH and BLOBBASEFEE halt the frame with a
+// frozen opcode error that uses all its gas, in the constructor, at depth 3
+// and called directly; BLOBHASH and BLOBBASEFEE are invalid in any frame on
+// Ghost; and a call to 0x05 or 0x09 halts the frozen frame.
+func TestFrozenPolicyStillForbidden(t *testing.T) {
+	forbidden := []OpCode{BALANCE, SELFBALANCE, CALLCODE, DELEGATECALL, CREATE, CREATE2, SELFDESTRUCT, BLOBHASH, BLOBBASEFEE}
+	env := newPolicyEnv(t)
+	d := env.newDepth3(1000, false)
+	for i, op := range forbidden {
+		tracer := new(frozenTracer)
+		addr, _, left, err := env.construct(2, saltOf(i), deployCode(cat(zeros(7), []byte{byte(op)}), []byte{byte(STOP)}), tracer)
+		var fe *ErrFrozenOpcode
+		if !errors.As(err, &fe) || fe.Opcode() != op {
+			t.Errorf("%v in the constructor: error %v, want a frozen opcode error", op, err)
+		}
+		if left != 0 || !tracer.frozenHaltUsedAllGas(op) {
+			t.Errorf("%v in the constructor: %d gas left", op, left)
+		}
+		if dep := tracer.frozenOpcodeFault(op); dep != 1 {
+			t.Errorf("%v in the constructor: halted at depth %d, want 1", op, dep)
+		}
+		if ghost.IsRegisteredPolicy(env.state, addr) {
+			t.Errorf("%v in the constructor: the policy exists", op)
+		}
+
+		inner := env.mustCreatePolicy(1, saltOf(100+i), cat(zeros(7), []byte{byte(op)}, returnOneCode))
+		tracer = new(frozenTracer)
+		if ok, _ := d.run(2, tracer, inner, nil); ok {
+			t.Errorf("%v at depth 3 does not halt the frame", op)
+		}
+		if dep := tracer.frozenOpcodeFault(op); dep != 3 {
+			t.Errorf("%v: frozen opcode fault at depth %d, want 3", op, dep)
+		}
+		if !tracer.frozenHaltUsedAllGas(op) {
+			t.Errorf("%v at depth 3 does not use all its gas", op)
+		}
+
+		_, left, err = env.evm(2, nil).Call(AccountRef(policySender), inner, nil, 1_000_000, new(uint256.Int))
+		if !errors.As(err, &fe) || fe.Opcode() != op || left != 0 {
+			t.Errorf("%v called directly: error %v, %d gas left", op, err, left)
+		}
+	}
+	// BLOBHASH and BLOBBASEFEE are invalid opcodes on Ghost.
+	for _, op := range []OpCode{BLOBHASH, BLOBBASEFEE} {
+		addr := common.BytesToAddress([]byte{0x0b, 0x10, byte(op)})
+		env.setContract(addr, cat(zeros(1), []byte{byte(op), byte(STOP)}))
+		_, _, err := env.evm(2, nil).Call(AccountRef(policySender), addr, nil, 1_000_000, new(uint256.Int))
+		var ie *ErrInvalidOpCode
+		if !errors.As(err, &ie) {
+			t.Errorf("%v in an ordinary contract: error %v, want an invalid opcode", op, err)
+		}
+	}
+	// Calls to MODEXP and BLAKE2F from a frozen context.
+	caller := env.mustCreatePolicy(1, saltOf(200), targetCallerCode(STATICCALL))
+	for j, target := range []common.Address{common.BytesToAddress([]byte{0x05}), common.BytesToAddress([]byte{0x09})} {
+		tracer := new(frozenTracer)
+		if ok, _ := d.run(2, tracer, caller, addrWord(target)); ok || !tracer.hasFault(ErrFrozenCallTarget) {
+			t.Errorf("STATICCALL to %v at depth 3: not refused (faults %v)", target, tracer.faults)
+		}
+		initCode := deployCode(cat(zeros(4), pushAddr(target), []byte{byte(PUSH3), 0x0f, 0x42, 0x40, byte(STATICCALL), byte(POP)}), []byte{byte(STOP)})
+		addr, _, _, err := env.construct(2, saltOf(300+j), initCode, new(frozenTracer))
+		if !errors.Is(err, ErrFrozenCallTarget) || ghost.IsRegisteredPolicy(env.state, addr) {
+			t.Errorf("STATICCALL to %v in the constructor: error %v", target, err)
+		}
+	}
 }
 
 // TestFrozenPolicyCallTargets checks RP-10 for the call-target allowlist: a
@@ -538,7 +1250,7 @@ func TestFrozenPolicyFailedConstructor(t *testing.T) {
 	}{
 		{"revert", []byte{byte(PUSH1), 0, byte(PUSH1), 0, byte(REVERT)}, policyTestGas},
 		{"invalid opcode", []byte{byte(INVALID)}, policyTestGas},
-		{"forbidden opcode", deployCode([]byte{byte(PUSH1), 0, byte(SLOAD)}, returnOneCode), policyTestGas},
+		{"forbidden opcode", deployCode([]byte{byte(PUSH1), 0, byte(BALANCE)}, returnOneCode), policyTestGas},
 		{"code starting with 0xef", deployCode(nil, []byte{0xef, 0x00}), policyTestGas},
 		{"code deposit out of gas", deployCode(nil, make([]byte, 1000)), PolicyFactoryGas(1015, true) + 1000},
 	}
@@ -661,7 +1373,7 @@ func TestFrozenPolicyNoBalance(t *testing.T) {
 // itself runs there. A direct call into the same policy halts on it.
 func TestFrozenPolicyDelegatecall(t *testing.T) {
 	env := newPolicyEnv(t)
-	policyCode := []byte{byte(PUSH1), 0x2a, byte(PUSH1), 0, byte(SSTORE), byte(STOP)}
+	policyCode := []byte{byte(SELFBALANCE), byte(POP), byte(PUSH1), 0x2a, byte(PUSH1), 0, byte(SSTORE), byte(STOP)}
 	policy := env.mustCreatePolicy(1, saltOf(1), policyCode)
 	delegator := common.HexToAddress("0xde1e")
 	env.setContract(delegator, cat(zeros(4), pushAddr(policy),
@@ -691,12 +1403,15 @@ func TestFrozenPolicyDelegatecall(t *testing.T) {
 		t.Errorf("the policy's own storage changed: %x", v)
 	}
 
-	// Called directly, the same code is frozen and halts on SSTORE.
+	// Called directly, the same code is frozen and halts on SELFBALANCE.
 	tracer = new(frozenTracer)
 	_, _, err := env.evm(2, tracer).Call(AccountRef(policySender), policy, nil, policyTestGas, new(uint256.Int))
 	var fe *ErrFrozenOpcode
-	if !errors.As(err, &fe) || fe.Opcode() != SSTORE {
-		t.Errorf("direct call: error %v, want a frozen SSTORE", err)
+	if !errors.As(err, &fe) || fe.Opcode() != SELFBALANCE {
+		t.Errorf("direct call: error %v, want a frozen SELFBALANCE", err)
+	}
+	if v := env.state.GetState(policy, common.Hash{}); v != (common.Hash{}) {
+		t.Errorf("the halted direct call wrote the policy's storage: %x", v)
 	}
 	for _, f := range tracer.frames {
 		if f.code == policy && !f.frozen {

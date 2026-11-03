@@ -176,8 +176,10 @@ with `VERIFY_GAS[0x0001] = 3,000` and `SIGVERIFY_WORD_GAS = 4`, both in
 
 ## Frozen policies
 
-A frozen policy (spec 10, section 6) is a contract whose behaviour depends
-only on its code and its input, and which never holds a balance. Only the
+A frozen policy (spec 10, section 6) is a contract that runs in a sandbox:
+it may read the chain facts, its caller and its own storage, but no balance,
+it cannot create, delegate or self-destruct, it calls only a short list of
+targets, and it never holds a balance. Only the
 policy factory creates one. The rules are in `core/vm/frozen_policy.go`, the
 addresses, hashes and registry helpers in `params/ghost/policy.go`.
 
@@ -239,16 +241,35 @@ frame starts. A `DELEGATECALL` or `CALLCODE` frame runs as its caller, so
 policy code reached by `DELEGATECALL` from a contract that is not frozen runs
 unfrozen, without the frozen context's access to the natives.
 
-A frozen frame halts, using up its gas, on any of these opcodes, when the
-opcode runs:
+What a frozen frame may run is spec 10, section 6.2. "Forbidden" means the
+frame halts at once with `vm.ErrFrozenOpcode`, an exceptional halt that uses
+up all its gas, as `INVALID` does:
 
-| Opcodes | Why |
+| Opcode | In a frozen context |
 |---|---|
-| BALANCE, SELFBALANCE, EXTCODESIZE, EXTCODECOPY, EXTCODEHASH, SLOAD, SSTORE, TLOAD, TSTORE | state |
-| ORIGIN, CALLER, GASPRICE, GAS | the transaction, the caller and the remaining gas |
-| BLOCKHASH, COINBASE, TIMESTAMP, NUMBER, DIFFICULTY, GASLIMIT, CHAINID, BASEFEE, BLOBHASH, BLOBBASEFEE | the block and the chain |
-| LOG0 to LOG4 | logs |
-| CREATE, CREATE2, CALLCODE, DELEGATECALL, SELFDESTRUCT | creation, delegation and destruction |
+| STOP, ADD, MUL, SUB, DIV, SDIV, MOD, SMOD, EXP, NOT, LT, GT, SLT, SGT, EQ, ISZERO, SIGNEXTEND, AND, OR, XOR, BYTE, SHL, SHR, SAR, ADDMOD, MULMOD, KECCAK256 | Allowed |
+| ADDRESS, CALLER, CALLVALUE, CALLDATALOAD, CALLDATASIZE, CALLDATACOPY, CODESIZE, CODECOPY, RETURNDATASIZE, RETURNDATACOPY | Allowed. CALLVALUE is always zero, since value to a policy is refused. CODESIZE and CODECOPY read the frame's own code |
+| ORIGIN, GASPRICE | Allowed. In a policy action ORIGIN is ACTION_CALLER and GASPRICE is zero |
+| BALANCE, SELFBALANCE | **Forbidden** |
+| EXTCODESIZE, EXTCODECOPY, EXTCODEHASH | Allowed only for the address of a frozen policy (`ghost.IsRegisteredPolicy`, the frame's own included). Forbidden for every other address, precompiles and natives included |
+| BLOCKHASH, COINBASE, TIMESTAMP, NUMBER, DIFFICULTY, GASLIMIT, CHAINID, BASEFEE | Allowed. These are the chain facts |
+| BLOBHASH, BLOBBASEFEE | Invalid opcodes on Ghost already; also on the frozen context's forbidden list |
+| POP, MLOAD, MSTORE, MSTORE8, MCOPY, MSIZE, PUSH0 to PUSH32, DUP1 to DUP16, SWAP1 to SWAP16, JUMP, JUMPI, PC, JUMPDEST, GAS | Allowed |
+| SLOAD, SSTORE, TLOAD, TSTORE | Allowed on the frame's own account. SSTORE and TSTORE fail in a static context with the usual write-protection error |
+| LOG0 to LOG4 | Allowed, with the policy as the emitter (not in a static context, where they fail with the usual write-protection error) |
+| CALL, STATICCALL | Allowed only with value zero and a target on the allowlist below. Otherwise **forbidden** |
+| CALLCODE, DELEGATECALL | **Forbidden** |
+| CREATE, CREATE2 | **Forbidden** |
+| SELFDESTRUCT | **Forbidden** |
+| RETURN, REVERT, INVALID | Allowed |
+| Every opcode not listed | Invalid, as in the EVM profile |
+
+The check is made when the opcode runs, not when the code is deployed, so
+the constructor and the runtime code follow one rule. The per-opcode list is
+`vm.FrozenOpcodes`; the EXTCODE\* address check runs in the interpreter
+after the stack check and before any gas is charged. A frozen frame is never
+a `CALLCODE` or `DELEGATECALL` frame, so the storage it reaches is always its
+own account's.
 
 Its `CALL` and `STATICCALL` halt unless the target is SHA256 (0x02),
 RIPEMD160 (0x03), IDENTITY (0x04), signature verify (0x51), 0x60, 0x61, or a
@@ -360,8 +381,10 @@ WebSocket serve only the namespaces named with `--http.api` and `--ws.api`.
   up the gas it was given. Only a top-level transaction to it commits, and it
   runs no code ([commit and reveal](private-transactions.md)).
 * **Frozen policies.** The native at 0x62 creates frozen policies, contracts
-  that may not read state or the environment, may call only a short list of
-  targets, and never hold a balance. Value sent to one fails, and a block
+  that may read the chain facts, the caller and their own storage but no
+  balance and no other account's code but a policy's, may not create,
+  delegate or self-destruct, may call only a short list of targets, and
+  never hold a balance. Value sent to one fails, and a block
   paying one as coinbase is invalid ([frozen policies](#frozen-policies)).
 * **The reveal transaction has no sender.** Type `0x50` is a native
   transaction without an account, nonce or signature; it runs no EVM code and
