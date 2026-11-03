@@ -101,6 +101,11 @@ type BlockContext struct {
 	BaseFee     *big.Int       // Provides information for BASEFEE (0 if vm runs with NoBaseFee flag and 0 gas price)
 	BlobBaseFee *big.Int       // Provides information for BLOBBASEFEE (0 if vm runs with NoBaseFee flag and 0 blob gas price)
 	Random      *common.Hash   // Provides information for PREVRANDAO
+
+	// Genesis is the chain's genesis block hash, the domain of the
+	// statements the statement checker at 0x61 verifies. A context built
+	// without a chain leaves it zero, and the checker then fails every call.
+	Genesis common.Hash
 }
 
 // TxContext provides the EVM with information about a transaction.
@@ -240,6 +245,9 @@ func (evm *EVM) Call(caller ContractRef, addr common.Address, input []byte, gas 
 	if addr == ghost.EscrowNativeAddress {
 		return evm.callEscrowNative(CALL, caller, input, gas, value)
 	}
+	if addr == ghost.StatementCheckerAddress {
+		return evm.callStatementChecker(CALL, caller, input, gas, value)
+	}
 	// A policy never holds a balance: a call with value to one fails as a
 	// call without the balance would, and nothing moves.
 	if !value.IsZero() && ghost.IsRegisteredPolicy(evm.StateDB, addr) {
@@ -345,6 +353,9 @@ func (evm *EVM) CallCode(caller ContractRef, addr common.Address, input []byte, 
 	if addr == ghost.EscrowNativeAddress {
 		return evm.callEscrowNative(CALLCODE, caller, input, gas, value)
 	}
+	if addr == ghost.StatementCheckerAddress {
+		return evm.callStatementChecker(CALLCODE, caller, input, gas, value)
+	}
 	// Fail if we're trying to transfer more than the available balance
 	// Note although it's noop to transfer X ether to caller itself. But
 	// if caller doesn't have enough balance, it would be an error to allow
@@ -406,6 +417,9 @@ func (evm *EVM) DelegateCall(caller ContractRef, addr common.Address, input []by
 	if addr == ghost.EscrowNativeAddress {
 		return evm.callEscrowNative(DELEGATECALL, caller, input, gas, nil)
 	}
+	if addr == ghost.StatementCheckerAddress {
+		return evm.callStatementChecker(DELEGATECALL, caller, input, gas, nil)
+	}
 	var snapshot = evm.StateDB.Snapshot()
 
 	// Invoke tracer hooks that signal entering/exiting a call frame
@@ -464,6 +478,9 @@ func (evm *EVM) StaticCall(caller ContractRef, addr common.Address, input []byte
 	}
 	if addr == ghost.EscrowNativeAddress {
 		return evm.callEscrowNative(STATICCALL, caller, input, gas, nil)
+	}
+	if addr == ghost.StatementCheckerAddress {
+		return evm.callStatementChecker(STATICCALL, caller, input, gas, nil)
 	}
 	// We take a snapshot here. This is a bit counter-intuitive, and could probably be skipped.
 	// However, even a staticcall is considered a 'touch'. On mainnet, static calls were introduced

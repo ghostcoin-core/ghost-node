@@ -57,6 +57,12 @@ var ErrStatementUnsupported = errors.New("linked proof verifier does not verify 
 // slot's, and the action fields, from ActionNonce to CalldataHash, are set;
 // Root, Remainder, Recipient, Rule, Note and Cf are zero and Out and Fee are
 // zero amounts. The action fields are zero for every other statement.
+//
+// A KNOW_PREIMAGE_v1 statement, which the statement checker at 0x61
+// verifies, is Kind ghosttree.Coin with PurposePreimage (preimage.go):
+// Policy is the calling policy, Y and Context are the statement's, and
+// Version, Binding, ChainID and Domain are set; every other field is zero.
+// Y and Context are zero for every other statement.
 type VerifyInputs struct {
 	Kind      ghosttree.Kind
 	Purpose   byte
@@ -86,6 +92,9 @@ type VerifyInputs struct {
 	Debit             *uint256.Int // the exact amount the action takes
 	Expiry            uint64       // the last block height the action is valid in
 	CalldataHash      common.Hash  // ActionCalldataHash of the policy call's calldata
+
+	Y       common.Hash               // y = K("ghost/policy-preimage/v1", x)
+	Context [PreimageContextSize]byte // the context the policy supplies
 }
 
 // HoldInputs are the public inputs of a proof of holding of a data

@@ -18,6 +18,7 @@ package core
 
 import (
 	"math/big"
+	"reflect"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
@@ -73,7 +74,27 @@ func NewEVMBlockContext(header *types.Header, chain ChainContext, author *common
 		BlobBaseFee: blobBaseFee,
 		GasLimit:    header.GasLimit,
 		Random:      random,
+		Genesis:     chainGenesis(chain),
 	}
+}
+
+// chainGenesis returns the genesis hash of a chain context that gives its
+// genesis block, as core.BlockChain does. The statement checker binds its
+// statements to it. Any other context, a nil one or a nil chain pointer
+// included (chain makers pass a nil *BlockChain), gives the zero hash, which
+// makes the checker fail every call.
+func chainGenesis(chain ChainContext) common.Hash {
+	gc, ok := chain.(interface{ Genesis() *types.Block })
+	if !ok {
+		return common.Hash{}
+	}
+	if v := reflect.ValueOf(gc); v.Kind() == reflect.Pointer && v.IsNil() {
+		return common.Hash{}
+	}
+	if block := gc.Genesis(); block != nil {
+		return block.Hash()
+	}
+	return common.Hash{}
 }
 
 // NewEVMTxContext creates a new transaction context for a single transaction.

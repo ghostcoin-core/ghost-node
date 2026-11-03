@@ -362,6 +362,115 @@ floods the pool from 24 peers at once and checks that no more signatures are
 verified at once than there are workers, that a transaction beyond the
 peers' share is dropped unverified, and that none is verified twice.
 
+## Proof-carrying transactions
+
+A frozen policy checks a proof of KNOW_PREIMAGE_v1 by calling the statement
+checker at `0x61` ([ghost-evm-profile.md](ghost-evm-profile.md#the-statement-checker);
+spec 10, sections 9.3 and 15). Its input, the statement, `y`, the context and
+the proof field, is 917,601 bytes, far over the pool's cap of 128 KiB
+(`TX_MAX_BYTES`, spec 09, section 8.3). The pool takes such a transaction in
+a size class of its own, verifies its proof once, and bounds the work a peer
+or a flood can cause. Block processing is not affected: the checker runs
+inside the EVM and verifies whatever the calling frame passes.
+
+### The class
+
+A proof-carrying transaction is an account transaction (type `0x52`) whose
+`to` is a frozen policy created before the next block
+(`ghost.IsCallablePolicy` against the pool's head state at the next block
+number) and whose data is at least 917,601 bytes. By convention the **last**
+917,601 bytes of the data are the checker input; the bytes before them are
+the policy's own calldata (a selector and anything else). The pool builds
+the binding itself, with the transaction's `to` as the policy and the chain
+id and genesis hash of this chain: a proof made for another policy, one the
+policy forwards to for example, is not admitted to the pool.
+
+Every other account transaction keeps the cap of 128 KiB unchanged.
+
+### Order of the checks
+
+1. **Size** (`txpool.ValidateTransaction`, `txpool.CheckProofTxSize`). Up to
+   128 KiB a transaction is ordinary. Above `ProofTxMaxBytes` (1 MiB) it is
+   dropped unread with `txpool.ErrProofTxOversized` (an
+   `ErrOversizedData`), and from a peer it counts as one failed check.
+   Between the two it passes provisionally when its data has room for the
+   checker input and it has a `to`, and is refused with `ErrOversizedData`
+   otherwise.
+2. The other cheap checks and the **state checks** of the pool, under the
+   pool lock: the nonce and the balance, then the class itself
+   (`txpool.CheckProofTxState`): a `to` that is not a frozen policy created
+   before the next block is refused with `ErrOversizedData`, a state failure
+   that is not held against the peer. Then the cap: the pool holds at most
+   `ProofTxMaxHeld` (4) proof-carrying transactions, at most one per sender
+   account (a replacement at the same nonce takes the place of the one it
+   replaces); past it a transaction is refused with `txpool.ErrProofHeldCap`.
+3. The **signature**, on the pool's `SigVerifier`, as for any account
+   transaction: it is the cheaper check, so it goes first.
+4. The **checker input** (`txpool.ProofGate`): its statement code must be
+   `0x06`. A wrong one fails without a verification.
+5. The **proof**, on the gate's check slots, through the active verifier.
+
+A transaction that fails step 4 or 5 is refused with
+`txpool.ErrProofFailed` and its hash remembered: it is refused again with
+`txpool.ErrProofRejectedBefore`, from any peer or RPC and at any head,
+without a check. A transaction whose proof passed is never verified again:
+its public inputs (the chain, the genesis hash, the policy `to`, `y` and the
+context) do not depend on the state. Only the ordinary state checks apply to
+a held one (the nonce, the balance, the policy still being callable): when
+`to` stops being a callable policy after a reorganisation, the transaction
+is dropped. A transaction a reorganisation puts back is taken again only if
+the gate passed its proof before.
+
+A node whose verifier has no proof system for the statement, which is the
+linked verifier today, refuses every proof-carrying transaction with
+`txpool.ErrProofUnsupported`, charged to nobody and not remembered; the
+checker answers 0 to every proof on such a node.
+
+### Budgets and peers
+
+The gate (`core/txpool/proofcheck.go`) runs at most `ProofCheckSlots` (2)
+verifications at once, one slot open to peers and one kept for local RPC,
+and `ProofChecksPerHead` (16) in all per chain head. A transaction that
+finds its slot taken or the head's checks used up is dropped unverified with
+the busy error `statement proof checks busy` (JSON-RPC code `-32005`), no
+fault of the peer. It remembers `ProofRejectedMemory` (4,096) hashes of
+failed proofs, the oldest forgotten first.
+
+Each peer may deliver `ProofPeerBudget` (4) proof-carrying transactions per
+head, refilled when the head moves (`eth/handler.go`); past it they are
+dropped unverified with `peer statement proof budget used up`. Each also
+takes one check of the peer's signature budget. A peer whose proof checks
+fail `ProofFailLimit` (3) times at one head, an oversized delivery and a
+proof refused before counting as one each, is disconnected, as for a failed
+signature. A state failure, a busy check, a used-up budget and a node that
+cannot verify the statement are not held against it. A peer's record
+outlives a disconnect, so a peer that reconnects at the same head has
+neither its budget nor its failures back.
+
+The bounds are node settings in `params/ghost/proofadmit.go`:
+
+| Constant | Value | Why |
+|---|---|---|
+| `AccountTxMaxBytes` | 131,072 | `TX_MAX_BYTES`, the pool's cap of every other account transaction |
+| `ProofTxMaxBytes` | 1,048,576 | the checker input and 130,975 bytes for the key, the signature, the selector and other calldata |
+| `ProofTxMaxHeld` | 4 | at most 4 MiB of proof-carrying transactions held, one per sender |
+| `ProofPeerBudget` | 4 per head | as the reveal pool's `PeerRevealsPerBlock` |
+| `ProofFailLimit` | 3 per head | as the reveal pool's `PeerMaxFailedProofs` |
+| `ProofCheckSlots` | 2 | one for peers, one for RPC |
+| `ProofChecksPerHead` | 16 | about 11 ms a verification at the 110,000 gas of `PREIMAGE_VERIFY_GAS`, so under 0.2 s a head whatever the flood |
+| `ProofRejectedMemory` | 4,096 | as the reveal pool's memory of refused hashes; 32-byte hashes with their first refusal |
+
+A proof-carrying transaction is announced, never broadcast whole, as any
+transaction above 4 KiB. The serving handler's 2 MiB reply limit lets one
+of them follow just under 2 MiB of others, some 3 MiB, well under the
+message cap of 10 MiB.
+
+`TestProofTxClassAndSizeBounds`, `TestProofGateBudgetAndSlots`,
+`TestProofGateFailedHashRefusedWithoutCheck` and
+`TestProofGateFloodStaysInCheckSlots` (`core/txpool`) check the class and
+the gate; the `TestLegacyPool...ProofTx...` tests (`core/txpool/legacypool`)
+the pool, and `TestHandlerDropsPeerAtProofFailLimit` (`eth`) the peers.
+
 ## Signatures in a block
 
 A block's signatures are checked only after its seal and header checks pass

@@ -41,6 +41,13 @@ type ValidationOptions struct {
 	// type a pool validated here takes. The caller's signer must then come
 	// from types.NewGhostAccountSigner.
 	AcceptGhostAccount bool
+
+	// ProofTxs lets an account transaction above MaxSize, and above
+	// ghost.AccountTxMaxBytes, through provisionally when it has the shape
+	// of a proof-carrying transaction and is at most ghost.ProofTxMaxBytes
+	// (CheckProofTxSize). The state checks then take or refuse it
+	// (ValidationOptionsWithState.ProofTxs).
+	ProofTxs bool
 }
 
 // ValidateTransaction is a helper method to check whether a transaction is valid
@@ -64,9 +71,16 @@ func ValidateTransaction(tx *types.Transaction, head *types.Header, signer types
 		return fmt.Errorf("%w: tx type %v not supported by this pool", core.ErrTxTypeNotSupported, tx.Type())
 	}
 	// Before performing any expensive validations, sanity check that the tx is
-	// smaller than the maximum limit the pool can meaningfully handle
+	// smaller than the maximum limit the pool can meaningfully handle. A
+	// proof-carrying transaction has a size class of its own, up to
+	// ghost.ProofTxMaxBytes; above it a transaction is dropped unread.
 	if tx.Size() > opts.MaxSize {
-		return fmt.Errorf("%w: transaction size %v, limit %v", ErrOversizedData, tx.Size(), opts.MaxSize)
+		if !opts.ProofTxs || !IsProofTxClass(tx) {
+			return fmt.Errorf("%w: transaction size %v, limit %v", ErrOversizedData, tx.Size(), opts.MaxSize)
+		}
+		if err := CheckProofTxSize(tx); err != nil {
+			return err
+		}
 	}
 	// Ensure only transactions that have been enabled are accepted
 	if !opts.Config.IsEnabled(opts.Config.GetEIP2565Transition, head.Number) {
@@ -154,6 +168,14 @@ type ValidationOptionsWithState struct {
 	// signature's, for a pool that verifies the signature afterwards, on its
 	// SigVerifier.
 	SkipAccountSignature bool
+
+	// ProofTxs refuses, with ErrOversizedData, an account transaction above
+	// ghost.AccountTxMaxBytes whose to is not a frozen policy created before
+	// the block of NextBlock (CheckProofTxState), after the nonce and
+	// balance checks and before the signature. The proof itself is checked
+	// after the signature, by the pool, on its ProofGate.
+	ProofTxs  bool
+	NextBlock uint64
 }
 
 // ValidateTransactionWithState is a helper method to check whether a transaction
@@ -219,6 +241,13 @@ func ValidateTransactionWithState(tx *types.Transaction, signer types.Signer, op
 		// (i.e. max cancellable via out-of-bound transaction).
 		if used, left := opts.UsedAndLeftSlots(from); left <= 0 {
 			return fmt.Errorf("%w: pooled %d txs", ErrAccountLimitExceeded, used)
+		}
+	}
+	// A transaction of the proof-carrying size class must be sent to a
+	// policy callable from the next block.
+	if opts.ProofTxs {
+		if err := CheckProofTxState(tx, opts.State, opts.NextBlock); err != nil {
+			return err
 		}
 	}
 	// Verify the signature of an account transaction last, the most

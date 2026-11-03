@@ -160,6 +160,12 @@ type handler struct {
 	sigBudgets  *txpool.SigBudgets
 	sigDropPeer func(id string)
 
+	// proofPeers holds each peer's budget of proof-carrying account
+	// transactions and its failed proof checks per head; a peer that
+	// reaches ghost.ProofFailLimit at one head is disconnected through
+	// sigDropPeer.
+	proofPeers *txpool.ProofPeers
+
 	// channels for fetcher, syncer, txsyncLoop
 	quitSync chan struct{}
 
@@ -191,6 +197,7 @@ func newHandler(config *handlerConfig) (*handler, error) {
 		handlerDoneCh:  make(chan struct{}),
 		handlerStartCh: make(chan struct{}),
 		sigBudgets:     txpool.NewSigBudgets(ghost.SigPeerBudget, sigBudgetPeers, nil),
+		proofPeers:     txpool.NewProofPeers(sigBudgetPeers),
 	}
 	h.sigDropPeer = h.removePeer
 	if config.Sync == downloader.FullSync {
@@ -343,6 +350,14 @@ func newHandler(config *handlerConfig) (*handler, error) {
 // in the pool costs nothing. A peer that sent a transaction whose signature
 // fails is disconnected; a transaction refused by the state (a stale nonce, a
 // spent balance) is not held against it.
+//
+// An account transaction above the account transaction cap is taken only as
+// a proof-carrying transaction: one above ghost.ProofTxMaxBytes is dropped
+// unread, and the others take one of the peer's ghost.ProofPeerBudget
+// deliveries of the head as well, past which they are dropped unverified.
+// An oversized delivery, and a transaction whose statement proof fails, is a
+// failed proof check of the peer; at ghost.ProofFailLimit of them at one
+// head the peer is disconnected.
 func (h *handler) addTxsFromPeer(peer string, txs []*types.Transaction) []error {
 	var (
 		errs   = make([]error, len(txs))
@@ -350,12 +365,25 @@ func (h *handler) addTxsFromPeer(peer string, txs []*types.Transaction) []error 
 		budget *txpool.SigBudget
 		index  = make([]int, 0, len(txs))
 		admit  = make([]*types.Transaction, 0, len(txs))
+		head   = h.proofHead()
+		drop   = false
 	)
 	for i, tx := range txs {
 		if tx.Type() == types.GhostAccountTxType && !h.txpool.Has(tx.Hash()) {
 			if !known {
 				errs[i] = txpool.ErrSignaturePeerUnknown
 				continue
+			}
+			if txpool.IsProofTxClass(tx) {
+				if err := txpool.CheckProofTxSize(tx); errors.Is(err, txpool.ErrProofTxOversized) {
+					errs[i] = err
+					drop = h.proofPeers.Fail(peer, head) || drop
+					continue
+				}
+				if !h.proofPeers.Take(peer, head) {
+					errs[i] = txpool.ErrProofPeerBudget
+					continue
+				}
 			}
 			if budget == nil {
 				budget = h.sigBudgets.Get(peer)
@@ -368,21 +396,38 @@ func (h *handler) addTxsFromPeer(peer string, txs []*types.Transaction) []error 
 		index = append(index, i)
 		admit = append(admit, tx)
 	}
-	if len(admit) == 0 {
-		return errs
-	}
 	failed := false
-	for j, err := range h.txpool.Add(admit, false, false) {
-		errs[index[j]] = err
-		if errors.Is(err, txpool.ErrSignatureFailed) {
-			failed = true
+	if len(admit) > 0 {
+		for j, err := range h.txpool.Add(admit, false, false) {
+			errs[index[j]] = err
+			if errors.Is(err, txpool.ErrSignatureFailed) {
+				failed = true
+			}
+			if txpool.ProofCharged(err) {
+				drop = h.proofPeers.Fail(peer, head) || drop
+			}
 		}
 	}
 	if failed {
 		log.Debug("Dropping peer for a failed transaction signature", "peer", peer)
 		h.sigDropPeer(peer)
+	} else if drop {
+		log.Debug("Dropping peer at the failed proof limit", "peer", peer, "limit", ghost.ProofFailLimit)
+		h.sigDropPeer(peer)
 	}
 	return errs
+}
+
+// proofHead returns the hash of the chain head the peers' proof budgets are
+// counted at.
+func (h *handler) proofHead() common.Hash {
+	if h.chain == nil {
+		return common.Hash{}
+	}
+	if head := h.chain.CurrentBlock(); head != nil {
+		return head.Hash()
+	}
+	return common.Hash{}
 }
 
 // protoTracker tracks the number of active protocol handlers.

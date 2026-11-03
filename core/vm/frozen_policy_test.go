@@ -386,7 +386,9 @@ func TestFrozenPolicyCallTargets(t *testing.T) {
 		// The escrow natives run; an empty input names no function and
 		// fails revert-style.
 		{"0x60", at(0x60), true, false},
-		{"0x61", at(0x61), true, true},
+		// The statement checker runs; an empty input is not a statement
+		// and fails revert-style.
+		{"0x61", at(0x61), true, false},
 		{"older policy", older, true, true},
 		{"ecrecover", at(0x01), false, false},
 		{"modexp", at(0x05), false, true},
