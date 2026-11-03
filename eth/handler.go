@@ -96,7 +96,9 @@ type txPool interface {
 // per-peer budgets to reveals on the existing transaction announce and fetch
 // messages. The reveals reach it with the peer they came from.
 type ghostPool interface {
-	// AddFromPeer adds reveals delivered by a peer, under its budgets.
+	// AddFromPeer adds reveals and policy actions delivered by a peer,
+	// under its budgets. An error wrapping ghostpool.ErrPeerFailLimit asks
+	// for the peer to be dropped.
 	AddFromPeer(peer string, txs []*types.Transaction) []error
 
 	// FilterAnnounced reports for each announced hash whether to fetch it

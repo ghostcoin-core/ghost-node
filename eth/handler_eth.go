@@ -24,9 +24,11 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core"
+	"github.com/ethereum/go-ethereum/core/txpool/ghostpool"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/eth/protocols/eth"
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/p2p"
 	"github.com/ethereum/go-ethereum/p2p/enode"
 )
 
@@ -81,7 +83,7 @@ func (h *ethHandler) Handle(peer *eth.Peer, packet eth.Packet) error {
 		if err := handleTransactions(peer, txs, true); err != nil {
 			return fmt.Errorf("Transactions: %v", err)
 		}
-		h.addRevealsFromPeer(peer.ID(), txs)
+		h.addRevealsFromPeer(peer, txs)
 		return h.txFetcher.Enqueue(peer.ID(), txs, false)
 
 	case *eth.PooledTransactionsPacket:
@@ -92,7 +94,7 @@ func (h *ethHandler) Handle(peer *eth.Peer, packet eth.Packet) error {
 		if err := handleTransactions(peer, txs, false); err != nil {
 			return fmt.Errorf("PooledTransactions: %v", err)
 		}
-		h.addRevealsFromPeer(peer.ID(), txs)
+		h.addRevealsFromPeer(peer, txs)
 		return h.txFetcher.Enqueue(peer.ID(), txs, true)
 
 	default:
@@ -178,11 +180,13 @@ func (h *ethHandler) filterAccountAnnounces(peer string, kinds []byte, sizes []u
 	return fkinds, fsizes, fhashes
 }
 
-// addRevealsFromPeer hands the reveals of a delivery to the reveal pool with
-// the peer they came from, so that its budgets apply. The whole delivery
-// still goes to the fetcher afterwards, which sees each of these reveals as
-// already known or refused.
-func (h *ethHandler) addRevealsFromPeer(peer string, txs []*types.Transaction) {
+// addRevealsFromPeer hands the reveals and policy actions of a delivery to
+// the reveal pool with the peer they came from, so that its budgets apply.
+// The whole delivery still goes to the fetcher afterwards, which sees each
+// of these transactions as already known or refused. A peer the pool
+// reports at its failed proof limit (ghostpool.ErrPeerFailLimit) is
+// disconnected, as for any other protocol breach.
+func (h *ethHandler) addRevealsFromPeer(peer *eth.Peer, txs []*types.Transaction) {
 	if h.ghostpool == nil {
 		return
 	}
@@ -195,10 +199,19 @@ func (h *ethHandler) addRevealsFromPeer(peer string, txs []*types.Transaction) {
 	if len(reveals) == 0 {
 		return
 	}
-	for i, err := range h.ghostpool.AddFromPeer(peer, reveals) {
+	id := peer.ID()
+	limit := false
+	for i, err := range h.ghostpool.AddFromPeer(id, reveals) {
 		if err != nil {
-			log.Debug("Reveal from peer refused", "peer", peer, "hash", reveals[i].Hash(), "err", err)
+			log.Debug("Reveal from peer refused", "peer", id, "hash", reveals[i].Hash(), "err", err)
+			if errors.Is(err, ghostpool.ErrPeerFailLimit) {
+				limit = true
+			}
 		}
+	}
+	if limit {
+		log.Debug("Dropping peer at the failed proof limit", "peer", id)
+		peer.Disconnect(p2p.DiscUselessPeer)
 	}
 }
 
