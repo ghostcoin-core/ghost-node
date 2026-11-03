@@ -134,6 +134,8 @@ func (b *BlockGen) addTx(bc *BlockChain, vmConfig vm.Config, tx *types.Transacti
 	switch {
 	case tx.Type() == types.GhostPolicyActionTxType:
 		receipt, err = ApplyPolicyAction(b.cm.config, b.cm, b.gasPool, b.statedb, b.header, genesis, b.header.Hash(), tx, &b.header.GasUsed, vmConfig)
+	case tx.Type() == types.GhostBundleTxType:
+		receipt, err = applyGhostBundle(b.cm.config, b.gasPool, b.statedb, b.header, b.cm, genesis, b.header.Hash(), tx, &b.header.GasUsed)
 	case tx.IsGhostReveal():
 		receipt, err = applyGhostReveal(b.cm.config, b.gasPool, b.statedb, b.header, b.cm, genesis, b.header.Hash(), tx, &b.header.GasUsed)
 	default:

@@ -90,6 +90,20 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 		if err := types.CheckTxType(tx); err != nil {
 			return nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: %w", i, tx.Hash().Hex(), err)
 		}
+		// A bundle is no reveal (IsGhostReveal), but is applied beside them.
+		if tx.Type() == types.GhostBundleTxType {
+			if p.bc == nil {
+				return nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: no chain for a bundle", i, tx.Hash().Hex())
+			}
+			statedb.SetTxContext(tx.Hash(), i)
+			receipt, err := applyGhostBundle(p.config, gp, statedb, header, p.bc, p.bc.Genesis().Hash(), blockHash, tx, usedGas)
+			if err != nil {
+				return nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: %w", i, tx.Hash().Hex(), err)
+			}
+			receipts = append(receipts, receipt)
+			allLogs = append(allLogs, receipt.Logs...)
+			continue
+		}
 		if tx.IsGhostReveal() {
 			if p.bc == nil {
 				return nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: no chain for a reveal", i, tx.Hash().Hex())
@@ -231,6 +245,41 @@ func applyGhostReveal(config ctypes.ChainConfigurator, gp *GasPool, statedb *sta
 	if err != nil {
 		return nil, err
 	}
+	return ghostNativeReceipt(config, statedb, header, blockHash, tx, gas, usedGas), nil
+}
+
+// applyGhostBundle applies a bundle (type 0x55) in the block of header: it
+// takes exactly count times G_PRIV from the block gas pool, which must hold
+// it, checks the bundle's structure and root proof with the active proof
+// verifier and applies its reveals in order, skipping those whose
+// state-dependent checks fail (ghostpriv.ApplyBundle). A structural failure
+// makes the block invalid. The receipt is one receipt of type 0x55, status
+// successful, with the bundle's whole gas and the logs of the applied
+// reveals in order.
+func applyGhostBundle(config ctypes.ChainConfigurator, gp *GasPool, statedb *state.StateDB, header *types.Header, chain ghostpriv.ChainReader, genesis common.Hash, blockHash common.Hash, tx *types.Transaction, usedGas *uint64) (*types.Receipt, error) {
+	if tx.Type() != types.GhostBundleTxType {
+		return nil, fmt.Errorf("%w: type %#x is not a bundle", types.ErrTxTypeNotSupported, tx.Type())
+	}
+	gas := tx.Gas()
+	if err := gp.SubGas(gas); err != nil {
+		return nil, err
+	}
+	env := &ghostpriv.BlockEnv{
+		Header:  header,
+		Chain:   chain,
+		ChainID: config.GetChainID(),
+		Genesis: genesis,
+	}
+	if _, err := ghostpriv.ApplyBundle(statedb, env, ghostpriv.ActiveVerifier(), tx.GhostBundleEnvelope()); err != nil {
+		return nil, err
+	}
+	return ghostNativeReceipt(config, statedb, header, blockHash, tx, gas, usedGas), nil
+}
+
+// ghostNativeReceipt finalises the state after a native transaction without
+// an account, adds its gas to usedGas and returns its receipt: status
+// successful, the gas and the logs the transaction wrote.
+func ghostNativeReceipt(config ctypes.ChainConfigurator, statedb *state.StateDB, header *types.Header, blockHash common.Hash, tx *types.Transaction, gas uint64, usedGas *uint64) *types.Receipt {
 	var root []byte
 	eip161d := config.IsEnabled(config.GetEIP161dTransition, header.Number)
 	if config.IsEnabled(config.GetEIP658Transition, header.Number) {
@@ -254,7 +303,7 @@ func applyGhostReveal(config ctypes.ChainConfigurator, gp *GasPool, statedb *sta
 	receipt.BlockHash = blockHash
 	receipt.BlockNumber = new(big.Int).Set(header.Number)
 	receipt.TransactionIndex = uint(statedb.TxIndex())
-	return receipt, nil
+	return receipt
 }
 
 // ApplyTransaction attempts to apply a transaction to the given state database

@@ -204,7 +204,7 @@ func (r *Receipt) decodeTyped(b []byte) error {
 		return errShortTypedReceipt
 	}
 	switch b[0] {
-	case DynamicFeeTxType, AccessListTxType, BlobTxType, GhostRevealTxType, GhostDataRevealTxType, GhostAccountTxType, GhostPolicyRevealTxType, GhostPolicyActionTxType:
+	case DynamicFeeTxType, AccessListTxType, BlobTxType, GhostRevealTxType, GhostDataRevealTxType, GhostAccountTxType, GhostPolicyRevealTxType, GhostPolicyActionTxType, GhostBundleTxType:
 		var data receiptRLP
 		err := rlp.DecodeBytes(b[1:], &data)
 		if err != nil {
@@ -312,7 +312,7 @@ func (rs Receipts) EncodeIndex(i int, w *bytes.Buffer) {
 	}
 	w.WriteByte(r.Type)
 	switch r.Type {
-	case AccessListTxType, DynamicFeeTxType, BlobTxType, GhostRevealTxType, GhostDataRevealTxType, GhostAccountTxType, GhostPolicyRevealTxType, GhostPolicyActionTxType:
+	case AccessListTxType, DynamicFeeTxType, BlobTxType, GhostRevealTxType, GhostDataRevealTxType, GhostAccountTxType, GhostPolicyRevealTxType, GhostPolicyActionTxType, GhostBundleTxType:
 		rlp.Encode(w, data)
 	default:
 		// For unsupported types, write nothing. Since this is for
@@ -348,8 +348,9 @@ func (rs Receipts) DeriveFields(config ctypes.ChainConfigurator, hash common.Has
 		rs[i].TransactionIndex = uint(i)
 
 		// The contract address can be derived from the transaction itself
-		// A coin, data or policy reveal has no sender and creates nothing.
-		if txs[i].To() == nil && !txs[i].IsGhostReveal() {
+		// A coin, data or policy reveal, a policy action or a bundle has no
+		// sender and creates nothing.
+		if txs[i].To() == nil && !txs[i].IsGhostReveal() && txs[i].Type() != GhostBundleTxType {
 			// Deriving the signer is expensive, only do if it's actually needed.
 			// The sender of an account transaction in a block is derived
 			// from its public key; the block import verified the signature.

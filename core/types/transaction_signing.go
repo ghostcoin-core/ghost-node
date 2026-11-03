@@ -41,11 +41,12 @@ const setCodeTxType = 0x04
 
 // CheckTxType refuses a transaction by its type byte alone, before any
 // signature work: the coin reveal (0x50), the data reveal (0x51), the account
-// transaction (0x52), the policy reveal (0x53) and the policy action (0x54)
-// are the only types taken.
+// transaction (0x52), the policy reveal (0x53), the policy action (0x54) and
+// the bundle (0x55) are the only types taken. The pools take the account
+// transaction and the reveals only, by checks of their own.
 func CheckTxType(tx *Transaction) error {
 	switch typ := tx.Type(); typ {
-	case GhostRevealTxType, GhostDataRevealTxType, GhostAccountTxType, GhostPolicyRevealTxType, GhostPolicyActionTxType:
+	case GhostRevealTxType, GhostDataRevealTxType, GhostAccountTxType, GhostPolicyRevealTxType, GhostPolicyActionTxType, GhostBundleTxType:
 		return nil
 	case LegacyTxType, AccessListTxType, DynamicFeeTxType, BlobTxType, setCodeTxType:
 		return fmt.Errorf("%w: type %#x", ErrSecp256k1TxType, typ)
@@ -160,9 +161,9 @@ func MustSignNewTx(prv *ecdsa.PrivateKey, s Signer, txdata TxData) *Transaction 
 // signing method. The cache is invalidated if the cached signer does
 // not match the signer used in the current call.
 func Sender(signer Signer, tx *Transaction) (common.Address, error) {
-	// A coin, data or policy reveal, or a policy action, has no account: no
-	// signer ever gives it an address.
-	if tx.IsGhostReveal() {
+	// A coin, data or policy reveal, a policy action or a bundle has no
+	// account: no signer ever gives it an address.
+	if tx.IsGhostReveal() || tx.Type() == GhostBundleTxType {
 		return common.Address{}, ErrNoSender
 	}
 	if sc := tx.from.Load(); sc != nil {
