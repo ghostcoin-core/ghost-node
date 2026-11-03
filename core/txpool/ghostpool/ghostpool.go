@@ -14,10 +14,11 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
 
-// Package ghostpool is the transaction pool of the native reveal
-// transactions, the coin reveal (type 0x50) and the data reveal (type 0x51).
-// A reveal has no sender account, no nonce and no gas price, so it cannot
-// live in the legacy pool, which is ordered per account; it lives here,
+// Package ghostpool is the transaction pool of the native transactions
+// without an account: the coin reveal (type 0x50), the data reveal (type
+// 0x51), the policy reveal (type 0x53) and the policy action (type 0x54). None
+// has a sender account, a nonce of an account or a gas price, so none can
+// live in the legacy pool, which is ordered per account; they live here,
 // beside the legacy pool, as a subpool of core/txpool.
 //
 // The pool checks a reveal with the chain rules of core/ghostpriv against
@@ -26,18 +27,33 @@
 // chain's tree-root index for the pool's head, the other checks read at most
 // the headers of the fee window and of the window before it, whose fee is
 // accepted too, and the proof is verified last, only for a
-// reveal every other check passed. A reveal refused for a reason no head can
-// change, a bad proof among them, is remembered by its hash in a bounded set
-// and refused again without any check. It holds at most one
-// reveal per marker, the first seen: a later reveal of the same marker is
-// refused, and a held reveal whose marker another reveal spent in a block is
-// dropped when the pool rechecks on the new head.
+// reveal every other check passed. A transaction refused for a reason no
+// head can change, a bad proof among them, is remembered by its hash in a
+// bounded set and refused again without any check. It holds at most one
+// reveal per marker, the first seen, across the three coin reveal types: a
+// later reveal of the same marker is refused, and a held reveal whose marker
+// another reveal spent in a block is dropped when the pool rechecks on the
+// new head.
+//
+// A policy action is checked with checks 1 to 8 of core/ghostpriv first,
+// against the pool's head, and its proof only after them. It is keyed by its
+// slot's marker and its nonce, and takes that key only when it is inserted,
+// after its proof verified: an action that fails reserves nothing, so a
+// flood of bad actions for one slot never keeps a valid one out. Reveals and
+// actions have caps of their own and share every peer budget. On each new
+// head a held action runs checks 1 to 8 again, never its proof.
+//
+// A peer whose transactions fail their proof PeerMaxFailedProofs times on
+// one head is refused with ErrPeerFailLimit, which the network handler
+// answers by disconnecting it.
 package ghostpool
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"math/big"
+	"sort"
 	"sync"
 	"time"
 
@@ -57,48 +73,77 @@ import (
 
 // The caps of the pool and the budgets of one peer.
 const (
-	// MaxReveals is the most reveals the pool holds.
+	// MaxReveals is the most reveals the pool holds, of the coin reveal
+	// (both versions), the data reveal and the policy reveal together.
 	MaxReveals = 16
 
-	// MaxBytes is the most envelope bytes the pool holds, 16 envelopes of
-	// the version 2 coin reveal, the largest of the envelopes the pool takes.
-	MaxBytes = MaxReveals * types.GhostRevealEnvelopeSize
+	// MaxBytes is the most reveal envelope bytes the pool holds, 16
+	// envelopes of the policy reveal, the largest of the envelopes the pool
+	// takes: 20,983,216 bytes.
+	MaxBytes = MaxReveals * types.GhostPolicyRevealEnvelopeSize
 
-	// PeerRevealsPerBlock is the number of reveals a peer may have the node
-	// fetch or take from it per chain head: each announced reveal the node
-	// agrees to fetch, and each reveal delivered without an announcement,
-	// takes one. The budget is refilled when the head moves.
+	// MaxActions is the most policy actions the pool holds, apart from the
+	// reveals.
+	MaxActions = 8
+
+	// MaxActionBytes is the most policy action envelope bytes the pool
+	// holds, 8 envelopes: 7,594,984 bytes.
+	MaxActionBytes = MaxActions * types.GhostPolicyActionEnvelopeSize
+
+	// PeerRevealsPerBlock is the number of transactions of this pool, of
+	// any of its types, a peer may have the node fetch or take from it per
+	// chain head: each announced one the node agrees to fetch, and each one
+	// delivered without an announcement, takes one. The budget is refilled
+	// when the head moves.
 	PeerRevealsPerBlock = 4
 
-	// PeerMaxInFlight is the most reveals of one peer that are announced and
-	// agreed to be fetched but not delivered yet.
+	// PeerMaxInFlight is the most transactions of this pool of one peer
+	// that are announced and agreed to be fetched but not delivered yet.
 	PeerMaxInFlight = 4
 
-	// PeerMaxHeld is the most reveals the pool holds that one peer was the
-	// first to deliver.
+	// PeerMaxHeld is the most transactions the pool holds, of any of its
+	// types, that one peer was the first to deliver.
 	PeerMaxHeld = 4
 
 	// PeerMaxHeldBytes is the most envelope bytes the pool holds that one
-	// peer was the first to deliver.
-	PeerMaxHeldBytes = PeerMaxHeld * types.GhostRevealEnvelopeSize
+	// peer was the first to deliver, PeerMaxHeld policy reveal envelopes.
+	PeerMaxHeldBytes = PeerMaxHeld * types.GhostPolicyRevealEnvelopeSize
+
+	// PeerMaxFailedProofs is the number of proofs of one peer's
+	// transactions, of any of the pool's types, that may fail on one head:
+	// at the last of them the pool refuses the transaction with
+	// ErrPeerFailLimit, and the peer is dropped. The count starts again when
+	// the head moves.
+	PeerMaxFailedProofs = 3
 
 	// announceExpiry is how long an agreed fetch counts against a peer's
-	// in-flight budget when the reveal never arrives.
+	// in-flight budget when the transaction never arrives.
 	announceExpiry = time.Minute
 )
 
 var (
-	// ErrPoolFull is returned for a reveal that would take the pool over
-	// MaxReveals reveals or MaxBytes bytes.
+	// ErrPoolFull is returned for a transaction that would take the pool
+	// over the cap of its class: MaxReveals reveals or MaxBytes bytes for a
+	// reveal, MaxActions actions or MaxActionBytes bytes for an action.
 	ErrPoolFull = errors.New("reveal pool full")
 
 	// ErrMarkerPending is returned for a reveal of a marker the pool already
 	// holds a different reveal for. The first seen is kept.
 	ErrMarkerPending = errors.New("marker already has a pending reveal")
 
+	// ErrActionPending is returned for a policy action whose slot marker
+	// and nonce the pool already holds a different verified action for. The
+	// first held is kept, and the peer is not counted a failed proof.
+	ErrActionPending = errors.New("policy action marker and nonce already have a pending action")
+
 	// ErrPeerBudget is returned for a reveal from a peer that has used up its
 	// budget.
 	ErrPeerBudget = errors.New("peer reveal budget used up")
+
+	// ErrPeerFailLimit is returned for a transaction of a peer that reached
+	// PeerMaxFailedProofs failed proofs on the current head, wrapping the
+	// refusal of the transaction: the peer is to be dropped.
+	ErrPeerFailLimit = errors.New("peer reached the failed proof limit of the head")
 
 	// ErrNoPeer is returned for a remote reveal that does not name the peer
 	// it came from: remote reveals enter only through AddFromPeer, so that
@@ -137,12 +182,13 @@ type rejectedSet struct {
 }
 
 // add remembers hash with its refusal err if err holds whatever the head,
-// that is if it comes from the bytes of the reveal alone: its decoding, its
-// chain id, the shape of a data reveal, or its proof, which is verified
-// last, so a proof refused is refused for good. A refusal that a later head,
-// a reorganisation or the pool's own load can lift is not remembered: the
-// fee of the window, the root, the marker, the backstop, the caps, the
-// budgets and a node without a verifier.
+// that is if it comes from the bytes of the transaction alone: its
+// decoding, its chain id, the shape of a data reveal, or its proof, which is
+// verified last, so a proof refused is refused for good. A refusal that a
+// later head, a reorganisation or the pool's own load can lift is not
+// remembered: the fee of the window, the root, the marker, the backstop, the
+// policy, the slot of an action, its nonce, its debit and its expiry, the
+// caps, the budgets and a node without a verifier.
 func (s *rejectedSet) add(hash common.Hash, err error) {
 	if !permanentRefusal(err) {
 		return
@@ -169,22 +215,48 @@ func (s *rejectedSet) lookup(hash common.Hash) error {
 	return s.errs[hash]
 }
 
-// permanentRefusals are the refusals of a reveal that its bytes alone decide.
+// permanentRefusals are the refusals of a transaction that its bytes alone
+// decide.
 var permanentRefusals = []error{
 	ghostpriv.ErrRevealLength, ghostpriv.ErrRevealVersion, ghostpriv.ErrRevealAmount,
 	ghostpriv.ErrRevealChainID, ghostpriv.ErrRevealProof,
 	ghostpriv.ErrDataRevealLength, ghostpriv.ErrDataRevealVersion, ghostpriv.ErrDataRevealAmount,
 	ghostpriv.ErrDataRevealChainID, ghostpriv.ErrDataRevealPurpose, ghostpriv.ErrDataRevealShape,
 	ghostpriv.ErrDataRevealProof,
+	ghostpriv.ErrPolicyRevealLength, ghostpriv.ErrPolicyRevealVersion, ghostpriv.ErrPolicyRevealAmount,
+	ghostpriv.ErrPolicyRevealChainID, ghostpriv.ErrPolicyRevealProof,
+	ghostpriv.ErrActionLength, ghostpriv.ErrActionVersion, ghostpriv.ErrActionEncoding,
+	ghostpriv.ErrActionChainID, ghostpriv.ErrActionProof,
 }
 
-// permanentRefusal reports whether err is a refusal of a reveal that no
-// head can lift.
+// permanentRefusal reports whether err is a refusal of a transaction that
+// no head can lift.
 func permanentRefusal(err error) bool {
 	if err == nil || errors.Is(err, ghostpriv.ErrNoVerifier) {
 		return false
 	}
 	for _, target := range permanentRefusals {
+		if errors.Is(err, target) {
+			return true
+		}
+	}
+	return false
+}
+
+// proofRefusals are the refusals of a proof the verifier rejected, one per
+// type.
+var proofRefusals = []error{
+	ghostpriv.ErrRevealProof, ghostpriv.ErrDataRevealProof,
+	ghostpriv.ErrPolicyRevealProof, ghostpriv.ErrActionProof,
+}
+
+// failedProof reports whether err is the refusal of a proof the verifier
+// checked and rejected. A node without a verifier is not the peer's fault.
+func failedProof(err error) bool {
+	if err == nil || errors.Is(err, ghostpriv.ErrNoVerifier) {
+		return false
+	}
+	for _, target := range proofRefusals {
 		if errors.Is(err, target) {
 			return true
 		}
@@ -218,68 +290,111 @@ type markerKey struct {
 	marker common.Hash
 }
 
-// entry is one held reveal.
+// actionKey identifies the slot nonce a policy action spends: the marker of
+// its escrow slot and its nonce.
+type actionKey struct {
+	marker common.Hash
+	nonce  uint64
+}
+
+// txClass is the class of a held transaction, which decides its gas, its
+// fee and the cap it counts under.
+type txClass uint8
+
+const (
+	classCoin   txClass = iota // the version 2 coin reveal, G_PRIV
+	classCoinV1                // the version 1 coin reveal, its own gas
+	classData                  // the data reveal, G_DATA
+	classPolicy                // the policy reveal, G_POLICY
+	classAction                // the policy action, G_ACTION
+)
+
+// gas is the gas of a transaction of the class.
+func (c txClass) gas() uint64 {
+	switch c {
+	case classCoinV1:
+		return ghostpriv.GasPrivV1
+	case classData:
+		return ghostpriv.GasData
+	case classPolicy:
+		return ghostpriv.GasPolicy
+	case classAction:
+		return ghostpriv.GasAction
+	default:
+		return ghostpriv.GasPriv
+	}
+}
+
+// entry is one held transaction.
 type entry struct {
-	tx   *types.Transaction
-	key  markerKey
-	peer string // the peer that first delivered it, empty for a local one
+	tx    *types.Transaction
+	class txClass
+	key   markerKey    // the marker of a reveal
+	akey  actionKey    // the slot nonce of an action
+	paid  *uint256.Int // the fee field of a reveal, the debit of an action
+	peer  string       // the peer that first delivered it, empty for a local one
 }
 
 // peerBudget is what one peer has used of its budgets.
 type peerBudget struct {
-	tokens     int                       // reveals left to take in this head
+	tokens     int                       // transactions left to take in this head
 	announced  map[common.Hash]time.Time // agreed fetches not delivered yet
-	held       int                       // reveals held that it delivered first
-	validating int                       // reveals it delivered being checked
+	held       int                       // transactions held that it delivered first
+	validating int                       // transactions it delivered being checked
+	failed     int                       // proofs of its transactions failed on this head
 }
 
 // Pool is the reveal pool.
 //
-// The reveal checks run outside the pool's lock, at most maxValidations at
-// a time, against a snapshot of the head: they verify the proof, and the
-// lock must not be held through that. Their cost is bounded per reveal
-// whatever the age of its root: one lookup in the tree-root index, then the
+// The checks run outside the pool's lock, at most maxValidations at a time,
+// against a snapshot of the head: they verify the proof, and the lock must
+// not be held through that. Their cost is bounded per transaction whatever
+// the age of a reveal's root: one lookup in the tree-root index, then the
 // other checks, which read at most the headers of the fee window and of the
-// window before it, then the proof. A reveal being checked holds its marker and a place under
-// the caps, so that the first seen of two competing reveals is still the
-// one kept.
+// window before it, then the proof. A reveal being checked holds its marker
+// and a place under the caps, so that the first seen of two competing
+// reveals is still the one kept. A policy action being checked holds a
+// place under the caps but not its key, which it takes when it is inserted.
 //
 // The refusals that need neither the proof nor the root run first under the
-// lock and charge the peer for every reveal they refuse; one peer holds at
-// most one slot at a time; a remote reveal that finds no slot free is
-// dropped, never queued; and one slot is kept for the node's own reveals.
+// lock and charge the peer for every transaction they refuse; one peer holds
+// at most one slot at a time; a remote transaction that finds no slot free
+// is dropped, never queued; and one slot is kept for the node's own
+// transactions.
 type Pool struct {
 	chain       BlockChain
 	verifier    func() ghostpriv.Verifier
-	remoteSlots chan struct{} // one per check running, of any reveal
-	localSlot   chan struct{} // the slot only local reveals take
+	remoteSlots chan struct{} // one per check running, of any transaction
+	localSlot   chan struct{} // the slot only local transactions take
 
-	mu         sync.RWMutex
-	head       *types.Header
-	state      *state.StateDB
-	fee        classFees // the version 2 coin reveal fees of the next block, for G_PRIV
-	feeV1      classFees // the version 1 coin reveal fees of the next block, for its gas
-	dataFee    classFees // the data reveal fees of the next block, for G_DATA
-	all        map[common.Hash]*entry
-	order      []common.Hash // hashes of the held reveals, first seen first
-	markers    map[markerKey]common.Hash
-	bytes      uint64
-	validating map[markerKey]common.Hash // reveals being checked, by marker
-	locals     int                       // local reveals among those being checked
-	peers      map[string]*peerBudget
-	rejected   rejectedSet // reveals refused for good, refused again unchecked
+	mu           sync.RWMutex
+	head         *types.Header
+	state        *state.StateDB
+	fees         classFeeSet // the fees of each reveal class in the next block
+	all          map[common.Hash]*entry
+	order        []common.Hash // hashes of the held transactions, first seen first
+	markers      map[markerKey]common.Hash
+	bytes        uint64                    // envelope bytes of the held reveals
+	validating   map[markerKey]common.Hash // reveals being checked, by marker
+	locals       int                       // local reveals among those being checked
+	actions      map[actionKey]common.Hash // held policy actions, by slot nonce
+	actionBytes  uint64                    // envelope bytes of the held actions
+	actionChecks map[common.Hash]bool      // actions being checked, true for a local one
+	localActions int                       // local actions among those being checked
+	peers        map[string]*peerBudget
+	rejected     rejectedSet // transactions refused for good, refused again unchecked
 
 	feed  event.Feed
 	scope event.SubscriptionScope
 }
 
 const (
-	// maxValidations is the most reveal checks of new reveals that run at
-	// the same time. One of them is kept for local reveals.
+	// maxValidations is the most checks of new transactions that run at
+	// the same time. One of them is kept for local transactions.
 	maxValidations = 4
 
-	// maxRevalidations is how often a new reveal is checked again when the
-	// head moved while it was checked.
+	// maxRevalidations is how often a new transaction is checked again when
+	// the head moved while it was checked.
 	maxRevalidations = 3
 )
 
@@ -291,28 +406,62 @@ var errHeadMoving = errors.New("chain head kept moving while the reveal was chec
 // verifier of core/ghostpriv.
 func New(chain BlockChain) *Pool {
 	return &Pool{
-		chain:       chain,
-		verifier:    ghostpriv.ActiveVerifier,
-		remoteSlots: make(chan struct{}, maxValidations-1),
-		localSlot:   make(chan struct{}, 1),
-		all:         make(map[common.Hash]*entry),
-		markers:     make(map[markerKey]common.Hash),
-		validating:  make(map[markerKey]common.Hash),
-		peers:       make(map[string]*peerBudget),
+		chain:        chain,
+		verifier:     ghostpriv.ActiveVerifier,
+		remoteSlots:  make(chan struct{}, maxValidations-1),
+		localSlot:    make(chan struct{}, 1),
+		all:          make(map[common.Hash]*entry),
+		markers:      make(map[markerKey]common.Hash),
+		validating:   make(map[markerKey]common.Hash),
+		actions:      make(map[actionKey]common.Hash),
+		actionChecks: make(map[common.Hash]bool),
+		peers:        make(map[string]*peerBudget),
 	}
 }
 
-// Filter accepts the coin reveal and the data reveal. The policy reveal,
-// though a reveal, is not taken: the pool has no admission rules for it yet.
+// Filter accepts the coin reveal, the data reveal, the policy reveal and
+// the policy action.
 func (p *Pool) Filter(tx *types.Transaction) bool {
-	return tx.IsGhostReveal() && tx.Type() != types.GhostPolicyRevealTxType
+	return tx.IsGhostReveal()
 }
 
 // classFees are the fees of one reveal class the block that would come next
 // on the head accepts: that of its fee window and that of the window before
 // it, each nil when unknown or, for prev, when there is none.
 type classFees struct {
-	cur, prev *uint256.Int
+	cur, prev *ghostpriv.Fee
+}
+
+// match returns the fee of the two whose total is paid, nil if neither is.
+func (c classFees) match(paid *uint256.Int) *ghostpriv.Fee {
+	switch {
+	case paid == nil:
+		return nil
+	case c.cur != nil && c.cur.Total.Eq(paid):
+		return c.cur
+	case c.prev != nil && c.prev.Total.Eq(paid):
+		return c.prev
+	}
+	return nil
+}
+
+// classFeeSet are the fees of every reveal class in the next block.
+type classFeeSet struct {
+	coin, coinV1, data, policy classFees
+}
+
+// of returns the fees of the reveal class c.
+func (s classFeeSet) of(c txClass) classFees {
+	switch c {
+	case classCoinV1:
+		return s.coinV1
+	case classData:
+		return s.data
+	case classPolicy:
+		return s.policy
+	default:
+		return s.coin
+	}
 }
 
 // Init sets the head the pool checks against. A reveal has no account, so
@@ -322,10 +471,10 @@ func (p *Pool) Init(gasTip uint64, head *types.Header, reserve txpool.AddressRes
 	if err != nil {
 		return err
 	}
-	fee, feeV1, dataFee := p.windowFees(head)
+	fees := p.windowFees(head)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.head, p.state, p.fee, p.feeV1, p.dataFee = head, st, fee, feeV1, dataFee
+	p.head, p.state, p.fees = head, st, fees
 	return nil
 }
 
@@ -335,10 +484,14 @@ func (p *Pool) Close() error {
 	return nil
 }
 
-// Reset moves the pool to the new head: it refills the peer budgets and
-// rechecks every held reveal against the block that would come next,
-// dropping each that no longer passes, among them every reveal whose marker
-// a block spent.
+// Reset moves the pool to the new head: it refills the peer budgets, starts
+// the count of failed proofs again when the head moved, and rechecks every
+// held transaction against the block that would come next, dropping each
+// that no longer passes, among them every reveal whose marker a block spent
+// and every action whose slot closed, whose nonce moved, whose policy a
+// reorganisation removed, whose debit no longer pays G_ACTION at the base
+// fee or whose expiry passed. A held action runs checks 1 to 8 again; its
+// proof, verified once, is not verified again.
 func (p *Pool) Reset(oldHead, newHead *types.Header) {
 	st, err := p.chain.StateAt(newHead.Root)
 	if err != nil {
@@ -352,14 +505,18 @@ func (p *Pool) Reset(oldHead, newHead *types.Header) {
 		log.Error("Reveal pool cannot reset to the new head", "number", newHead.Number, "hash", newHead.Hash(), "err", err)
 		return
 	}
-	fee, feeV1, dataFee := p.windowFees(newHead)
+	fees := p.windowFees(newHead)
 	p.mu.Lock()
-	p.head, p.state, p.fee, p.feeV1, p.dataFee = newHead, st, fee, feeV1, dataFee
+	moved := p.head == nil || p.head.Hash() != newHead.Hash()
+	p.head, p.state, p.fees = newHead, st, fees
 	now := time.Now()
 	for _, b := range p.peers {
 		b.tokens = PeerRevealsPerBlock
+		if moved {
+			b.failed = 0
+		}
 		for hash, at := range b.announced {
-			// A reveal another peer delivered first, or one that never
+			// A transaction another peer delivered first, or one that never
 			// came, no longer holds an in-flight place.
 			if _, held := p.all[hash]; held || now.Sub(at) > announceExpiry {
 				delete(b.announced, hash)
@@ -374,8 +531,14 @@ func (p *Pool) Reset(oldHead, newHead *types.Header) {
 
 	var failed []common.Hash
 	for _, e := range held {
-		if err := p.check(newHead, recheck.Copy(), e.tx, e.peer == ""); err != nil {
-			log.Debug("Dropped reveal on recheck", "hash", e.tx.Hash(), "err", err)
+		var err error
+		if e.class == classAction {
+			err = p.actionRules(newHead, recheck.Copy(), e.tx)
+		} else {
+			err = p.check(newHead, recheck.Copy(), e.tx, e.peer == "")
+		}
+		if err != nil {
+			log.Debug("Dropped transaction on recheck", "hash", e.tx.Hash(), "type", e.tx.Type(), "err", err)
 			failed = append(failed, e.tx.Hash())
 		}
 	}
@@ -431,7 +594,11 @@ func (p *Pool) Add(txs []*types.Transaction, local bool, sync bool) []error {
 	return errs
 }
 
-// AddFromPeer adds reveals delivered by a peer, under that peer's budgets.
+// AddFromPeer adds transactions delivered by a peer, under that peer's
+// budgets. A transaction whose proof failed as the peer's
+// PeerMaxFailedProofs-th on this head, and every one after it on the same
+// head, is refused with an error wrapping ErrPeerFailLimit: the caller drops
+// the peer.
 func (p *Pool) AddFromPeer(peer string, txs []*types.Transaction) []error {
 	errs := make([]error, len(txs))
 	for i, tx := range txs {
@@ -444,20 +611,25 @@ func (p *Pool) AddFromPeer(peer string, txs []*types.Transaction) []error {
 	return errs
 }
 
-// add checks and inserts one reveal, first delivered by peer, empty for a
-// local reveal. The cheap refusals come first, under the lock, and a remote
-// reveal takes a check slot there or is dropped; then the reveal holds its
-// marker, a place under the caps and its slot while the reveal checks run
-// outside the lock, and is inserted when they pass on the head that is
-// still the pool's.
+// add checks and inserts one transaction, first delivered by peer, empty
+// for a local one. The cheap refusals come first, under the lock, and a
+// remote transaction takes a check slot there or is dropped; then the
+// transaction holds a place under the caps and its slot, and a reveal its
+// marker, while its checks run outside the lock, and is inserted when they
+// pass on the head that is still the pool's.
 func (p *Pool) add(tx *types.Transaction, peer string) error {
 	if !p.Filter(tx) {
 		return fmt.Errorf("%w: type %#x", core.ErrTxTypeNotSupported, tx.Type())
 	}
 	hash := tx.Hash()
-	// A reveal refused for good before is refused again without any check,
-	// and charged to the peer as any other.
 	p.mu.Lock()
+	// A peer at the failed proof limit of this head gets no more checks.
+	if b, ok := p.peers[peer]; ok && peer != "" && b.failed >= PeerMaxFailedProofs {
+		p.mu.Unlock()
+		return fmt.Errorf("%w: peer %s, %d failed proofs", ErrPeerFailLimit, peer, b.failed)
+	}
+	// A transaction refused for good before is refused again without any
+	// check, and charged to the peer as any other.
 	if first := p.rejected.lookup(hash); first != nil {
 		_, err := p.charge(peer, hash)
 		p.mu.Unlock()
@@ -467,6 +639,16 @@ func (p *Pool) add(tx *types.Transaction, peer string) error {
 		return fmt.Errorf("%w: %w", ErrRejectedBefore, first)
 	}
 	p.mu.Unlock()
+	if tx.Type() == types.GhostPolicyActionTxType {
+		return p.addAction(tx, peer)
+	}
+	return p.addReveal(tx, peer)
+}
+
+// addReveal checks and inserts one reveal, of any of the three reveal
+// types.
+func (p *Pool) addReveal(tx *types.Transaction, peer string) error {
+	hash := tx.Hash()
 	// Decoding runs the length, version and amount checks; a peer is charged
 	// for a reveal that fails them as for any other.
 	fields, decodeErr := decode(tx)
@@ -487,40 +669,11 @@ func (p *Pool) add(tx *types.Transaction, peer string) error {
 	head, st, err := p.snapshot()
 	p.mu.Unlock()
 
-	// A local reveal waits for a slot: any free one, else the one kept for
-	// local reveals, which no peer can take.
-	if slot == nil {
-		select {
-		case p.remoteSlots <- struct{}{}:
-			slot = p.remoteSlots
-		default:
-			select {
-			case p.remoteSlots <- struct{}{}:
-				slot = p.remoteSlots
-			case p.localSlot <- struct{}{}:
-				slot = p.localSlot
-			}
-		}
-	}
-
-	// Each round leaves the loop holding the lock.
-	for attempt := 0; ; attempt++ {
-		if err == nil {
-			err = p.check(head, st, tx, peer == "")
-		}
-		p.mu.Lock()
-		if err != nil || p.head.Hash() == head.Hash() {
-			break
-		}
-		// The head moved while the reveal was checked: check it again on
-		// the new head.
-		if attempt+1 == maxRevalidations {
-			err = errHeadMoving
-			break
-		}
-		head, st, err = p.snapshot()
-		p.mu.Unlock()
-	}
+	slot = p.takeSlot(slot)
+	err = p.checkUntilSettled(head, st, err, func(head *types.Header, st *state.StateDB) error {
+		return p.check(head, st, tx, peer == "")
+	})
+	// The lock is held from here.
 	<-slot
 	delete(p.validating, key)
 	b, ok := p.peers[peer]
@@ -531,11 +684,11 @@ func (p *Pool) add(tx *types.Transaction, peer string) error {
 	}
 	// Places a local reveal took while this one was checked are not counted
 	// against it at admission, so the caps are checked again here.
-	if err == nil && (len(p.all) >= MaxReveals || p.bytes+tx.Size() > MaxBytes) {
-		err = fmt.Errorf("%w: %d reveals, %d bytes", ErrPoolFull, len(p.all), p.bytes)
+	if err == nil && (len(p.markers) >= MaxReveals || p.bytes+tx.Size() > MaxBytes) {
+		err = fmt.Errorf("%w: %d reveals, %d bytes", ErrPoolFull, len(p.markers), p.bytes)
 	}
 	if err != nil {
-		p.rejected.add(hash, err)
+		err = p.refuse(hash, peer, err)
 		p.mu.Unlock()
 		return err
 	}
@@ -544,17 +697,161 @@ func (p *Pool) add(tx *types.Transaction, peer string) error {
 	if !ok {
 		peer = ""
 	}
-	p.all[hash] = &entry{tx: tx, key: key, peer: peer}
-	p.order = append(p.order, hash)
+	p.insert(&entry{tx: tx, class: fields.class(), key: key, paid: fields.fee, peer: peer})
 	p.markers[key] = hash
 	p.bytes += tx.Size()
-	if peer != "" {
-		b.held++
-	}
 	p.mu.Unlock()
 
 	p.feed.Send(core.NewTxsEvent{Txs: []*types.Transaction{tx}})
 	return nil
+}
+
+// addAction checks and inserts one policy action. Checks 1 to 8 run under
+// the lock against the pool's head, before any proof; then the action holds
+// a check slot and a place under the action caps, but not its key, while its
+// proof is verified outside the lock; it takes its key when it is inserted,
+// so that of two valid actions for one key the first to finish is kept and
+// the other refused with ErrActionPending, which is no failed proof.
+func (p *Pool) addAction(tx *types.Transaction, peer string) error {
+	hash := tx.Hash()
+	envelope := tx.GhostPolicyActionEnvelope()
+	a, decodeErr := ghostpriv.DecodeAction(envelope)
+	size := tx.Size()
+	p.mu.Lock()
+	slot, err := p.admitAction(hash, a, decodeErr, envelope, size, peer)
+	if err != nil {
+		p.rejected.add(hash, err)
+		p.mu.Unlock()
+		return err
+	}
+	local := peer == ""
+	p.actionChecks[hash] = local
+	if local {
+		p.localActions++
+	} else {
+		p.peers[peer].validating++
+	}
+	head, st, err := p.snapshot()
+	p.mu.Unlock()
+
+	slot = p.takeSlot(slot)
+	err = p.checkUntilSettled(head, st, err, func(head *types.Header, st *state.StateDB) error {
+		_, _, err := ghostpriv.CheckAction(st, p.actionEnv(head), p.verifier(), envelope)
+		return err
+	})
+	// The lock is held from here.
+	<-slot
+	delete(p.actionChecks, hash)
+	b, ok := p.peers[peer]
+	if local {
+		p.localActions--
+	} else if ok && b.validating > 0 {
+		b.validating--
+	}
+	key := actionKey{marker: a.Marker, nonce: a.Nonce}
+	// The key is reserved only here, after the proof verified; the caps
+	// are checked again, as places local actions took were not counted at
+	// admission.
+	if err == nil {
+		if other, held := p.actions[key]; held {
+			err = fmt.Errorf("%w: marker %x nonce %d held by %x", ErrActionPending, key.marker, key.nonce, other)
+		} else if len(p.actions) >= MaxActions || p.actionBytes+size > MaxActionBytes {
+			err = fmt.Errorf("%w: %d actions, %d bytes", ErrPoolFull, len(p.actions), p.actionBytes)
+		}
+	}
+	if err != nil {
+		err = p.refuse(hash, peer, err)
+		p.mu.Unlock()
+		return err
+	}
+	if !ok {
+		peer = ""
+	}
+	p.insert(&entry{tx: tx, class: classAction, akey: key, paid: new(uint256.Int).Set(a.Debit), peer: peer})
+	p.actions[key] = hash
+	p.actionBytes += size
+	p.mu.Unlock()
+
+	p.feed.Send(core.NewTxsEvent{Txs: []*types.Transaction{tx}})
+	return nil
+}
+
+// takeSlot returns the check slot of a transaction: slot when admission
+// took one for a remote transaction; else, for a local transaction, any
+// free one, else the one kept for local transactions, which no peer can
+// take, waiting for it.
+func (p *Pool) takeSlot(slot chan struct{}) chan struct{} {
+	if slot != nil {
+		return slot
+	}
+	select {
+	case p.remoteSlots <- struct{}{}:
+		return p.remoteSlots
+	default:
+		select {
+		case p.remoteSlots <- struct{}{}:
+			return p.remoteSlots
+		case p.localSlot <- struct{}{}:
+			return p.localSlot
+		}
+	}
+}
+
+// checkUntilSettled runs check on head and st, outside the lock, unless err
+// already refuses, and again on the new head while the head moved under it,
+// at most maxRevalidations times. It returns holding the lock.
+func (p *Pool) checkUntilSettled(head *types.Header, st *state.StateDB, err error, check func(*types.Header, *state.StateDB) error) error {
+	for attempt := 0; ; attempt++ {
+		if err == nil {
+			err = check(head, st)
+		}
+		p.mu.Lock()
+		if err != nil || p.head.Hash() == head.Hash() {
+			return err
+		}
+		// The head moved while the transaction was checked: check it again
+		// on the new head.
+		if attempt+1 == maxRevalidations {
+			return errHeadMoving
+		}
+		head, st, err = p.snapshot()
+		p.mu.Unlock()
+	}
+}
+
+// refuse records the refusal err of a checked transaction: its hash is
+// remembered when no head can lift err, and a failed proof is counted to
+// the peer, whose PeerMaxFailedProofs-th on this head turns the refusal into
+// one wrapping ErrPeerFailLimit. The remembered refusal is the plain one, so
+// that another peer sending the same transaction is not taken for this one.
+// The caller holds the lock.
+func (p *Pool) refuse(hash common.Hash, peer string, err error) error {
+	p.rejected.add(hash, err)
+	if peer == "" || !failedProof(err) {
+		return err
+	}
+	b, ok := p.peers[peer]
+	if !ok {
+		return err
+	}
+	b.failed++
+	if b.failed >= PeerMaxFailedProofs {
+		return fmt.Errorf("%w: peer %s, %d failed proofs: %w", ErrPeerFailLimit, peer, b.failed, err)
+	}
+	return err
+}
+
+// insert enters a checked transaction under its hash, first seen last, and
+// counts it to the peer that delivered it. The caller holds the lock.
+func (p *Pool) insert(e *entry) {
+	hash := e.tx.Hash()
+	p.all[hash] = e
+	p.order = append(p.order, hash)
+	if e.peer != "" {
+		if b, ok := p.peers[e.peer]; ok {
+			b.held++
+		}
+	}
 }
 
 // admit runs the cheap refusals of a new reveal, decoded as fields or
@@ -562,11 +859,11 @@ func (p *Pool) add(tx *types.Transaction, peer string) error {
 // refusal but that of a reveal held or being checked: so a reveal that
 // fails costs the peer as much as one that passes. Then come the decoding,
 // the peer's one check slot and held cap, a marker held or being checked
-// for another reveal, the chain id, the fee, a spent marker and the caps.
-// The root and the proof are left to the reveal checks, the proof last.
-// A remote reveal takes a check slot last, without waiting, and admit
-// returns it; a local reveal takes its slot after the lock is let go. The
-// caller holds the lock.
+// for another reveal, the chain id, the fee, a spent marker, the policy of a
+// policy reveal and the caps. The root and the proof are left to the reveal
+// checks, the proof last. A remote reveal takes a check slot last, without
+// waiting, and admit returns it; a local reveal takes its slot after the
+// lock is let go. The caller holds the lock.
 func (p *Pool) admit(hash common.Hash, fields revealFields, decodeErr error, size uint64, peer string) (chan struct{}, error) {
 	key := fields.key
 	if _, ok := p.all[hash]; ok {
@@ -582,13 +879,8 @@ func (p *Pool) admit(hash common.Hash, fields revealFields, decodeErr error, siz
 	if decodeErr != nil {
 		return nil, decodeErr
 	}
-	if b != nil {
-		if b.validating > 0 {
-			return nil, fmt.Errorf("%w: peer %s", ErrPeerBusy, peer)
-		}
-		if n := b.held + b.validating; n >= PeerMaxHeld || uint64(n+1)*size > PeerMaxHeldBytes {
-			return nil, fmt.Errorf("%w: peer %s holds %d reveals", ErrPeerBudget, peer, n)
-		}
+	if err := p.peerRoom(b, peer, size); err != nil {
+		return nil, err
 	}
 	if other, ok := p.validating[key]; ok {
 		return nil, fmt.Errorf("%w: marker %x taken by %x", ErrMarkerPending, key.marker, other)
@@ -605,9 +897,76 @@ func (p *Pool) admit(hash common.Hash, fields revealFields, decodeErr error, siz
 	if peer == "" {
 		pending = p.locals
 	}
-	if count := len(p.all) + pending; count >= MaxReveals || p.bytes+uint64(pending+1)*size > MaxBytes {
+	if count := len(p.markers) + pending; count >= MaxReveals || p.bytes+uint64(pending+1)*size > MaxBytes {
 		return nil, fmt.Errorf("%w: %d reveals, %d bytes", ErrPoolFull, count, p.bytes)
 	}
+	return p.remoteSlot(peer)
+}
+
+// admitAction runs the cheap refusals of a new policy action, decoded as a
+// or refused by decodeErr, charging the peer first as admit does: the
+// decoding (checks 1 and 2), the peer's one check slot and held cap, a key
+// the pool holds a verified action for, checks 3 to 8 against the pool's
+// head, and the action caps. The proof is left to the check after it; the
+// action reserves no key here. The caller holds the lock.
+func (p *Pool) admitAction(hash common.Hash, a *ghostpriv.Action, decodeErr error, envelope []byte, size uint64, peer string) (chan struct{}, error) {
+	if _, ok := p.all[hash]; ok {
+		return nil, txpool.ErrAlreadyKnown
+	}
+	if _, ok := p.actionChecks[hash]; ok {
+		return nil, txpool.ErrAlreadyKnown
+	}
+	b, err := p.charge(peer, hash)
+	if err != nil {
+		return nil, err
+	}
+	if decodeErr != nil {
+		return nil, decodeErr
+	}
+	if err := p.peerRoom(b, peer, size); err != nil {
+		return nil, err
+	}
+	key := actionKey{marker: a.Marker, nonce: a.Nonce}
+	if other, ok := p.actions[key]; ok {
+		return nil, fmt.Errorf("%w: marker %x nonce %d held by %x", ErrActionPending, key.marker, key.nonce, other)
+	}
+	if p.head == nil || p.state == nil {
+		return nil, errors.New("reveal pool not initialised")
+	}
+	if _, _, err := ghostpriv.CheckAction(p.state, p.actionEnv(p.head), cheapOnly{}, envelope); err != nil {
+		return nil, err
+	}
+	pending := len(p.actionChecks)
+	if peer == "" {
+		pending = p.localActions
+	}
+	if count := len(p.actions) + pending; count >= MaxActions || p.actionBytes+uint64(pending+1)*size > MaxActionBytes {
+		return nil, fmt.Errorf("%w: %d actions, %d bytes", ErrPoolFull, count, p.actionBytes)
+	}
+	return p.remoteSlot(peer)
+}
+
+// peerRoom refuses a transaction of size bytes from a peer, of budget b,
+// that has another transaction being checked or would hold more than its
+// held caps. A local transaction, of no budget, is not limited. The caller
+// holds the lock.
+func (p *Pool) peerRoom(b *peerBudget, peer string, size uint64) error {
+	if b == nil {
+		return nil
+	}
+	if b.validating > 0 {
+		return fmt.Errorf("%w: peer %s", ErrPeerBusy, peer)
+	}
+	if n := b.held + b.validating; n >= PeerMaxHeld || uint64(n+1)*size > PeerMaxHeldBytes {
+		return fmt.Errorf("%w: peer %s holds %d reveals", ErrPeerBudget, peer, n)
+	}
+	return nil
+}
+
+// remoteSlot takes a check slot open to peers for a remote transaction,
+// without waiting, or refuses it with ErrChecksBusy; a local transaction
+// takes its slot after the lock is let go. The caller holds the lock.
+func (p *Pool) remoteSlot(peer string) (chan struct{}, error) {
 	if peer == "" {
 		return nil, nil
 	}
@@ -619,11 +978,39 @@ func (p *Pool) admit(hash common.Hash, fields revealFields, decodeErr error, siz
 	}
 }
 
-// charge takes the reveal with the given hash from the budget of peer and
-// returns the budget: nothing for a reveal the peer announced and the node
-// agreed to fetch, one of its reveals of this head for any other, and a
-// refusal when none is left. A local reveal, of no peer, has no budget. The
-// caller holds the lock.
+// cheapOnly is the verifier the cheap checks of a policy action run with:
+// it accepts every proof, so that ghostpriv.CheckAction runs checks 1 to 8
+// alone and verifies no proof.
+type cheapOnly struct{}
+
+func (cheapOnly) VerifyReveal(*ghostpriv.VerifyInputs, []byte) error { return nil }
+
+// actionEnv is the environment of a policy action in the block that would
+// come next on head.
+func (p *Pool) actionEnv(head *types.Header) *ghostpriv.BlockEnv {
+	return &ghostpriv.BlockEnv{
+		Header:  p.nextHeader(head),
+		Chain:   p.chain,
+		ChainID: p.chain.Config().GetChainID(),
+		Genesis: p.chain.Genesis().Hash(),
+	}
+}
+
+// actionRules runs checks 1 to 8 of a policy action against st, the state
+// after head, for the block that would come next on head: the shape, the
+// encoding, the chain id, the expiry, the open slot of a callable policy,
+// the nonce, the expected remaining and the debit at the next block's base
+// fee. No proof is verified.
+func (p *Pool) actionRules(head *types.Header, st *state.StateDB, tx *types.Transaction) error {
+	_, _, err := ghostpriv.CheckAction(st, p.actionEnv(head), cheapOnly{}, tx.GhostPolicyActionEnvelope())
+	return err
+}
+
+// charge takes the transaction with the given hash from the budget of peer
+// and returns the budget: nothing for one the peer announced and the node
+// agreed to fetch, one of its transactions of this head for any other, and
+// a refusal when none is left. A local transaction, of no peer, has no
+// budget. The caller holds the lock.
 func (p *Pool) charge(peer string, hash common.Hash) (*peerBudget, error) {
 	if peer == "" {
 		return nil, nil
@@ -640,37 +1027,43 @@ func (p *Pool) charge(peer string, hash common.Hash) (*peerBudget, error) {
 }
 
 // cheapRules runs the reveal checks that read no ancestry against the
-// pool's head: the chain id, the fee and the marker against the spent set.
-// The caller holds the lock.
+// pool's head: the chain id, the fee and the marker against the spent set,
+// and for a policy reveal the zero marker and its policy (check 9). The
+// caller holds the lock.
 func (p *Pool) cheapRules(r revealFields) error {
 	coin := r.key.kind == ghosttree.Coin
+	errChainID, errFee, errMarker := ghostpriv.ErrRevealChainID, ghostpriv.ErrRevealFee, ghostpriv.ErrRevealMarker
+	switch {
+	case !coin:
+		errChainID, errFee, errMarker = ghostpriv.ErrDataRevealChainID, ghostpriv.ErrDataRevealFee, ghostpriv.ErrDataRevealMarker
+	case r.policy:
+		errChainID, errFee, errMarker = ghostpriv.ErrPolicyRevealChainID, ghostpriv.ErrPolicyRevealFee, ghostpriv.ErrPolicyRevealMarker
+	}
 	if id := p.chain.Config().GetChainID(); id == nil || !id.IsUint64() || id.Uint64() != r.chainID {
-		if coin {
-			return fmt.Errorf("%w: have %d, chain %v", ghostpriv.ErrRevealChainID, r.chainID, id)
-		}
-		return fmt.Errorf("%w: have %d, chain %v", ghostpriv.ErrDataRevealChainID, r.chainID, id)
+		return fmt.Errorf("%w: have %d, chain %v", errChainID, r.chainID, id)
 	}
 	// Each class pays the window fee for its own gas: a version 2 coin
 	// reveal that of G_PRIV, a version 1 coin reveal that of its own gas, a
-	// data reveal, from its reserve, that of G_DATA.
-	errFee, fees := ghostpriv.ErrRevealFee, p.fee
+	// data reveal, from its reserve, that of G_DATA, a policy reveal that
+	// of G_POLICY.
+	fees := p.fees.of(r.class())
 	switch {
-	case !coin:
-		errFee, fees = ghostpriv.ErrDataRevealFee, p.dataFee
-	case r.v1:
-		fees = p.feeV1
+	case fees.cur != nil && fees.match(r.fee) == nil && fees.prev == nil:
+		return fmt.Errorf("%w: have %v, want %v", errFee, r.fee, fees.cur.Total)
+	case fees.cur != nil && fees.match(r.fee) == nil:
+		return fmt.Errorf("%w: have %v, want %v or %v", errFee, r.fee, fees.cur.Total, fees.prev.Total)
 	}
-	switch {
-	case fees.cur != nil && !fees.cur.Eq(r.fee) && fees.prev == nil:
-		return fmt.Errorf("%w: have %v, want %v", errFee, r.fee, fees.cur)
-	case fees.cur != nil && !fees.cur.Eq(r.fee) && !fees.prev.Eq(r.fee):
-		return fmt.Errorf("%w: have %v, want %v or %v", errFee, r.fee, fees.cur, fees.prev)
+	if r.policy && r.key.marker == (common.Hash{}) {
+		return fmt.Errorf("%w: %w", errMarker, ghosttree.ErrZeroMarker)
 	}
 	if p.state != nil && ghosttree.IsSpent(p.state, r.key.kind, r.key.marker) {
-		if coin {
-			return fmt.Errorf("%w: %x", ghostpriv.ErrRevealMarker, r.key.marker)
+		return fmt.Errorf("%w: %x", errMarker, r.key.marker)
+	}
+	if r.policy && p.state != nil && p.head != nil {
+		next := p.head.Number.Uint64() + 1
+		if err := ghostpriv.PolicyRevealAllowed(p.state, r.policyAddr, r.codeHash, next); err != nil {
+			return err
 		}
-		return fmt.Errorf("%w: %x", ghostpriv.ErrDataRevealMarker, r.key.marker)
 	}
 	return nil
 }
@@ -701,22 +1094,27 @@ func (p *Pool) eligibleRoot(head *types.Header, kind ghosttree.Kind, root common
 
 // windowFees are the fees of each class that the block that would come next
 // on head accepts, for the version 2 coin reveal (G_PRIV), the version 1
-// coin reveal (its own gas) and the data reveal (G_DATA): that of its fee
-// window and that of the window before it, nil when the window does not
-// exist, for the first window, or an ancestor it needs is not available: the
-// reveal checks then refuse the reveal themselves. The headers are walked
-// once for all classes, reading at most those of the two windows, seven of
-// them.
-func (p *Pool) windowFees(head *types.Header) (fee, feeV1, dataFee classFees) {
+// coin reveal (its own gas), the data reveal (G_DATA) and the policy reveal
+// (G_POLICY): that of its fee window and that of the window before it, nil
+// when the window does not exist, for the first window, or an ancestor it
+// needs is not available: the reveal checks then refuse the reveal
+// themselves. The headers are walked once for all classes, reading at most
+// those of the two windows, seven of them.
+func (p *Pool) windowFees(head *types.Header) classFeeSet {
 	cur, prev := p.windowStarts(head)
 	class := func(gas uint64) classFees {
-		c := classFees{cur: feeTotal(cur, gas)}
+		c := classFees{cur: windowFee(cur, gas)}
 		if c.cur != nil {
-			c.prev = feeTotal(prev, gas)
+			c.prev = windowFee(prev, gas)
 		}
 		return c
 	}
-	return class(ghostpriv.GasPriv), class(ghostpriv.GasPrivV1), class(ghostpriv.GasData)
+	return classFeeSet{
+		coin:   class(ghostpriv.GasPriv),
+		coinV1: class(ghostpriv.GasPrivV1),
+		data:   class(ghostpriv.GasData),
+		policy: class(ghostpriv.GasPolicy),
+	}
 }
 
 // windowStarts returns the first header of the fee window of the block that
@@ -749,9 +1147,9 @@ func (p *Pool) ancestor(h *types.Header, n uint64) *types.Header {
 	return h
 }
 
-// feeTotal is the window fee for gas of a window whose first block is h, nil
-// when h or its base fee is missing or cannot be priced.
-func feeTotal(h *types.Header, gas uint64) *uint256.Int {
+// windowFee is the window fee for gas of a window whose first block is h,
+// nil when h or its base fee is missing or cannot be priced.
+func windowFee(h *types.Header, gas uint64) *ghostpriv.Fee {
 	if h == nil || h.BaseFee == nil {
 		return nil
 	}
@@ -759,18 +1157,23 @@ func feeTotal(h *types.Header, gas uint64) *uint256.Int {
 	if err != nil {
 		return nil
 	}
-	return fee.Total
+	return &fee
 }
 
-// remove drops a held reveal. The caller holds the lock.
+// remove drops a held transaction. The caller holds the lock.
 func (p *Pool) remove(hash common.Hash) {
 	e, ok := p.all[hash]
 	if !ok {
 		return
 	}
 	delete(p.all, hash)
-	delete(p.markers, e.key)
-	p.bytes -= e.tx.Size()
+	if e.class == classAction {
+		delete(p.actions, e.akey)
+		p.actionBytes -= e.tx.Size()
+	} else {
+		delete(p.markers, e.key)
+		p.bytes -= e.tx.Size()
+	}
 	for i, h := range p.order {
 		if h == hash {
 			p.order = append(p.order[:i], p.order[i+1:]...)
@@ -793,12 +1196,31 @@ func (p *Pool) budget(peer string) *peerBudget {
 	return b
 }
 
+// announcedSize reports whether a transaction of type kind announced with
+// size is one of the pool's of the size of its envelope, and whether the
+// type is one of the pool's at all.
+func announcedSize(kind byte, size uint32) (sized, ours bool) {
+	switch kind {
+	case types.GhostRevealTxType:
+		// The version 2 or the version 1 layout.
+		return size == types.GhostRevealEnvelopeSize || size == types.GhostRevealV1EnvelopeSize, true
+	case types.GhostDataRevealTxType:
+		return size == types.GhostDataRevealEnvelopeSize, true
+	case types.GhostPolicyRevealTxType:
+		return size == types.GhostPolicyRevealEnvelopeSize, true
+	case types.GhostPolicyActionTxType:
+		return size == types.GhostPolicyActionEnvelopeSize, true
+	}
+	return false, false
+}
+
 // FilterAnnounced applies a peer's budgets to an announcement of the
 // existing announce message and reports for each announced hash whether to
-// fetch it. Only reveals are limited. A reveal announced with a size other
-// than the envelope's is never fetched; a reveal the pool holds or already
-// agreed to fetch from this peer costs nothing; any other takes one of the
-// peer's reveals of this head and one in-flight place, and is not fetched
+// fetch it. Only the pool's types are limited: the coin, data and policy
+// reveals and the policy action. One announced with a size other than its
+// envelope's is never fetched; one the pool holds or already agreed to
+// fetch from this peer costs nothing; any other takes one of the peer's
+// transactions of this head and one in-flight place, and is not fetched
 // when either is used up. Without types, as before the typed announcement,
 // nothing is filtered here and the delivery is charged instead.
 func (p *Pool) FilterAnnounced(peer string, kinds []byte, sizes []uint32, hashes []common.Hash) []bool {
@@ -813,14 +1235,8 @@ func (p *Pool) FilterAnnounced(peer string, kinds []byte, sizes []uint32, hashes
 	defer p.mu.Unlock()
 	now := time.Now()
 	for i, hash := range hashes {
-		var sized bool
-		switch kinds[i] {
-		case types.GhostRevealTxType:
-			// The version 2 or the version 1 layout.
-			sized = sizes[i] == types.GhostRevealEnvelopeSize || sizes[i] == types.GhostRevealV1EnvelopeSize
-		case types.GhostDataRevealTxType:
-			sized = sizes[i] == types.GhostDataRevealEnvelopeSize
-		default:
+		sized, ours := announcedSize(kinds[i], sizes[i])
+		if !ours {
 			keep[i] = true
 			continue
 		}
@@ -846,8 +1262,8 @@ func (p *Pool) FilterAnnounced(peer string, kinds []byte, sizes []uint32, hashes
 	return keep
 }
 
-// DropPeer forgets a peer's budgets when it disconnects. The reveals it
-// delivered stay in the pool.
+// DropPeer forgets a peer's budgets when it disconnects. The transactions
+// it delivered stay in the pool.
 func (p *Pool) DropPeer(peer string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -865,16 +1281,76 @@ func (p *Pool) Pending(filter txpool.PendingFilter) map[common.Address][]*txpool
 	return map[common.Address][]*txpool.LazyTransaction{}
 }
 
-// PendingReveals returns the held reveals, first seen first. Each passed
-// the reveal checks against the block that comes next on the pool's head.
+// PendingReveals returns the held transactions, reveals and policy actions,
+// in block order: the highest tip per gas in the block that comes next on
+// the pool's head first, then by hash ascending. A reveal's tip is that of
+// the cover rule for its class's gas at the next block's base fee, an
+// action's its debit less G_ACTION times that base fee; the tips per gas
+// are compared as exact fractions. Each passed its checks against the block
+// that comes next on the pool's head.
 func (p *Pool) PendingReveals() []*types.Transaction {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	txs := make([]*types.Transaction, 0, len(p.order))
+	var baseFee *big.Int
+	if p.head != nil {
+		baseFee = p.nextHeader(p.head).BaseFee
+	}
+	type ranked struct {
+		tx   *types.Transaction
+		hash common.Hash
+		tip  *big.Int // the tip of the transaction
+		gas  *big.Int // its gas, the denominator of its tip per gas
+	}
+	list := make([]ranked, 0, len(p.order))
 	for _, hash := range p.order {
-		txs = append(txs, p.all[hash].tx)
+		e := p.all[hash]
+		gas := e.class.gas()
+		list = append(list, ranked{tx: e.tx, hash: hash, tip: p.tip(e, baseFee), gas: new(big.Int).SetUint64(gas)})
+	}
+	sort.Slice(list, func(i, j int) bool {
+		// tip_i / gas_i against tip_j / gas_j, by cross-multiplication.
+		left := new(big.Int).Mul(list[i].tip, list[j].gas)
+		right := new(big.Int).Mul(list[j].tip, list[i].gas)
+		if c := left.Cmp(right); c != 0 {
+			return c > 0
+		}
+		return bytes.Compare(list[i].hash[:], list[j].hash[:]) < 0
+	})
+	txs := make([]*types.Transaction, len(list))
+	for i, r := range list {
+		txs[i] = r.tx
 	}
 	return txs
+}
+
+// tip is the tip a held transaction pays in a block with base fee baseFee:
+// for a reveal the tip of the cover rule applied to the window fee it pays
+// for its class's gas, for an action its debit less G_ACTION times the base
+// fee; zero when it cannot be priced. The caller holds the lock.
+func (p *Pool) tip(e *entry, baseFee *big.Int) *big.Int {
+	if baseFee == nil || e.paid == nil {
+		return new(big.Int)
+	}
+	if e.class == classAction {
+		base, overflow := uint256.FromBig(baseFee)
+		if overflow {
+			return new(big.Int)
+		}
+		burn, err := ghostpriv.ActionBurn(base)
+		if err != nil || burn.Gt(e.paid) {
+			return new(big.Int)
+		}
+		return new(uint256.Int).Sub(e.paid, burn).ToBig()
+	}
+	fee := p.fees.of(e.class).match(e.paid)
+	if fee == nil {
+		return new(big.Int)
+	}
+	split, err := fee.CoverGas(baseFee, e.class.gas())
+	if err != nil {
+		return new(big.Int)
+	}
+	return split.Tip.ToBig()
 }
 
 // SubscribeTransactions subscribes to new reveals. The pool resurrects no
@@ -886,7 +1362,7 @@ func (p *Pool) SubscribeTransactions(ch chan<- core.NewTxsEvent, reorgs bool) ev
 // Nonce returns 0: a reveal has no account.
 func (p *Pool) Nonce(addr common.Address) uint64 { return 0 }
 
-// Stats returns the number of held reveals, all of them pending.
+// Stats returns the number of held transactions, all of them pending.
 func (p *Pool) Stats() (int, int) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -934,7 +1410,8 @@ func (p *Pool) snapshot() (*types.Header, *state.StateDB, error) {
 //     chain that holds only the headers of the fee window and of the window
 //     before it, so that their own root check stops there; a root the index
 //     found below those windows is refused by that check, and the checks that come after the root,
-//     the marker and the backstop, are then run here;
+//     the marker, the backstop and for a policy reveal its policy and the
+//     room for its remainder, are then run here;
 //  3. the proof, for the inputs the node computes, last, so that a reveal
 //     refused by any other check costs no proof verification.
 //
@@ -983,8 +1460,9 @@ func (p *Pool) checkRules(head *types.Header, st *state.StateDB, rv *checkedReve
 		return err
 	}
 	// Every check before the root passed and the index found the root: what
-	// is left is the marker and the backstop: out plus fee for a coin reveal,
-	// the reserve for a data reveal.
+	// is left is the marker and the backstop: out plus fee for a coin or
+	// policy reveal, the reserve for a data reveal; then, for a policy
+	// reveal, its policy and the room for its remainder.
 	if ghosttree.IsSpent(st, rv.in.Kind, rv.in.Marker) {
 		return fmt.Errorf("%w: %x", rv.errMarker, rv.in.Marker)
 	}
@@ -1001,6 +1479,9 @@ func (p *Pool) checkRules(head *types.Header, st *state.StateDB, rv *checkedReve
 	if need := new(uint256.Int).Add(rv.in.Out, rv.in.Fee); need.Gt(hidden) {
 		return fmt.Errorf("%w: out plus fee %v, hidden %v", rv.errBackstop, need, hidden)
 	}
+	if rv.afterBackstop != nil {
+		return rv.afterBackstop(st, next.Number.Uint64())
+	}
 	return nil
 }
 
@@ -1014,6 +1495,11 @@ type checkedReveal struct {
 	errMarker   error
 	errBackstop error
 	rules       func(st *state.StateDB, env *ghostpriv.BlockEnv, verifier ghostpriv.Verifier) error
+
+	// afterBackstop runs the checks of the type that come after the
+	// backstop and before the proof, for a block at height, nil when there
+	// are none.
+	afterBackstop func(st *state.StateDB, height uint64) error
 }
 
 // decodeForCheck decodes a reveal and computes the public inputs of its
@@ -1058,6 +1544,30 @@ func decodeForCheck(tx *types.Transaction, genesis common.Hash) (*checkedReveal,
 			rules: func(st *state.StateDB, env *ghostpriv.BlockEnv, verifier ghostpriv.Verifier) error {
 				_, _, err := ghostpriv.CheckDataReveal(st, env, verifier, envelope)
 				return err
+			},
+		}, nil
+	case types.GhostPolicyRevealTxType:
+		envelope := tx.GhostPolicyRevealEnvelope()
+		r, err := ghostpriv.DecodePolicyReveal(envelope)
+		if err != nil {
+			return nil, err
+		}
+		return &checkedReveal{
+			in:          r.VerifyInputs(r.ChainID, genesis),
+			proof:       common.CopyBytes(r.Proof),
+			errProof:    ghostpriv.ErrPolicyRevealProof,
+			errRoot:     ghostpriv.ErrPolicyRevealRoot,
+			errMarker:   ghostpriv.ErrPolicyRevealMarker,
+			errBackstop: ghostpriv.ErrPolicyRevealBackstop,
+			rules: func(st *state.StateDB, env *ghostpriv.BlockEnv, verifier ghostpriv.Verifier) error {
+				_, _, err := ghostpriv.CheckPolicyReveal(st, env, verifier, envelope)
+				return err
+			},
+			afterBackstop: func(st *state.StateDB, height uint64) error {
+				if err := ghostpriv.PolicyRevealAllowed(st, r.Policy, r.CodeHash, height); err != nil {
+					return err
+				}
+				return ghostpriv.PolicyRevealTreeRoom(st, height, r.Remainder)
 			},
 		}, nil
 	default:
@@ -1132,10 +1642,29 @@ type revealFields struct {
 	chainID uint64
 	fee     *uint256.Int
 	v1      bool // a version 1 coin reveal, whose fee is priced for its own gas
+
+	// policy marks a policy reveal, a coin marker's reveal into the escrow
+	// slot of the policy at policyAddr, of code hash codeHash.
+	policy     bool
+	policyAddr common.Address
+	codeHash   common.Hash
 }
 
-// decode decodes a reveal's fields, running the first three reveal checks
-// of its type: the length, the version and the amount words.
+// class is the class of the reveal.
+func (r revealFields) class() txClass {
+	switch {
+	case r.key.kind != ghosttree.Coin:
+		return classData
+	case r.policy:
+		return classPolicy
+	case r.v1:
+		return classCoinV1
+	}
+	return classCoin
+}
+
+// decode decodes a reveal's fields, running the first checks of its type:
+// the length, the version and the amount words.
 func decode(tx *types.Transaction) (revealFields, error) {
 	switch tx.Type() {
 	case types.GhostRevealTxType:
@@ -1150,6 +1679,21 @@ func decode(tx *types.Transaction) (revealFields, error) {
 			return revealFields{}, err
 		}
 		return revealFields{key: markerKey{kind: ghosttree.Data, marker: r.Marker}, chainID: r.ChainID, fee: r.Fee}, nil
+	case types.GhostPolicyRevealTxType:
+		// The policy reveal spends a coin marker: it shares the marker set of
+		// the coin reveal.
+		r, err := ghostpriv.DecodePolicyReveal(tx.GhostPolicyRevealEnvelope())
+		if err != nil {
+			return revealFields{}, err
+		}
+		return revealFields{
+			key:        markerKey{kind: ghosttree.Coin, marker: r.Marker},
+			chainID:    r.ChainID,
+			fee:        r.Fee,
+			policy:     true,
+			policyAddr: r.Policy,
+			codeHash:   r.CodeHash,
+		}, nil
 	default:
 		return revealFields{}, fmt.Errorf("%w: type %#x", core.ErrTxTypeNotSupported, tx.Type())
 	}

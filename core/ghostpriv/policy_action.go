@@ -298,6 +298,21 @@ func ActionBurn(baseFee *uint256.Int) (*uint256.Int, error) {
 	return burn, nil
 }
 
+// PolicyRevealAllowed is check 9 of a policy reveal (spec 10, section 5.2)
+// on its own, for the transaction pool's checks before the proof: addr is a
+// frozen policy of a block before number with codeHash as its registered
+// code hash and its EXTCODEHASH (ErrPolicyRevealPolicy).
+func PolicyRevealAllowed(st StateDB, addr common.Address, codeHash common.Hash, number uint64) error {
+	return policyAllowed(st, addr, codeHash, number)
+}
+
+// PolicyRevealTreeRoom is check 10 of a policy reveal on its own: the coin
+// tree takes the remainder leaf in the block at height
+// (ErrPolicyRevealTree). It changes nothing.
+func PolicyRevealTreeRoom(st StateDB, height uint64, remainder common.Hash) error {
+	return treeRoom(st, height, remainder)
+}
+
 // actionSlot is check 5: the marker has an open slot, and the slot's policy
 // is a frozen policy the registry records as created in a block before
 // number, whose registered code hash is its EXTCODEHASH.

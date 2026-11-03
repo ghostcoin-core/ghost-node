@@ -17,9 +17,11 @@
 package ghostpool
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"math/big"
+	"sort"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -478,8 +480,13 @@ func TestGhostPoolPerPeerBudget(t *testing.T) {
 }
 
 func TestGhostPoolCapsAndRecheck(t *testing.T) {
-	if MaxBytes != MaxReveals*types.GhostRevealEnvelopeSize {
-		t.Fatalf("byte cap %d is not %d envelopes", MaxBytes, MaxReveals)
+	// The byte cap is 16 envelopes of the policy reveal, the largest the
+	// pool takes.
+	if MaxBytes != MaxReveals*types.GhostPolicyRevealEnvelopeSize {
+		t.Fatalf("byte cap %d is not %d policy reveal envelopes", MaxBytes, MaxReveals)
+	}
+	if MaxBytes != 20_983_216 {
+		t.Fatalf("byte cap %d is not 20,983,216 bytes", MaxBytes)
 	}
 	f := newFixture(t, 7, nil)
 	p := f.newPool()
@@ -496,13 +503,23 @@ func TestGhostPoolCapsAndRecheck(t *testing.T) {
 	if run, _ := p.Stats(); run != MaxReveals {
 		t.Fatalf("pool holds %d reveals, want %d", run, MaxReveals)
 	}
-	if p.bytes != MaxBytes {
-		t.Fatalf("pool holds %d bytes, want %d", p.bytes, MaxBytes)
+	if want := uint64(MaxReveals * types.GhostRevealEnvelopeSize); p.bytes != want {
+		t.Fatalf("pool holds %d bytes, want %d", p.bytes, want)
 	}
 	requireErr(t, p.Add(reveals[MaxReveals:], true, true)[0], ErrPoolFull, "reveal over the cap")
 	requireErr(t, p.AddFromPeer("peer-a", reveals[MaxReveals:])[0], ErrPoolFull, "reveal from a peer over the cap")
-	if got := hashes(p.PendingReveals()); len(got) != MaxReveals || got[0] != reveals[0].Hash() || got[MaxReveals-1] != reveals[MaxReveals-1].Hash() {
-		t.Fatal("pending reveals are not the held ones, first seen first")
+	// The reveals pay the same fee for the same gas, so the block order is
+	// by hash.
+	got := hashes(p.PendingReveals())
+	want := hashes(reveals[:MaxReveals])
+	sort.Slice(want, func(i, j int) bool { return bytes.Compare(want[i][:], want[j][:]) < 0 })
+	if len(got) != MaxReveals {
+		t.Fatalf("%d pending reveals, want %d", len(got), MaxReveals)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("pending reveal %d is %x, want %x: the held ones of equal tip by hash", i, got[i], want[i])
+		}
 	}
 
 	// A new head in the same fee window: every reveal still passes.
