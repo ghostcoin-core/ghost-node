@@ -1,0 +1,327 @@
+// Copyright 2026 The Ghost Authors
+// This file is part of the go-ethereum library.
+//
+// The go-ethereum library is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Lesser General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// The go-ethereum library is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Lesser General Public License for more details.
+//
+// You should have received a copy of the GNU Lesser General Public License
+// along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
+
+package ghost
+
+import "github.com/ethereum/go-ethereum/crypto"
+
+// Guard (spec 10, section 12; docs/ghost-evm-profile.md) is a frozen policy
+// with fixed code, empty parameters and no balance. It has two entry points:
+//
+//   - release(bytes32 marker), selector 0x67d42a8b, exactly 36 bytes of
+//     calldata: an ordinary transaction anyone may send, paying its own gas.
+//     It reads slot(marker) from the escrow natives and, once the block
+//     number is at least height + GuardHoldBlocks and the block timestamp at
+//     least timestamp + GuardHoldSeconds, both floors at once, and the top 12
+//     bytes of instr are zero, pays all of remaining to the low 20 bytes of
+//     instr. There is no relay fee. It returns nothing.
+//   - cancel(bytes32 F, bytes16 salt, bytes note), selector 0xd5b2bbe7,
+//     exactly 516 bytes of calldata (the selector, F, the salt word, the
+//     offset word 0x60, the length word 380 and the note padded to 384
+//     bytes): the call of a policy action. It takes the action's marker from
+//     actionMarker() and recommits actionSettle()'s remaining after the
+//     debit, remaining - debit, to F under salt with note. Outside an action
+//     actionMarker() fails, and so does cancel. With a debit equal to
+//     remaining the amount is zero, recommit refuses it and nothing is
+//     re-committed. It returns nothing.
+//
+// Any other selector or calldata length reverts, and so does any failed
+// call to the natives, always with empty return data. Release and cancel
+// end on the slot's one closed state: paying or recommitting all of
+// remaining closes the slot, and whichever lands second fails.
+//
+// The code is hand-assembled: a compiler would emit opcodes a frozen
+// context forbids. It uses only the opcodes spec 10, section 6.2 allows and
+// calls only the escrow natives at 0x60, with value zero. No consensus rule
+// reads GuardAddress: no node treats an address as Guard (spec 10, section
+// 15, item 4); the constants are here for wallets and tests.
+
+// The hold of a Guard slot: release needs both floors (72 hours at 30
+// seconds a block).
+const (
+	GuardHoldBlocks  uint64 = 8_640
+	GuardHoldSeconds uint64 = 259_200
+)
+
+// TagGuardSalt is the tag of the salt Guard is created with.
+const TagGuardSalt = "ghost/guard-salt/v1"
+
+// GuardRuntimeCode is the code the factory stores for Guard.
+//
+// Memory: release builds the input of slot(marker) at 0x000 and gets the
+// fifteen slot words at 0x100 (word i at 0x100 + 32*i, in the order of
+// vm.EscrowSlotWords: remaining is word 3 at 0x160, the opening height word
+// 5 at 0x1a0, the opening timestamp word 6 at 0x1c0 and instr word 14 at
+// 0x2c0), then builds the input of pay at 0x000. Cancel calls actionMarker()
+// and actionSettle() with their selector at 0x300, gets the marker at 0x320
+// and the debit and the remaining after it at 0x340 and 0x360, and builds the
+// 580-byte input of recommit at 0x000: the selector, the marker, F, the salt
+// word, the amount, the note offset 0xa0, the note length 380 and the
+// 384 bytes of the padded note from calldata 0x84. A selector is written as
+// a word shifted left by 224 bits, so a later word written at 0x004 keeps
+// it.
+//
+// A sum of a slot's height or timestamp and its floor that is below the
+// height or timestamp has wrapped around, and reverts.
+var GuardRuntimeCode = []byte{
+	// Dispatch on the selector and the calldata length.
+	0x60, 0x00, // 0x000 PUSH1 0x00
+	0x35,       // 0x002 CALLDATALOAD
+	0x60, 0xe0, // 0x003 PUSH1 0xe0
+	0x1c,                         // 0x005 SHR  the selector
+	0x80,                         // 0x006 DUP1
+	0x63, 0x67, 0xd4, 0x2a, 0x8b, // 0x007 PUSH4 release(bytes32)
+	0x14,       // 0x00c EQ
+	0x36,       // 0x00d CALLDATASIZE
+	0x60, 0x24, // 0x00e PUSH1 0x24  36 bytes
+	0x14,             // 0x010 EQ
+	0x16,             // 0x011 AND
+	0x61, 0x00, 0x2b, // 0x012 PUSH2 0x002b  release
+	0x57,                         // 0x015 JUMPI
+	0x63, 0xd5, 0xb2, 0xbb, 0xe7, // 0x016 PUSH4 cancel(bytes32,bytes16,bytes)
+	0x14,             // 0x01b EQ
+	0x36,             // 0x01c CALLDATASIZE
+	0x61, 0x02, 0x04, // 0x01d PUSH2 0x0204  516 bytes
+	0x14,             // 0x020 EQ
+	0x16,             // 0x021 AND
+	0x61, 0x00, 0xb9, // 0x022 PUSH2 0x00b9  cancel
+	0x57, // 0x025 JUMPI
+
+	// fail: revert with empty data.
+	0x5b,       // 0x026 JUMPDEST
+	0x60, 0x00, // 0x027 PUSH1 0x00
+	0x80, // 0x029 DUP1
+	0xfd, // 0x02a REVERT
+
+	// release: STATICCALL slot(marker), 36 bytes at 0x000, 480 bytes out at
+	// 0x100.
+	0x5b,                         // 0x02b JUMPDEST
+	0x50,                         // 0x02c POP  the selector
+	0x63, 0xb4, 0xa6, 0xa6, 0x0a, // 0x02d PUSH4 slot(bytes32)
+	0x60, 0xe0, // 0x032 PUSH1 0xe0
+	0x1b,       // 0x034 SHL
+	0x60, 0x00, // 0x035 PUSH1 0x00
+	0x52,       // 0x037 MSTORE
+	0x60, 0x04, // 0x038 PUSH1 0x04
+	0x35,       // 0x03a CALLDATALOAD  the marker
+	0x60, 0x04, // 0x03b PUSH1 0x04
+	0x52,             // 0x03d MSTORE
+	0x61, 0x01, 0xe0, // 0x03e PUSH2 0x01e0  out size
+	0x61, 0x01, 0x00, // 0x041 PUSH2 0x0100  out offset
+	0x60, 0x24, // 0x044 PUSH1 0x24  in size
+	0x60, 0x00, // 0x046 PUSH1 0x00  in offset
+	0x60, 0x60, // 0x048 PUSH1 0x60  the escrow natives
+	0x5a,             // 0x04a GAS
+	0xfa,             // 0x04b STATICCALL
+	0x15,             // 0x04c ISZERO
+	0x61, 0x00, 0x26, // 0x04d PUSH2 0x0026  fail
+	0x57, // 0x050 JUMPI
+
+	// release: NUMBER >= height + GuardHoldBlocks, without wrap-around.
+	0x61, 0x01, 0xa0, // 0x051 PUSH2 0x01a0  word 5, the height
+	0x51,             // 0x054 MLOAD
+	0x80,             // 0x055 DUP1
+	0x61, 0x21, 0xc0, // 0x056 PUSH2 0x21c0  8,640
+	0x01,             // 0x059 ADD
+	0x80,             // 0x05a DUP1
+	0x91,             // 0x05b SWAP2
+	0x11,             // 0x05c GT  height > sum: wrapped
+	0x61, 0x00, 0x26, // 0x05d PUSH2 0x0026  fail
+	0x57,             // 0x060 JUMPI
+	0x43,             // 0x061 NUMBER
+	0x10,             // 0x062 LT  number < sum
+	0x61, 0x00, 0x26, // 0x063 PUSH2 0x0026  fail
+	0x57, // 0x066 JUMPI
+
+	// release: TIMESTAMP >= timestamp + GuardHoldSeconds, without
+	// wrap-around.
+	0x61, 0x01, 0xc0, // 0x067 PUSH2 0x01c0  word 6, the timestamp
+	0x51,                   // 0x06a MLOAD
+	0x80,                   // 0x06b DUP1
+	0x62, 0x03, 0xf4, 0x80, // 0x06c PUSH3 0x03f480  259,200
+	0x01,             // 0x070 ADD
+	0x80,             // 0x071 DUP1
+	0x91,             // 0x072 SWAP2
+	0x11,             // 0x073 GT  timestamp > sum: wrapped
+	0x61, 0x00, 0x26, // 0x074 PUSH2 0x0026  fail
+	0x57,             // 0x077 JUMPI
+	0x42,             // 0x078 TIMESTAMP
+	0x10,             // 0x079 LT  block timestamp < sum
+	0x61, 0x00, 0x26, // 0x07a PUSH2 0x0026  fail
+	0x57, // 0x07d JUMPI
+
+	// release: the top 12 bytes of instr are zero.
+	0x61, 0x02, 0xc0, // 0x07e PUSH2 0x02c0  word 14, instr
+	0x51,       // 0x081 MLOAD
+	0x80,       // 0x082 DUP1
+	0x60, 0xa0, // 0x083 PUSH1 0xa0
+	0x1c,             // 0x085 SHR
+	0x61, 0x00, 0x26, // 0x086 PUSH2 0x0026  fail
+	0x57, // 0x089 JUMPI
+
+	// release: CALL pay(marker, instr, remaining), 100 bytes at 0x000.
+	0x63, 0x97, 0xd4, 0xdf, 0x67, // 0x08a PUSH4 pay(bytes32,address,uint256)
+	0x60, 0xe0, // 0x08f PUSH1 0xe0
+	0x1b,       // 0x091 SHL
+	0x60, 0x00, // 0x092 PUSH1 0x00
+	0x52,       // 0x094 MSTORE
+	0x60, 0x04, // 0x095 PUSH1 0x04
+	0x35,       // 0x097 CALLDATALOAD  the marker
+	0x60, 0x04, // 0x098 PUSH1 0x04
+	0x52,       // 0x09a MSTORE
+	0x60, 0x24, // 0x09b PUSH1 0x24
+	0x52,             // 0x09d MSTORE  instr as the address word
+	0x61, 0x01, 0x60, // 0x09e PUSH2 0x0160  word 3, remaining
+	0x51,       // 0x0a1 MLOAD
+	0x60, 0x44, // 0x0a2 PUSH1 0x44
+	0x52,       // 0x0a4 MSTORE
+	0x60, 0x00, // 0x0a5 PUSH1 0x00  out size
+	0x60, 0x00, // 0x0a7 PUSH1 0x00  out offset
+	0x60, 0x64, // 0x0a9 PUSH1 0x64  in size
+	0x60, 0x00, // 0x0ab PUSH1 0x00  in offset
+	0x60, 0x00, // 0x0ad PUSH1 0x00  value
+	0x60, 0x60, // 0x0af PUSH1 0x60  the escrow natives
+	0x5a,             // 0x0b1 GAS
+	0xf1,             // 0x0b2 CALL
+	0x15,             // 0x0b3 ISZERO
+	0x61, 0x00, 0x26, // 0x0b4 PUSH2 0x0026  fail
+	0x57, // 0x0b7 JUMPI
+	0x00, // 0x0b8 STOP
+
+	// cancel: the note's offset word is 0x60 and its length word 380.
+	0x5b,       // 0x0b9 JUMPDEST
+	0x60, 0x44, // 0x0ba PUSH1 0x44
+	0x35,       // 0x0bc CALLDATALOAD
+	0x60, 0x60, // 0x0bd PUSH1 0x60
+	0x14,             // 0x0bf EQ
+	0x15,             // 0x0c0 ISZERO
+	0x61, 0x00, 0x26, // 0x0c1 PUSH2 0x0026  fail
+	0x57,       // 0x0c4 JUMPI
+	0x60, 0x64, // 0x0c5 PUSH1 0x64
+	0x35,             // 0x0c7 CALLDATALOAD
+	0x61, 0x01, 0x7c, // 0x0c8 PUSH2 0x017c  380
+	0x14,             // 0x0cb EQ
+	0x15,             // 0x0cc ISZERO
+	0x61, 0x00, 0x26, // 0x0cd PUSH2 0x0026  fail
+	0x57, // 0x0d0 JUMPI
+
+	// cancel: STATICCALL actionMarker(), the marker at 0x320.
+	0x63, 0xd7, 0xc5, 0x05, 0xe5, // 0x0d1 PUSH4 actionMarker()
+	0x60, 0xe0, // 0x0d6 PUSH1 0xe0
+	0x1b,             // 0x0d8 SHL
+	0x61, 0x03, 0x00, // 0x0d9 PUSH2 0x0300
+	0x52,       // 0x0dc MSTORE
+	0x60, 0x20, // 0x0dd PUSH1 0x20  out size
+	0x61, 0x03, 0x20, // 0x0df PUSH2 0x0320  out offset
+	0x60, 0x04, // 0x0e2 PUSH1 0x04  in size
+	0x61, 0x03, 0x00, // 0x0e4 PUSH2 0x0300  in offset
+	0x60, 0x60, // 0x0e7 PUSH1 0x60  the escrow natives
+	0x5a,             // 0x0e9 GAS
+	0xfa,             // 0x0ea STATICCALL
+	0x15,             // 0x0eb ISZERO
+	0x61, 0x00, 0x26, // 0x0ec PUSH2 0x0026  fail
+	0x57, // 0x0ef JUMPI
+
+	// cancel: STATICCALL actionSettle(), the debit at 0x340 and the
+	// remaining after it at 0x360.
+	0x63, 0x63, 0x43, 0x98, 0x1a, // 0x0f0 PUSH4 actionSettle()
+	0x60, 0xe0, // 0x0f5 PUSH1 0xe0
+	0x1b,             // 0x0f7 SHL
+	0x61, 0x03, 0x00, // 0x0f8 PUSH2 0x0300
+	0x52,       // 0x0fb MSTORE
+	0x60, 0x40, // 0x0fc PUSH1 0x40  out size
+	0x61, 0x03, 0x40, // 0x0fe PUSH2 0x0340  out offset
+	0x60, 0x04, // 0x101 PUSH1 0x04  in size
+	0x61, 0x03, 0x00, // 0x103 PUSH2 0x0300  in offset
+	0x60, 0x60, // 0x106 PUSH1 0x60  the escrow natives
+	0x5a,             // 0x108 GAS
+	0xfa,             // 0x109 STATICCALL
+	0x15,             // 0x10a ISZERO
+	0x61, 0x00, 0x26, // 0x10b PUSH2 0x0026  fail
+	0x57, // 0x10e JUMPI
+
+	// cancel: CALL recommit(marker, F, salt, remaining - debit, note), 580
+	// bytes at 0x000.
+	0x63, 0x5c, 0xa8, 0x75, 0xe8, // 0x10f PUSH4 recommit(bytes32,bytes32,bytes16,uint256,bytes)
+	0x60, 0xe0, // 0x114 PUSH1 0xe0
+	0x1b,       // 0x116 SHL
+	0x60, 0x00, // 0x117 PUSH1 0x00
+	0x52,             // 0x119 MSTORE
+	0x61, 0x03, 0x20, // 0x11a PUSH2 0x0320
+	0x51,       // 0x11d MLOAD  the marker
+	0x60, 0x04, // 0x11e PUSH1 0x04
+	0x52,       // 0x120 MSTORE
+	0x60, 0x04, // 0x121 PUSH1 0x04
+	0x35,       // 0x123 CALLDATALOAD  F
+	0x60, 0x24, // 0x124 PUSH1 0x24
+	0x52,       // 0x126 MSTORE
+	0x60, 0x24, // 0x127 PUSH1 0x24
+	0x35,       // 0x129 CALLDATALOAD  the salt word
+	0x60, 0x44, // 0x12a PUSH1 0x44
+	0x52,             // 0x12c MSTORE
+	0x61, 0x03, 0x60, // 0x12d PUSH2 0x0360
+	0x51,       // 0x130 MLOAD  remaining - debit
+	0x60, 0x64, // 0x131 PUSH1 0x64
+	0x52,       // 0x133 MSTORE
+	0x60, 0xa0, // 0x134 PUSH1 0xa0  the note offset
+	0x60, 0x84, // 0x136 PUSH1 0x84
+	0x52,             // 0x138 MSTORE
+	0x61, 0x01, 0x7c, // 0x139 PUSH2 0x017c  the note length, 380
+	0x60, 0xa4, // 0x13c PUSH1 0xa4
+	0x52,             // 0x13e MSTORE
+	0x61, 0x01, 0x80, // 0x13f PUSH2 0x0180  size 384
+	0x60, 0x84, // 0x142 PUSH1 0x84  calldata offset
+	0x60, 0xc4, // 0x144 PUSH1 0xc4  memory offset
+	0x37,       // 0x146 CALLDATACOPY  the padded note
+	0x60, 0x00, // 0x147 PUSH1 0x00  out size
+	0x60, 0x00, // 0x149 PUSH1 0x00  out offset
+	0x61, 0x02, 0x44, // 0x14b PUSH2 0x0244  in size 580
+	0x60, 0x00, // 0x14e PUSH1 0x00  in offset
+	0x60, 0x00, // 0x150 PUSH1 0x00  value
+	0x60, 0x60, // 0x152 PUSH1 0x60  the escrow natives
+	0x5a,             // 0x154 GAS
+	0xf1,             // 0x155 CALL
+	0x15,             // 0x156 ISZERO
+	0x61, 0x00, 0x26, // 0x157 PUSH2 0x0026  fail
+	0x57, // 0x15a JUMPI
+	0x00, // 0x15b STOP
+}
+
+// GuardInitCode is the init code Guard is created with: it copies
+// GuardRuntimeCode, the 348 bytes that follow these 12, and returns it.
+var GuardInitCode = append([]byte{
+	0x61, 0x01, 0x5c, // 0x00 PUSH2 0x015c  the runtime size
+	0x80,       // 0x03 DUP1
+	0x60, 0x0c, // 0x04 PUSH1 0x0c  the runtime offset
+	0x60, 0x00, // 0x06 PUSH1 0x00
+	0x39,       // 0x08 CODECOPY
+	0x60, 0x00, // 0x09 PUSH1 0x00
+	0xf3, // 0x0b RETURN
+}, GuardRuntimeCode...)
+
+var (
+	// GuardSalt is the salt the factory creates Guard with,
+	// K("ghost/guard-salt/v1").
+	GuardSalt = K(TagGuardSalt)
+
+	// GuardAddress is the address the factory creates Guard at,
+	// PolicyAddress(GuardSalt, keccak256(GuardInitCode)).
+	GuardAddress = PolicyAddress(GuardSalt, crypto.Keccak256Hash(GuardInitCode))
+
+	// GuardCodeHash is keccak256(GuardRuntimeCode), the code hash the
+	// policy registry records for Guard.
+	GuardCodeHash = crypto.Keccak256Hash(GuardRuntimeCode)
+)
