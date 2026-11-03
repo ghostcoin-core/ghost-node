@@ -193,6 +193,14 @@ func (in *EVMInterpreter) Run(contract *Contract, input []byte, readOnly bool) (
 		} else if sLen > operation.maxStack {
 			return nil, &ErrStackOverflow{stackLen: sLen, limit: operation.maxStack}
 		}
+		// A frozen context reads code only of a frozen policy: EXTCODESIZE,
+		// EXTCODECOPY and EXTCODEHASH of any other address halt the frame,
+		// before any gas is charged.
+		if contract.frozen && frozenExtcodeOpcodes[op] {
+			if addr := common.Address(stack.peek().Bytes20()); !in.evm.frozenExtcodeAllowed(addr) {
+				return nil, &ErrFrozenOpcode{opcode: op}
+			}
+		}
 		// Static portion of gas
 		if !contract.UseGas(cost) {
 			return nil, ErrOutOfGas

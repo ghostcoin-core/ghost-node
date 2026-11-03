@@ -34,12 +34,14 @@ import (
 // storage and balance it would use, is a registered policy, or when it is
 // the constructor of a policy the factory is creating. The flag is computed
 // once when the frame is set up and kept on the Contract, so the
-// interpreter never reads the registry per opcode.
+// interpreter reads the registry only for the opcodes whose target it
+// checks.
 //
-// A frozen frame halts on every opcode of frozenOpcodes, and its CALL and
-// STATICCALL halt unless the target is on the allowlist
-// (ghost.IsFrozenCallTarget) or a policy created in an earlier block. A
-// policy never holds a balance: a CALL with value to it fails, a
+// A frozen frame halts on every opcode of frozenOpcodes and on EXTCODESIZE,
+// EXTCODECOPY and EXTCODEHASH of an address that is not a registered
+// policy, and its CALL and STATICCALL halt unless the target is on the
+// allowlist (ghost.IsFrozenCallTarget) or a policy created in an earlier
+// block. A policy never holds a balance: a CALL with value to it fails, a
 // SELFDESTRUCT that would credit it halts, and the factory burns a balance
 // sent to the address ahead of the creation.
 
@@ -82,17 +84,20 @@ func (e *ErrFrozenOpcode) Error() string {
 // Opcode returns the forbidden opcode.
 func (e *ErrFrozenOpcode) Opcode() OpCode { return e.opcode }
 
-// FrozenOpcodes lists the opcodes a frozen context may not run: everything
-// that reads or writes state, the block, the transaction or the caller,
-// the remaining gas, and every way to create, delegate or self-destruct.
-// What is left is a function of the code and the input alone.
+// FrozenOpcodes lists the opcodes a frozen context may never run (spec 10,
+// section 6.2): the balance reads, every way to create, delegate or
+// self-destruct, and the blob opcodes, which are invalid on Ghost anyway.
+// The chain facts, the caller, origin, gas price and remaining gas, the
+// frame's own storage and transient storage, and the logs are allowed; the
+// writes among them fail in a static frame as the base client has it. A
+// frozen frame is never a CALLCODE or DELEGATECALL frame, so the storage it
+// reaches is its own account's.
 var FrozenOpcodes = []OpCode{
-	BALANCE, ORIGIN, CALLER, GASPRICE, EXTCODESIZE, EXTCODECOPY, EXTCODEHASH,
-	BLOCKHASH, COINBASE, TIMESTAMP, NUMBER, DIFFICULTY, GASLIMIT, CHAINID,
-	SELFBALANCE, BASEFEE, BLOBHASH, BLOBBASEFEE,
-	SLOAD, SSTORE, GAS, TLOAD, TSTORE,
-	LOG0, LOG1, LOG2, LOG3, LOG4,
-	CREATE, CALLCODE, DELEGATECALL, CREATE2, SELFDESTRUCT,
+	BALANCE, SELFBALANCE,
+	CALLCODE, DELEGATECALL,
+	CREATE, CREATE2,
+	SELFDESTRUCT,
+	BLOBHASH, BLOBBASEFEE,
 }
 
 // frozenOpcodes is FrozenOpcodes as a lookup table for the interpreter.
@@ -102,6 +107,27 @@ var frozenOpcodes = func() (table [256]bool) {
 	}
 	return table
 }()
+
+// FrozenExtcodeOpcodes lists the opcodes a frozen context may run only on
+// the address of a frozen policy. The address is the top stack item; on any
+// other address, a precompile or a native included, the frame halts with
+// ErrFrozenOpcode.
+var FrozenExtcodeOpcodes = []OpCode{EXTCODESIZE, EXTCODECOPY, EXTCODEHASH}
+
+// frozenExtcodeOpcodes is FrozenExtcodeOpcodes as a lookup table for the
+// interpreter.
+var frozenExtcodeOpcodes = func() (table [256]bool) {
+	for _, op := range FrozenExtcodeOpcodes {
+		table[op] = true
+	}
+	return table
+}()
+
+// frozenExtcodeAllowed reports whether a frozen context may read the code of
+// addr: only when addr is a registered policy.
+func (evm *EVM) frozenExtcodeAllowed(addr common.Address) bool {
+	return ghost.IsRegisteredPolicy(evm.StateDB, addr)
+}
 
 // Frozen reports whether the contract runs in a frozen context. The natives
 // a frozen context may call look at it on their caller; a DELEGATECALL into
