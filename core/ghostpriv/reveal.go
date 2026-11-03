@@ -475,57 +475,108 @@ func (env *BlockEnv) rootEligible(kind ghosttree.Kind, root common.Hash) bool {
 	return false
 }
 
-// CheckReveal runs checks 1 to 11 of a reveal against the state before it
-// and returns the decoded reveal and the window fee it pays: that of the
-// including block's window or of the window before it. It changes nothing.
-func CheckReveal(st StateDB, env *BlockEnv, verifier Verifier, envelope []byte) (*Reveal, Fee, error) {
+// RevealFailure is the kind of a failed reveal check. A lone reveal that
+// fails any check invalidates its block, whatever the kind; inside a bundle
+// a structural failure invalidates the block and a state failure skips only
+// that reveal.
+type RevealFailure uint8
+
+const (
+	// RevealPassed is the kind of no failure.
+	RevealPassed RevealFailure = iota
+
+	// RevealStructural is a failure of the reveal's own bytes or of the
+	// block's means to check it: its type, length, version or amount words
+	// (checks 1 to 3), its chain id (check 4), or the including block or
+	// the ancestry the checks read being unavailable (ErrRevealChainInfo).
+	RevealStructural
+
+	// RevealState is a failure that depends on the state the reveal runs
+	// on: the window fee (check 5), the recipient being a registered policy,
+	// the root (check 7), the marker (check 8) and the backstop (check 9).
+	RevealState
+)
+
+// CheckRevealWithoutProof runs checks 1 to 9 of a reveal against the state
+// before it, in the order of CheckReveal, and not the proof (check 10). It
+// returns the decoded reveal, the window fee it pays and, on a failure, its
+// kind. It changes nothing.
+func CheckRevealWithoutProof(st StateDB, env *BlockEnv, envelope []byte) (*Reveal, Fee, RevealFailure, error) {
 	// Checks 1 to 3: type, length, version and amount words.
 	r, err := DecodeReveal(envelope)
 	if err != nil {
-		return nil, Fee{}, err
+		return nil, Fee{}, RevealStructural, err
 	}
+	fee, kind, err := checkRevealFields(st, env, r)
+	if err != nil {
+		return nil, Fee{}, kind, err
+	}
+	return r, fee, RevealPassed, nil
+}
+
+// checkRevealFields runs checks 4 to 9 of a decoded reveal against the state
+// before it and returns the window fee it pays and, on a failure, its kind.
+// It changes nothing.
+func checkRevealFields(st StateDB, env *BlockEnv, r *Reveal) (Fee, RevealFailure, error) {
 	if env == nil || env.Header == nil || env.Header.Number == nil {
-		return nil, Fee{}, fmt.Errorf("%w: no including block", ErrRevealChainInfo)
+		return Fee{}, RevealStructural, fmt.Errorf("%w: no including block", ErrRevealChainInfo)
 	}
 	// Check 4: the chain id.
 	if env.ChainID == nil || !env.ChainID.IsUint64() || env.ChainID.Uint64() != r.ChainID {
-		return nil, Fee{}, fmt.Errorf("%w: have %d, chain %v", ErrRevealChainID, r.ChainID, env.ChainID)
+		return Fee{}, RevealStructural, fmt.Errorf("%w: have %d, chain %v", ErrRevealChainID, r.ChainID, env.ChainID)
 	}
-	chainID := env.ChainID.Uint64()
 	// Check 5: the fee of the including block's window or of the window
 	// before it, priced for the gas of the reveal's version (G_PRIV for
 	// version 2, GasPrivV1 for version 1), which must cover that gas times
 	// the including block's base fee. The fee returned is the one that
 	// matched, split by the cover rule into the burn and the tip, never above
-	// that window's nominal tip.
+	// that window's nominal tip. An ancestry the node cannot read is not the
+	// reveal's failure but the block's.
 	fee, err := env.windowFee(r.Fee, r.Gas())
 	if err != nil {
-		return nil, Fee{}, err
+		if errors.Is(err, ErrRevealChainInfo) {
+			return Fee{}, RevealStructural, err
+		}
+		return Fee{}, RevealState, err
 	}
 	// The recipient check of spec 10, section 4.5: a policy never holds a
 	// balance, so a reveal may not credit one.
 	if ghost.IsRegisteredPolicy(st, r.Recipient) {
-		return nil, Fee{}, fmt.Errorf("%w: %v", ErrRevealRecipient, r.Recipient)
+		return Fee{}, RevealState, fmt.Errorf("%w: %v", ErrRevealRecipient, r.Recipient)
 	}
-	// Check 6: the node's own binding digest, in the verifier's inputs.
-	in := r.VerifyInputs(chainID, env.Genesis)
+	// Check 6, the node's own binding digest, is computed with the
+	// verifier's inputs, by the proof check or by the bundle's root.
 	// Check 7: the root.
 	if !env.rootEligible(ghosttree.Coin, r.Root) {
-		return nil, Fee{}, fmt.Errorf("%w: %x", ErrRevealRoot, r.Root)
+		return Fee{}, RevealState, fmt.Errorf("%w: %x", ErrRevealRoot, r.Root)
 	}
 	// Check 8: the marker, against the spent set, which holds the markers of
 	// earlier reveals of this block too.
 	if ghosttree.IsSpent(st, ghosttree.Coin, r.Marker) {
-		return nil, Fee{}, fmt.Errorf("%w: %x", ErrRevealMarker, r.Marker)
+		return Fee{}, RevealState, fmt.Errorf("%w: %x", ErrRevealMarker, r.Marker)
 	}
 	// Check 9: the backstop.
 	hidden, err := Hidden(st)
 	if err != nil {
-		return nil, Fee{}, fmt.Errorf("%w: %w", ErrRevealBackstop, err)
+		return Fee{}, RevealState, fmt.Errorf("%w: %w", ErrRevealBackstop, err)
 	}
 	if need := new(uint256.Int).Add(r.Out, r.Fee); need.Gt(hidden) {
-		return nil, Fee{}, fmt.Errorf("%w: out plus fee %v, hidden %v", ErrRevealBackstop, need, hidden)
+		return Fee{}, RevealState, fmt.Errorf("%w: out plus fee %v, hidden %v", ErrRevealBackstop, need, hidden)
 	}
+	return fee, RevealPassed, nil
+}
+
+// CheckReveal runs checks 1 to 11 of a reveal against the state before it
+// and returns the decoded reveal and the window fee it pays: that of the
+// including block's window or of the window before it. It changes nothing.
+func CheckReveal(st StateDB, env *BlockEnv, verifier Verifier, envelope []byte) (*Reveal, Fee, error) {
+	// Checks 1 to 9.
+	r, fee, _, err := CheckRevealWithoutProof(st, env, envelope)
+	if err != nil {
+		return nil, Fee{}, err
+	}
+	// Check 6: the node's own binding digest, in the verifier's inputs.
+	in := r.VerifyInputs(env.ChainID.Uint64(), env.Genesis)
 	// Check 10: the proof, for the inputs the node computed. Check 11 has
 	// nothing to read: the version 2 statement opens the input rule inside
 	// the proof, and the binding carries no rule; the version 1 inputs carry
@@ -561,6 +612,12 @@ func ApplyReveal(st StateDB, env *BlockEnv, verifier Verifier, envelope []byte) 
 	if err != nil {
 		return err
 	}
+	return applyCheckedReveal(st, env, r, fee)
+}
+
+// applyCheckedReveal runs check 12 and makes the change of a reveal that
+// passed checks 1 to 11, paying fee. On an error nothing is changed.
+func applyCheckedReveal(st StateDB, env *BlockEnv, r *Reveal, fee Fee) error {
 	height := env.Header.Number.Uint64()
 	snap := st.Snapshot()
 	fail := func(err error) error {
