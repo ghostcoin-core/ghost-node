@@ -254,9 +254,50 @@ Its `CALL` and `STATICCALL` halt unless the target is SHA256 (0x02),
 RIPEMD160 (0x03), IDENTITY (0x04), signature verify (0x51), 0x60, 0x61, or a
 policy created in an earlier block. MODEXP, BLAKE2F, the removed
 precompiles, the factory, any contract that is not a policy and a policy
-created in the same block are refused. The natives at 0x60 and 0x61 do not
-exist yet: a call to them is allowed and, with no code there, succeeds as a
-call to an empty account.
+created in the same block are refused. 0x60 is the escrow natives
+(`core/vm/escrow_natives.go`) and 0x61 the statement checker below; both
+fail a call whose input they do not take, an empty one included.
+
+### The statement checker
+
+The statement checker at `0x0000000000000000000000000000000000000061`
+(`ghost.StatementCheckerAddress`, `core/vm/statement_checker.go`; spec 10,
+section 9.3) checks a proof of the statement KNOW_PREIMAGE_v1 for the frozen
+policy that calls it: knowledge of a 32-byte `x` with
+`y = K("ghost/policy-preimage/v1", x)`.
+
+* **Input.** `statement (1) || y (32) || context (64) || proof`, where the
+  statement is `0x06`, the context a value the policy supplies, and the proof
+  the whole proof field of the policy action, `ghostpriv.ActionProofSize`
+  (917,504) bytes. The input is exactly 917,601 bytes (28,676 words).
+* **Binding.** The checker builds it itself:
+  `K("ghost/preimage-binding/v1", fields)` over 161 bytes, the chain id (8),
+  the version `0x0001` (2), the domain, which is the genesis hash (32), the
+  statement `0x06`, its version `0x01` and the purpose `0x07` (1 each), the
+  calling policy's address (20), `y` (32) and the context (64). The calling
+  policy is the executing account of the frame that made the call. The chain
+  id comes from the EVM's chain configuration and the genesis hash from the
+  block context (`vm.BlockContext.Genesis`, which `core.NewEVMBlockContext`
+  sets from a chain that gives its genesis block). The tag, statement code
+  and purpose differ from the policy action's (`0x05`, purpose `0x06`), so a
+  digest made for one never verifies for the other.
+* **Output.** A 32-byte word: 1 when the active verifier accepts the proof,
+  0 otherwise. A node whose verifier has no proof system for the statement,
+  which is the linked verifier today, answers 0 to every proof.
+* **Gas.** `PREIMAGE_VERIFY_GAS` = 110,000 plus 3 per 32-byte word of the
+  input, charged before anything is checked and whatever the answer: 196,028
+  for the input above.
+* **Failure.** The call fails revert-style, with no return data, its gas
+  spent and the rest returned to the caller, when the caller is not a frame
+  in a frozen context, when it is reached by `CALLCODE` or `DELEGATECALL` or
+  by a `CALL` with value, when the input has any other length or another
+  statement code, and when the block context has no genesis hash (a context
+  built without a chain): the check fails closed.
+
+The checker reads and changes no state. Block processing does not check
+anything else about it: the policy decides what to pass and what to do with
+the answer. How a transaction carrying such a proof enters the pool is in
+[account-transactions.md](account-transactions.md).
 
 ### No balance
 

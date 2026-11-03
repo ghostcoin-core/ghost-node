@@ -44,6 +44,16 @@
 // (ActionProof): the inputs are Kind ghosttree.Coin with purpose
 // ghostpriv.PurposeAction. A proof field of the reveal size never verifies
 // an action, nor an action's a reveal.
+//
+// A KNOW_PREIMAGE_v1 statement's stub proof, which the statement checker at
+// 0x61 verifies, is the same over the statement's binding digest
+// (ghostpriv.Preimage.BindingDigest), in a proof field of
+// ghostpriv.ActionProofSize bytes (PreimageProof): the inputs are Kind
+// ghosttree.Coin with purpose ghostpriv.PurposePreimage. Its binding has a
+// tag, statement code and purpose of its own, so an action's stub proof
+// never verifies a statement, nor a statement's an action. The stub is a
+// ghostpriv.PreimageVerifier: it verifies the statement, which the linked
+// verifier does not.
 package ghostprivtest
 
 import (
@@ -79,19 +89,29 @@ func ActionProof(binding common.Hash) []byte {
 	return proof
 }
 
+// PreimageProof returns the stub proof of a KNOW_PREIMAGE_v1 statement's
+// binding digest: the whole proof field, ghostpriv.ActionProofSize bytes.
+func PreimageProof(binding common.Hash) []byte {
+	return ActionProof(binding)
+}
+
 // Verifier is the stub verifier: it accepts exactly the stub proof of the
-// binding digest the node computed, for a coin, policy or data reveal and
-// for a policy action.
+// binding digest the node computed, for a coin, policy or data reveal, for a
+// policy action and for a KNOW_PREIMAGE_v1 statement.
 type Verifier struct{}
+
+// VerifiesPreimage implements ghostpriv.PreimageVerifier.
+func (Verifier) VerifiesPreimage() bool { return true }
 
 // VerifyReveal implements ghostpriv.Verifier.
 func (Verifier) VerifyReveal(in *ghostpriv.VerifyInputs, proof []byte) error {
 	if in == nil {
 		return ErrStubProof
 	}
-	// An action's proof field has its own length, and only an action's.
+	// An action's and a statement's proof field has its own length, and
+	// only theirs.
 	size := ghostpriv.ProofSize
-	if in.Kind == ghosttree.Coin && in.Purpose == ghostpriv.PurposeAction {
+	if in.Kind == ghosttree.Coin && (in.Purpose == ghostpriv.PurposeAction || in.Purpose == ghostpriv.PurposePreimage) {
 		size = ghostpriv.ActionProofSize
 	}
 	if len(proof) != size {

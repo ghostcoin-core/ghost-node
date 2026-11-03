@@ -56,6 +56,10 @@ const (
 	txMaxSize = 4 * txSlotSize // 128KB
 )
 
+// The pool's cap is TX_MAX_BYTES, the account transaction cap above which
+// only a proof-carrying transaction is taken (core/txpool/proofcheck.go).
+var _ = [1]struct{}{}[txMaxSize-ghost.AccountTxMaxBytes]
+
 var (
 	// ErrTxPoolOverflow is returned if the transaction pool is full and can't accept
 	// another remote transaction.
@@ -219,6 +223,14 @@ type LegacyPool struct {
 	// the pool lock, within its bounds.
 	sigVerifier *txpool.SigVerifier
 
+	// proofGate checks the proofs of proof-carrying account transactions,
+	// outside the pool lock, within its bounds; nil when the pool takes no
+	// account transactions. proofHeld is the sender of each proof-carrying
+	// transaction the pool took, pruned of those no longer in the pool
+	// whenever it is read.
+	proofGate *txpool.ProofGate
+	proofHeld map[common.Hash]common.Address
+
 	currentHead   atomic.Pointer[types.Header] // Current head of the blockchain
 	currentState  *state.StateDB               // Current state in the blockchain head
 	pendingNonces *noncer                      // Pending state tracking virtual nonces
@@ -271,13 +283,20 @@ func New(config Config, chain BlockChain) *LegacyPool {
 		reorgShutdownCh: make(chan struct{}),
 		initDoneCh:      make(chan struct{}),
 		sigVerifier:     txpool.NewSigVerifier(ghost.SigVerifyWorkers, ghost.SigVerifyQueue, ghost.SigFailureCacheSize, nil),
+		proofHeld:       make(map[common.Hash]common.Address),
 	}
 	// Account transactions are bound to the genesis hash: take them only from
-	// a chain that gives its genesis block.
+	// a chain that gives its genesis block. The statement proofs of
+	// proof-carrying transactions are bound to it too.
 	if chain, ok := chain.(interface{ Genesis() *types.Block }); ok {
 		if genesis := chain.Genesis(); genesis != nil {
 			pool.signer = types.NewGhostAccountSigner(pool.signer, genesis.Hash())
 			pool.ghostAccounts = true
+			var chainID uint64
+			if id := pool.chainconfig.GetChainID(); id != nil && id.IsUint64() {
+				chainID = id.Uint64()
+			}
+			pool.proofGate = txpool.NewProofGate(chainID, genesis.Hash(), nil)
 		}
 	}
 	pool.locals = newAccountSet(pool.signer)
@@ -627,6 +646,7 @@ func (pool *LegacyPool) validateTxBasics(tx *types.Transaction, local bool) erro
 		AcceptGhostAccount: pool.ghostAccounts,
 		MaxSize:            txMaxSize,
 		MinTip:             pool.gasTip.Load().ToBig(),
+		ProofTxs:           pool.proofGate != nil,
 	}
 	if local {
 		opts.MinTip = new(big.Int)
@@ -701,11 +721,98 @@ func (pool *LegacyPool) validateTx(tx *types.Transaction, local bool) error {
 // verifySignature it leaves out the signature check of an account
 // transaction, the only expensive one.
 //
+// A proof-carrying transaction must also be sent to a policy callable from
+// the next block and fit the pool's cap of them; with verifySignature, when
+// it is about to be added, its proof must have passed the pool's ProofGate,
+// which is never asked again for a transaction it passed.
+//
 // Note, this method assumes the pool lock is held!
 func (pool *LegacyPool) validateTxState(tx *types.Transaction, verifySignature bool) error {
+	if err := pool.validateTxStateOnly(tx, verifySignature); err != nil {
+		return err
+	}
+	if !txpool.IsProofTxClass(tx) {
+		return nil
+	}
+	if pool.proofGate == nil {
+		return fmt.Errorf("%w: transaction size %v, limit %v", txpool.ErrOversizedData, tx.Size(), txMaxSize)
+	}
+	if err := pool.checkProofHeld(tx); err != nil {
+		return err
+	}
+	if verifySignature && !pool.proofGate.Passed(tx.Hash()) {
+		return txpool.ErrProofUnchecked
+	}
+	return nil
+}
+
+// checkProofHeld refuses a proof-carrying transaction with ErrProofHeldCap
+// when the pool holds ghost.ProofTxMaxHeld others, or one of the same sender
+// at another nonce. One of the same sender and nonce, which tx would
+// replace, does not count.
+//
+// Note, this method assumes the pool lock is held!
+func (pool *LegacyPool) checkProofHeld(tx *types.Transaction) error {
+	from, err := types.GhostAccountAddress(pool.signer, tx)
+	if err != nil {
+		return fmt.Errorf("%w: %w", txpool.ErrInvalidSender, err)
+	}
+	hash, held := tx.Hash(), 0
+	for h, sender := range pool.proofHeld {
+		old := pool.all.Get(h)
+		if old == nil {
+			delete(pool.proofHeld, h)
+			continue
+		}
+		if h == hash {
+			continue
+		}
+		if sender == from {
+			if old.Nonce() == tx.Nonce() {
+				continue
+			}
+			return fmt.Errorf("%w: sender %v holds one", txpool.ErrProofHeldCap, from)
+		}
+		held++
+	}
+	if held >= ghost.ProofTxMaxHeld {
+		return fmt.Errorf("%w: %d held", txpool.ErrProofHeldCap, held)
+	}
+	return nil
+}
+
+// dropUncallableProofTxs removes every held proof-carrying transaction whose
+// to is no longer a policy callable from the next block, after a new head or
+// a reorganisation. A held transaction's proof is never verified again: its
+// public inputs do not depend on the state.
+//
+// Note, this method assumes the pool lock is held!
+func (pool *LegacyPool) dropUncallableProofTxs() {
+	number := pool.nextBlockNumber()
+	for hash := range pool.proofHeld {
+		tx := pool.all.Get(hash)
+		if tx == nil {
+			delete(pool.proofHeld, hash)
+			continue
+		}
+		if err := txpool.CheckProofTxState(tx, pool.currentState, number); err != nil {
+			log.Debug("Dropped proof-carrying transaction", "hash", hash, "err", err)
+			pool.removeTx(hash, true, true)
+			delete(pool.proofHeld, hash)
+		}
+	}
+}
+
+// validateTxStateOnly runs the shared state checks of an account
+// transaction, the size class's included.
+//
+// Note, this method assumes the pool lock is held!
+func (pool *LegacyPool) validateTxStateOnly(tx *types.Transaction, verifySignature bool) error {
 	opts := &txpool.ValidationOptionsWithState{
 		State:                pool.currentState,
 		SkipAccountSignature: !verifySignature,
+		ProofTxs:             pool.proofGate != nil,
+		NextBlock:            pool.nextBlockNumber(),
 
 		FirstNonceGap: nil, // Pool allows arbitrary arrival order, don't invalidate nonce gaps
 		UsedAndLeftSlots: func(addr common.Address) (int, int) {
@@ -766,6 +873,13 @@ func (pool *LegacyPool) add(tx *types.Transaction, local bool) (replaced bool, e
 	}
 	// already validated by this point
 	from, _ := types.Sender(pool.signer, tx)
+
+	// Count a proof-carrying transaction against the pool's cap of them. If
+	// it is not added after all, the entry is pruned the next time the cap
+	// is read.
+	if txpool.IsProofTxClass(tx) {
+		pool.proofHeld[hash] = from
+	}
 
 	// If the address is not yet known, request exclusivity to track the account
 	// only by this subpool until all transactions are evicted
@@ -1141,7 +1255,9 @@ func (pool *LegacyPool) Add(txs []*types.Transaction, local, sync bool) []error 
 // is refused before it takes a slot of the signature queue. The signatures
 // are then verified on the pool's SigVerifier, in the share of origin, and
 // the senders cached in the transactions, so that adding them later does not
-// verify them again.
+// verify them again. Last, the checker input and the proof of each
+// proof-carrying transaction whose signature verified are checked on the
+// pool's ProofGate, in the check slot of origin.
 func (pool *LegacyPool) verifyAccountTxs(origin txpool.SigOrigin, txs []*types.Transaction, errs []error) {
 	var (
 		index []int
@@ -1167,6 +1283,25 @@ func (pool *LegacyPool) verifyAccountTxs(origin txpool.SigOrigin, txs []*types.T
 		if err != nil {
 			errs[index[j]] = err
 			log.Trace("Discarding transaction", "hash", batch[j].Hash(), "err", err)
+			invalidTxMeter.Mark(1)
+		}
+	}
+	// The proofs of the proof-carrying transactions whose signature verified
+	// come last, on the pool's ProofGate, within its bounds.
+	if pool.proofGate == nil {
+		return
+	}
+	var head common.Hash
+	if h := pool.currentHead.Load(); h != nil {
+		head = h.Hash()
+	}
+	for j, tx := range batch {
+		if errs[index[j]] != nil || !txpool.IsProofTxClass(tx) {
+			continue
+		}
+		if err := pool.proofGate.Check(origin, head, tx); err != nil {
+			errs[index[j]] = err
+			log.Trace("Discarding proof-carrying transaction", "hash", tx.Hash(), "err", err)
 			invalidTxMeter.Mark(1)
 		}
 	}
@@ -1424,6 +1559,10 @@ func (pool *LegacyPool) runReorg(done chan struct{}, reset *txpoolResetRequest, 
 		// Drop the scheme 0x0003 transactions the next block can no longer
 		// hold, those reinjected by a reorganisation included.
 		pool.dropRescueSunset()
+
+		// Drop the proof-carrying transactions whose policy the next block
+		// can no longer call.
+		pool.dropUncallableProofTxs()
 
 		// Nonces were reset, discard any events that became stale
 		for addr := range events {
