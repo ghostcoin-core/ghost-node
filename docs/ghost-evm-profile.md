@@ -320,6 +320,59 @@ anything else about it: the policy decides what to pass and what to do with
 the answer. How a transaction carrying such a proof enters the pool is in
 [account-transactions.md](account-transactions.md).
 
+### Guard
+
+Guard (spec 10, section 12) is a frozen policy with fixed code, empty
+parameters and no balance. Its code is hand-assembled in
+`params/ghost/guard.go`, with a commented listing, because a compiler would
+emit opcodes the frozen context forbids. It uses only the opcodes above and
+calls only the escrow natives at 0x60, always with value zero. The factory
+creates it at a fixed salt:
+
+| Constant | Value |
+|---|---|
+| `ghost.GuardSalt` | `K("ghost/guard-salt/v1")` |
+| `ghost.GuardAddress` | `0xCA99390eEd6c683a6807cC4d74F44a84A3ba0c3c`, `ghost.PolicyAddress(GuardSalt, keccak256(GuardInitCode))` |
+| `ghost.GuardCodeHash` | `0xbeae0e084bf5f9d091bff3b25afb2aa8bc0f63e4b0cda06e5def2ea3b25a86d8`, Keccak-256 of the 348 bytes of `ghost.GuardRuntimeCode` (the registry's code-hash word) |
+| `ghost.GuardHoldBlocks` | 8,640 |
+| `ghost.GuardHoldSeconds` | 259,200 (72 hours at 30 seconds a block) |
+
+No consensus rule reads `GuardAddress`, and no node treats any address as
+Guard (spec 10, section 15, item 4). The constants are there for wallets
+and tests.
+
+Guard has two entry points, selected like the escrow natives by the first
+four bytes of the Keccak-256 of the signature. Any other selector or
+calldata length reverts, and so does any failed call to the natives. A
+revert always has empty data, and neither entry point returns anything.
+
+* **`release(bytes32 marker)`**, selector `0x67d42a8b`, exactly 36 bytes.
+  An ordinary transaction that anyone may send, paying its own gas; there
+  is no relay fee. It reads `slot(marker)` and requires:
+  * `NUMBER >= height + 8,640` and `TIMESTAMP >= timestamp + 259,200`,
+    both floors at once;
+  * the top 12 bytes of `instr` zero.
+
+  It then calls `pay(marker, instr, remaining)`, which pays all of
+  `remaining` to the low 20 bytes of `instr`. A sum that wraps around
+  reverts. Guard reads slot words 3 (`remaining`), 5 (the opening height),
+  6 (the opening timestamp) and 14 (`instr`), in the order of
+  `vm.EscrowSlotWords`.
+* **`cancel(bytes32 F, bytes16 salt, bytes note)`**, selector `0xd5b2bbe7`,
+  exactly 516 bytes: the selector, `F`, the salt word, the offset word
+  `0x60`, the length word 380, and the note padded to 384 bytes. Another
+  offset or length reverts. This is the call of a policy action. It takes
+  the marker from `actionMarker()` and calls
+  `recommit(marker, F, salt, amount, note)`, where `amount` is
+  `remaining - debit`, the second word of `actionSettle()`. Outside an
+  action `actionMarker()` fails, so cancel fails too. When the debit equals
+  `remaining` the amount is zero, `recommit` refuses it, and nothing is
+  re-committed.
+
+Release and cancel share the slot's single closed state. Paying or
+re-committing all of `remaining` closes the slot, so whichever lands
+second fails. The tests are `core/vm/guard_test.go`.
+
 ### No balance
 
 A policy's balance is always zero:
