@@ -195,11 +195,11 @@ const (
 )
 
 // IsGhostReveal reports whether tx is a native transaction without an
-// account: a coin reveal (0x50), a data reveal (0x51) or a policy reveal
-// (0x53).
+// account: a coin reveal (0x50), a data reveal (0x51), a policy reveal
+// (0x53) or a policy action (0x54). None has a sender, nonce or signature.
 func (tx *Transaction) IsGhostReveal() bool {
 	switch tx.Type() {
-	case GhostRevealTxType, GhostDataRevealTxType, GhostPolicyRevealTxType:
+	case GhostRevealTxType, GhostDataRevealTxType, GhostPolicyRevealTxType, GhostPolicyActionTxType:
 		return true
 	}
 	return false

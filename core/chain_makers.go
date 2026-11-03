@@ -131,9 +131,12 @@ func (b *BlockGen) addTx(bc *BlockChain, vmConfig vm.Config, tx *types.Transacti
 	if g := b.cm.GetHeaderByNumber(0); g != nil {
 		genesis = g.Hash()
 	}
-	if tx.IsGhostReveal() {
+	switch {
+	case tx.Type() == types.GhostPolicyActionTxType:
+		receipt, err = ApplyPolicyAction(b.cm.config, b.cm, b.gasPool, b.statedb, b.header, genesis, b.header.Hash(), tx, &b.header.GasUsed, vmConfig)
+	case tx.IsGhostReveal():
 		receipt, err = applyGhostReveal(b.cm.config, b.gasPool, b.statedb, b.header, b.cm, genesis, b.header.Hash(), tx, &b.header.GasUsed)
-	} else {
+	default:
 		receipt, err = applyTransactionWithGenesis(b.cm.config, bc, genesis, &b.header.Coinbase, b.gasPool, b.statedb, b.header, tx, &b.header.GasUsed, vmConfig)
 	}
 	if err != nil {

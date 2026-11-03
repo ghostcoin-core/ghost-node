@@ -356,6 +356,7 @@ func (s *Ethereum) APIs() []rpc.API {
 		apis = append(apis,
 			rpc.API{Namespace: "ghost", Service: ethapi.NewGhostAPI(s.treeHistory)},
 			rpc.API{Namespace: "ghost", Service: ethapi.NewGhostBucketAPI(s.treeHistory)},
+			rpc.API{Namespace: "ghost", Service: ethapi.NewGhostEscrowAPI(s.APIBackend)},
 		)
 	}
 

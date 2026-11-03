@@ -146,6 +146,29 @@ func TestFrozenPolicyReserved(t *testing.T) {
 	}
 }
 
+// TestEscrowNativeAccounts checks the three native accounts of the escrow
+// (spec 10, section 7.1): ESCROW_ACCOUNT, POLICY_REGISTRY and ACTION_CALLER
+// at their system addresses, reserved, and the only addresses
+// IsEscrowNativeAccount names.
+func TestEscrowNativeAccounts(t *testing.T) {
+	if ghost.ActionCallerAddress != common.HexToAddress("0x67686f737400000000000000000000000000000a") {
+		t.Fatalf("action caller %v", ghost.ActionCallerAddress)
+	}
+	for _, addr := range []common.Address{ghost.EscrowAccount, ghost.PolicyRegistryAccount, ghost.ActionCallerAddress} {
+		if !ghost.IsEscrowNativeAccount(addr) || !ghost.IsReservedAddress(addr) {
+			t.Errorf("%v is not a reserved escrow native account", addr)
+		}
+	}
+	for _, addr := range []common.Address{
+		ghost.CommitEntryAddress, ghost.PrivTotalsAccount, ghost.EscrowNativeAddress,
+		common.HexToAddress("0x67686f737400000000000000000000000000000b"), {0x0a},
+	} {
+		if ghost.IsEscrowNativeAccount(addr) {
+			t.Errorf("%v taken for an escrow native account", addr)
+		}
+	}
+}
+
 func isZeroBytes(b []byte) bool {
 	for _, c := range b {
 		if c != 0 {

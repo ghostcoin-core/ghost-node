@@ -417,19 +417,28 @@ func CloseEscrowSlot(st StateDB, height uint64, policy common.Address, marker co
 	return nil
 }
 
+// ErrEscrowNonce is returned for a debit of a slot whose action nonce cannot
+// grow any more.
+var ErrEscrowNonce = errors.New("escrow slot action nonce exhausted")
+
 // DebitEscrowSlot takes an action's debit, at most remaining, from the open
-// slot of marker that belongs to policy: action_debits rises and total_escrow
-// falls by debit. The caller burns and tips the debit, and writes the action
-// result. The slot closes when remaining reaches zero. On an error nothing is
-// changed.
+// slot of marker that belongs to policy and spends the slot's action nonce:
+// action_debits rises and total_escrow falls by debit, and the action nonce
+// rises by one. The caller burns and tips the debit, and writes the action
+// result. The slot closes when remaining reaches zero; its words 0 to 3, the
+// nonce among them, are kept. On an error nothing is changed.
 func DebitEscrowSlot(st StateDB, height uint64, policy common.Address, marker common.Hash, debit *uint256.Int) error {
 	old, s, err := openSlotOf(st, policy, marker)
 	if err != nil {
 		return err
 	}
+	if s.ActionNonce == ^uint64(0) {
+		return fmt.Errorf("%w: %x", ErrEscrowNonce, marker)
+	}
 	if err := s.take(debit, 0, s.ActionDebits); err != nil {
 		return err
 	}
+	s.ActionNonce++
 	if err := subTotal(st, SlotTotalEscrow, debit); err != nil {
 		return err
 	}

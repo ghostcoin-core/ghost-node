@@ -95,7 +95,17 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 				return nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: no chain for a reveal", i, tx.Hash().Hex())
 			}
 			statedb.SetTxContext(tx.Hash(), i)
-			receipt, err := applyGhostReveal(p.config, gp, statedb, header, p.bc, p.bc.Genesis().Hash(), blockHash, tx, usedGas)
+			var (
+				receipt *types.Receipt
+				err     error
+			)
+			// A policy action runs its policy call in the EVM; every other
+			// native type is a reveal.
+			if tx.Type() == types.GhostPolicyActionTxType {
+				receipt, err = ApplyPolicyAction(p.config, p.bc, gp, statedb, header, p.bc.Genesis().Hash(), blockHash, tx, usedGas, cfg)
+			} else {
+				receipt, err = applyGhostReveal(p.config, gp, statedb, header, p.bc, p.bc.Genesis().Hash(), blockHash, tx, usedGas)
+			}
 			if err != nil {
 				return nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: %w", i, tx.Hash().Hex(), err)
 			}
@@ -194,7 +204,8 @@ func applyTransaction(msg *Message, config ctypes.ChainConfigurator, gp *GasPool
 // G_DATA or G_POLICY), runs the checks of the transaction's own type with the
 // active proof verifier and makes its change (core/ghostpriv). chain gives
 // the headers of the block's ancestry and genesis is the chain's genesis
-// hash. Any failure makes the block invalid.
+// hash. Any failure makes the block invalid. A policy action (type 0x54) is
+// not a reveal here: it goes to ApplyPolicyAction, and this refuses it.
 func applyGhostReveal(config ctypes.ChainConfigurator, gp *GasPool, statedb *state.StateDB, header *types.Header, chain ghostpriv.ChainReader, genesis common.Hash, blockHash common.Hash, tx *types.Transaction, usedGas *uint64) (*types.Receipt, error) {
 	gas := tx.Gas()
 	if err := gp.SubGas(gas); err != nil {
