@@ -125,9 +125,9 @@ func testRealProofRevealRoundTrip(t *testing.T, ka knownAnswer) {
 	}
 
 	// The same fields and proof as a version 2 reveal, with its 380-byte
-	// note, are refused before the library is called: it verifies only the
-	// 368-byte version 1 statement.
-	t.Run("version 2 refused", func(t *testing.T) {
+	// note, reach the library's version 2 verifier and are rejected: the
+	// proof is of the version 1 statement.
+	t.Run("version 2 rejected", func(t *testing.T) {
 		v2 := *dec
 		v2.Version = ghostpriv.RevealVersion
 		v2.Note[ghostpriv.NoteSize-1] = 0x5a
@@ -140,8 +140,8 @@ func testRealProofRevealRoundTrip(t *testing.T, ka knownAnswer) {
 		}
 		dec2 := decode(t, env2)
 		err = v.VerifyReveal(dec2.VerifyInputs(in.ChainID, in.Domain), dec2.Proof)
-		if !errors.Is(err, ghostpriv.ErrStatementUnsupported) || !errors.Is(err, ghostpriv.ErrProofStatement) {
-			t.Fatalf("version 2 reveal: %v, want %v", err, ghostpriv.ErrStatementUnsupported)
+		if !errors.Is(err, ghostpriv.ErrProofRejected) || errors.Is(err, ghostpriv.ErrStatementUnsupported) {
+			t.Fatalf("version 2 reveal: %v, want %v", err, ghostpriv.ErrProofRejected)
 		}
 	})
 

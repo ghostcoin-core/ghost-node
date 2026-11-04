@@ -30,10 +30,10 @@ import (
 var ErrNoVerifier = errors.New("no reveal proof verifier in this node")
 
 // ErrStatementUnsupported is the answer of the linked proof verifier, given
-// without calling it, to a statement it has no proof system for: a version 2
-// ordinary reveal and a policy reveal. Their statements are not those of the
-// linked library's C interface, so they are refused, fail-closed, before any
-// state change, until a verifier that supports them is linked.
+// without calling it, to a statement version it has no proof system for: an
+// ordinary reveal of a version other than 1 or 2, a policy reveal of a
+// version other than 1, and KNOW_PREIMAGE_v1. They are refused, fail-closed,
+// before any state change, until a verifier that supports them is linked.
 var ErrStatementUnsupported = errors.New("linked proof verifier does not verify this statement version")
 
 // VerifyInputs are the public inputs of a reveal's proof, as the node

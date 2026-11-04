@@ -37,6 +37,7 @@ package ghostpriv
 #include "ghost_proofs.h"
 #include "ghost_data.h"
 #include "ghost_hold.h"
+#include "ghost_policy.h"
 */
 import "C"
 
@@ -55,6 +56,8 @@ import (
 const (
 	ghostChainParamsBytes = C.GHOST_PROOFS_CHAIN_PARAMS_BYTES
 	ghostCoinRevealBytes  = C.GHOST_PROOFS_COIN_REVEAL_BYTES
+	ghostCoinRevealV2     = C.GHOST_PROOFS_COIN_REVEAL_V2_BYTES
+	ghostPolicyReveal     = C.GHOST_POLICY_REVEAL_BYTES
 	ghostDataRevealBytes  = C.GHOST_DATA_REVEAL_BYTES
 	ghostHoldContextBytes = C.GHOST_HOLD_CONTEXT_BYTES
 	ghostProofMaxBytes    = C.GHOST_PROOFS_PROOF_MAX_BYTES
@@ -62,10 +65,11 @@ const (
 
 var (
 	// ErrProofStatement is returned, without calling the proof verifier, for
-	// a statement it does not verify: anything but a version 1 coin reveal,
-	// or a data reveal or revoke. A version 2 coin reveal and a policy reveal
-	// are among them, and their error also wraps ErrStatementUnsupported.
-	ErrProofStatement = errors.New("reveal proof verifier checks only coin reveals and data reveals and revokes")
+	// a statement it does not verify: anything but an ordinary coin reveal of
+	// version 1 or 2, a policy reveal of version 1, or a data reveal or
+	// revoke. An ordinary or policy reveal of another version is among them,
+	// and its error also wraps ErrStatementUnsupported.
+	ErrProofStatement = errors.New("reveal proof verifier checks only coin, policy and data reveals and data revokes")
 
 	// ErrProofRejected is returned for every answer of the proof verifier
 	// but acceptance; the error names the status.
@@ -74,7 +78,8 @@ var (
 
 // ghostVerifier is the reveal verifier of the ghost repository's
 // ghost-proofs, linked in through C interfaces: ghost_proofs.h for coin
-// reveals and ghostverifier's ghost_data.h for data reveals and revokes.
+// reveals of both versions, ghostverifier's ghost_policy.h for policy reveals
+// and its ghost_data.h for data reveals and revokes.
 type ghostVerifier struct{}
 
 // DefaultVerifier returns the verifier the node uses until another is set:
@@ -85,9 +90,11 @@ type ghostVerifier struct{}
 // non-empty rule is ErrProofRejected, like any other proof that fails.
 func DefaultVerifier() Verifier { return ghostVerifier{} }
 
-// VerifyReveal verifies the proof of a coin reveal, data reveal or data
-// revoke against the chain parameters and statement it builds from in, in
-// the layout of ghost_proofs.h or ghost_data.h. The proof may be followed by
+// VerifyReveal verifies the proof of an ordinary coin reveal (version 1 or
+// 2), a policy reveal, a data reveal or a data revoke against the chain
+// parameters and statement it builds from in, in the layout of
+// ghost_proofs.h, ghost_policy.h or ghost_data.h. The chain parameters carry
+// the reveal's own version, as its binding does. The proof may be followed by
 // zero bytes, as in the reveal's proof field. The binding digest is not
 // passed: the verifier computes its own from the same fields.
 func (ghostVerifier) VerifyReveal(in *VerifyInputs, proof []byte) error {
@@ -96,14 +103,9 @@ func (ghostVerifier) VerifyReveal(in *VerifyInputs, proof []byte) error {
 	}
 	var verify func(params, statement, proof *C.uint8_t, paramsLen, statementLen, proofLen C.size_t) C.int32_t
 	var statement []byte
+	version := Version
 	switch {
-	case in.Kind == ghosttree.Coin && in.Purpose == PurposeReveal:
-		// The linked library verifies the version 1 statement only. A
-		// version 2 ordinary reveal, whose 380-byte note makes a longer
-		// statement, is refused without calling it.
-		if in.Version != RevealVersionV1 {
-			return fmt.Errorf("%w: %w: ordinary reveal version %d", ErrProofStatement, ErrStatementUnsupported, in.Version)
-		}
+	case in.Kind == ghosttree.Coin && in.Purpose == PurposeReveal && in.Version == RevealVersionV1:
 		var err error
 		if statement, err = ghostCoinStatement(in); err != nil {
 			return err
@@ -111,10 +113,22 @@ func (ghostVerifier) VerifyReveal(in *VerifyInputs, proof []byte) error {
 		verify = func(p, s, q *C.uint8_t, pl, sl, ql C.size_t) C.int32_t {
 			return C.ghost_verify_coin_reveal(p, pl, s, sl, q, ql)
 		}
+	case in.Kind == ghosttree.Coin && in.Purpose == PurposeReveal && in.Version == RevealVersion:
+		// Statement S1 version 2: no rule, the full 380-byte note.
+		statement, version = ghostCoinStatementV2(in), RevealVersion
+		verify = func(p, s, q *C.uint8_t, pl, sl, ql C.size_t) C.int32_t {
+			return C.ghost_verify_coin_reveal_v2(p, pl, s, sl, q, ql)
+		}
+	case in.Kind == ghosttree.Coin && in.Purpose == PurposeReveal:
+		return fmt.Errorf("%w: %w: ordinary reveal version %d", ErrProofStatement, ErrStatementUnsupported, in.Version)
+	case in.Kind == ghosttree.Coin && in.Purpose == PurposePolicySpend && in.Version == PolicyRevealVersion:
+		// Statement S4.
+		statement, version = ghostPolicyStatement(in), PolicyRevealVersion
+		verify = func(p, s, q *C.uint8_t, pl, sl, ql C.size_t) C.int32_t {
+			return C.ghost_verify_policy_reveal(p, pl, s, sl, q, ql)
+		}
 	case in.Kind == ghosttree.Coin && in.Purpose == PurposePolicySpend:
-		// The policy reveal's statement (S4) has no proof system in the
-		// linked library yet.
-		return fmt.Errorf("%w: %w: policy reveal", ErrProofStatement, ErrStatementUnsupported)
+		return fmt.Errorf("%w: %w: policy reveal version %d", ErrProofStatement, ErrStatementUnsupported, in.Version)
 	case in.Kind == ghosttree.Data && (in.Purpose == PurposeReveal || in.Purpose == PurposeRevoke):
 		statement = ghostDataStatement(in)
 		verify = func(p, s, q *C.uint8_t, pl, sl, ql C.size_t) C.int32_t {
@@ -126,7 +140,7 @@ func (ghostVerifier) VerifyReveal(in *VerifyInputs, proof []byte) error {
 	if len(proof) == 0 || len(proof) > ghostProofMaxBytes {
 		return fmt.Errorf("%w: proof of %d bytes", ErrProofRejected, len(proof))
 	}
-	params := ghostChainParams(in)
+	params := ghostChainParamsVersion(in, version)
 	status := verify(
 		(*C.uint8_t)(unsafe.Pointer(&params[0])),
 		(*C.uint8_t)(unsafe.Pointer(&statement[0])),
@@ -182,11 +196,51 @@ func ghostHoldContext(in *HoldInputs) []byte {
 
 // ghostChainParams returns the chain parameters: the chain id (8 bytes, big
 // endian), the version (2) and the domain, the genesis hash (32).
-func ghostChainParams(in *VerifyInputs) []byte {
+func ghostChainParams(in *VerifyInputs) []byte { return ghostChainParamsVersion(in, Version) }
+
+// ghostChainParamsVersion returns the chain parameters with the given
+// version in place of Version: a version 2 ordinary reveal binds version 2.
+func ghostChainParamsVersion(in *VerifyInputs, version uint16) []byte {
 	b := make([]byte, 0, ghostChainParamsBytes)
 	b = binary.BigEndian.AppendUint64(b, in.ChainID)
-	b = binary.BigEndian.AppendUint16(b, Version)
+	b = binary.BigEndian.AppendUint16(b, version)
 	return append(b, in.Domain[:]...)
+}
+
+// ghostCoinStatementV2 returns the version 2 coin reveal statement of
+// ghost_proofs.h, of GHOST_PROOFS_COIN_REVEAL_V2_BYTES: the root, marker and
+// remainder (32 each), the remainder's note (380), the recipient (20) and out
+// and fee as 32-byte amount words. There is no rule. A nil amount is zero.
+func ghostCoinStatementV2(in *VerifyInputs) []byte {
+	b := make([]byte, 0, ghostCoinRevealV2)
+	b = append(b, in.Root[:]...)
+	b = append(b, in.Marker[:]...)
+	b = append(b, in.Remainder[:]...)
+	b = append(b, in.Note[:]...)
+	b = append(b, in.Recipient[:]...)
+	b = append(b, amountWord(amountOrZero(in.Out))...)
+	return append(b, amountWord(amountOrZero(in.Fee))...)
+}
+
+// ghostPolicyStatement returns the policy reveal statement of ghost_policy.h,
+// of GHOST_POLICY_REVEAL_BYTES: the root, marker and remainder (32 each), out
+// and fee as 32-byte amount words, the policy address (20), its code hash,
+// the parameters hash, the action tag, the action salt and the instruction
+// (32 each) and the remainder note (380), the order of the binding.
+func ghostPolicyStatement(in *VerifyInputs) []byte {
+	b := make([]byte, 0, ghostPolicyReveal)
+	b = append(b, in.Root[:]...)
+	b = append(b, in.Marker[:]...)
+	b = append(b, in.Remainder[:]...)
+	b = append(b, amountWord(amountOrZero(in.Out))...)
+	b = append(b, amountWord(amountOrZero(in.Fee))...)
+	b = append(b, in.Policy[:]...)
+	b = append(b, in.PolicyCodeHash[:]...)
+	b = append(b, in.ParamsHash[:]...)
+	b = append(b, in.ActionTag[:]...)
+	b = append(b, in.ActionSalt[:]...)
+	b = append(b, in.Instr[:]...)
+	return append(b, in.Note[:]...)
 }
 
 // ghostCoinStatement returns the version 1 coin reveal statement of
