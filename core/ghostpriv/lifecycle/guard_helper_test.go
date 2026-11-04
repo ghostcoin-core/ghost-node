@@ -904,8 +904,8 @@ func (s *scenario) requireGuardCurrent(w *wallet, want *coin) {
 // total, total in less total out, is hidden and is the value of the unspent
 // coins the wallets, which must hold every coin of the chain, restore from
 // the receipts; total_escrow is escrow and the sum of remaining over every
-// slot the receipts show opened, each of which keeps out = remaining + paid
-// + recommitted + action_debits + forfeited, and is Guard's.
+// slot the receipts show opened, each of which is Guard's and keeps the
+// identity out = remaining + paid + recommitted + action_debits + forfeited.
 func (s *scenario) requireIdentity(hidden, escrow *uint256.Int, wallets ...*wallet) {
 	s.t.Helper()
 	for _, n := range s.net.nodes {
