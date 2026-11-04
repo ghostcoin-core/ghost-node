@@ -168,7 +168,7 @@ func TestProofTxClassAndSizeBounds(t *testing.T) {
 			t.Fatalf("%s: size check: %v", name, err)
 		}
 		if got := ProofTxInput(tx); !bytes.Equal(got, input) {
-			t.Fatalf("%s: checker input is not the last 917,601 bytes of the data", name)
+			t.Fatalf("%s: checker input is not the last 948,321 bytes of the data", name)
 		}
 	}
 	for name, tx := range map[string]*types.Transaction{"data shorter than the checker input": shortData, "contract creation": create} {

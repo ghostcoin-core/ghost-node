@@ -484,7 +484,7 @@ func TestPolicyActionCheckOrder(t *testing.T) {
 		in.CalldataHash != ghostpriv.ActionCalldataHash(calldata) || in.Binding != a.BindingDigest(s.f.chainID, s.f.genesis.Hash(), slot) {
 		t.Fatalf("verifier inputs %+v", in)
 	}
-	if len(a.BindingInput(s.f.chainID, s.f.genesis.Hash(), slot)) != ghostpriv.ActionBindingSize || ghostpriv.ActionBindingSize != 337 {
+	if len(a.BindingInput(s.f.chainID, s.f.genesis.Hash(), slot)) != ghostpriv.ActionBindingSize || ghostpriv.ActionBindingSize != 273 {
 		t.Fatal("binding input size")
 	}
 	if !fee.Burn.Eq(burn) || !fee.Tip.Eq(actionTip) || !fee.Total.Eq(debit) || !new(uint256.Int).Add(fee.Burn, fee.Tip).Eq(debit) {

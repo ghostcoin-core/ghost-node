@@ -38,6 +38,7 @@ package ghostpriv
 #include "ghost_data.h"
 #include "ghost_hold.h"
 #include "ghost_policy.h"
+#include "ghost_action.h"
 */
 import "C"
 
@@ -58,6 +59,8 @@ const (
 	ghostCoinRevealBytes  = C.GHOST_PROOFS_COIN_REVEAL_BYTES
 	ghostCoinRevealV2     = C.GHOST_PROOFS_COIN_REVEAL_V2_BYTES
 	ghostPolicyReveal     = C.GHOST_POLICY_REVEAL_BYTES
+	ghostActionStatement  = C.GHOST_ACTION_STATEMENT_BYTES
+	ghostActionProofBytes = C.GHOST_ACTION_PROOF_BYTES
 	ghostDataRevealBytes  = C.GHOST_DATA_REVEAL_BYTES
 	ghostHoldContextBytes = C.GHOST_HOLD_CONTEXT_BYTES
 	ghostProofMaxBytes    = C.GHOST_PROOFS_PROOF_MAX_BYTES
@@ -66,10 +69,11 @@ const (
 var (
 	// ErrProofStatement is returned, without calling the proof verifier, for
 	// a statement it does not verify: anything but an ordinary coin reveal of
-	// version 1 or 2, a policy reveal of version 1, or a data reveal or
-	// revoke. An ordinary or policy reveal of another version is among them,
-	// and its error also wraps ErrStatementUnsupported.
-	ErrProofStatement = errors.New("reveal proof verifier checks only coin, policy and data reveals and data revokes")
+	// version 1 or 2, a policy reveal or policy action of version 1, or a
+	// data reveal or revoke. An ordinary reveal, policy reveal or policy
+	// action of another version is among them, and its error also wraps
+	// ErrStatementUnsupported.
+	ErrProofStatement = errors.New("reveal proof verifier checks only coin, policy and data reveals, data revokes and policy actions")
 
 	// ErrProofRejected is returned for every answer of the proof verifier
 	// but acceptance; the error names the status.
@@ -78,8 +82,9 @@ var (
 
 // ghostVerifier is the reveal verifier of the ghost repository's
 // ghost-proofs, linked in through C interfaces: ghost_proofs.h for coin
-// reveals of both versions, ghostverifier's ghost_policy.h for policy reveals
-// and its ghost_data.h for data reveals and revokes.
+// reveals of both versions, ghostverifier's ghost_policy.h for policy
+// reveals, its ghost_action.h for policy actions (KNOW_ACTION_v1) and its
+// ghost_data.h for data reveals and revokes.
 type ghostVerifier struct{}
 
 // DefaultVerifier returns the verifier the node uses until another is set:
@@ -91,11 +96,11 @@ type ghostVerifier struct{}
 func DefaultVerifier() Verifier { return ghostVerifier{} }
 
 // VerifyReveal verifies the proof of an ordinary coin reveal (version 1 or
-// 2), a policy reveal, a data reveal or a data revoke against the chain
-// parameters and statement it builds from in, in the layout of
-// ghost_proofs.h, ghost_policy.h or ghost_data.h. The chain parameters carry
-// the reveal's own version, as its binding does. The proof may be followed by
-// zero bytes, as in the reveal's proof field. The binding digest is not
+// 2), a policy reveal, a policy action, a data reveal or a data revoke
+// against the chain parameters and statement it builds from in, in the
+// layout of ghost_proofs.h, ghost_policy.h, ghost_action.h or ghost_data.h.
+// The chain parameters carry the statement's own version, as its binding
+// does. The proof may be followed by zero bytes, as in the proof field. The binding digest is not
 // passed: the verifier computes its own from the same fields.
 func (ghostVerifier) VerifyReveal(in *VerifyInputs, proof []byte) error {
 	if in == nil {
@@ -129,6 +134,17 @@ func (ghostVerifier) VerifyReveal(in *VerifyInputs, proof []byte) error {
 		}
 	case in.Kind == ghosttree.Coin && in.Purpose == PurposePolicySpend:
 		return fmt.Errorf("%w: %w: policy reveal version %d", ErrProofStatement, ErrStatementUnsupported, in.Version)
+	case in.Kind == ghosttree.Coin && in.Purpose == PurposeAction && in.Version == PolicyActionVersion:
+		// KNOW_ACTION_v1, whose proof field is ActionProofSize.
+		if len(proof) == 0 || len(proof) > ghostActionProofBytes {
+			return fmt.Errorf("%w: proof of %d bytes", ErrProofRejected, len(proof))
+		}
+		statement, version = ghostActionStatementBytes(in), PolicyActionVersion
+		verify = func(p, s, q *C.uint8_t, pl, sl, ql C.size_t) C.int32_t {
+			return C.ghost_verify_know_action(p, pl, s, sl, q, ql)
+		}
+	case in.Kind == ghosttree.Coin && in.Purpose == PurposeAction:
+		return fmt.Errorf("%w: %w: policy action version %d", ErrProofStatement, ErrStatementUnsupported, in.Version)
 	case in.Kind == ghosttree.Data && (in.Purpose == PurposeReveal || in.Purpose == PurposeRevoke):
 		statement = ghostDataStatement(in)
 		verify = func(p, s, q *C.uint8_t, pl, sl, ql C.size_t) C.int32_t {
@@ -205,6 +221,25 @@ func ghostChainParamsVersion(in *VerifyInputs, version uint16) []byte {
 	b = binary.BigEndian.AppendUint64(b, in.ChainID)
 	b = binary.BigEndian.AppendUint16(b, version)
 	return append(b, in.Domain[:]...)
+}
+
+// ghostActionStatementBytes returns the KNOW_ACTION_v1 statement of
+// ghost_action.h, of GHOST_ACTION_STATEMENT_BYTES: the slot's policy address
+// (20), the marker (32), the action nonce (8, big endian), the slot's action
+// tag and salt (32 each), the expected remaining and the debit as 32-byte
+// amount words, the expiry (8, big endian) and the calldata hash (32), the
+// order of the binding. A nil amount is zero.
+func ghostActionStatementBytes(in *VerifyInputs) []byte {
+	b := make([]byte, 0, ghostActionStatement)
+	b = append(b, in.Policy[:]...)
+	b = append(b, in.Marker[:]...)
+	b = binary.BigEndian.AppendUint64(b, in.ActionNonce)
+	b = append(b, in.ActionTag[:]...)
+	b = append(b, in.ActionSalt[:]...)
+	b = append(b, amountWord(amountOrZero(in.ExpectedRemaining))...)
+	b = append(b, amountWord(amountOrZero(in.Debit))...)
+	b = binary.BigEndian.AppendUint64(b, in.Expiry)
+	return append(b, in.CalldataHash[:]...)
 }
 
 // ghostCoinStatementV2 returns the version 2 coin reveal statement of

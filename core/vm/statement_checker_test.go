@@ -31,9 +31,9 @@ import (
 // checkerGenesis is the genesis hash the tests' block contexts carry.
 var checkerGenesis = common.HexToHash("0x9e6e515e000000000000000000000000000000000000000000000000000000aa")
 
-// checkerFullGas is the gas of a call with an input of 917,601 bytes:
-// 110,000 plus 3 for each of its 28,676 words.
-const checkerFullGas = 196_028
+// checkerFullGas is the gas of a call with an input of 948,321 bytes:
+// 110,000 plus 3 for each of its 29,636 words.
+const checkerFullGas = 198_908
 
 // useStubVerifier makes the stub verifier the active one for the test.
 func useStubVerifier(t *testing.T) {
@@ -263,13 +263,13 @@ func TestStatementCheckerRefusesBadCalls(t *testing.T) {
 // TestStatementCheckerGas checks the gas of spec 10, section 9.3: 110,000
 // plus 3 per 32-byte word of the input, charged before the proof is checked,
 // the same for a proof that verifies and one that does not, 196,028 for the
-// input of 917,601 bytes; with less gas the call runs out of gas.
+// input of 948,321 bytes; with less gas the call runs out of gas.
 func TestStatementCheckerGas(t *testing.T) {
 	useStubVerifier(t)
 	if ghost.PreimageVerifyGas != 110_000 || ghost.StatementCheckerWordGas != 3 {
 		t.Fatalf("PREIMAGE_VERIFY_GAS %d, word gas %d", ghost.PreimageVerifyGas, ghost.StatementCheckerWordGas)
 	}
-	for n, want := range map[int]uint64{0: 110_000, 1: 110_003, 32: 110_003, 33: 110_006, 917_601: checkerFullGas} {
+	for n, want := range map[int]uint64{0: 110_000, 1: 110_003, 32: 110_003, 33: 110_006, 948_321: checkerFullGas} {
 		if got := StatementCheckerGas(n); got != want {
 			t.Errorf("gas of %d bytes: %d, want %d", n, got, want)
 		}

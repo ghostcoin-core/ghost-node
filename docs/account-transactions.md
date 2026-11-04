@@ -367,7 +367,7 @@ peers' share is dropped unverified, and that none is verified twice.
 A frozen policy checks a proof of KNOW_PREIMAGE_v1 by calling the statement
 checker at `0x61` ([ghost-evm-profile.md](ghost-evm-profile.md#the-statement-checker);
 spec 10, sections 9.3 and 15). Its input, the statement, `y`, the context and
-the proof field, is 917,601 bytes, far over the pool's cap of 128 KiB
+the proof field, is 948,321 bytes, far over the pool's cap of 128 KiB
 (`TX_MAX_BYTES`, spec 09, section 8.3). The pool takes such a transaction in
 a size class of its own, verifies its proof once, and bounds the work a peer
 or a flood can cause. Block processing is not affected: the checker runs
@@ -378,8 +378,8 @@ inside the EVM and verifies whatever the calling frame passes.
 A proof-carrying transaction is an account transaction (type `0x52`) whose
 `to` is a frozen policy created before the next block
 (`ghost.IsCallablePolicy` against the pool's head state at the next block
-number) and whose data is at least 917,601 bytes. By convention the **last**
-917,601 bytes of the data are the checker input; the bytes before them are
+number) and whose data is at least 948,321 bytes. By convention the **last**
+948,321 bytes of the data are the checker input; the bytes before them are
 the policy's own calldata (a selector and anything else). The pool builds
 the binding itself, with the transaction's `to` as the policy and the chain
 id and genesis hash of this chain: a proof made for another policy, one the

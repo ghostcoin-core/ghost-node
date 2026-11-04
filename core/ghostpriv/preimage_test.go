@@ -47,13 +47,13 @@ func testPreimage() *ghostpriv.Preimage {
 
 // TestPreimageBindingLayout checks the statement constants, the 161 bytes
 // of the binding input field by field, the digest's tag, and that the
-// checker input of 917,601 bytes decodes back to the statement.
+// checker input of 948,321 bytes decodes back to the statement.
 func TestPreimageBindingLayout(t *testing.T) {
 	if ghostpriv.StatementPreimage != 0x06 || ghostpriv.PurposePreimage != 0x07 || ghostpriv.PreimageVersion != 1 {
 		t.Fatalf("statement %#x, purpose %#x, version %d", ghostpriv.StatementPreimage, ghostpriv.PurposePreimage, ghostpriv.PreimageVersion)
 	}
-	if size := ghostpriv.PreimageInputSize; size != 917_601 {
-		t.Fatalf("checker input of %d bytes, want 917,601", size)
+	if size := ghostpriv.PreimageInputSize; size != 948_321 {
+		t.Fatalf("checker input of %d bytes, want 948,321", size)
 	}
 	if size := 1 + 32 + 64 + ghostpriv.ActionProofSize; size != ghostpriv.PreimageInputSize {
 		t.Fatalf("statement, y, context and the action's proof field make %d bytes", size)
@@ -118,7 +118,7 @@ func TestPreimageBindingLayout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(input) != 917_601 || input[0] != 0x06 || !bytes.Equal(input[1:33], p.Y[:]) || !bytes.Equal(input[33:97], p.Context[:]) {
+	if len(input) != 948_321 || input[0] != 0x06 || !bytes.Equal(input[1:33], p.Y[:]) || !bytes.Equal(input[33:97], p.Context[:]) {
 		t.Fatalf("checker input layout: %d bytes, statement %#x", len(input), input[0])
 	}
 	back, err := ghostpriv.DecodePreimageInput(input)

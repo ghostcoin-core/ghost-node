@@ -36,7 +36,8 @@ import (
 // ACTION_CALLER under ACTION_CALL_GAS. The checks that need no EVM are here;
 // the execution, which runs the policy call, is core.ApplyPolicyAction.
 const (
-	TagPolicyActionBinding = "ghost/policy-action-binding/v1"
+	TagPolicyActionBinding = "ghost/action-binding/v1"
+	TagPolicyActionKey     = "ghost/policy-action/v1"
 	TagActionCalldata      = "ghost/action-calldata/v1"
 	TagActionResult        = "ghost/action-result/v1"
 	TagActionReturn        = "ghost/action-return/v1"
@@ -48,17 +49,20 @@ const (
 	// proof of the action key (KNOW_ACTION).
 	PurposeAction byte = 0x06
 
-	// ActionCalldataSize is the length of the calldata field: the calldata,
-	// as long as the length field says, then zeros.
-	ActionCalldataSize = 31_744
+	// ActionCalldataSize is ACTION_CALLDATA_MAX, the length of the calldata
+	// field: the calldata, as long as the length field says, then zeros
+	// (spec 10, section 8.1).
+	ActionCalldataSize = 1_024
 
-	// ActionProofSize is the length of the proof field of a policy action:
-	// the serialized proof followed by zeros.
-	ActionProofSize = 917_504
+	// ActionProofSize is ACTION_PROOF_BYTES, the length of the proof field
+	// of a policy action: the serialized proof followed by zeros. It is the
+	// proof-length bound of the small statements, 947,283 bytes, rounded up
+	// to a multiple of 1,024 (spec 10, section 8.1).
+	ActionProofSize = 948_224
 
 	// ActionBindingSize is the length of a policy action's binding digest
-	// input.
-	ActionBindingSize = 337
+	// input (spec 10, section 8.2).
+	ActionBindingSize = 273
 
 	// ActionCallGas is ACTION_CALL_GAS, the gas the policy call gets, paid
 	// inside G_ACTION.
@@ -198,9 +202,18 @@ func DecodeAction(envelope []byte) (*Action, error) {
 }
 
 // ActionCalldataHash is the hash of a policy call's calldata the action's
-// binding carries: K("ghost/action-calldata/v1", calldata).
+// binding carries: K("ghost/action-calldata/v1", calldata_len, calldata),
+// the length as two bytes big endian (spec 10, section 8.2). Calldata longer
+// than its field never decodes.
 func ActionCalldataHash(calldata []byte) common.Hash {
-	return ghosttree.K(TagActionCalldata, calldata)
+	return ghosttree.K(TagActionCalldata, binary.BigEndian.AppendUint16(nil, uint16(len(calldata))), calldata)
+}
+
+// PolicyActionTag is the action tag of an action key: K("ghost/policy-action/v1",
+// actionRoot, actionSalt). A policy action's proof shows knowledge of the
+// actionRoot behind its slot's tag and salt.
+func PolicyActionTag(actionRoot, actionSalt common.Hash) common.Hash {
+	return ghosttree.K(TagPolicyActionKey, actionRoot[:], actionSalt[:])
 }
 
 // ActionReturnHash is the hash of a policy call's return data the
@@ -213,21 +226,20 @@ func ActionReturnHash(ret []byte) common.Hash {
 func (a *Action) CalldataHash() common.Hash { return ActionCalldataHash(a.Calldata) }
 
 // BindingDigest returns the binding digest a policy action's proof must
-// commit to, K("ghost/policy-action-binding/v1", fields) over the 337 bytes
-// of BindingInput, for the action on the slot it names.
+// commit to, K("ghost/action-binding/v1", fields) over the 273 bytes of
+// BindingInput, for the action on the slot it names.
 func (a *Action) BindingDigest(chainID uint64, genesis common.Hash, slot *EscrowSlot) common.Hash {
 	return ghosttree.K(TagPolicyActionBinding, a.BindingInput(chainID, genesis, slot))
 }
 
-// BindingInput returns the 337 bytes the action binding digest hashes: the
-// chain id (8), the version 1 (2), the domain, which is the genesis hash
-// (32), the statement 0x05 and its version 0x01 (1 each), the purpose 0x06
-// (1), the marker (32), from the slot the policy address (20), the
-// parameters hash, the action tag, the action salt and the instruction (32
-// each), then the action's nonce (8), expected remaining and debit (32
-// each), expiry (8) and calldata hash (32). The node supplies the version,
-// statement and purpose and reads the slot's fields from the state; the
-// proof is not covered.
+// BindingInput returns the 273 bytes the action binding digest hashes
+// (spec 10, section 8.2): the chain id (8), the version 1 (2), the domain,
+// which is the genesis hash (32), the statement 0x05 and its version 0x01
+// (1 each), the purpose 0x06 (1), the slot's policy address (20), the marker
+// (32), the action's nonce (8), the slot's action tag and action salt (32
+// each), the action's expected remaining and debit (32 each), expiry (8) and
+// calldata hash (32). The node supplies the version, statement and purpose
+// and reads the slot's fields from the state; the proof is not covered.
 func (a *Action) BindingInput(chainID uint64, genesis common.Hash, slot *EscrowSlot) []byte {
 	if slot == nil {
 		slot = new(EscrowSlot)
@@ -238,13 +250,11 @@ func (a *Action) BindingInput(chainID uint64, genesis common.Hash, slot *EscrowS
 	b = binary.BigEndian.AppendUint16(b, PolicyActionVersion)
 	b = append(b, genesis[:]...)
 	b = append(b, statementPolicyAction, statementVersion, PurposeAction)
-	b = append(b, a.Marker[:]...)
 	b = append(b, slot.Policy[:]...)
-	b = append(b, slot.ParamsHash[:]...)
+	b = append(b, a.Marker[:]...)
+	b = binary.BigEndian.AppendUint64(b, a.Nonce)
 	b = append(b, slot.ActionTag[:]...)
 	b = append(b, slot.ActionSalt[:]...)
-	b = append(b, slot.Instr[:]...)
-	b = binary.BigEndian.AppendUint64(b, a.Nonce)
 	b = append(b, amountWord(amountOrZero(a.ExpectedRemaining))...)
 	b = append(b, amountWord(amountOrZero(a.Debit))...)
 	b = binary.BigEndian.AppendUint64(b, a.Expiry)

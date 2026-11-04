@@ -127,8 +127,8 @@ stage_build() {
 	echo "--- Build every command"
 	go run build/ci.go install
 	echo "--- Real-proof verifier tests"
-	CGO_ENABLED=1 go test -tags ghostproofs -count=1 -v -run '^(TestGhostVerifierKnownAnswer|TestRealProofRevealRoundTrip)$' ./core/ghostpriv/
-	CGO_ENABLED=1 go test -tags ghostproofs -count=1 -v -run '^(TestRealProofRevealPoolAndBlock|TestRealProofTamperedRevealRejected)$' ./core/txpool/ghostpool/
+	CGO_ENABLED=1 go test -tags ghostproofs -count=1 -v -run '^(TestGhostVerifierKnownAnswer|TestRealProofRevealRoundTrip|TestRealProofPolicyAction)$' ./core/ghostpriv/
+	CGO_ENABLED=1 go test -tags ghostproofs -count=1 -v -run '^(TestRealProofRevealPoolAndBlock|TestRealProofTamperedRevealRejected|TestRealProofPolicyActionAdmission)$' ./core/txpool/ghostpool/
 	echo "--- The Linux release is one self-contained file"
 	kind="$(file build/bin/geth)"
 	echo "$kind"
