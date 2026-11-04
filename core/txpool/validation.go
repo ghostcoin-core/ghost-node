@@ -23,8 +23,10 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core"
+	"github.com/ethereum/go-ethereum/core/ghostpriv"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/params/ghost"
 	"github.com/ethereum/go-ethereum/params/types/ctypes"
 	"github.com/ethereum/go-ethereum/params/vars"
 )
@@ -133,9 +135,39 @@ func ValidateTransaction(tx *types.Transaction, head *types.Header, signer types
 	if tx.Gas() < intrGas {
 		return fmt.Errorf("%w: gas %v, minimum needed %v", core.ErrIntrinsicGas, tx.Gas(), intrGas)
 	}
+	// A commit or data commit whose data or value the chain refuses can never
+	// run: refuse it now, with the reason execution would give.
+	if err := ValidateCommit(tx); err != nil {
+		return err
+	}
 	// Ensure the gasprice is high enough to cover the requirement of the calling pool
 	if tx.GasTipCapIntCmp(opts.MinTip) < 0 {
 		return fmt.Errorf("%w: gas tip cap %v, minimum needed %v", ErrUnderpriced, tx.GasTipCap(), opts.MinTip)
+	}
+	return nil
+}
+
+// ValidateCommit runs, on a transaction sent to the coin or the data commit
+// entry address, the checks of its data and value that need no state, the
+// ones every execution of it runs first: the data is 430 bytes of version 3
+// (ghostpriv.ErrCommitData), F is not zero (ghostpriv.ErrCommitZeroF), and the
+// value is between 1 and V_MAX for a commit (ghostpriv.ErrCommitAmount) or
+// the data reserve for a data commit (ghostpriv.ErrDataCommitValue). A
+// transaction that fails one of them is never mined, so the pool refuses it
+// with ErrInvalidCommit wrapping the same error. Any other transaction passes.
+func ValidateCommit(tx *types.Transaction) error {
+	to := tx.To()
+	if to == nil || !ghost.IsCommitEntry(*to) {
+		return nil
+	}
+	var err error
+	if *to == ghost.DataCommitEntryAddress {
+		_, err = ghostpriv.ParseDataCommit(tx.Data(), tx.Value())
+	} else {
+		_, err = ghostpriv.ParseCommit(tx.Data(), tx.Value())
+	}
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidCommit, err)
 	}
 	return nil
 }

@@ -60,4 +60,9 @@ var (
 	// input transaction of non-blob type when a blob transaction from this sender
 	// remains pending (and vice-versa).
 	ErrAlreadyReserved = errors.New("address already reserved")
+
+	// ErrInvalidCommit is returned for a transaction to a commit entry
+	// address whose data or value the chain refuses at every execution, so it
+	// could never be mined. It wraps the error execution would give.
+	ErrInvalidCommit = errors.New("invalid commit")
 )
