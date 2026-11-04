@@ -136,6 +136,12 @@ func (h *History) sync(head *types.Header, records RecordsFunc, rebuild bool) er
 		} else if !marked {
 			return fmt.Errorf("%w: no spent-marker index", errStaleHistory)
 		}
+		// And so is one whose records are not in the layout of this
+		// version, such as one written before the note grew: no block can
+		// be applied on it or reverted from it.
+		if err := h.checkLayout(); err != nil {
+			return fmt.Errorf("%w: %w", errStaleHistory, err)
+		}
 		if hash == head.Hash() {
 			return nil
 		}
@@ -256,10 +262,41 @@ func (h *History) ancestry(head *types.Header) ([]blockID, error) {
 	}
 }
 
+// checkLayout decodes the first record of every stored kind, which a history
+// written in an older layout fails, as every record of it is in that layout.
+func (h *History) checkLayout() error {
+	for _, kind := range storedKinds {
+		if _, err := h.read(slot{kind, 0, 0}); err != nil {
+			return fmt.Errorf("%v tree 0 position 0: %w", kind, err)
+		}
+	}
+	return nil
+}
+
+// storedCount returns the number of records stored in a tree, counting the
+// keys only: unlike countAt it decodes nothing, so it also counts a history
+// whose records are in an older layout, which reset must remove.
+func (h *History) storedCount(kind Kind, treeIndex uint64) (uint64, error) {
+	lo, hi := uint64(0), h.p.capacity()
+	for lo < hi {
+		mid := lo + (hi-lo)/2
+		enc, err := rawdb.ReadGhostTreeLeaf(h.db, uint8(kind), treeIndex, uint32(mid))
+		if err != nil {
+			return 0, err
+		}
+		if enc != nil {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+	return lo, nil
+}
+
 // reset removes the head, the markers of the tag and spent-marker indexes
-// and every record, page root, tag key and spent-marker entry. Block entries
-// stay behind, as no list of them is kept; applying a block replaces its
-// entry.
+// and every record, page root, tag key and spent-marker entry, whatever the
+// layout of the records. Block entries stay behind, as no list of them is
+// kept; applying a block replaces its entry.
 func (h *History) reset() error {
 	batch := h.db.NewBatch()
 	if err := rawdb.DeleteGhostTreeBlock(batch, headKey); err != nil {
@@ -287,7 +324,7 @@ func (h *History) reset() error {
 	}
 	for _, kind := range storedKinds {
 		for index := uint64(0); ; index++ {
-			count, err := h.countAt(kind, index, math.MaxUint64)
+			count, err := h.storedCount(kind, index)
 			if err != nil {
 				return err
 			}
