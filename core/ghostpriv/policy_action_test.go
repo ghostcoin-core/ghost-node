@@ -867,7 +867,7 @@ func (c *callTracer) CaptureFault(uint64, vm.OpCode, uint64, uint64, *vm.ScopeCo
 // debit is the whole remaining closes the slot.
 func TestPolicyActionNoRefundAndGas(t *testing.T) {
 	useStub(t)
-	if ghostpriv.ActionCallGas != 250_000 || ghostpriv.GasAction != 15_585_968 || types.GhostPolicyActionGas != 15_585_968 {
+	if ghostpriv.ActionCallGas != 250_000 || ghostpriv.GasAction != 15_905_968 || types.GhostPolicyActionGas != 15_905_968 {
 		t.Fatalf("ACTION_CALL_GAS %d, G_ACTION %d", ghostpriv.ActionCallGas, ghostpriv.GasAction)
 	}
 	s := newActionScenario(t, actionPolicyA, actionPolicyR)

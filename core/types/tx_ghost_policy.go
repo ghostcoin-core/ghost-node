@@ -45,9 +45,9 @@ const (
 
 	// GhostPolicyRevealGas is G_POLICY, the gas every policy reveal takes
 	// from the block gas pool: 16 per envelope byte, 21,000, the verification
-	// charge of 110,000 and the slot opening of 160,000 (spec 10, section
+	// charge of 440,000 and the slot opening of 160,000 (spec 10, section
 	// 10).
-	GhostPolicyRevealGas = 21_274_216
+	GhostPolicyRevealGas = 21_604_216
 )
 
 // GhostPolicyRevealTx is the payload of a policy reveal, kept as its exact

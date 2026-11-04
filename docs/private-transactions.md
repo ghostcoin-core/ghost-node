@@ -119,7 +119,7 @@ the verifier of the version 2 proof is linked.
 A reveal has no sender, nonce or signature: `types.Sender` returns
 `types.ErrNoSender` for it under every signer, and no signer signs it. No
 ordinary account can authorise one. Every version 2 reveal takes exactly
-`G_PRIV = 21,111,656` gas (16 x 1,311,291 + 21,000 + 110,000,
+`G_PRIV = 21,371,656` gas (16 x 1,311,291 + 21,000 + 370,000,
 `types.GhostRevealGas`, `ghostpriv.GasPriv`) from the block gas pool, and a
 version 1 reveal its own 21,090,372; a block whose pool holds less is
 invalid. Each native type takes its own class's gas (spec 10, section 10):
@@ -200,9 +200,9 @@ base part `G_class * price`, the tip `ceil(base part / 10)` and the fee
 the G_PRIV form). The cover rule burns `G_class * max(price, beta)` for the
 including block's base fee `beta` and pays the rest as the tip
 (`Fee.CoverGas(beta, gas)`; `Fee.Cover(beta)` is the G_PRIV form). For
-`b_ref = 10^9` the ordinary fee is 26,126,835,464,302,822 wei, the policy fee
-26,328,012,405,281,638 and the data fee 26,100,495,343,659,410; for
-`b_ref = 1.1 * 10^9` the ordinary fee is 28,739,519,008,410,822. At
+`b_ref = 10^9` the ordinary fee is 26,448,599,764,588,822 wei, the policy fee
+26,736,405,555,644,638 and the data fee 26,100,495,343,659,410; for
+`b_ref = 1.1 * 10^9` the ordinary fee is 29,093,459,738,696,822. At
 `b_ref = 10^9` the cover limit of the ordinary and the policy fee is
 1,237,555,001.
 
@@ -213,7 +213,7 @@ escrow slot held for a frozen policy (see `docs/ghost-evm-profile.md`). It is
 the typed transaction `0x53 || payload`, version 1, 1,311,451 bytes, with hash
 `keccak256(0x53 || payload)` (`types.NewGhostPolicyRevealTx`). Like the other
 reveals it has no sender, nonce or signature. It takes exactly
-`G_POLICY = 21,274,216` gas (16 x 1,311,451 + 21,000 + 110,000 + 160,000 for
+`G_POLICY = 21,604,216` gas (16 x 1,311,451 + 21,000 + 440,000 + 160,000 for
 the slot opening, `types.GhostPolicyRevealGas`, `ghostpriv.GasPolicy`). Its
 receipt is a typed receipt of type `0x53`. The payload, 1,311,450 bytes:
 

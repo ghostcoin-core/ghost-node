@@ -457,7 +457,7 @@ The bounds are node settings in `params/ghost/proofadmit.go`:
 | `ProofPeerBudget` | 4 per head | as the reveal pool's `PeerRevealsPerBlock` |
 | `ProofFailLimit` | 3 per head | as the reveal pool's `PeerMaxFailedProofs` |
 | `ProofCheckSlots` | 2 | one for peers, one for RPC |
-| `ProofChecksPerHead` | 16 | about 11 ms a verification at the 110,000 gas of `PREIMAGE_VERIFY_GAS`, so under 0.2 s a head whatever the flood |
+| `ProofChecksPerHead` | 16 | about 43 ms a verification at the 430,000 gas of `PREIMAGE_VERIFY_GAS`, so under 0.7 s a head whatever the flood |
 | `ProofRejectedMemory` | 4,096 | as the reveal pool's memory of refused hashes; 32-byte hashes with their first refusal |
 
 A proof-carrying transaction is announced, never broadcast whole, as any

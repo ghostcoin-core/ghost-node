@@ -58,8 +58,8 @@ func TestPolicyRevealTypeAndGas(t *testing.T) {
 		verify, extra uint64
 		want          uint64
 	}{
-		{"G_PRIV", GhostRevealGas, GhostRevealEnvelopeSize, 110_000, 0, 21_111_656},
-		{"G_POLICY", GhostPolicyRevealGas, GhostPolicyRevealEnvelopeSize, 110_000, 160_000, 21_274_216},
+		{"G_PRIV", GhostRevealGas, GhostRevealEnvelopeSize, 370_000, 0, 21_371_656},
+		{"G_POLICY", GhostPolicyRevealGas, GhostPolicyRevealEnvelopeSize, 440_000, 160_000, 21_604_216},
 		{"G_DATA", GhostDataRevealGas, GhostDataRevealEnvelopeSize, 92_300, 0, 21_090_372},
 	} {
 		if c.gas != c.want || c.gas != 16*c.envelope+21_000+c.verify+c.extra {

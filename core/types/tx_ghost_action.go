@@ -46,10 +46,10 @@ const (
 
 	// GhostPolicyActionGas is G_ACTION, the gas every policy action takes
 	// from the block gas pool, whatever its call uses: 16 per envelope byte,
-	// 21,000 and the fixed action charge of 375,000, which holds the proof
+	// 21,000 and the fixed action charge of 695,000, which holds the proof
 	// verification, the policy call's ACTION_CALL_GAS of 250,000 and the
 	// slot debit with its result log. Nothing of it is refunded.
-	GhostPolicyActionGas = 15_585_968
+	GhostPolicyActionGas = 15_905_968
 )
 
 // GhostPolicyActionTx is the payload of a policy action, kept as its exact

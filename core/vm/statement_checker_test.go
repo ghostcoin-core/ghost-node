@@ -32,8 +32,8 @@ import (
 var checkerGenesis = common.HexToHash("0x9e6e515e000000000000000000000000000000000000000000000000000000aa")
 
 // checkerFullGas is the gas of a call with an input of 948,321 bytes:
-// 110,000 plus 3 for each of its 29,636 words.
-const checkerFullGas = 198_908
+// 430,000 plus 3 for each of its 29,636 words.
+const checkerFullGas = 518_908
 
 // useStubVerifier makes the stub verifier the active one for the test.
 func useStubVerifier(t *testing.T) {
@@ -260,16 +260,16 @@ func TestStatementCheckerRefusesBadCalls(t *testing.T) {
 	}
 }
 
-// TestStatementCheckerGas checks the gas of spec 10, section 9.3: 110,000
+// TestStatementCheckerGas checks the gas of spec 10, section 9.3: 430,000
 // plus 3 per 32-byte word of the input, charged before the proof is checked,
-// the same for a proof that verifies and one that does not, 196,028 for the
+// the same for a proof that verifies and one that does not, 518,908 for the
 // input of 948,321 bytes; with less gas the call runs out of gas.
 func TestStatementCheckerGas(t *testing.T) {
 	useStubVerifier(t)
-	if ghost.PreimageVerifyGas != 110_000 || ghost.StatementCheckerWordGas != 3 {
+	if ghost.PreimageVerifyGas != 430_000 || ghost.StatementCheckerWordGas != 3 {
 		t.Fatalf("PREIMAGE_VERIFY_GAS %d, word gas %d", ghost.PreimageVerifyGas, ghost.StatementCheckerWordGas)
 	}
-	for n, want := range map[int]uint64{0: 110_000, 1: 110_003, 32: 110_003, 33: 110_006, 948_321: checkerFullGas} {
+	for n, want := range map[int]uint64{0: 430_000, 1: 430_003, 32: 430_003, 33: 430_006, 948_321: checkerFullGas} {
 		if got := StatementCheckerGas(n); got != want {
 			t.Errorf("gas of %d bytes: %d, want %d", n, got, want)
 		}
@@ -285,11 +285,11 @@ func TestStatementCheckerGas(t *testing.T) {
 		input []byte
 		word  byte
 	}{"valid": {valid, 1}, "invalid": {invalid, 0}} {
-		ret, left, err := env.checkerEVM(2, checkerGenesis).StaticCall(frozen, ghost.StatementCheckerAddress, c.input, 500_000)
+		ret, left, err := env.checkerEVM(2, checkerGenesis).StaticCall(frozen, ghost.StatementCheckerAddress, c.input, 1_000_000)
 		if err != nil || len(ret) != 32 || ret[31] != c.word {
 			t.Fatalf("%s: ret %x, err %v", name, ret, err)
 		}
-		if used := 500_000 - left; used != checkerFullGas {
+		if used := 1_000_000 - left; used != checkerFullGas {
 			t.Errorf("%s proof: gas used %d, want %d", name, used, checkerFullGas)
 		}
 	}

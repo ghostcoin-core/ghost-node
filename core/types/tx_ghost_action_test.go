@@ -221,18 +221,18 @@ func TestGhostActionTxRoundTrip(t *testing.T) {
 
 // TestGhostActionTxGasAndSize checks the sizes and gas of the policy action:
 // an envelope of 949,373 bytes and a payload of 949,372, and G_ACTION =
-// 15,585,968, 16 per envelope byte, 21,000 and the fixed action charge of
-// 375,000, which holds ACTION_CALL_GAS of 250,000. The gas is the same for
+// 15,905,968, 16 per envelope byte, 21,000 and the fixed action charge of
+// 695,000, which holds ACTION_CALL_GAS of 250,000. The gas is the same for
 // every action, whatever its payload, and is the smallest of the native
 // classes.
 func TestGhostActionTxGasAndSize(t *testing.T) {
 	if GhostPolicyActionEnvelopeSize != 949_373 || GhostPolicyActionPayloadSize != 949_372 {
 		t.Fatalf("envelope %d, payload %d", GhostPolicyActionEnvelopeSize, GhostPolicyActionPayloadSize)
 	}
-	if GhostPolicyActionGas != 15_585_968 {
+	if GhostPolicyActionGas != 15_905_968 {
 		t.Fatalf("G_ACTION %d", GhostPolicyActionGas)
 	}
-	const actionCharge = 375_000
+	const actionCharge = 695_000
 	if GhostPolicyActionGas != 16*GhostPolicyActionEnvelopeSize+21_000+actionCharge {
 		t.Fatal("G_ACTION is not 16 per envelope byte, 21,000 and the action charge")
 	}

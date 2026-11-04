@@ -59,11 +59,11 @@ func TestRevealSizesAndGas(t *testing.T) {
 	if GhostDataRevealPayloadSize != 1_311_066 || GhostDataRevealEnvelopeSize != 1_311_067 {
 		t.Errorf("data reveal payload %d, envelope %d", GhostDataRevealPayloadSize, GhostDataRevealEnvelopeSize)
 	}
-	if GhostRevealGas != 21_111_656 {
+	if GhostRevealGas != 21_371_656 {
 		t.Errorf("G_PRIV %d", GhostRevealGas)
 	}
-	if 16*GhostRevealEnvelopeSize+21_000+110_000 != 21_111_656 {
-		t.Errorf("G_PRIV is not 16 per envelope byte, 21,000 and 110,000")
+	if 16*GhostRevealEnvelopeSize+21_000+370_000 != 21_371_656 {
+		t.Errorf("G_PRIV is not 16 per envelope byte, 21,000 and 370,000")
 	}
 	if GhostDataRevealGas != 21_090_372 {
 		t.Errorf("G_DATA %d", GhostDataRevealGas)

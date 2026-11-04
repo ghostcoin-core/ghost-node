@@ -301,11 +301,11 @@ func TestGhostBundleTxLengthChecks(t *testing.T) {
 }
 
 // TestGhostBundleTxGasIsSumOfRevealGas checks that a bundle takes exactly
-// count times G_PRIV, 21,111,656, the sum of what the same reveals take as
+// count times G_PRIV, 21,371,656, the sum of what the same reveals take as
 // lone reveals, for every count from 1 to 1,408, so it is never cheaper to
 // include than the reveals it carries.
 func TestGhostBundleTxGasIsSumOfRevealGas(t *testing.T) {
-	if GhostRevealGas != 21_111_656 {
+	if GhostRevealGas != 21_371_656 {
 		t.Fatalf("G_PRIV %d", GhostRevealGas)
 	}
 	lone, err := NewGhostRevealTx(testRevealEnvelope())
@@ -315,7 +315,7 @@ func TestGhostBundleTxGasIsSumOfRevealGas(t *testing.T) {
 	var sum uint64
 	for n := 1; n <= GhostBundleMaxReveals; n++ {
 		sum += lone.Gas()
-		if got := GhostBundleGas(n); got != sum || got != uint64(n)*21_111_656 {
+		if got := GhostBundleGas(n); got != sum || got != uint64(n)*21_371_656 {
 			t.Fatalf("count %d: gas %d, want the sum of lone reveals %d", n, got, sum)
 		}
 	}
@@ -332,8 +332,8 @@ func TestGhostBundleTxGasIsSumOfRevealGas(t *testing.T) {
 			t.Fatalf("count %d: transaction gas %d, want %d", n, tx.Gas(), uint64(n)*lone.Gas())
 		}
 	}
-	// The largest bundle's gas: 1,408 * 21,111,656.
-	if GhostBundleGas(GhostBundleMaxReveals) != 29_725_211_648 {
+	// The largest bundle's gas: 1,408 * 21,371,656.
+	if GhostBundleGas(GhostBundleMaxReveals) != 30_091_291_648 {
 		t.Fatalf("largest bundle's gas %d", GhostBundleGas(GhostBundleMaxReveals))
 	}
 }

@@ -40,11 +40,11 @@ import (
 // reveal's fee. Each class's tip goes to the coinbase.
 func TestPolicyRevealBlockGas(t *testing.T) {
 	useStub(t)
-	if ghostpriv.GasPriv != 21_111_656 || ghostpriv.GasPolicy != 21_274_216 || ghostpriv.GasData != 21_090_372 {
+	if ghostpriv.GasPriv != 21_371_656 || ghostpriv.GasPolicy != 21_604_216 || ghostpriv.GasData != 21_090_372 {
 		t.Fatalf("G_PRIV %d, G_POLICY %d, G_DATA %d", ghostpriv.GasPriv, ghostpriv.GasPolicy, ghostpriv.GasData)
 	}
-	if ghostpriv.GasPolicy-ghostpriv.GasPriv != 16*(types.GhostPolicyRevealEnvelopeSize-types.GhostRevealEnvelopeSize)+ghostpriv.SlotOpenGas {
-		t.Fatal("G_POLICY is not G_PRIV with the policy fields and the slot opening")
+	if ghostpriv.GasPolicy-ghostpriv.GasPriv != 16*(types.GhostPolicyRevealEnvelopeSize-types.GhostRevealEnvelopeSize)+(440_000-370_000)+ghostpriv.SlotOpenGas {
+		t.Fatal("G_POLICY is not G_PRIV with the policy fields, its larger verification charge and the slot opening")
 	}
 	all := uint64(ghostpriv.GasPriv + ghostpriv.GasPolicy + ghostpriv.GasData)
 	var (
