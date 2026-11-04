@@ -63,7 +63,7 @@ const (
 	// PreimageVerifyGas is PREIMAGE_VERIFY_GAS, the gas of a call to the
 	// statement checker on top of StatementCheckerWordGas per 32-byte word
 	// of its input (spec 10, section 9.3).
-	PreimageVerifyGas uint64 = 110_000
+	PreimageVerifyGas uint64 = 430_000
 
 	// StatementCheckerWordGas is the gas of the statement checker per
 	// 32-byte word of its input.

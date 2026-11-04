@@ -305,7 +305,7 @@ policy that calls it: knowledge of a 32-byte `x` with
 * **Output.** A 32-byte word: 1 when the active verifier accepts the proof,
   0 otherwise. A node whose verifier has no proof system for the statement,
   which is the linked verifier today, answers 0 to every proof.
-* **Gas.** `PREIMAGE_VERIFY_GAS` = 110,000 plus 3 per 32-byte word of the
+* **Gas.** `PREIMAGE_VERIFY_GAS` = 430,000 plus 3 per 32-byte word of the
   input, charged before anything is checked and whatever the answer: 196,028
   for the input above.
 * **Failure.** The call fails revert-style, with no return data, its gas

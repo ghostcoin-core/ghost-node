@@ -164,9 +164,9 @@ func TestEnvelopeSizeAndPadding(t *testing.T) {
 	if types.GhostDataRevealEnvelopeSize != 1_311_067 || types.GhostDataRevealPayloadSize != 1_311_066 {
 		t.Fatalf("data reveal sizes %d %d", types.GhostDataRevealEnvelopeSize, types.GhostDataRevealPayloadSize)
 	}
-	// G_PRIV = 16 x 1,311,291 + 21,000 + 110,000 = 21,111,656; G_DATA = 16 x
+	// G_PRIV = 16 x 1,311,291 + 21,000 + 370,000 = 21,371,656; G_DATA = 16 x
 	// 1,311,067 + 21,000 + 92,300 = 21,090,372.
-	if ghostpriv.GasPriv != 16*1_311_291+21_000+110_000 || types.GhostRevealGas != ghostpriv.GasPriv {
+	if ghostpriv.GasPriv != 16*1_311_291+21_000+370_000 || types.GhostRevealGas != ghostpriv.GasPriv {
 		t.Fatalf("G_PRIV %d", ghostpriv.GasPriv)
 	}
 	if ghostpriv.GasData != 16*1_311_067+21_000+92_300 || types.GhostDataRevealGas != ghostpriv.GasData {

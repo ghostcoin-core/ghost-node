@@ -45,8 +45,8 @@ const (
 
 	// GhostRevealGas is G_PRIV, the gas every version 2 ordinary reveal takes
 	// from the block gas pool: 16 per envelope byte, 21,000 and the
-	// verification charge of 110,000 (spec 10, section 10).
-	GhostRevealGas = 21_111_656
+	// verification charge of 370,000 (spec 10, section 10).
+	GhostRevealGas = 21_371_656
 
 	// GhostRevealV1PayloadSize is the length of a version 1 reveal's payload,
 	// with its 156-byte remainder note. The version 1 reveal is still

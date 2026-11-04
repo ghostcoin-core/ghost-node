@@ -907,7 +907,7 @@ func TestOrdinaryRevealV2Decode(t *testing.T) {
 	if dec.Version != 2 || dec.Note != r.Note {
 		t.Fatal("decode does not give back the version and the note")
 	}
-	if tx, err := types.NewGhostRevealTx(env); err != nil || tx.Size() != 1_311_291 || tx.Gas() != 21_111_656 {
+	if tx, err := types.NewGhostRevealTx(env); err != nil || tx.Size() != 1_311_291 || tx.Gas() != 21_371_656 {
 		t.Fatalf("transaction: %v", err)
 	}
 
