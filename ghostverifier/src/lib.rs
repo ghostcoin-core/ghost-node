@@ -19,6 +19,12 @@
 //!
 //! It also adds a C interface around the shipped verifier of the proof of
 //! holding, `verify_hold`: [`ghost_verify_hold`], declared in `ghost_hold.h`.
+//! The version 2 ordinary reveal (statement S1 version 2) is ghost-proofs'
+//! own [`ghost_verify_coin_reveal_v2`], declared in `ghost_proofs.h`. The
+//! policy reveal (statement S4) has no C interface in ghost-proofs, so this
+//! crate adds [`ghost_verify_policy_reveal`], declared in `ghost_policy.h`,
+//! around `verify_policy_reveal`.
+//!
 //! A proof of holding never goes on chain; the node checks none. The function
 //! is for a verifier that holds the node's headers, and for the node's tests.
 //! Only the prover of a proof of holding is test-only, behind the
@@ -31,9 +37,12 @@ use ghost_proofs::ffi::{
     GHOST_PROOFS_MALFORMED_INPUT, GHOST_PROOFS_PANICKED, GHOST_PROOFS_REJECTED, PROOF_MAX_BYTES,
     chain_params_from_bytes, verify_coin_reveal_bytes,
 };
-use ghost_proofs::{DataPurpose, DataReveal, HoldContext, Proof, ProofError, verify_hold, verify_salted_data_reveal};
+use ghost_proofs::{
+    DataPurpose, DataReveal, HoldContext, NOTE_V3_BYTES, POLICY_ADDRESS_BYTES, PolicyReveal, Proof, ProofError,
+    verify_hold, verify_policy_reveal, verify_salted_data_reveal,
+};
 
-pub use ghost_proofs::ffi::ghost_verify_coin_reveal;
+pub use ghost_proofs::ffi::{ghost_verify_coin_reveal, ghost_verify_coin_reveal_v2};
 pub use ghost_proofs::{PURPOSE_REVEAL, PURPOSE_REVOKE};
 
 /// The test-only prover of a proof of holding and the absence witness of a
@@ -283,6 +292,132 @@ pub unsafe extern "C" fn ghost_verify_hold(
             )
         };
         verify_hold_bytes(params, context, proof)
+    }))
+    .unwrap_or(GHOST_PROOFS_PANICKED)
+}
+
+/// Length of a policy reveal statement (S4): the root, marker and remainder
+/// (32 each), out and fee (32-byte amount words), the policy address (20),
+/// the policy code hash, params hash, action tag, action salt and payout
+/// instruction (32 each) and the remainder's note (380), in that order.
+pub const POLICY_REVEAL_BYTES: usize = 3 * 32 + 2 * 32 + POLICY_ADDRESS_BYTES + 5 * 32 + NOTE_V3_BYTES;
+
+/// Decodes a policy reveal statement in the layout of ghost_policy.h.
+pub fn policy_reveal_from_bytes(bytes: &[u8; POLICY_REVEAL_BYTES]) -> PolicyReveal {
+    let mut rest: &[u8] = bytes;
+    let mut take = |n: usize| -> &[u8] {
+        let (head, tail) = rest.split_at(n);
+        rest = tail;
+        head
+    };
+    let w = |b: &[u8]| -> [u8; 32] { b.try_into().expect("32 bytes") };
+    PolicyReveal {
+        root: w(take(32)),
+        marker: w(take(32)),
+        remainder: w(take(32)),
+        out: w(take(32)),
+        fee: w(take(32)),
+        policy_address: take(POLICY_ADDRESS_BYTES).try_into().expect("20 bytes"),
+        policy_codehash: w(take(32)),
+        params_hash: w(take(32)),
+        action_tag: w(take(32)),
+        action_salt: w(take(32)),
+        instr: w(take(32)),
+        remainder_note: take(NOTE_V3_BYTES).try_into().expect("380 bytes"),
+    }
+}
+
+/// Encodes a policy reveal statement in the layout of ghost_policy.h.
+pub fn policy_reveal_to_bytes(tx: &PolicyReveal) -> [u8; POLICY_REVEAL_BYTES] {
+    let mut b = Vec::with_capacity(POLICY_REVEAL_BYTES);
+    for f in [
+        &tx.root[..],
+        &tx.marker,
+        &tx.remainder,
+        &tx.out,
+        &tx.fee,
+        &tx.policy_address,
+    ] {
+        b.extend_from_slice(f);
+    }
+    for f in [
+        &tx.policy_codehash,
+        &tx.params_hash,
+        &tx.action_tag,
+        &tx.action_salt,
+        &tx.instr,
+    ] {
+        b.extend_from_slice(f);
+    }
+    b.extend_from_slice(&tx.remainder_note);
+    b.try_into().expect("policy reveal statement length")
+}
+
+fn verify_policy_unguarded(params: &[u8], statement: &[u8], proof: &[u8]) -> i32 {
+    let (Ok(params), Ok(statement)) = (
+        <&[u8; CHAIN_PARAMS_BYTES]>::try_from(params),
+        <&[u8; POLICY_REVEAL_BYTES]>::try_from(statement),
+    ) else {
+        return GHOST_PROOFS_BAD_ARGUMENT;
+    };
+    if proof.is_empty() || proof.len() > PROOF_MAX_BYTES {
+        return GHOST_PROOFS_MALFORMED_INPUT;
+    }
+    let tx = policy_reveal_from_bytes(statement);
+    let Some(len) = serialized_len(proof) else {
+        return GHOST_PROOFS_MALFORMED_INPUT;
+    };
+    let params = chain_params_from_bytes(params);
+    match verify_policy_reveal(&params, &tx, &Proof::from_bytes(proof[..len].to_vec())) {
+        Ok(()) => GHOST_PROOFS_ACCEPTED,
+        Err(ProofError::MalformedProof) => GHOST_PROOFS_MALFORMED_INPUT,
+        Err(_) => GHOST_PROOFS_REJECTED,
+    }
+}
+
+/// Verifies a policy reveal proof given as bytes in the layout of
+/// ghost_policy.h with the shipped verifier of ghost-proofs. Never panics.
+pub fn verify_policy_reveal_bytes(params: &[u8], statement: &[u8], proof: &[u8]) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| verify_policy_unguarded(params, statement, proof)))
+        .unwrap_or(GHOST_PROOFS_PANICKED)
+}
+
+/// Verifies a policy reveal proof (statement S4) against the statement and
+/// the chain parameters, as declared in ghost_policy.h. The node's own checks
+/// of the policy, the root and the marker are the caller's.
+///
+/// # Safety
+///
+/// Each non-null pointer must point to at least its length of readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ghost_verify_policy_reveal(
+    params: *const u8,
+    params_len: usize,
+    statement: *const u8,
+    statement_len: usize,
+    proof: *const u8,
+    proof_len: usize,
+) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| {
+        if params.is_null() || statement.is_null() || proof.is_null() {
+            return GHOST_PROOFS_BAD_ARGUMENT;
+        }
+        if params_len != CHAIN_PARAMS_BYTES || statement_len != POLICY_REVEAL_BYTES {
+            return GHOST_PROOFS_BAD_ARGUMENT;
+        }
+        if proof_len == 0 || proof_len > PROOF_MAX_BYTES {
+            return GHOST_PROOFS_MALFORMED_INPUT;
+        }
+        // SAFETY: the pointers are not null and the caller guarantees each
+        // points to at least its length of readable bytes.
+        let (params, statement, proof) = unsafe {
+            (
+                std::slice::from_raw_parts(params, params_len),
+                std::slice::from_raw_parts(statement, statement_len),
+                std::slice::from_raw_parts(proof, proof_len),
+            )
+        };
+        verify_policy_reveal_bytes(params, statement, proof)
     }))
     .unwrap_or(GHOST_PROOFS_PANICKED)
 }

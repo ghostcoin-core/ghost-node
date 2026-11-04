@@ -303,13 +303,14 @@ func testGhostVerifierKnownAnswer(t *testing.T, ka knownAnswer) {
 		}
 	})
 
-	// The linked library verifies only the version 1 statement of 368 bytes.
-	// A version 2 ordinary reveal and a policy reveal are refused before it
-	// is called, even with the fields of an honest version 1 proof, and so is
-	// a version 1 note longer than its 156 bytes.
-	t.Run("version 2 and policy statements refused", func(t *testing.T) {
+	// The linked library verifies the ordinary reveal of version 1 and 2
+	// and the policy reveal of version 1. Any other version is refused
+	// before it is called, as is a version 1 note longer than its 156 bytes.
+	// The version 1 proof, given as a version 2 ordinary reveal or as a
+	// policy reveal, reaches the library and is rejected.
+	t.Run("other versions refused, other statements rejected", func(t *testing.T) {
 		for _, verifier := range []ghostpriv.Verifier{v, ghostpriv.ActiveVerifier()} {
-			for _, version := range []uint16{0, ghostpriv.RevealVersion, 3, 0xffff} {
+			for _, version := range []uint16{0, 3, 0xffff} {
 				in := clone()
 				in.Version = version
 				err := verifier.VerifyReveal(in, proof())
@@ -317,10 +318,17 @@ func testGhostVerifierKnownAnswer(t *testing.T, ka knownAnswer) {
 				rejected(t, "ordinary reveal of another version", err, ghostpriv.ErrProofStatement)
 			}
 			in := clone()
+			in.Version = ghostpriv.RevealVersion
+			rejected(t, "version 1 proof as version 2", verifier.VerifyReveal(in, proof()), ghostpriv.ErrProofRejected)
+			in = clone()
 			in.Purpose = ghostpriv.PurposePolicySpend
+			rejected(t, "version 1 proof as a policy reveal", verifier.VerifyReveal(in, proof()), ghostpriv.ErrProofRejected)
+			in = clone()
+			in.Purpose = ghostpriv.PurposePolicySpend
+			in.Version = 2
 			err := verifier.VerifyReveal(in, proof())
-			rejected(t, "policy reveal", err, ghostpriv.ErrStatementUnsupported)
-			rejected(t, "policy reveal", err, ghostpriv.ErrProofStatement)
+			rejected(t, "policy reveal version 2", err, ghostpriv.ErrStatementUnsupported)
+			rejected(t, "policy reveal version 2", err, ghostpriv.ErrProofStatement)
 
 			in = clone()
 			in.Note[ghostpriv.RevealNoteSize] = 1

@@ -327,8 +327,9 @@ func (acceptAll) VerifyReveal(*ghostpriv.VerifyInputs, []byte) error { return ni
 
 // releaseVerifierVersions checks, on the state of block 1 with the default,
 // linked verifier, that a version 2 reveal of the recorded coin, which
-// passes every check before the proof, is refused by the verifier with
-// ErrStatementUnsupported and leaves the state as it was, that the pool on
+// passes every check before the proof, is rejected by the verifier's
+// version 2 statement, since the proof is of version 1, and leaves the state
+// as it was, that the pool on
 // block 1 refuses and does not hold it, and that the recorded version 1
 // reveal then applies on that same state.
 func (rp *realProof) releaseVerifierVersions(t *testing.T, p *Pool) {
@@ -364,8 +365,8 @@ func (rp *realProof) releaseVerifierVersions(t *testing.T, p *Pool) {
 	coinbase := st.GetBalance(env.Header.Coinbase)
 
 	err = ghostpriv.ApplyReveal(st, env, ghostpriv.DefaultVerifier(), v2tx.GhostRevealEnvelope())
-	if !errors.Is(err, ghostpriv.ErrRevealProof) || !errors.Is(err, ghostpriv.ErrStatementUnsupported) {
-		t.Fatalf("version 2 reveal: %v, want %v and %v", err, ghostpriv.ErrRevealProof, ghostpriv.ErrStatementUnsupported)
+	if !errors.Is(err, ghostpriv.ErrRevealProof) || !errors.Is(err, ghostpriv.ErrProofRejected) {
+		t.Fatalf("version 2 reveal: %v, want %v and %v", err, ghostpriv.ErrRevealProof, ghostpriv.ErrProofRejected)
 	}
 	if after := st.IntermediateRoot(true); after != before {
 		t.Fatalf("state root %x after the refused reveal, was %x", after, before)
@@ -406,10 +407,10 @@ func TestRealProofRevealPoolAndBlock(t *testing.T) {
 	rp.newChain(rp.makeBlocks())
 	p := rp.newPool()
 
-	// The release verifier refuses a version 2 reveal of the same coin
-	// before any state change, and still verifies the recorded version 1
+	// The release verifier rejects a version 2 reveal of the same coin with
+	// the version 1 proof without any state change, and still verifies the recorded version 1
 	// reveal.
-	t.Run("version 2 refused without a state change", func(t *testing.T) {
+	t.Run("version 2 with a version 1 proof rejected without a state change", func(t *testing.T) {
 		rp.releaseVerifierVersions(t, p)
 	})
 
