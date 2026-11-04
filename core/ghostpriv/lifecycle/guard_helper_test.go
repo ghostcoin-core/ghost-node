@@ -81,7 +81,9 @@ func guardSelector(sig string) [4]byte {
 	return s
 }
 
-func guardWord(v uint64) []byte { return common.LeftPadBytes(binary.BigEndian.AppendUint64(nil, v), 32) }
+func guardWord(v uint64) []byte {
+	return common.LeftPadBytes(binary.BigEndian.AppendUint64(nil, v), 32)
+}
 
 // guardReleaseIn is the calldata of release(marker), 36 bytes.
 func guardReleaseIn(marker common.Hash) []byte {

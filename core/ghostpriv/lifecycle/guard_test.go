@@ -271,7 +271,7 @@ func TestGuardLifecycleReleaseAfterHold(t *testing.T) {
 
 	// Before the hold, release fails.
 	var block *types.Block
-	early :=s.payerCall(s.node(2), s.payerNonce(s.node(2)), ghost.GuardAddress, guardReleaseIn(a.marker()), guardReleaseGas)
+	early := s.payerCall(s.node(2), s.payerNonce(s.node(2)), ghost.GuardAddress, guardReleaseIn(a.marker()), guardReleaseGas)
 	block, _ = s.net.mineGuard(s.node(2), guardPlan{coinbase: filler, txs: []*types.Transaction{early}})
 	for _, n := range s.net.nodes {
 		checkReleaseRefused(t, n, block, early, a.marker(), destA)
@@ -453,7 +453,7 @@ func checkReleasePaid(t *testing.T, n *node, block *types.Block, release *types.
 	if got := delta(pre, post, dest); got.Cmp(amount.ToBig()) != 0 {
 		t.Fatalf("node %s: instr got %v, want %v", n.name, got, amount)
 	}
-	gas :=new(uint256.Int).Mul(uint256.NewInt(rc.GasUsed), uint256.MustFromBig(rc.EffectiveGasPrice))
+	gas := new(uint256.Int).Mul(uint256.NewInt(rc.GasUsed), uint256.MustFromBig(rc.EffectiveGasPrice))
 	if got := delta(post, pre, sender); got.Cmp(gas.ToBig()) != 0 {
 		t.Fatalf("node %s: the sender paid %v, want the gas %v alone", n.name, got, gas)
 	}
