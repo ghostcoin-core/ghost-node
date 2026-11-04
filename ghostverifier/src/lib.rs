@@ -23,7 +23,9 @@
 //! own [`ghost_verify_coin_reveal_v2`], declared in `ghost_proofs.h`. The
 //! policy reveal (statement S4) has no C interface in ghost-proofs, so this
 //! crate adds [`ghost_verify_policy_reveal`], declared in `ghost_policy.h`,
-//! around `verify_policy_reveal`.
+//! around `verify_policy_reveal`. Nor has the policy action's statement
+//! `KNOW_ACTION_v1`: [`ghost_verify_know_action`], declared in
+//! `ghost_action.h`, wraps `verify_know_action`.
 //!
 //! A proof of holding never goes on chain; the node checks none. The function
 //! is for a verifier that holds the node's headers, and for the node's tests.
@@ -38,8 +40,8 @@ use ghost_proofs::ffi::{
     chain_params_from_bytes, verify_coin_reveal_bytes,
 };
 use ghost_proofs::{
-    DataPurpose, DataReveal, HoldContext, NOTE_V3_BYTES, POLICY_ADDRESS_BYTES, PolicyReveal, Proof, ProofError,
-    verify_hold, verify_policy_reveal, verify_salted_data_reveal,
+    ACTION_PROOF_BYTES, DataPurpose, DataReveal, HoldContext, KnowAction, NOTE_V3_BYTES, POLICY_ADDRESS_BYTES,
+    PolicyReveal, Proof, ProofError, verify_hold, verify_know_action, verify_policy_reveal, verify_salted_data_reveal,
 };
 
 pub use ghost_proofs::ffi::{ghost_verify_coin_reveal, ghost_verify_coin_reveal_v2};
@@ -418,6 +420,119 @@ pub unsafe extern "C" fn ghost_verify_policy_reveal(
             )
         };
         verify_policy_reveal_bytes(params, statement, proof)
+    }))
+    .unwrap_or(GHOST_PROOFS_PANICKED)
+}
+
+/// Length of a `KNOW_ACTION_v1` statement: the policy address (20), the
+/// marker (32), the action nonce (8, big endian), the action tag and salt,
+/// the expected remaining and the debit (32 each), the expiry (8, big endian)
+/// and the calldata hash (32), in the order of the binding.
+pub const ACTION_STATEMENT_BYTES: usize = POLICY_ADDRESS_BYTES + 32 + 8 + 4 * 32 + 8 + 32;
+
+/// Decodes a `KNOW_ACTION_v1` statement in the layout of ghost_action.h.
+pub fn know_action_from_bytes(bytes: &[u8; ACTION_STATEMENT_BYTES]) -> KnowAction {
+    let mut rest: &[u8] = bytes;
+    let mut take = |n: usize| -> &[u8] {
+        let (head, tail) = rest.split_at(n);
+        rest = tail;
+        head
+    };
+    let w = |b: &[u8]| -> [u8; 32] { b.try_into().expect("32 bytes") };
+    let n = |b: &[u8]| -> u64 { u64::from_be_bytes(b.try_into().expect("8 bytes")) };
+    KnowAction {
+        policy_address: take(POLICY_ADDRESS_BYTES).try_into().expect("20 bytes"),
+        marker: w(take(32)),
+        action_nonce: n(take(8)),
+        action_tag: w(take(32)),
+        action_salt: w(take(32)),
+        expected_remaining: w(take(32)),
+        debit: w(take(32)),
+        expiry: n(take(8)),
+        calldata_hash: w(take(32)),
+    }
+}
+
+/// Encodes a `KNOW_ACTION_v1` statement in the layout of ghost_action.h.
+pub fn know_action_to_bytes(s: &KnowAction) -> [u8; ACTION_STATEMENT_BYTES] {
+    let mut b = Vec::with_capacity(ACTION_STATEMENT_BYTES);
+    b.extend_from_slice(&s.policy_address);
+    b.extend_from_slice(&s.marker);
+    b.extend_from_slice(&s.action_nonce.to_be_bytes());
+    b.extend_from_slice(&s.action_tag);
+    b.extend_from_slice(&s.action_salt);
+    b.extend_from_slice(&s.expected_remaining);
+    b.extend_from_slice(&s.debit);
+    b.extend_from_slice(&s.expiry.to_be_bytes());
+    b.extend_from_slice(&s.calldata_hash);
+    b.try_into().expect("action statement length")
+}
+
+fn verify_action_unguarded(params: &[u8], statement: &[u8], proof: &[u8]) -> i32 {
+    let (Ok(params), Ok(statement)) = (
+        <&[u8; CHAIN_PARAMS_BYTES]>::try_from(params),
+        <&[u8; ACTION_STATEMENT_BYTES]>::try_from(statement),
+    ) else {
+        return GHOST_PROOFS_BAD_ARGUMENT;
+    };
+    if proof.is_empty() || proof.len() > ACTION_PROOF_BYTES {
+        return GHOST_PROOFS_MALFORMED_INPUT;
+    }
+    let s = know_action_from_bytes(statement);
+    let Some(len) = serialized_len(proof) else {
+        return GHOST_PROOFS_MALFORMED_INPUT;
+    };
+    let params = chain_params_from_bytes(params);
+    match verify_know_action(&params, &s, &Proof::from_bytes(proof[..len].to_vec())) {
+        Ok(()) => GHOST_PROOFS_ACCEPTED,
+        Err(ProofError::MalformedProof) => GHOST_PROOFS_MALFORMED_INPUT,
+        Err(_) => GHOST_PROOFS_REJECTED,
+    }
+}
+
+/// Verifies a `KNOW_ACTION_v1` proof given as bytes in the layout of
+/// ghost_action.h with the shipped verifier of ghost-proofs. Never panics.
+pub fn verify_know_action_bytes(params: &[u8], statement: &[u8], proof: &[u8]) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| verify_action_unguarded(params, statement, proof)))
+        .unwrap_or(GHOST_PROOFS_PANICKED)
+}
+
+/// Verifies a policy action proof (`KNOW_ACTION_v1`) against the statement
+/// and the chain parameters, as declared in ghost_action.h. The node's own
+/// checks of the slot, nonce, remaining, debit and expiry are the caller's.
+///
+/// # Safety
+///
+/// Each non-null pointer must point to at least its length of readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ghost_verify_know_action(
+    params: *const u8,
+    params_len: usize,
+    statement: *const u8,
+    statement_len: usize,
+    proof: *const u8,
+    proof_len: usize,
+) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| {
+        if params.is_null() || statement.is_null() || proof.is_null() {
+            return GHOST_PROOFS_BAD_ARGUMENT;
+        }
+        if params_len != CHAIN_PARAMS_BYTES || statement_len != ACTION_STATEMENT_BYTES {
+            return GHOST_PROOFS_BAD_ARGUMENT;
+        }
+        if proof_len == 0 || proof_len > ACTION_PROOF_BYTES {
+            return GHOST_PROOFS_MALFORMED_INPUT;
+        }
+        // SAFETY: the pointers are not null and the caller guarantees each
+        // points to at least its length of readable bytes.
+        let (params, statement, proof) = unsafe {
+            (
+                std::slice::from_raw_parts(params, params_len),
+                std::slice::from_raw_parts(statement, statement_len),
+                std::slice::from_raw_parts(proof, proof_len),
+            )
+        };
+        verify_know_action_bytes(params, statement, proof)
     }))
     .unwrap_or(GHOST_PROOFS_PANICKED)
 }

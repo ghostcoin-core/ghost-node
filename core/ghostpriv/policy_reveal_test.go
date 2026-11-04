@@ -108,13 +108,28 @@ func (f *fixture) newPolicyReveal(root, marker common.Hash, policy common.Addres
 		Policy:     policy,
 		CodeHash:   codeHash,
 		ParamsHash: ghosttree.K("ghost/test-params", marker[:]),
-		ActionTag:  ghosttree.K("ghost/test-action-tag", marker[:]),
-		ActionSalt: ghosttree.K("ghost/test-action-salt", marker[:]),
+		ActionTag:  testActionTag(marker),
+		ActionSalt: testActionSalt(marker),
 		Instr:      ghosttree.K("ghost/test-instr", marker[:]),
 	}
 	copy(r.Note[:], testNote(0x5c))
 	f.provePolicy(r)
 	return r
+}
+
+// testActionRoot is the action key of the test slot of marker, behind its
+// testActionTag under its testActionSalt, so a real action proof can be made
+// for it.
+func testActionRoot(marker common.Hash) common.Hash {
+	return ghosttree.K("ghost/test-action-root", marker[:])
+}
+
+func testActionSalt(marker common.Hash) common.Hash {
+	return ghosttree.K("ghost/test-action-salt", marker[:])
+}
+
+func testActionTag(marker common.Hash) common.Hash {
+	return ghostpriv.PolicyActionTag(testActionRoot(marker), testActionSalt(marker))
 }
 
 // provePolicy sets the stub proof of the policy reveal's binding digest.

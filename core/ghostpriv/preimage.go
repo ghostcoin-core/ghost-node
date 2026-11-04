@@ -56,7 +56,7 @@ const (
 
 	// PreimageInputSize is the length of the statement checker's input: the
 	// statement code (1), y (32), the context (64) and the proof field, which
-	// is the policy action's, ActionProofSize bytes: 917,601 bytes.
+	// is the policy action's, ActionProofSize bytes: 948,321 bytes.
 	PreimageInputSize = 1 + 32 + PreimageContextSize + ActionProofSize
 )
 
@@ -66,7 +66,7 @@ var _ = [1]struct{}{}[ghost.ProofTxMaxBytes/PreimageInputSize-1]
 var (
 	// ErrPreimageInput is returned for a statement checker input that is not
 	// PreimageInputSize bytes or does not start with StatementPreimage.
-	ErrPreimageInput = errors.New("statement checker input is not a KNOW_PREIMAGE_v1 statement of 917,601 bytes")
+	ErrPreimageInput = errors.New("statement checker input is not a KNOW_PREIMAGE_v1 statement of 948,321 bytes")
 
 	// ErrPreimageDomain is returned when the chain id or the genesis hash
 	// the binding needs is missing: the check fails closed.

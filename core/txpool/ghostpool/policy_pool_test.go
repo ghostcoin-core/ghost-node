@@ -175,6 +175,16 @@ func genFee(t *testing.T, b *core.BlockGen, gas uint64) *uint256.Int {
 	return fee.Total
 }
 
+// testActionRoot is the action key of the test slot of marker, behind its
+// action tag under testActionSalt, so a real action proof can be made for it.
+func testActionRoot(marker common.Hash) common.Hash {
+	return ghosttree.K("ghost/test-action-root", marker[:])
+}
+
+func testActionSalt(marker common.Hash) common.Hash {
+	return ghosttree.K("ghost/test-action-salt", marker[:])
+}
+
 // policyReveal is a policy reveal of marker into policy with the genesis
 // coin root, out slotOut, the given fee and the stub proof.
 func (pf *policyFixture) policyReveal(marker common.Hash, policy common.Address, codeHash common.Hash, fee *uint256.Int) *ghostpriv.PolicyReveal {
@@ -189,8 +199,8 @@ func (pf *policyFixture) policyReveal(marker common.Hash, policy common.Address,
 		Policy:     policy,
 		CodeHash:   codeHash,
 		ParamsHash: ghosttree.K("ghost/test-params", marker[:]),
-		ActionTag:  ghosttree.K("ghost/test-action-tag", marker[:]),
-		ActionSalt: ghosttree.K("ghost/test-action-salt", marker[:]),
+		ActionTag:  ghostpriv.PolicyActionTag(testActionRoot(marker), testActionSalt(marker)),
+		ActionSalt: testActionSalt(marker),
 		Instr:      ghosttree.K("ghost/test-instr", marker[:]),
 	}
 	pf.proveReveal(r)

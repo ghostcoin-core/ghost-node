@@ -290,7 +290,7 @@ policy that calls it: knowledge of a 32-byte `x` with
 * **Input.** `statement (1) || y (32) || context (64) || proof`, where the
   statement is `0x06`, the context a value the policy supplies, and the proof
   the whole proof field of the policy action, `ghostpriv.ActionProofSize`
-  (917,504) bytes. The input is exactly 917,601 bytes (28,676 words).
+  (948,224) bytes. The input is exactly 948,321 bytes (29,636 words).
 * **Binding.** The checker builds it itself:
   `K("ghost/preimage-binding/v1", fields)` over 161 bytes, the chain id (8),
   the version `0x0001` (2), the domain, which is the genesis hash (32), the
