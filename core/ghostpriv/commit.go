@@ -39,6 +39,17 @@ const (
 	// the version (2 bytes), F (32), the salt (16) and the note (380), 430
 	// bytes.
 	SaltedCommitDataSize = 2 + 32 + SaltSize + NoteSize
+
+	// oldCommitNoteSize is the length of the note of a version 2 commit,
+	// before notes grew to NoteSize. The node refuses such commits now
+	// (ErrCommitData), but the test chain holds some from before, and their
+	// 244-byte receipt logs must still enter the tree history.
+	oldCommitNoteSize = 156
+
+	// oldSaltedCommitLogSize is the length of the receipt log of a version 2
+	// salted commit with an oldCommitNoteSize note: location (8), leaf (32),
+	// amount (32), the note (156) and the salt (16), 244 bytes.
+	oldSaltedCommitLogSize = 8 + 32 + 32 + oldCommitNoteSize + SaltSize
 )
 
 var (
@@ -323,8 +334,10 @@ var (
 
 // HistoryRecords returns the tree history records of a block from its
 // receipts, in the order the block wrote them: the leaf, tree index,
-// position and note of every commit, reveal remainder (whose 156-byte note,
-// for a version 1 reveal, is zero-padded on the right to NoteSize), policy
+// position and note of every commit (whose 156-byte note, for the 244-byte
+// log of a commit made before notes were NoteSize bytes, is zero-padded on the
+// right to NoteSize), reveal remainder (whose 156-byte note, for a version 1
+// reveal, is zero-padded on the right to NoteSize), policy
 // reveal remainder and data commit (with the salt of a salted commit or data
 // commit, whose log carries it after the note), and the marker of every
 // reveal, policy reveal and data reveal as a record of ghosttree.CoinMarkers
@@ -373,6 +386,12 @@ func HistoryRecords(receipts types.Receipts) ([]ghosttree.Record, error) {
 				out = append(out, leaf(ghosttree.Coin, d, d[72:]))
 			case l.Address == coinAccount && topic == topicCommit && len(l.Topics) == 1 && len(d) == commitLog+SaltSize:
 				out = append(out, salted(ghosttree.Coin, d, d[72:72+NoteSize]))
+			case l.Address == coinAccount && topic == topicCommit && len(l.Topics) == 1 && len(d) == oldSaltedCommitLogSize:
+				// A salted commit from before notes were NoteSize bytes: the
+				// leaf it appended is in the log, as in a new one, and the
+				// record holds its 156-byte note zero-padded on the right to
+				// NoteSize. The note is no input of the leaf or the root.
+				out = append(out, salted(ghosttree.Coin, d, d[72:72+oldCommitNoteSize]))
 			case l.Address == coinAccount && topic == topicReveal && len(l.Topics) == 2 && len(d) == revealLogSize:
 				out = append(out, leaf(ghosttree.Coin, d, d[40:40+NoteSize]))
 				out = append(out, ghosttree.Record{Kind: ghosttree.CoinMarkers, Leaf: l.Topics[1]})

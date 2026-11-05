@@ -257,10 +257,16 @@ and data rules write from the tree accounts:
 
 | Receipt log | Records |
 |---|---|
-| commit | coin leaf at the logged tree index and position, with its 380-byte note, and with its salt when the log is the 468-byte log of a salted commit |
+| commit | coin leaf at the logged tree index and position, with its 380-byte note, and with its salt when the log is the 468-byte log of a salted commit; the 244-byte log of a salted commit made before notes were 380 bytes (156-byte note, then the salt), which the test chain holds, gives the same record with its note zero-padded on the right to 380 bytes |
 | reveal | coin leaf of the remainder with its note, and the marker in the coin marker list; the version 1 reveal carries a 156-byte note (`ghostpriv.RevealNoteSize`), stored zero-padded on the right to 380 bytes |
 | data commit | data leaf at the logged tree index and position, with its 380-byte note, and with its salt when the log is the 436-byte log of a salted data commit |
 | data reveal (and revoke) | the marker in the data marker list |
+
+The note is no input of a leaf, so the padded note of an old commit leaves
+the page roots and the header root as the block built them. The node still
+refuses new commits with a 156-byte note (`ghostpriv.ErrCommitData`); only
+their logs already in the chain are read, and no other old length (an
+unsalted 228-byte commit log, an old data commit log) is.
 
 A log of a tree account that is none of these, a block without its body, or a
 body without all its receipts is an error: the history stays at the block's
