@@ -426,7 +426,7 @@ func (s *iset) lowLeaf(key common.Hash, limit, at uint64) (low uint64, apply fun
 	refAt := s.indexRootKey()
 	ref, err := s.uint(refAt, "index root")
 	if err != nil {
-		return 0, nil,err
+		return 0, nil, err
 	}
 	// The path the bits of key take, to the leaf that shares most of its
 	// prefix.
@@ -434,25 +434,25 @@ func (s *iset) lowLeaf(key common.Hash, limit, at uint64) (low uint64, apply fun
 	for ref&1 == 1 {
 		id := ref >> 1
 		if id == 0 || id >= limit || len(path) == 256 {
-			return 0, nil,s.corrupt("index node %d", id)
+			return 0, nil, s.corrupt("index node %d", id)
 		}
 		crit, err := s.uint(s.indexNodeKey(id, critBit), "index bit")
 		if err != nil {
-			return 0, nil,err
+			return 0, nil, err
 		}
 		if crit > 255 || (len(path) > 0 && crit <= path[len(path)-1].crit) {
-			return 0, nil,s.corrupt("index bit %d", crit)
+			return 0, nil, s.corrupt("index bit %d", crit)
 		}
 		dir := bitAt(key, crit)
 		path = append(path, critStep{id: id, crit: crit, dir: dir, at: refAt})
 		refAt = s.indexNodeKey(id, critChild+byte(dir))
 		if ref, err = s.uint(refAt, "index child"); err != nil {
-			return 0, nil,err
+			return 0, nil, err
 		}
 	}
 	best := ref >> 1
 	if best >= limit {
-		return 0, nil,s.corrupt("index leaf %d", best)
+		return 0, nil, s.corrupt("index leaf %d", best)
 	}
 	value := s.get(s.leafKey(best, leafValue))
 	if value == key {
@@ -475,18 +475,18 @@ func (s *iset) lowLeaf(key common.Hash, limit, at uint64) (low uint64, apply fun
 	}
 	sub, err := s.uint(subAt, "index reference")
 	if err != nil {
-		return 0, nil,err
+		return 0, nil, err
 	}
 	// Every key in the subtree there agrees with key before bit d and
 	// differs at d: below key when key's bit d is 1. Otherwise the low leaf
 	// is the largest key left of the last turn right above it.
 	if bitAt(key, d) == 1 {
 		if low, err = s.maxLeaf(sub, limit); err != nil {
-			return 0, nil,err
+			return 0, nil, err
 		}
 	} else {
 		if low, err = s.leftOfLastRight(path[:k], limit, key); err != nil {
-			return 0, nil,err
+			return 0, nil, err
 		}
 	}
 	// The new node takes the position of the new leaf as its id.

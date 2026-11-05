@@ -243,7 +243,9 @@ func TestMissingTreeRootsRejected(t *testing.T) {
 		"no data lookup": func(h *types.Header) { h.DataLookupRoot = nil },
 		"no coin marker": func(h *types.Header) { h.CoinMarkerRoot = nil },
 		"no digest":      func(h *types.Header) { h.LookupDigest = nil },
-		"no lookups":     func(h *types.Header) { h.CoinLookupRoot, h.DataLookupRoot, h.CoinMarkerRoot, h.LookupDigest = nil, nil, nil, nil },
+		"no lookups": func(h *types.Header) {
+			h.CoinLookupRoot, h.DataLookupRoot, h.CoinMarkerRoot, h.LookupDigest = nil, nil, nil, nil
+		},
 	} {
 		h := types.CopyHeader(good)
 		change(h)
@@ -319,6 +321,7 @@ func TestMissingTreeRootsRejected(t *testing.T) {
 	}
 	rootless := types.CopyHeader(good)
 	rootless.CoinTreeRoot, rootless.DataTreeRoot, rootless.DataMarkerRoot, rootless.BaseFee = nil, nil, nil, nil
+	rootless.CoinLookupRoot, rootless.DataLookupRoot, rootless.CoinMarkerRoot, rootless.LookupDigest = nil, nil, nil, nil
 	if err := checkTreeRootFields(false, rootless); err != nil {
 		t.Errorf("no roots before EIP-1559: %v", err)
 	}

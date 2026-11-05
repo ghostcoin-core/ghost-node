@@ -110,8 +110,10 @@ func lookupTag(name string) ghosttree.LookupTag {
 	return ghosttree.DeriveLookupTag(ghosttree.K("ghost/test-lookup-key", []byte(name)), 0)
 }
 
-func lookupLeaf(name string) common.Hash   { return ghosttree.K("ghost/test-lookup-leaf", []byte(name)) }
-func lookupMarker(name string) common.Hash { return ghosttree.K("ghost/test-lookup-marker", []byte(name)) }
+func lookupLeaf(name string) common.Hash { return ghosttree.K("ghost/test-lookup-leaf", []byte(name)) }
+func lookupMarker(name string) common.Hash {
+	return ghosttree.K("ghost/test-lookup-marker", []byte(name))
+}
 
 // treeOps are the tree changes of one block: coin and data leaves, each
 // with its tag (zero for none), and coin and data markers. A coin marker
