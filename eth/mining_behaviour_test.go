@@ -914,6 +914,10 @@ func TestMiningHeaderFlood(t *testing.T) {
 			CoinTreeRoot:   head.CoinTreeRoot,
 			DataTreeRoot:   head.DataTreeRoot,
 			DataMarkerRoot: head.DataMarkerRoot,
+			CoinLookupRoot: head.CoinLookupRoot,
+			DataLookupRoot: head.DataLookupRoot,
+			CoinMarkerRoot: head.CoinMarkerRoot,
+			LookupDigest:   head.LookupDigest,
 		}
 		return types.NewBlock(h, nil, nil, nil, trie.NewStackTrie(nil))
 	}
