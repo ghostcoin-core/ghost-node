@@ -197,6 +197,17 @@ func TestToFilterArg(t *testing.T) {
 	}
 }
 
+const (
+	// requestTimeout is the deadline of a single request to the test node. It
+	// is generous so that a busy machine does not fail a request that would
+	// succeed; a hung node still fails the test.
+	requestTimeout = 10 * time.Second
+
+	// pendingWaitLimit bounds how long a test polls for the miner's pending
+	// state, which the miner builds in the background.
+	pendingWaitLimit = 30 * time.Second
+)
+
 var (
 	testKey, _, testAddr = testAccount(0x81)
 	testBalance          = big.NewInt(2e15)
@@ -370,7 +381,7 @@ func testHeader(t *testing.T, chain []*types.Block, client *rpc.Client) {
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
 			ec := NewClient(client)
-			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
 			defer cancel()
 
 			got, err := ec.HeaderByNumber(ctx, tt.block)
@@ -419,7 +430,7 @@ func testBalanceAt(t *testing.T, client *rpc.Client) {
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
 			ec := NewClient(client)
-			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
 			defer cancel()
 
 			got, err := ec.BalanceAt(ctx, tt.account, tt.block)
@@ -439,7 +450,7 @@ func TestHeader_TxesUnclesNotEmpty(t *testing.T) {
 	defer backend.Close()
 	defer client.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
 	defer cancel()
 
 	res := make(map[string]interface{})
@@ -687,14 +698,14 @@ func testAtFunctions(t *testing.T, client *rpc.Client) {
 	}
 
 	// send a transaction for some interesting pending status
-	sendTransaction(ec)
-	time.Sleep(100 * time.Millisecond)
-
-	// Check pending transaction count
-	pending, err := ec.PendingTransactionCount(context.Background())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err := sendTransaction(ec); err != nil {
+		t.Fatalf("can't send transaction: %v", err)
 	}
+
+	// Check pending transaction count. The miner adds the transaction to the
+	// pending block in the background, so poll for it rather than wait a
+	// fixed time.
+	pending := waitPendingTransactionCount(t, ec, 1, pendingWaitLimit)
 	if pending != 1 {
 		t.Fatalf("unexpected pending, wanted 1 got: %v", pending)
 	}
@@ -773,6 +784,25 @@ func testAtFunctions(t *testing.T, client *rpc.Client) {
 	}
 	if !bytes.Equal(code, penCode) {
 		t.Fatalf("unexpected code: %v %v", code, penCode)
+	}
+}
+
+// waitPendingTransactionCount polls the pending transaction count until it
+// reaches want or limit passes, and returns the last count read.
+func waitPendingTransactionCount(t *testing.T, ec *Client, want uint, limit time.Duration) uint {
+	t.Helper()
+	deadline := time.Now().Add(limit)
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+		count, err := ec.PendingTransactionCount(ctx)
+		cancel()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if count >= want || time.Now().After(deadline) {
+			return count
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

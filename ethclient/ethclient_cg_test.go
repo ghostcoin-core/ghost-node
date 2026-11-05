@@ -1,6 +1,7 @@
 package ethclient
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	"github.com/ethereum/go-ethereum/node"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/params/types/genesisT"
+	"github.com/ethereum/go-ethereum/rpc"
 )
 
 // TestEthGetBlockByNumber_ValidJSONResponse tests that
@@ -30,11 +32,12 @@ func TestEthGetBlockByNumber_ValidJSONResponse(t *testing.T) {
 	defer backend.Close()
 	defer client.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
+	// The miner sets the pending block in the background, so wait for it
+	// rather than for a fixed time.
+	waitPendingBlock(t, client, pendingWaitLimit)
 
-	// Have to sleep a little to make sure miner has time to set pending.
-	time.Sleep(time.Millisecond * 100)
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	defer cancel()
 
 	// Get a reference block.
 	parent, err := NewClient(client).HeaderByNumber(ctx, nil)
@@ -123,6 +126,30 @@ func TestEthGetBlockByNumber_ValidJSONResponse(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// waitPendingBlock polls the node until the miner's pending block is built on
+// top of the current head, and fails the test if that does not happen within
+// limit.
+func waitPendingBlock(t *testing.T, client *rpc.Client, limit time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(limit)
+	for {
+		var latest, pending map[string]json.RawMessage
+		ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+		errLatest := client.CallContext(ctx, &latest, "eth_getBlockByNumber", "latest", false)
+		errPending := client.CallContext(ctx, &pending, "eth_getBlockByNumber", "pending", false)
+		cancel()
+		if errLatest == nil && errPending == nil && latest != nil && pending != nil &&
+			bytes.Equal(pending["parentHash"], latest["hash"]) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no pending block on top of the head after %v (latest error: %v, pending error: %v, pending parent: %s, head: %s)",
+				limit, errLatest, errPending, pending["parentHash"], latest["hash"])
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
