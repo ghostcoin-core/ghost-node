@@ -36,9 +36,13 @@ const (
 	CommitDataSize = 2 + 32 + NoteSize
 
 	// SaltedCommitDataSize is the length of salted commit data, version 3:
-	// the version (2 bytes), F (32), the salt (16) and the note (380), 430
-	// bytes.
-	SaltedCommitDataSize = 2 + 32 + SaltSize + NoteSize
+	// the version (2 bytes), F (32), the salt (16), the note (380) and the
+	// lookup tag (16), 446 bytes.
+	SaltedCommitDataSize = 2 + 32 + SaltSize + NoteSize + LookupTagSize
+
+	// LookupTagSize is the length of the lookup tag a commit and a data
+	// commit carry after the note.
+	LookupTagSize = ghosttree.LookupTagSize
 
 	// oldCommitNoteSize is the length of the note of a version 2 commit,
 	// before notes grew to NoteSize. The node refuses such commits now
@@ -55,11 +59,16 @@ const (
 var (
 	// ErrCommitData is returned for commit data that is not exactly
 	// SaltedCommitDataSize bytes of SaltedCommitVersion: the version 1 and
-	// version 2 layouts, and any other length, included.
-	ErrCommitData = errors.New("commit data is not 430 bytes of version 3")
+	// version 2 layouts, the 430 bytes without a lookup tag, and any other
+	// length, included.
+	ErrCommitData = errors.New("commit data is not 446 bytes of version 3")
 
 	// ErrCommitZeroF is returned for an all-zero F.
 	ErrCommitZeroF = errors.New("commit F is zero")
+
+	// ErrCommitLookupTag is returned for commit data whose lookup tag is 16
+	// zero bytes, the tag of the lookup index's sentinel.
+	ErrCommitLookupTag = errors.New("commit lookup tag is zero")
 
 	// ErrCommitAmount is returned for a commit value of 0 or above V_MAX.
 	ErrCommitAmount = errors.New("commit value not between 1 and V_MAX")
@@ -73,13 +82,16 @@ var (
 )
 
 // Commit is a parsed commit: the value burned, the F the commitment binds it
-// to, the note stored with the leaf and, for salted commit data, the salt
-// stored with it (nil for version 1 data).
+// to, the note stored with the leaf, for salted commit data the salt stored
+// with it (nil for version 1 data), and the lookup tag its leaf takes in the
+// coin lookup index; a zero tag, which no commit data carries, gives the
+// leaf no entry, as for the recommit of an escrow slot.
 type Commit struct {
 	F     common.Hash
 	Value *uint256.Int
 	Note  [NoteSize]byte
 	Salt  *[SaltSize]byte
+	Tag   ghosttree.LookupTag
 }
 
 // CommitVersion is the commitment format version of the commit's data:
@@ -103,28 +115,52 @@ func commitVersion(salt *[SaltSize]byte) uint16 {
 	return Version
 }
 
-// SaltedCommitData returns the salted data of a commit or data commit
-// transaction: SaltedCommitVersion, F, the salt and the note, exactly
-// SaltedCommitDataSize bytes.
-func SaltedCommitData(f common.Hash, salt []byte, note []byte) ([]byte, error) {
+// LookupCommitData returns the salted data of a commit or data commit
+// transaction: SaltedCommitVersion, F, the salt, the note and the lookup
+// tag, exactly SaltedCommitDataSize bytes. A tag that is not
+// LookupTagSize bytes, or is all zero, is an error.
+func LookupCommitData(f common.Hash, salt []byte, note []byte, tag []byte) ([]byte, error) {
 	if len(salt) != SaltSize {
 		return nil, fmt.Errorf("salt of %d bytes, want %d", len(salt), SaltSize)
 	}
 	if len(note) != NoteSize {
 		return nil, fmt.Errorf("note of %d bytes, want %d", len(note), NoteSize)
 	}
+	if len(tag) != LookupTagSize {
+		return nil, fmt.Errorf("lookup tag of %d bytes, want %d", len(tag), LookupTagSize)
+	}
+	if ghosttree.LookupTag(tag).IsZero() {
+		return nil, ErrCommitLookupTag
+	}
 	data := make([]byte, 0, SaltedCommitDataSize)
 	data = binary.BigEndian.AppendUint16(data, SaltedCommitVersion)
 	data = append(data, f[:]...)
 	data = append(data, salt...)
-	return append(data, note...), nil
+	data = append(data, note...)
+	return append(data, tag...), nil
 }
 
-// parseCommitData splits commit data into F, the salt and the note: exactly
-// SaltedCommitDataSize bytes of SaltedCommitVersion. Anything else, the
-// version 1 layout and the 206 bytes of version 2 with a 156-byte note
-// included, is ErrCommitData.
-func parseCommitData(data []byte) (f common.Hash, salt *[SaltSize]byte, note [NoteSize]byte, err error) {
+// SaltedCommitData is LookupCommitData with the tag FallbackLookupTag(f),
+// for a sender that keeps no lookup key. A wallet that finds its notes
+// through the lookup index passes the tag of its own key to
+// LookupCommitData instead.
+func SaltedCommitData(f common.Hash, salt []byte, note []byte) ([]byte, error) {
+	tag := FallbackLookupTag(f)
+	return LookupCommitData(f, salt, note, tag[:])
+}
+
+// FallbackLookupTag is the lookup tag SaltedCommitData gives a commitment to
+// f: DeriveLookupTag with f as the key and index 0. It is never zero in
+// practice, and anyone who sees f can compute it.
+func FallbackLookupTag(f common.Hash) ghosttree.LookupTag {
+	return ghosttree.DeriveLookupTag(f, 0)
+}
+
+// parseCommitData splits commit data into F, the salt, the note and the
+// lookup tag: exactly SaltedCommitDataSize bytes of SaltedCommitVersion.
+// Anything else, the version 1 layout, the 206 bytes of version 2 with a
+// 156-byte note and the 430 bytes without a tag included, is ErrCommitData.
+func parseCommitData(data []byte) (f common.Hash, salt *[SaltSize]byte, note [NoteSize]byte, tag ghosttree.LookupTag, err error) {
 	var version uint16
 	if len(data) >= 2 {
 		version = binary.BigEndian.Uint16(data[:2])
@@ -133,27 +169,32 @@ func parseCommitData(data []byte) (f common.Hash, salt *[SaltSize]byte, note [No
 	case len(data) == SaltedCommitDataSize && version == SaltedCommitVersion:
 		salt = new([SaltSize]byte)
 		copy(salt[:], data[34:34+SaltSize])
-		copy(note[:], data[34+SaltSize:])
+		copy(note[:], data[34+SaltSize:34+SaltSize+NoteSize])
+		copy(tag[:], data[34+SaltSize+NoteSize:])
 	default:
-		return common.Hash{}, nil, note, fmt.Errorf("%w: %d bytes", ErrCommitData, len(data))
+		return common.Hash{}, nil, note, tag, fmt.Errorf("%w: %d bytes", ErrCommitData, len(data))
 	}
-	return common.BytesToHash(data[2:34]), salt, note, nil
+	return common.BytesToHash(data[2:34]), salt, note, tag, nil
 }
 
 // ParseCommit checks the data and value of a top-level call to the commit
-// entry address, in the order of the coin rules: exactly 430 bytes of
-// version 3 (ErrCommitData), F not zero
-// (ErrCommitZeroF), then 1 <= value <= V_MAX (ErrCommitAmount). The
-// commitment is computed from F and the value; nothing in the data can set
-// it, and the salt only rides along to the receipt and the history.
+// entry address, in the order of the coin rules: exactly 446 bytes of
+// version 3 (ErrCommitData), F not zero (ErrCommitZeroF), the lookup tag not
+// zero (ErrCommitLookupTag), then 1 <= value <= V_MAX (ErrCommitAmount).
+// The commitment is computed from F and the value; nothing in the data can
+// set it, the salt only rides along to the receipt and the history, and the
+// tag goes into the coin lookup index with the leaf.
 func ParseCommit(data []byte, value *big.Int) (*Commit, error) {
-	f, salt, note, err := parseCommitData(data)
+	f, salt, note, tag, err := parseCommitData(data)
 	if err != nil {
 		return nil, err
 	}
-	c := &Commit{F: f, Note: note, Salt: salt}
+	c := &Commit{F: f, Note: note, Salt: salt, Tag: tag}
 	if c.F == (common.Hash{}) {
 		return nil, ErrCommitZeroF
+	}
+	if c.Tag.IsZero() {
+		return nil, ErrCommitLookupTag
 	}
 	if value == nil || value.Sign() <= 0 {
 		return nil, ErrCommitAmount
@@ -187,12 +228,13 @@ func ApplyCommit(st StateDB, height uint64, from common.Address, c *Commit) erro
 
 // appendCommit makes the effects of a commit but the burn, commit step 10 of
 // spec 03 without the debit: it appends the commitment to the coin tree with
-// the receipt log, which carries the note and the salt, and adds the value to
-// the total in. On an error nothing is changed.
+// the receipt log, which carries the note and the salt, puts its lookup tag
+// into the coin lookup index, and adds the value to the total in. On an
+// error nothing is changed.
 func appendCommit(st StateDB, height uint64, c *Commit) error {
 	leaf := c.Commitment()
 	snap := st.Snapshot()
-	res, err := ghosttree.Append(st, ghosttree.Coin, height, leaf)
+	res, err := ghosttree.AppendTagged(st, ghosttree.Coin, height, leaf, c.Tag)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrCommitTree, err)
 	}
@@ -234,13 +276,14 @@ var (
 )
 
 // DataCommit is a parsed data commit: the F_d the commitment binds, the note
-// stored with the leaf and, for salted commit data, the salt stored with it
-// (nil for version 1 data). It holds no amount: the value of every data
-// commit is DataReserve.
+// stored with the leaf, for salted commit data the salt stored with it (nil
+// for version 1 data), and the lookup tag its leaf takes in the data lookup
+// index. It holds no amount: the value of every data commit is DataReserve.
 type DataCommit struct {
 	F    common.Hash
 	Note [NoteSize]byte
 	Salt *[SaltSize]byte
+	Tag  ghosttree.LookupTag
 }
 
 // CommitVersion is the commitment format version of the data commit's data:
@@ -255,18 +298,22 @@ func (c *DataCommit) Commitment() common.Hash {
 }
 
 // ParseDataCommit checks the data and value of a top-level call to the data
-// commit entry address, in this order: exactly 430 bytes of version 3, the
-// layout of a coin commit (ErrCommitData), F not zero (ErrCommitZeroF), then
-// a value of exactly DataReserve (ErrDataCommitValue). The commitment is
-// computed from F and the reserve; nothing in the data can set it.
+// commit entry address, in this order: exactly 446 bytes of version 3, the
+// layout of a coin commit (ErrCommitData), F not zero (ErrCommitZeroF), the
+// lookup tag not zero (ErrCommitLookupTag), then a value of exactly
+// DataReserve (ErrDataCommitValue). The commitment is computed from F and
+// the reserve; nothing in the data can set it.
 func ParseDataCommit(data []byte, value *big.Int) (*DataCommit, error) {
-	f, salt, note, err := parseCommitData(data)
+	f, salt, note, tag, err := parseCommitData(data)
 	if err != nil {
 		return nil, err
 	}
-	c := &DataCommit{F: f, Note: note, Salt: salt}
+	c := &DataCommit{F: f, Note: note, Salt: salt, Tag: tag}
 	if c.F == (common.Hash{}) {
 		return nil, ErrCommitZeroF
+	}
+	if c.Tag.IsZero() {
+		return nil, ErrCommitLookupTag
 	}
 	if value == nil || value.Cmp(DataReserve.ToBig()) != 0 {
 		return nil, fmt.Errorf("%w: %v", ErrDataCommitValue, value)
@@ -289,7 +336,7 @@ func ApplyDataCommit(st StateDB, height uint64, from common.Address, c *DataComm
 	}
 	leaf := c.Commitment()
 	snap := st.Snapshot()
-	res, err := ghosttree.Append(st, ghosttree.Data, height, leaf)
+	res, err := ghosttree.AppendTagged(st, ghosttree.Data, height, leaf, c.Tag)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrDataCommitTree, err)
 	}

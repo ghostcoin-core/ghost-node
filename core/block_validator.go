@@ -163,42 +163,54 @@ func (v *BlockValidator) ValidateState(block *types.Block, statedb *state.StateD
 	return nil
 }
 
-// validateTreeRoots checks the coin and data tree roots and the data marker
-// root of a header that carries any of them against the roots of the
-// executed state. A header without roots is left to the consensus engine,
-// which rejects it on Ghost chains.
+// validateTreeRoots checks the Ghost fields of a header that carries any of
+// them against those of the executed state: the coin and data tree roots
+// and the data marker root, and, when the header carries any lookup field,
+// the coin and data lookup roots, the coin marker root and the block lookup
+// digest of decision 0004. A header without roots is left to the consensus
+// engine, which rejects it on Ghost chains, as is one with the roots but
+// without the lookup fields.
 func validateTreeRoots(header *types.Header, statedb *state.StateDB) error {
-	if header.CoinTreeRoot == nil && header.DataTreeRoot == nil && header.DataMarkerRoot == nil {
+	type field struct {
+		name   string
+		remote *common.Hash
+		local  func(f *ghosttree.HeaderFields) common.Hash
+		lookup bool // checked only when the header carries a lookup field
+	}
+	fields := []field{
+		{"coinTreeRoot", header.CoinTreeRoot, func(f *ghosttree.HeaderFields) common.Hash { return f.CoinTreeRoot }, false},
+		{"dataTreeRoot", header.DataTreeRoot, func(f *ghosttree.HeaderFields) common.Hash { return f.DataTreeRoot }, false},
+		{"dataMarkerRoot", header.DataMarkerRoot, func(f *ghosttree.HeaderFields) common.Hash { return f.DataMarkerRoot }, false},
+		{"coinLookupRoot", header.CoinLookupRoot, func(f *ghosttree.HeaderFields) common.Hash { return f.CoinLookupRoot }, true},
+		{"dataLookupRoot", header.DataLookupRoot, func(f *ghosttree.HeaderFields) common.Hash { return f.DataLookupRoot }, true},
+		{"coinMarkerRoot", header.CoinMarkerRoot, func(f *ghosttree.HeaderFields) common.Hash { return f.CoinMarkerRoot }, true},
+		{"lookupDigest", header.LookupDigest, func(f *ghosttree.HeaderFields) common.Hash { return f.LookupDigest }, true},
+	}
+	var carries, lookups bool
+	for _, f := range fields {
+		if f.remote != nil {
+			carries = true
+			lookups = lookups || f.lookup
+		}
+	}
+	if !carries {
 		return nil
 	}
-	for _, f := range []struct {
-		name   string
-		kind   ghosttree.Kind
-		remote *common.Hash
-	}{
-		{"coinTreeRoot", ghosttree.Coin, header.CoinTreeRoot},
-		{"dataTreeRoot", ghosttree.Data, header.DataTreeRoot},
-	} {
-		local, err := ghosttree.Root(statedb, f.kind)
-		if err != nil {
-			return fmt.Errorf("invalid %s: %w", f.name, err)
-		}
-		if f.remote == nil {
-			return fmt.Errorf("invalid %s (remote: missing local: %x)", f.name, local)
-		}
-		if *f.remote != local {
-			return fmt.Errorf("invalid %s (remote: %x local: %x)", f.name, *f.remote, local)
-		}
-	}
-	local, err := ghosttree.DataMarkerRoot(statedb)
+	local, err := ghosttree.ReadHeaderFields(statedb, header.Number.Uint64())
 	if err != nil {
-		return fmt.Errorf("invalid dataMarkerRoot: %w", err)
+		return fmt.Errorf("invalid tree roots: %w", err)
 	}
-	if header.DataMarkerRoot == nil {
-		return fmt.Errorf("invalid dataMarkerRoot (remote: missing local: %x)", local)
-	}
-	if *header.DataMarkerRoot != local {
-		return fmt.Errorf("invalid dataMarkerRoot (remote: %x local: %x)", *header.DataMarkerRoot, local)
+	for _, f := range fields {
+		if f.lookup && !lookups {
+			continue
+		}
+		want := f.local(local)
+		if f.remote == nil {
+			return fmt.Errorf("invalid %s (remote: missing local: %x)", f.name, want)
+		}
+		if *f.remote != want {
+			return fmt.Errorf("invalid %s (remote: %x local: %x)", f.name, *f.remote, want)
+		}
 	}
 	return nil
 }

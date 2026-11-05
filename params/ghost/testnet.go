@@ -62,7 +62,7 @@ const (
 )
 
 // TestNetGenesisHash is the hash of the public test network's first block.
-var TestNetGenesisHash = common.HexToHash("0xdfe4271fd12d302e15c68e381ade8076207f70d3778eebd69604566fb6979436")
+var TestNetGenesisHash = common.HexToHash("0x1beeb3088d741bdde1f5285fec7fea05b2d598237657e37741099d3e82867176")
 
 // TestNetBootnodes are the seed nodes of the public test network, the
 // bootstrap nodes a node uses when neither --bootnodes nor the config file

@@ -1638,7 +1638,7 @@ func TestDataRevealInsertsMarkerIntoTheSet(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, m := range []common.Hash{mReveal, mRevoke} {
-		if err := ghosttree.MarkSpent(fresh, ghosttree.Data, m); err != nil {
+		if err := ghosttree.MarkSpent(fresh, ghosttree.Data, 1, m, ghosttree.NoGlobalPosition); err != nil {
 			t.Fatal(err)
 		}
 	}

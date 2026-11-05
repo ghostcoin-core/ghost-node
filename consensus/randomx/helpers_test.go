@@ -158,14 +158,22 @@ func fullHeader() *types.Header {
 }
 
 // ghostHeader returns a header of the Ghost layout with every field set:
-// both tree roots, the data marker root and the base fee, and none of the
-// fields it forbids.
+// both tree roots, the data marker root, the four lookup fields and the base
+// fee, and none of the fields it forbids.
 func ghostHeader() *types.Header {
 	h := fullHeader()
 	h.WithdrawalsHash, h.BlobGasUsed, h.ExcessBlobGas, h.ParentBeaconRoot = nil, nil, nil, nil
 	coin, data, marker := common.Hash{11}, common.Hash{12}, common.Hash{13}
 	h.CoinTreeRoot, h.DataTreeRoot, h.DataMarkerRoot = &coin, &data, &marker
+	setLookupFields(h)
 	return h
+}
+
+// setLookupFields sets the four lookup fields of decision 0004 to arbitrary
+// values.
+func setLookupFields(h *types.Header) {
+	coinLookup, dataLookup, coinMarker, digest := common.Hash{14}, common.Hash{15}, common.Hash{16}, common.Hash{17}
+	h.CoinLookupRoot, h.DataLookupRoot, h.CoinMarkerRoot, h.LookupDigest = &coinLookup, &dataLookup, &coinMarker, &digest
 }
 
 // headerFields returns the names of every field of types.Header.

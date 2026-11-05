@@ -351,9 +351,8 @@ func ApplyPolicyReveal(st StateDB, env *BlockEnv, verifier Verifier, envelope []
 		st.RevertToSnapshot(snap)
 		return err
 	}
-	if err := ghosttree.MarkSpent(st, ghosttree.Coin, r.Marker); err != nil {
-		return fail(fmt.Errorf("%w: %w", ErrPolicyRevealMarker, err))
-	}
+	// The remainder goes first, so that the marker's leaf in the coin marker
+	// set names it; check 10 has shown the tree takes it.
 	res, err := ghosttree.Append(st, ghosttree.Coin, height, r.Remainder)
 	if err != nil {
 		return fail(fmt.Errorf("%w: %w", ErrPolicyRevealTree, err))
@@ -361,6 +360,13 @@ func ApplyPolicyReveal(st StateDB, env *BlockEnv, verifier Verifier, envelope []
 	loc, err := receiptLocation(res)
 	if err != nil {
 		return fail(fmt.Errorf("%w: %w", ErrPolicyRevealTree, err))
+	}
+	appended, err := ghosttree.GlobalPositionOf(res)
+	if err != nil {
+		return fail(fmt.Errorf("%w: %w", ErrPolicyRevealTree, err))
+	}
+	if err := ghosttree.MarkSpent(st, ghosttree.Coin, height, r.Marker, appended); err != nil {
+		return fail(fmt.Errorf("%w: %w", ErrPolicyRevealMarker, err))
 	}
 	data := make([]byte, 0, policyRevealLogSize)
 	data = append(data, loc...)

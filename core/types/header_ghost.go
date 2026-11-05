@@ -26,57 +26,99 @@ import (
 	"github.com/ethereum/go-ethereum/rlp"
 )
 
-// A header has one of two layouts (docs/trees-and-headers.md):
+// A header has one of three layouts (docs/trees-and-headers.md):
 //
-//   - the base layout, with all three roots nil: fields 0 to 14 and the
-//     optional fields BaseFee, WithdrawalsHash, BlobGasUsed, ExcessBlobGas and
-//     ParentBeaconRoot, exactly as the base client encodes them;
-//   - the Ghost layout of spec 05, section 10, with all three roots set: the
-//     19-item list of fields 0 to 14, BaseFee, CoinTreeRoot, DataTreeRoot and
-//     DataMarkerRoot, and none of the other optional fields.
+//   - the base layout, with all seven Ghost fields nil: fields 0 to 14 and
+//     the optional fields BaseFee, WithdrawalsHash, BlobGasUsed,
+//     ExcessBlobGas and ParentBeaconRoot, exactly as the base client encodes
+//     them;
+//   - the Ghost layout of spec 05, section 10, and decision 0004, with all
+//     seven set: the 23-item list of fields 0 to 14, BaseFee, CoinTreeRoot,
+//     DataTreeRoot, DataMarkerRoot, CoinLookupRoot, DataLookupRoot,
+//     CoinMarkerRoot and LookupDigest, and none of the other optional fields;
+//   - the 19-item list of the three tree roots without the four lookup
+//     fields, which only the base client's test engines write. It is not a
+//     Ghost header: DecodeGhostHeader rejects it with item-count, and the
+//     RandomX engine refuses a header without the lookup fields.
 //
 // Any other combination cannot be encoded. The decoder tells the layouts
-// apart by shape: 19 items with a 32-byte string at index 18. In the base
-// layout index 18 is ExcessBlobGas, an integer of at most 8 bytes.
+// apart by shape: 23 or 19 items with a 32-byte string last. In the base
+// layout there are at most 20 items, and index 18 is ExcessBlobGas, an
+// integer of at most 8 bytes.
 
-const ghostHeaderItems = 19
+const (
+	ghostHeaderItems = 23
+	treeHeaderItems  = 19
+)
 
 var (
 	errPartialTreeRoots = errors.New("header sets some but not all of the tree and marker roots")
+	errPartialLookup    = errors.New("header sets some but not all of the lookup roots and digest")
+	errLookupNoRoots    = errors.New("header sets the lookup fields without the tree roots")
 	errTreeRootsNoFee   = errors.New("header with tree roots has no base fee")
 	errTreeRootsField   = errors.New("header with tree roots sets a field the Ghost layout forbids")
 )
 
-// ghostLayout reports whether the header takes the Ghost layout, and an error
-// for a combination of fields neither layout encodes.
-func (obj *Header) ghostLayout() (bool, error) {
-	coin, data, marker := obj.CoinTreeRoot != nil, obj.DataTreeRoot != nil, obj.DataMarkerRoot != nil
-	switch {
-	case !coin && !data && !marker:
-		return false, nil
-	case !coin || !data || !marker:
-		return false, errPartialTreeRoots
-	case obj.BaseFee == nil:
-		return false, errTreeRootsNoFee
-	case obj.WithdrawalsHash != nil:
-		return false, fmt.Errorf("%w: withdrawalsHash", errTreeRootsField)
-	case obj.BlobGasUsed != nil:
-		return false, fmt.Errorf("%w: blobGasUsed", errTreeRootsField)
-	case obj.ExcessBlobGas != nil:
-		return false, fmt.Errorf("%w: excessBlobGas", errTreeRootsField)
-	case obj.ParentBeaconRoot != nil:
-		return false, fmt.Errorf("%w: parentBeaconRoot", errTreeRootsField)
+// lookupFields returns the four lookup fields in their order.
+func (obj *Header) lookupFields() []*common.Hash {
+	return []*common.Hash{obj.CoinLookupRoot, obj.DataLookupRoot, obj.CoinMarkerRoot, obj.LookupDigest}
+}
+
+// HasLookupFields reports whether the header sets the four lookup fields
+// of decision 0004.
+func (obj *Header) HasLookupFields() bool {
+	for _, f := range obj.lookupFields() {
+		if f == nil {
+			return false
+		}
 	}
-	return true, nil
+	return true
+}
+
+// ghostLayout returns the number of items of the header's Ghost layout, 0
+// for the base layout, and an error for a combination of fields no layout
+// encodes.
+func (obj *Header) ghostLayout() (int, error) {
+	coin, data, marker := obj.CoinTreeRoot != nil, obj.DataTreeRoot != nil, obj.DataMarkerRoot != nil
+	lookups := 0
+	for _, f := range obj.lookupFields() {
+		if f != nil {
+			lookups++
+		}
+	}
+	switch {
+	case !coin && !data && !marker && lookups == 0:
+		return 0, nil
+	case !coin && !data && !marker:
+		return 0, errLookupNoRoots
+	case !coin || !data || !marker:
+		return 0, errPartialTreeRoots
+	case lookups != 0 && lookups != len(obj.lookupFields()):
+		return 0, errPartialLookup
+	case obj.BaseFee == nil:
+		return 0, errTreeRootsNoFee
+	case obj.WithdrawalsHash != nil:
+		return 0, fmt.Errorf("%w: withdrawalsHash", errTreeRootsField)
+	case obj.BlobGasUsed != nil:
+		return 0, fmt.Errorf("%w: blobGasUsed", errTreeRootsField)
+	case obj.ExcessBlobGas != nil:
+		return 0, fmt.Errorf("%w: excessBlobGas", errTreeRootsField)
+	case obj.ParentBeaconRoot != nil:
+		return 0, fmt.Errorf("%w: parentBeaconRoot", errTreeRootsField)
+	case lookups == 0:
+		return treeHeaderItems, nil
+	}
+	return ghostHeaderItems, nil
 }
 
 // EncodeRLP implements rlp.Encoder. The base layout is written byte for byte
 // as the generated encoder did.
 func (obj *Header) EncodeRLP(_w io.Writer) error {
-	ghost, err := obj.ghostLayout()
+	items, err := obj.ghostLayout()
 	if err != nil {
 		return err
 	}
+	ghost := items != 0
 	w := rlp.NewEncoderBuffer(_w)
 	_tmp0 := w.List()
 	w.WriteBytes(obj.ParentHash[:])
@@ -116,6 +158,11 @@ func (obj *Header) EncodeRLP(_w io.Writer) error {
 		w.WriteBytes(obj.CoinTreeRoot[:])
 		w.WriteBytes(obj.DataTreeRoot[:])
 		w.WriteBytes(obj.DataMarkerRoot[:])
+		if items == ghostHeaderItems {
+			for _, f := range obj.lookupFields() {
+				w.WriteBytes(f[:])
+			}
+		}
 		w.ListEnd(_tmp0)
 		return w.Flush()
 	}
@@ -193,9 +240,52 @@ type ghostHeaderRLP struct {
 	DataTreeRoot common.Hash
 	// DataMarkerRoot is the root of the data spent-marker set.
 	DataMarkerRoot common.Hash
+	// The lookup fields of decision 0004, items 19 to 22.
+	CoinLookupRoot common.Hash
+	DataLookupRoot common.Hash
+	CoinMarkerRoot common.Hash
+	LookupDigest   common.Hash
 }
 
 func (g *ghostHeaderRLP) header() *Header {
+	t := treeHeaderRLP{
+		ParentHash: g.ParentHash, UncleHash: g.UncleHash, Coinbase: g.Coinbase, Root: g.Root,
+		TxHash: g.TxHash, ReceiptHash: g.ReceiptHash, Bloom: g.Bloom, Difficulty: g.Difficulty,
+		Number: g.Number, GasLimit: g.GasLimit, GasUsed: g.GasUsed, Time: g.Time, Extra: g.Extra,
+		MixDigest: g.MixDigest, Nonce: g.Nonce, BaseFee: g.BaseFee,
+		CoinTreeRoot: g.CoinTreeRoot, DataTreeRoot: g.DataTreeRoot, DataMarkerRoot: g.DataMarkerRoot,
+	}
+	h := t.header()
+	coinLookup, dataLookup, coinMarker, digest := g.CoinLookupRoot, g.DataLookupRoot, g.CoinMarkerRoot, g.LookupDigest
+	h.CoinLookupRoot, h.DataLookupRoot, h.CoinMarkerRoot, h.LookupDigest = &coinLookup, &dataLookup, &coinMarker, &digest
+	return h
+}
+
+// treeHeaderRLP is the 19-item layout of the three tree roots alone.
+type treeHeaderRLP struct {
+	ParentHash   common.Hash
+	UncleHash    common.Hash
+	Coinbase     common.Address
+	Root         common.Hash
+	TxHash       common.Hash
+	ReceiptHash  common.Hash
+	Bloom        Bloom
+	Difficulty   *big.Int
+	Number       *big.Int
+	GasLimit     uint64
+	GasUsed      uint64
+	Time         uint64
+	Extra        []byte
+	MixDigest    common.Hash
+	Nonce        BlockNonce
+	BaseFee      *big.Int
+	CoinTreeRoot common.Hash
+	DataTreeRoot common.Hash
+	// DataMarkerRoot is the root of the data spent-marker set.
+	DataMarkerRoot common.Hash
+}
+
+func (g *treeHeaderRLP) header() *Header {
 	coin, data, marker := g.CoinTreeRoot, g.DataTreeRoot, g.DataMarkerRoot
 	return &Header{
 		ParentHash:     g.ParentHash,
@@ -220,39 +310,52 @@ func (g *ghostHeaderRLP) header() *Header {
 	}
 }
 
-// isGhostLayout reports whether raw is a list of exactly 19 items whose item
-// at index 18 is a 32-byte string. Malformed input is not; the base decoder
-// then reports what is wrong with it.
-func isGhostLayout(raw []byte) bool {
+// ghostLayoutOf returns the item count of raw when it is a list of exactly
+// 23 or 19 items whose last item is a 32-byte string, 0 otherwise.
+// Malformed input is 0; the base decoder then reports what is wrong with it.
+func ghostLayoutOf(raw []byte) int {
 	content, _, err := rlp.SplitList(raw)
 	if err != nil {
-		return false
+		return 0
 	}
-	if n, err := rlp.CountValues(content); err != nil || n != ghostHeaderItems {
-		return false
+	n, err := rlp.CountValues(content)
+	if err != nil || (n != ghostHeaderItems && n != treeHeaderItems) {
+		return 0
 	}
-	for i := 0; i < ghostHeaderItems; i++ {
+	for i := 0; i < n; i++ {
 		kind, item, rest, err := rlp.Split(content)
 		if err != nil {
-			return false
+			return 0
 		}
-		if i == ghostHeaderItems-1 {
-			return kind == rlp.String && len(item) == common.HashLength
+		if i == n-1 {
+			if kind == rlp.String && len(item) == common.HashLength {
+				return n
+			}
+			return 0
 		}
 		content = rest
 	}
-	return false
+	return 0
 }
 
 // DecodeRLP implements rlp.Decoder. A header in the Ghost layout decodes
-// with all three roots set; any other input decodes exactly as before.
+// with all seven Ghost fields set, one of 19 items with the three roots
+// alone; any other input decodes exactly as before.
 func (h *Header) DecodeRLP(s *rlp.Stream) error {
 	raw, err := s.Raw()
 	if err != nil {
 		return err
 	}
-	if isGhostLayout(raw) {
+	switch ghostLayoutOf(raw) {
+	case ghostHeaderItems:
 		var g ghostHeaderRLP
+		if err := rlp.DecodeBytes(raw, &g); err != nil {
+			return err
+		}
+		*h = *g.header()
+		return nil
+	case treeHeaderItems:
+		var g treeHeaderRLP
 		if err := rlp.DecodeBytes(raw, &g); err != nil {
 			return err
 		}
@@ -376,15 +479,16 @@ func longLength(b []byte, n int) (int, error) {
 // Field sizes of the Ghost layout: exact sizes of the fixed fields, and the
 // widths in bytes of the integers.
 var (
-	ghostFixedSizes = map[int]int{0: 32, 1: 32, 2: 20, 3: 32, 4: 32, 5: 32, 6: 256, 13: 32, 14: 8, 16: 32, 17: 32, 18: 32}
+	ghostFixedSizes = map[int]int{0: 32, 1: 32, 2: 20, 3: 32, 4: 32, 5: 32, 6: 256, 13: 32, 14: 8, 16: 32, 17: 32, 18: 32, 19: 32, 20: 32, 21: 32, 22: 32}
 	ghostIntWidths  = []struct{ index, width int }{{7, 32}, {8, 8}, {9, 8}, {10, 8}, {11, 8}, {15, 32}}
 )
 
 const ghostMaxExtra = 32
 
-// DecodeGhostHeader is the strict reference decoder of spec 05, section 10.
-// It accepts only the Ghost layout and rejects anything else with a
-// *GhostHeaderError carrying the first reason that applies.
+// DecodeGhostHeader is the strict reference decoder of spec 05, section 10,
+// with the 23 items of decision 0004. It accepts only the Ghost layout and
+// rejects anything else with a *GhostHeaderError carrying the first reason
+// that applies; the 19 items before the lookup fields are item-count.
 func DecodeGhostHeader(b []byte) (*Header, error) {
 	// 1. One canonical RLP list.
 	top, rest, err := parseCanonical(b)
@@ -398,7 +502,7 @@ func DecodeGhostHeader(b []byte) (*Header, error) {
 	if len(rest) > 0 {
 		return nil, ghostReject(GhostReasonTrailingBytes, "%d bytes after the list", len(rest))
 	}
-	// 3. Exactly 19 items, none a list.
+	// 3. Exactly 23 items, none a list.
 	if len(top.items) != ghostHeaderItems {
 		return nil, ghostReject(GhostReasonItemCount, "%d items, want %d", len(top.items), ghostHeaderItems)
 	}
@@ -450,5 +554,9 @@ func DecodeGhostHeader(b []byte) (*Header, error) {
 	copy(g.CoinTreeRoot[:], items[16].content)
 	copy(g.DataTreeRoot[:], items[17].content)
 	copy(g.DataMarkerRoot[:], items[18].content)
+	copy(g.CoinLookupRoot[:], items[19].content)
+	copy(g.DataLookupRoot[:], items[20].content)
+	copy(g.CoinMarkerRoot[:], items[21].content)
+	copy(g.LookupDigest[:], items[22].content)
 	return g.header(), nil
 }

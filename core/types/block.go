@@ -100,6 +100,16 @@ type Header struct {
 	CoinTreeRoot   *common.Hash `json:"-" rlp:"-"`
 	DataTreeRoot   *common.Hash `json:"-" rlp:"-"`
 	DataMarkerRoot *common.Hash `json:"-" rlp:"-"`
+
+	// CoinLookupRoot and DataLookupRoot are the roots of the coin and data
+	// lookup indices after the block, CoinMarkerRoot the root of the coin
+	// spent-marker set, and LookupDigest the block lookup digest, header
+	// fields 19 to 22 of decision 0004. A Ghost header sets all four with
+	// the three roots above; header_ghost.go encodes them.
+	CoinLookupRoot *common.Hash `json:"-" rlp:"-"`
+	DataLookupRoot *common.Hash `json:"-" rlp:"-"`
+	CoinMarkerRoot *common.Hash `json:"-" rlp:"-"`
+	LookupDigest   *common.Hash `json:"-" rlp:"-"`
 }
 
 // field type overrides for gencodec
@@ -132,14 +142,10 @@ func (h *Header) Size() common.StorageSize {
 		baseFeeBits = h.BaseFee.BitLen()
 	}
 	var roots int
-	if h.CoinTreeRoot != nil {
-		roots += common.HashLength
-	}
-	if h.DataTreeRoot != nil {
-		roots += common.HashLength
-	}
-	if h.DataMarkerRoot != nil {
-		roots += common.HashLength
+	for _, r := range []*common.Hash{h.CoinTreeRoot, h.DataTreeRoot, h.DataMarkerRoot, h.CoinLookupRoot, h.DataLookupRoot, h.CoinMarkerRoot, h.LookupDigest} {
+		if r != nil {
+			roots += common.HashLength
+		}
 	}
 	return headerSize + common.StorageSize(len(h.Extra)+roots+(h.Difficulty.BitLen()+h.Number.BitLen()+baseFeeBits)/8)
 }
@@ -332,6 +338,12 @@ func CopyHeader(h *Header) *Header {
 	if h.DataMarkerRoot != nil {
 		cpy.DataMarkerRoot = new(common.Hash)
 		*cpy.DataMarkerRoot = *h.DataMarkerRoot
+	}
+	for _, p := range []**common.Hash{&cpy.CoinLookupRoot, &cpy.DataLookupRoot, &cpy.CoinMarkerRoot, &cpy.LookupDigest} {
+		if *p != nil {
+			v := **p
+			*p = &v
+		}
 	}
 	return &cpy
 }

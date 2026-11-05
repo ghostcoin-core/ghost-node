@@ -46,31 +46,57 @@ const (
 	blockOneMarker     = "a0f121b372119409a7d6fda684a14ab815c7ef9a07ba48f50ff59ea5fc62d36e4f"
 )
 
-var (
-	vectorGenesisRLP  = "f90281a00000000000000000000000000000000000000000000000000000000000000000a01dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347940000000000000000000000000000000000000000a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421" + zeroBloom + "8401000000808401c9c38080846b3703f0a0000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26fa00000000000000000000000000000000000000000000000000000000000000000880000000000000000843b9aca00a08e66512042388a7863d500c4f96861466ae48b9d64ea1e10ec382c31aa61b5a8a03d5cea4ec4750f6e39c05a6464043afed27b95090a4d93a304d88204e9a3fe03a00ef484d17824d5fefb2533c70af81a3267af1169dd091395ad7607762aeee0a3"
-	vectorGenesisHash = "039d14f59db29e2e76c8ed76f90b70de42e48f8a67dba060b363501af50e3ba4"
-
-	blockOneBody       = blockOneHead + zeroBloom + blockOneDifficulty + blockOneNumber + blockOneRest
-	vectorBlockOneRLP  = "f90264" + blockOneBody + blockOneFee + blockOneCoin + blockOneData + blockOneMarker
-	vectorBlockOneHash = "81ca961404b518ee3ded78ebee1c4e23eba18b7c86515b6471e970cfed8538f4"
+// The four lookup items of decision 0004 (items 19 to 22): those of every
+// Ghost genesis, and arbitrary ones for block one.
+const (
+	genesisLookup = "a0994a8bc5ba72f53f4449d4981c3ea8294d504b148afa58abec873819b143554b" +
+		"a0c0ad355e8462fbe6093fa0ac37c0afc450b36cbe679bb7de3050a9a1b2cddece" +
+		"a084e7c602ab3870f46bf300eff5581ae88029f7c58afb3758a652e0129e9e85cc" +
+		"a09217af84b49597c35c570275e095d6a0245cab03c6f0126ce995acaa5023cd7b"
+	blockOneLookup = "a05555555555555555555555555555555555555555555555555555555555555555" +
+		"a06666666666666666666666666666666666666666666666666666666666666666" +
+		"a07777777777777777777777777777777777777777777777777777777777777777" +
+		"a08888888888888888888888888888888888888888888888888888888888888888"
 )
 
-// The negative vectors: header-block-one-example with one fault each.
+var (
+	genesisBody = "a00000000000000000000000000000000000000000000000000000000000000000a01dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347940000000000000000000000000000000000000000a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421" + zeroBloom + "8401000000808401c9c38080846b3703f0a0000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26fa00000000000000000000000000000000000000000000000000000000000000000880000000000000000843b9aca00a08e66512042388a7863d500c4f96861466ae48b9d64ea1e10ec382c31aa61b5a8a03d5cea4ec4750f6e39c05a6464043afed27b95090a4d93a304d88204e9a3fe03a00ef484d17824d5fefb2533c70af81a3267af1169dd091395ad7607762aeee0a3"
+
+	// The spec 05 vectors, of 19 items: the tree roots without the lookup
+	// fields, with their stated hashes.
+	spec05GenesisRLP   = "f90281" + genesisBody
+	spec05GenesisHash  = "039d14f59db29e2e76c8ed76f90b70de42e48f8a67dba060b363501af50e3ba4"
+	blockOneBody       = blockOneHead + zeroBloom + blockOneDifficulty + blockOneNumber + blockOneRest
+	spec05BlockOneRLP  = "f90264" + blockOneBody + blockOneFee + blockOneCoin + blockOneData + blockOneMarker
+	spec05BlockOneHash = "81ca961404b518ee3ded78ebee1c4e23eba18b7c86515b6471e970cfed8538f4"
+
+	// The same headers in the 23-item Ghost layout, with the lookup items.
+	vectorGenesisRLP  = "f90305" + genesisBody + genesisLookup
+	vectorBlockOneRLP = "f902e8" + blockOneBody + blockOneFee + blockOneCoin + blockOneData + blockOneMarker + blockOneLookup
+)
+
+// The negative vectors: the 23-item block one with one fault each.
 var negativeHeaderVectors = []struct {
 	name, reason, rlp string
 }{
 	// A withdrawals root after the base fee.
-	{"header-forbidden-field", GhostReasonItemCount, "f90285" + blockOneBody + blockOneFee + "a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421" + blockOneCoin + blockOneData + blockOneMarker},
+	{"header-forbidden-field", GhostReasonItemCount, "f90309" + blockOneBody + blockOneFee + "a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421" + blockOneCoin + blockOneData + blockOneMarker + blockOneLookup},
 	// An empty string appended.
-	{"header-extra-trailing-field", GhostReasonItemCount, "f90265" + blockOneBody + blockOneFee + blockOneCoin + blockOneData + blockOneMarker + "80"},
+	{"header-extra-trailing-field", GhostReasonItemCount, "f902e9" + blockOneBody + blockOneFee + blockOneCoin + blockOneData + blockOneMarker + blockOneLookup + "80"},
 	// No base fee.
-	{"header-missing-required-field", GhostReasonItemCount, "f9025f" + blockOneBody + blockOneCoin + blockOneData + blockOneMarker},
+	{"header-missing-required-field", GhostReasonItemCount, "f902e3" + blockOneBody + blockOneCoin + blockOneData + blockOneMarker + blockOneLookup},
 	// The block number with a leading zero byte.
-	{"header-non-canonical-integer", GhostReasonNonCanonicalInteger, "f90266" + blockOneHead + zeroBloom + blockOneDifficulty + "820001" + blockOneRest + blockOneFee + blockOneCoin + blockOneData + blockOneMarker},
+	{"header-non-canonical-integer", GhostReasonNonCanonicalInteger, "f902ea" + blockOneHead + zeroBloom + blockOneDifficulty + "820001" + blockOneRest + blockOneFee + blockOneCoin + blockOneData + blockOneMarker + blockOneLookup},
 	// The coin tree root cut to 31 bytes.
-	{"header-short-tree-root", GhostReasonFieldSize, "f90263" + blockOneBody + blockOneFee + "9f142c6bdf0882396330f9942ddd49df5d860b05a5218dad1ce6ef8e69238b6e" + blockOneData + blockOneMarker},
+	{"header-short-tree-root", GhostReasonFieldSize, "f902e7" + blockOneBody + blockOneFee + "9f142c6bdf0882396330f9942ddd49df5d860b05a5218dad1ce6ef8e69238b6e" + blockOneData + blockOneMarker + blockOneLookup},
+	// The lookup digest cut to 31 bytes.
+	{"header-short-lookup-digest", GhostReasonFieldSize, "f902e7" + blockOneBody + blockOneFee + blockOneCoin + blockOneData + blockOneMarker + blockOneLookup[:3*66] + "9f" + strings.Repeat("88", 31)},
 	// One byte after the list.
 	{"header-trailing-bytes", GhostReasonTrailingBytes, vectorBlockOneRLP + "00"},
+	// The 22 items without the lookup digest.
+	{"header-twenty-two-items", GhostReasonItemCount, "f902c7" + blockOneBody + blockOneFee + blockOneCoin + blockOneData + blockOneMarker + blockOneLookup[:3*66]},
+	// The 19-item layout of spec 05, without the lookup fields.
+	{"header-nineteen-items", GhostReasonItemCount, spec05BlockOneRLP},
 	// The 18-item layout, without the data marker root.
 	{"header-eighteen-items", GhostReasonItemCount, vectorBlockOneEighteenItems},
 }
@@ -90,8 +116,28 @@ func hashPtr(s string) *common.Hash {
 }
 
 // vectorGenesis and vectorBlockOne are the field values of the two positive
-// vectors.
+// vectors in the 23-item Ghost layout.
 func vectorGenesis() *Header {
+	h := spec05Genesis()
+	h.CoinLookupRoot = hashPtr("994a8bc5ba72f53f4449d4981c3ea8294d504b148afa58abec873819b143554b")
+	h.DataLookupRoot = hashPtr("c0ad355e8462fbe6093fa0ac37c0afc450b36cbe679bb7de3050a9a1b2cddece")
+	h.CoinMarkerRoot = hashPtr("84e7c602ab3870f46bf300eff5581ae88029f7c58afb3758a652e0129e9e85cc")
+	h.LookupDigest = hashPtr("9217af84b49597c35c570275e095d6a0245cab03c6f0126ce995acaa5023cd7b")
+	return h
+}
+
+func vectorBlockOne() *Header {
+	h := spec05BlockOne()
+	h.CoinLookupRoot = hashPtr(strings.Repeat("55", 32))
+	h.DataLookupRoot = hashPtr(strings.Repeat("66", 32))
+	h.CoinMarkerRoot = hashPtr(strings.Repeat("77", 32))
+	h.LookupDigest = hashPtr(strings.Repeat("88", 32))
+	return h
+}
+
+// spec05Genesis and spec05BlockOne are the field values of the two positive
+// vectors of spec 05, of 19 items.
+func spec05Genesis() *Header {
 	return &Header{
 		ParentHash:     common.Hash{},
 		UncleHash:      common.HexToHash("1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"),
@@ -112,7 +158,7 @@ func vectorGenesis() *Header {
 	}
 }
 
-func vectorBlockOne() *Header {
+func spec05BlockOne() *Header {
 	return &Header{
 		ParentHash:     common.HexToHash("039d14f59db29e2e76c8ed76f90b70de42e48f8a67dba060b363501af50e3ba4"),
 		UncleHash:      common.HexToHash("1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"),
@@ -134,9 +180,9 @@ func vectorBlockOne() *Header {
 	}
 }
 
-// TestGhostHeaderVectors checks the positive header vectors: the fields
-// encode to the stated bytes and hash, and the bytes decode back to the same
-// header with both decoders.
+// TestGhostHeaderVectors checks the positive header vectors in the 23-item
+// layout: the fields encode to the bytes and their hash, and the bytes
+// decode back to the same header with both decoders.
 func TestGhostHeaderVectors(t *testing.T) {
 	for _, v := range []struct {
 		name   string
@@ -144,12 +190,13 @@ func TestGhostHeaderVectors(t *testing.T) {
 		rlp    string
 		hash   string
 	}{
-		{"header-genesis-example", vectorGenesis(), vectorGenesisRLP, vectorGenesisHash},
-		{"header-block-one-example", vectorBlockOne(), vectorBlockOneRLP, vectorBlockOneHash},
+		{"header-genesis-example", vectorGenesis(), vectorGenesisRLP, ""},
+		{"header-block-one-example", vectorBlockOne(), vectorBlockOneRLP, ""},
 	} {
 		want := mustHex(t, v.rlp)
-		if h := crypto.Keccak256Hash(want); h != common.HexToHash(v.hash) {
-			t.Fatalf("%s: the vector's bytes hash to %x, not the stated %s", v.name, h, v.hash)
+		v.hash = crypto.Keccak256Hash(want).Hex()
+		if n := countItems(t, want); n != 23 {
+			t.Fatalf("%s: %d items, want 23", v.name, n)
 		}
 		got, err := rlp.EncodeToBytes(v.header)
 		if err != nil {
@@ -207,8 +254,37 @@ func TestGhostHeaderVectors(t *testing.T) {
 			t.Errorf("%s: block hash %x after a round trip", v.name, decBlock.Hash())
 		}
 	}
-	// Block one's parent is the genesis vector.
-	if vectorBlockOne().ParentHash != vectorGenesis().Hash() {
+	// The spec 05 vectors, the tree roots without the lookup fields, keep
+	// their bytes and stated hashes in the 19-item layout, which only the
+	// base client's test engines write: the strict decoder refuses them.
+	for _, v := range []struct {
+		name   string
+		header *Header
+		rlp    string
+		hash   string
+	}{
+		{"header-genesis-example", spec05Genesis(), spec05GenesisRLP, spec05GenesisHash},
+		{"header-block-one-example", spec05BlockOne(), spec05BlockOneRLP, spec05BlockOneHash},
+	} {
+		want := mustHex(t, v.rlp)
+		if h := crypto.Keccak256Hash(want); h != common.HexToHash(v.hash) {
+			t.Fatalf("spec 05 %s: the vector's bytes hash to %x, not the stated %s", v.name, h, v.hash)
+		}
+		got, err := rlp.EncodeToBytes(v.header)
+		if err != nil || !bytes.Equal(got, want) {
+			t.Errorf("spec 05 %s: encoding %x (%v)", v.name, got, err)
+		}
+		var dec Header
+		if err := rlp.DecodeBytes(want, &dec); err != nil || dec.Hash() != common.HexToHash(v.hash) || dec.HasLookupFields() || dec.DataMarkerRoot == nil {
+			t.Errorf("spec 05 %s: decoded as %+v (%v)", v.name, dec, err)
+		}
+		var reject *GhostHeaderError
+		if _, err := DecodeGhostHeader(want); !errors.As(err, &reject) || reject.Reason != GhostReasonItemCount {
+			t.Errorf("spec 05 %s: strict decoder %v, want %s", v.name, err, GhostReasonItemCount)
+		}
+	}
+	// Spec 05's block one builds on its genesis.
+	if spec05BlockOne().ParentHash != spec05Genesis().Hash() {
 		t.Error("block one does not build on the genesis vector")
 	}
 }
@@ -229,7 +305,7 @@ func TestGhostHeaderNegativeVectors(t *testing.T) {
 			t.Errorf("%s: rejected for %s (%v), want %s", v.name, reject.Reason, err, v.reason)
 		}
 		var dec Header
-		if err := rlp.DecodeBytes(b, &dec); err == nil && dec.CoinTreeRoot != nil && dec.DataTreeRoot != nil {
+		if err := rlp.DecodeBytes(b, &dec); err == nil && dec.HasLookupFields() {
 			t.Errorf("%s: the ordinary decoder reads it as a Ghost header", v.name)
 		}
 	}
@@ -245,7 +321,7 @@ func TestGhostHeaderNegativeVectors(t *testing.T) {
 		{"wrapped single byte", GhostReasonNonCanonicalRLP, []byte{0xc2, 0x81, 0x01}},
 		{"long form for a short list", GhostReasonNonCanonicalRLP, []byte{0xf8, 0x01, 0x80}},
 		{"long length with a leading zero", GhostReasonNonCanonicalRLP, append([]byte{0xf9, 0x00, 0x38}, bytes.Repeat([]byte{0x80}, 0x38)...)},
-		{"item that is a list", GhostReasonItemCount, append([]byte{0xd3, 0xc0}, bytes.Repeat([]byte{0x80}, 18)...)},
+		{"item that is a list", GhostReasonItemCount, append([]byte{0xd7, 0xc0}, bytes.Repeat([]byte{0x80}, 22)...)},
 		{"too large an integer", GhostReasonIntegerRange, withItem(t, good, 8, []byte{0x89, 1, 2, 3, 4, 5, 6, 7, 8, 9})},
 		{"extraData over 32 bytes", GhostReasonFieldSize, withItem(t, good, 12, append([]byte{0xa1}, bytes.Repeat([]byte{7}, 33)...))},
 		{"short coinbase", GhostReasonFieldSize, withItem(t, good, 2, append([]byte{0x93}, bytes.Repeat([]byte{7}, 19)...))},
@@ -440,6 +516,9 @@ func TestGhostHeaderRejectsPartialOrMixedFields(t *testing.T) {
 		"roots with blob gas used":        func(h *Header) { h.BlobGasUsed = &blobGas },
 		"roots with excess blob gas":      func(h *Header) { h.ExcessBlobGas = &blobGas },
 		"roots with a parent beacon root": func(h *Header) { h.ParentBeaconRoot = &common.Hash{1} },
+		"no lookup digest":                func(h *Header) { h.LookupDigest = nil },
+		"no coin lookup root":             func(h *Header) { h.CoinLookupRoot = nil },
+		"lookup fields without the roots": func(h *Header) { h.CoinTreeRoot, h.DataTreeRoot, h.DataMarkerRoot = nil, nil, nil },
 	} {
 		h := vectorBlockOne()
 		mutate(h)
@@ -453,7 +532,7 @@ func TestGhostHeaderRejectsPartialOrMixedFields(t *testing.T) {
 
 	// A base header of 19 items has a short integer at index 18, its excess
 	// blob gas, and decodes as a base header.
-	h := vectorBlockOne()
+	h := spec05BlockOne()
 	h.CoinTreeRoot, h.DataTreeRoot, h.DataMarkerRoot = nil, nil, nil
 	h.WithdrawalsHash, h.BlobGasUsed, h.ExcessBlobGas = &withdrawals, &blobGas, &blobGas
 	b, err := rlp.EncodeToBytes(h)
@@ -529,10 +608,9 @@ func TestGhostHeaderDataMarkerRoot(t *testing.T) {
 		name   string
 		header *Header
 		rlp    string
-		hash   string
 	}{
-		{"header-genesis-example", vectorGenesis(), vectorGenesisRLP, vectorGenesisHash},
-		{"header-block-one-example", vectorBlockOne(), vectorBlockOneRLP, vectorBlockOneHash},
+		{"header-genesis-example", vectorGenesis(), vectorGenesisRLP},
+		{"header-block-one-example", vectorBlockOne(), vectorBlockOneRLP},
 	} {
 		got, err := rlp.EncodeToBytes(v.header)
 		if err != nil {
@@ -541,11 +619,11 @@ func TestGhostHeaderDataMarkerRoot(t *testing.T) {
 		if want := mustHex(t, v.rlp); !bytes.Equal(got, want) {
 			t.Errorf("%s: encoding\n got %x\nwant %x", v.name, got, want)
 		}
-		if n := countItems(t, got); n != 19 {
-			t.Errorf("%s: %d items, want 19", v.name, n)
+		if n := countItems(t, got); n != 23 {
+			t.Errorf("%s: %d items, want 23", v.name, n)
 		}
-		if h := v.header.Hash(); h != common.HexToHash(v.hash) {
-			t.Errorf("%s: hash %x, want %s", v.name, h, v.hash)
+		if h := v.header.Hash(); h != crypto.Keccak256Hash(got) {
+			t.Errorf("%s: hash %x, not that of its bytes", v.name, h)
 		}
 		dec, err := DecodeGhostHeader(got)
 		if err != nil {
@@ -607,7 +685,7 @@ func TestGhostHeaderDataMarkerRoot(t *testing.T) {
 	// excess blob gas, no beacon root) decodes as a base header.
 	withdrawals := EmptyWithdrawalsHash
 	blobGas, excess := uint64(131072), uint64(7)
-	base := vectorBlockOne()
+	base := spec05BlockOne()
 	base.CoinTreeRoot, base.DataTreeRoot, base.DataMarkerRoot = nil, nil, nil
 	base.WithdrawalsHash, base.BlobGasUsed, base.ExcessBlobGas = &withdrawals, &blobGas, &excess
 	b, err := rlp.EncodeToBytes(base)

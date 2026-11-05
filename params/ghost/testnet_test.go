@@ -37,7 +37,7 @@ import (
 // block: a change to its genesis is a new network, so it has to be made on
 // purpose, here and in TestNetGenesisHash together.
 func TestPublicTestNetGenesisHashStable(t *testing.T) {
-	want := common.HexToHash("0xdfe4271fd12d302e15c68e381ade8076207f70d3778eebd69604566fb6979436")
+	want := common.HexToHash("0x1beeb3088d741bdde1f5285fec7fea05b2d598237657e37741099d3e82867176")
 	block := core.GenesisToBlock(ghost.TestNetGenesis(), nil)
 	if block.Hash() != want {
 		t.Errorf("test network genesis hash %x, want %x", block.Hash(), want)
@@ -49,6 +49,9 @@ func TestPublicTestNetGenesisHashStable(t *testing.T) {
 	h := block.Header()
 	if h.CoinTreeRoot == nil || h.DataTreeRoot == nil || h.DataMarkerRoot == nil {
 		t.Error("test network genesis header has no Ghost tree roots")
+	}
+	if !h.HasLookupFields() {
+		t.Error("test network genesis header has no lookup fields")
 	}
 	if block.Hash() == core.GenesisToBlock(ghost.InternalNetGenesis(), nil).Hash() {
 		t.Error("test network genesis is the internal network's")

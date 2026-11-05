@@ -238,6 +238,12 @@ func TestMissingTreeRootsRejected(t *testing.T) {
 		"no data root":   func(h *types.Header) { h.DataTreeRoot = nil },
 		"no marker root": func(h *types.Header) { h.DataMarkerRoot = nil },
 		"no roots":       func(h *types.Header) { h.CoinTreeRoot, h.DataTreeRoot, h.DataMarkerRoot = nil, nil, nil },
+		// The lookup fields of decision 0004.
+		"no coin lookup": func(h *types.Header) { h.CoinLookupRoot = nil },
+		"no data lookup": func(h *types.Header) { h.DataLookupRoot = nil },
+		"no coin marker": func(h *types.Header) { h.CoinMarkerRoot = nil },
+		"no digest":      func(h *types.Header) { h.LookupDigest = nil },
+		"no lookups":     func(h *types.Header) { h.CoinLookupRoot, h.DataLookupRoot, h.CoinMarkerRoot, h.LookupDigest = nil, nil, nil, nil },
 	} {
 		h := types.CopyHeader(good)
 		change(h)
@@ -596,13 +602,15 @@ func TestTreeStateAndMarkersAfterForcedReorg(t *testing.T) {
 			t.Errorf("block %d: %v append %d: %v", height, kind, i, err)
 		}
 	}
+	var height uint64
 	mark := func(st *state.StateDB, kind ghosttree.Kind, m common.Hash) {
-		if err := ghosttree.MarkSpent(st, kind, m); err != nil {
+		if err := ghosttree.MarkSpent(st, kind, height, m, ghosttree.NoGlobalPosition); err != nil {
 			t.Errorf("%v marker %x: %v", kind, m, err)
 		}
 	}
 	engine := &treeWriter{RandomX: f.engine, write: func(h *types.Header, st *state.StateDB) {
 		n := h.Number.Uint64()
+		height = n
 		switch {
 		case h.Coinbase == trunk && n == 1:
 			// A full coin tree at index 0, filled in this block, with
@@ -869,7 +877,7 @@ func TestDataMarkerRootFollowsDataMarkers(t *testing.T) {
 	marking := common.Address{0xd7}
 	engine := &treeWriter{RandomX: f.engine, write: func(h *types.Header, st *state.StateDB) {
 		if h.Coinbase == marking {
-			if err := ghosttree.MarkSpent(st, ghosttree.Data, marker); err != nil {
+			if err := ghosttree.MarkSpent(st, ghosttree.Data, h.Number.Uint64(), marker, ghosttree.NoGlobalPosition); err != nil {
 				t.Errorf("block %d: %v", h.Number, err)
 			}
 		}
@@ -888,7 +896,7 @@ func TestDataMarkerRootFollowsDataMarkers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ghosttree.MarkSpent(fresh, ghosttree.Data, marker); err != nil {
+	if err := ghosttree.MarkSpent(fresh, ghosttree.Data, 1, marker, ghosttree.NoGlobalPosition); err != nil {
 		t.Fatal(err)
 	}
 	want, err := ghosttree.DataMarkerRoot(fresh)

@@ -69,6 +69,7 @@ func TestGasLimitAboveConsensusMaximumRejected(t *testing.T) {
 		}
 		h.UncleHash = types.EmptyUncleHash
 		h.CoinTreeRoot, h.DataTreeRoot, h.DataMarkerRoot = &coin, &data, &marker
+		setLookupFields(h)
 		return h
 	}
 	// The largest step up the gas limit rule allows from the parent.

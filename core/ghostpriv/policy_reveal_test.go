@@ -246,7 +246,7 @@ func TestPolicyRevealCheckOrder(t *testing.T) {
 		return policyEnvelope(t, r)
 	}
 	spend := func(st *state.StateDB) {
-		if err := ghosttree.MarkSpent(st, ghosttree.Coin, base.Marker); err != nil {
+		if err := ghosttree.MarkSpent(st, ghosttree.Coin, 1, base.Marker, ghosttree.NoGlobalPosition); err != nil {
 			t.Fatal(err)
 		}
 	}

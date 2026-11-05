@@ -55,25 +55,25 @@ func TestRepeatedMarkerIsRejected(t *testing.T) {
 	if IsSpent(st, Coin, m) {
 		t.Fatal("a fresh marker is spent")
 	}
-	if err := MarkSpent(st, Coin, m); err != nil {
+	if err := MarkSpent(st, Coin, 1, m, NoGlobalPosition); err != nil {
 		t.Fatal(err)
 	}
 	if !IsSpent(st, Coin, m) {
 		t.Fatal("a marked marker is not spent")
 	}
 	// Again in the same block: the state already holds it.
-	if err := MarkSpent(st, Coin, m); !errors.Is(err, ErrMarkerSpent) {
+	if err := MarkSpent(st, Coin, 1, m, NoGlobalPosition); !errors.Is(err, ErrMarkerSpent) {
 		t.Errorf("repeat in the same block: %v, want %v", err, ErrMarkerSpent)
 	}
 	// And in a later block.
 	st = commitAndReopen(t, sdb, st, 1)
-	if err := MarkSpent(st, Coin, m); !errors.Is(err, ErrMarkerSpent) {
+	if err := MarkSpent(st, Coin, 1, m, NoGlobalPosition); !errors.Is(err, ErrMarkerSpent) {
 		t.Errorf("repeat in a later block: %v, want %v", err, ErrMarkerSpent)
 	}
-	if err := MarkSpent(st, Coin, testMarker(2)); err != nil {
+	if err := MarkSpent(st, Coin, 2, testMarker(2), NoGlobalPosition); err != nil {
 		t.Errorf("another marker: %v", err)
 	}
-	if err := MarkSpent(st, Kind(7), testMarker(3)); !errors.Is(err, ErrUnknownKind) {
+	if err := MarkSpent(st, Kind(7), 2, testMarker(3), NoGlobalPosition); !errors.Is(err, ErrUnknownKind) {
 		t.Errorf("unknown kind: %v", err)
 	}
 	if !IsSpent(st, Kind(7), testMarker(3)) {
@@ -85,17 +85,17 @@ func TestMarkerSetsAreSeparate(t *testing.T) {
 	st := newState(t)
 	m := testMarker(1)
 	// A data marker value written into the coin set (TH-13).
-	if err := MarkSpent(st, Coin, m); err != nil {
+	if err := MarkSpent(st, Coin, 1, m, NoGlobalPosition); err != nil {
 		t.Fatal(err)
 	}
 	if IsSpent(st, Data, m) {
 		t.Fatal("a coin marker counts as a spent data marker")
 	}
-	if err := MarkSpent(st, Data, m); err != nil {
+	if err := MarkSpent(st, Data, 1, m, NoGlobalPosition); err != nil {
 		t.Fatalf("the data set refuses a value spent in the coin set: %v", err)
 	}
 	n := testMarker(2)
-	if err := MarkSpent(st, Data, n); err != nil {
+	if err := MarkSpent(st, Data, 1, n, NoGlobalPosition); err != nil {
 		t.Fatal(err)
 	}
 	if IsSpent(st, Coin, n) {
@@ -121,7 +121,7 @@ func TestMarkerSlotLayout(t *testing.T) {
 	if got := st.GetState(ghost.CoinMarkerAccount, m); got != (common.Hash{}) {
 		t.Fatalf("marker slot before: %x", got)
 	}
-	if err := MarkSpent(st, Coin, m); err != nil {
+	if err := MarkSpent(st, Coin, 1, m, NoGlobalPosition); err != nil {
 		t.Fatal(err)
 	}
 	st = commitAndReopen(t, sdb, st, 1)
@@ -148,7 +148,7 @@ func TestAnyNonZeroMarkerCountsAsSpent(t *testing.T) {
 		if !IsSpent(st, Data, m) {
 			t.Errorf("value %x does not count as spent", v)
 		}
-		if err := MarkSpent(st, Data, m); !errors.Is(err, ErrMarkerSpent) {
+		if err := MarkSpent(st, Data, 1, m, NoGlobalPosition); !errors.Is(err, ErrMarkerSpent) {
 			t.Errorf("value %x: MarkSpent %v, want %v", v, err, ErrMarkerSpent)
 		}
 		if got := st.GetState(ghost.DataMarkerAccount, m); got != v {
@@ -169,10 +169,10 @@ func TestAccountsSurviveEmptyAccountCleanup(t *testing.T) {
 	if _, err := Append(st, Data, 1, testLeaf(1)); err != nil {
 		t.Fatal(err)
 	}
-	if err := MarkSpent(st, Coin, testMarker(0)); err != nil {
+	if err := MarkSpent(st, Coin, 1, testMarker(0), NoGlobalPosition); err != nil {
 		t.Fatal(err)
 	}
-	if err := MarkSpent(st, Data, testMarker(1)); err != nil {
+	if err := MarkSpent(st, Data, 1, testMarker(1), NoGlobalPosition); err != nil {
 		t.Fatal(err)
 	}
 	coinRoot, dataRoot := mustRoot(t, Release, st, Coin), mustRoot(t, Release, st, Data)

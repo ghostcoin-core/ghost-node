@@ -138,7 +138,7 @@ func (r *refSet) has(m common.Hash) bool {
 
 func markData(t *testing.T, st StateDB, m common.Hash) {
 	t.Helper()
-	if err := MarkSpent(st, Data, m); err != nil {
+	if err := MarkSpent(st, Data, 1, m, NoGlobalPosition); err != nil {
 		t.Fatalf("marking %x: %v", m, err)
 	}
 }
@@ -379,7 +379,7 @@ func TestMarkerSetMatchesReferenceModel(t *testing.T) {
 
 func TestMarkerSetRefusesZeroAndRepeat(t *testing.T) {
 	st := newState(t)
-	if err := MarkSpent(st, Data, common.Hash{}); !errors.Is(err, ErrZeroMarker) {
+	if err := MarkSpent(st, Data, 1, common.Hash{}, NoGlobalPosition); !errors.Is(err, ErrZeroMarker) {
 		t.Errorf("zero marker in the genesis set: %v, want %v", err, ErrZeroMarker)
 	}
 	if st.Exist(ghost.DataMarkerAccount) || st.IntermediateRoot(true) != types.EmptyRootHash {
@@ -388,10 +388,10 @@ func TestMarkerSetRefusesZeroAndRepeat(t *testing.T) {
 	m := testMarker(1)
 	markData(t, st, m)
 	stateRoot, setRoot := st.IntermediateRoot(true), markerRoot(t, st)
-	if err := MarkSpent(st, Data, common.Hash{}); !errors.Is(err, ErrZeroMarker) {
+	if err := MarkSpent(st, Data, 1, common.Hash{}, NoGlobalPosition); !errors.Is(err, ErrZeroMarker) {
 		t.Errorf("zero marker: %v, want %v", err, ErrZeroMarker)
 	}
-	if err := MarkSpent(st, Data, m); !errors.Is(err, ErrMarkerSpent) {
+	if err := MarkSpent(st, Data, 1, m, NoGlobalPosition); !errors.Is(err, ErrMarkerSpent) {
 		t.Errorf("repeat: %v, want %v", err, ErrMarkerSpent)
 	}
 	if st.IntermediateRoot(true) != stateRoot || markerRoot(t, st) != setRoot || MarkerSetCount(st) != 2 {
@@ -466,7 +466,7 @@ func TestMarkerSetInsertWorkIsBounded(t *testing.T) {
 		markData(t, st, m)
 	}
 	c := &countingState{StateDB: st}
-	if err := MarkSpent(c, Data, markers[1000]); err != nil {
+	if err := MarkSpent(c, Data, 1, markers[1000], NoGlobalPosition); err != nil {
 		t.Fatal(err)
 	}
 	if c.reads > 2000 || c.writes > 400 {
@@ -481,10 +481,13 @@ func TestMarkerSetInsertWorkIsBounded(t *testing.T) {
 	}
 }
 
-func TestMarkSpentInsertsDataMarkersOnly(t *testing.T) {
+// TestMarkSpentKeepsTheSetsApart checks that a coin marker goes into the
+// coin marker set only and a data marker into the data marker set only, and
+// that both refuse the zero marker, the sentinel's value.
+func TestMarkSpentKeepsTheSetsApart(t *testing.T) {
 	st := newState(t)
 	m := testMarker(1)
-	if err := MarkSpent(st, Coin, m); err != nil {
+	if err := MarkSpent(st, Coin, 1, m, 7); err != nil {
 		t.Fatal(err)
 	}
 	if markerRoot(t, st) != EmptyMarkerSetRoot || MarkerSetCount(st) != 1 {
@@ -493,10 +496,23 @@ func TestMarkSpentInsertsDataMarkersOnly(t *testing.T) {
 	if st.Exist(ghost.DataMarkerAccount) {
 		t.Error("a coin marker wrote to the data marker account")
 	}
-	if err := MarkSpent(st, Coin, common.Hash{}); err != nil {
-		t.Errorf("the coin set refuses the zero marker: %v", err)
+	if CoinMarkerSetCount(st) != 2 {
+		t.Errorf("coin marker set count %d, want 2", CoinMarkerSetCount(st))
+	}
+	if v, _, _, appended, err := CoinMarkerSetLeaf(st, 1); err != nil || v != m || appended != 7 {
+		t.Errorf("coin marker leaf 1 is %x appended %d (%v), want %x appended 7", v, appended, err, m)
+	}
+	if err := MarkSpent(st, Coin, 1, common.Hash{}, NoGlobalPosition); !errors.Is(err, ErrZeroMarker) {
+		t.Errorf("the coin set takes the zero marker: %v", err)
+	}
+	coinRoot, err := CoinMarkerRoot(st)
+	if err != nil {
+		t.Fatal(err)
 	}
 	markData(t, st, m)
+	if again, err := CoinMarkerRoot(st); err != nil || again != coinRoot {
+		t.Errorf("a data marker changed the coin marker root: %x, was %x (%v)", again, coinRoot, err)
+	}
 	ref := newRefSet()
 	ref.insert(m)
 	if got, want := markerRoot(t, st), ref.root(); got != want {

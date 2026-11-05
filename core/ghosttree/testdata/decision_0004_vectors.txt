@@ -1,0 +1,92 @@
+# Golden vectors of decision 0004, the lookup formats.
+#
+# Source: docs/decisions/0004-lookup-formats.md in ghostcoin-core/ghost, whose
+# reference checker scripts/check_decision_0004.py prints every block with
+# --print. Values are hex; S is SHA3-256 and K is Keccak-256, each over
+# len(tag) || tag || inputs; integers are big-endian; a global position is 5
+# bytes.
+#
+# One [name] block per vector, one "field = value" line per field.
+
+[lookup-tag]
+k_note = 35136c4a7bdccb4b26159c15f86567a483ac58e1b2c40dca49a5d099272c4181
+tag0 = 74c5d993f5f018e3174926b2c8e8fb68
+tag1 = 98f00763f51d9e982a7814297473729f
+tag2 = b3e8df15fdd3d0f3ac8c7562c50ba57e
+
+[data-lookup-tag]
+k_note = 08f3c586fe83f60374f0551ad5a25ddab61fd4fc70ab71572c0aae3b042c82ab
+tag0 = 9d77715bd859976996087ca266cf37b0
+
+[coin-lookup-empty]
+root = 994a8bc5ba72f53f4449d4981c3ea8294d504b148afa58abec873819b143554b
+
+[data-lookup-empty]
+root = c0ad355e8462fbe6093fa0ac37c0afc450b36cbe679bb7de3050a9a1b2cddece
+
+[coin-lookup-one-leaf]
+# tag(0) at global position 0
+root = 09cf86c7dd4db859ff77e3ee9b988e324cc4fe53a384f6b4b674a4b9ddc64954
+
+[coin-lookup-two-leaves]
+# tag(0) at 0, tag(1) at 1
+root = 489542787d7482d68a5bbd92c21f8225be3b0420bf06f1232c01af1f9f4c4451
+
+[coin-lookup-copied-tag]
+# tag(0) at 0, tag(1) at 1, tag(0) at 2
+root = 2f880d0d3c8d149461815119475cc2c32bb5932ff3fa98a7dd771cdd2a18957e
+# index leaves: tag position nextTag nextPosition nextIndex
+leaf0 = 00000000000000000000000000000000 0000000000 74c5d993f5f018e3174926b2c8e8fb68 0000000000 0000000001
+leaf1 = 74c5d993f5f018e3174926b2c8e8fb68 0000000000 74c5d993f5f018e3174926b2c8e8fb68 0000000002 0000000003
+leaf2 = 98f00763f51d9e982a7814297473729f 0000000001 00000000000000000000000000000000 0000000000 0000000000
+leaf3 = 74c5d993f5f018e3174926b2c8e8fb68 0000000002 98f00763f51d9e982a7814297473729f 0000000001 0000000002
+
+[data-lookup-one-leaf]
+# data tag(0) at global position 0
+root = 04d419113c03c7b976eea6b1e9334f91d529faa05a89355e64b8439d6b96f9cc
+
+[coin-marker-set-markers]
+m0 = d93e36255156ef29b2e0785719a1a22ec2b03a8500013c94f5277aa1cb6daf78
+m0_appended = 0000000001
+m1 = f7476caa827fa1478d8f2a561e2638a7d4817793176eaced88798bf7d28fa806
+m1_appended = 0000000002
+sentinel_appended = ffffffffff
+
+[coin-marker-set-empty]
+root = 84e7c602ab3870f46bf300eff5581ae88029f7c58afb3758a652e0129e9e85cc
+
+[coin-marker-set-one-marker]
+# m0 appended 1
+root = d2d2d35cf33c017a3bbe0d7867ce1f62948514d1294354c2a11795f046960df8
+
+[coin-marker-set-two-markers]
+# m0 appended 1, m1 appended 2
+root = f073fe2b59b6fd3d2827569ccd5d8652f56aae3547109fb34030749ed6877fb3
+
+[block-lookup-digest-empty]
+encoding = 0000000000000000000000000000000000000000000000000000
+digest = 9217af84b49597c35c570275e095d6a0245cab03c6f0126ce995acaa5023cd7b
+
+[block-lookup-digest-example]
+# coinStart 1, coin tags [tag(1)], dataStart 0, data tags [data tag(0)],
+# coin markers [m0], data markers []
+encoding = 00000000010000000198f00763f51d9e982a7814297473729f0000000000000000019d77715bd859976996087ca266cf37b000000001d93e36255156ef29b2e0785719a1a22ec2b03a8500013c94f5277aa1cb6daf7800000000
+digest = 91534b00a1395018530174d9b5512a570a8d78038cd7f9526926309196a7429e
+
+[genesis-header]
+# fields 19 to 22 of every Ghost genesis header, which has 23 items
+coinLookupRoot = 994a8bc5ba72f53f4449d4981c3ea8294d504b148afa58abec873819b143554b
+dataLookupRoot = c0ad355e8462fbe6093fa0ac37c0afc450b36cbe679bb7de3050a9a1b2cddece
+coinMarkerRoot = 84e7c602ab3870f46bf300eff5581ae88029f7c58afb3758a652e0129e9e85cc
+lookupDigest = 9217af84b49597c35c570275e095d6a0245cab03c6f0126ce995acaa5023cd7b
+
+[global-positions]
+tree0_pos0 = 0000000000
+tree1_pos0 = 0100000000
+tree255_pos4294967294 = fffffffffe
+tree255_pos4294967295 = rejected
+none = ffffffffff
+
+[witness-layouts]
+lookup_witness_bytes = 1332
+coin_marker_witness_bytes = 1359

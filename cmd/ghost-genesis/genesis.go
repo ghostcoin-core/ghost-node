@@ -126,7 +126,9 @@ func genesisTime(medianTime uint32) uint64 {
 }
 
 // genesisBlock builds the block of a genesis, with the roots of the empty
-// coin and data trees and of the empty data marker set in its header.
+// coin and data trees and of the empty data marker set in its header, and
+// the lookup fields of decision 0004: the empty lookup and coin marker roots
+// and the digest of empty lists.
 func genesisBlock(g *genesisT.Genesis) (*types.Block, error) {
 	if len(g.Alloc) != 0 {
 		return nil, fmt.Errorf("genesis allocates to %d accounts, want none", len(g.Alloc))
@@ -135,8 +137,6 @@ func genesisBlock(g *genesisT.Genesis) (*types.Block, error) {
 	if header.Root != types.EmptyRootHash {
 		return nil, fmt.Errorf("genesis state root %x, want the empty root", header.Root)
 	}
-	coin, data := ghosttree.EmptyRoot(ghosttree.Coin), ghosttree.EmptyRoot(ghosttree.Data)
-	marker := ghosttree.EmptyMarkerSetRoot
-	header.CoinTreeRoot, header.DataTreeRoot, header.DataMarkerRoot = &coin, &data, &marker
+	ghosttree.GenesisHeaderFields().SetOn(header)
 	return types.NewBlockWithHeader(header), nil
 }

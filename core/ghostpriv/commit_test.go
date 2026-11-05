@@ -512,7 +512,7 @@ func TestSaltedCommitCarriesSaltToHistory(t *testing.T) {
 
 // TestSaltedCommitDataLengthIsExact builds salted commit data, checks its
 // layout, and sends salted data of every wrong length and version to the
-// commit entry address: only exactly 430 bytes of version 3 are accepted, and
+// commit entry address: only exactly 446 bytes of version 3 are accepted, and
 // anything else, version 1 and the 206 bytes of version 2 included, is
 // ErrCommitData.
 func TestSaltedCommitDataLengthIsExact(t *testing.T) {
@@ -522,10 +522,11 @@ func TestSaltedCommitDataLengthIsExact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ghostpriv.SaltedCommitDataSize != 430 || ghostpriv.CommitDataSize != 414 || ghostpriv.SaltedCommitVersion != 3 || ghostpriv.Version != 1 {
+	if ghostpriv.SaltedCommitDataSize != 446 || ghostpriv.CommitDataSize != 414 || ghostpriv.SaltedCommitVersion != 3 || ghostpriv.Version != 1 {
 		t.Fatalf("sizes %d and %d, versions %d and %d", ghostpriv.SaltedCommitDataSize, ghostpriv.CommitDataSize, ghostpriv.SaltedCommitVersion, ghostpriv.Version)
 	}
-	want := append(append(append([]byte{0x00, 0x03}, good.f[:]...), salt...), good.note...)
+	tag := ghostpriv.FallbackLookupTag(good.f)
+	want := append(append(append(append([]byte{0x00, 0x03}, good.f[:]...), salt...), good.note...), tag[:]...)
 	if !bytes.Equal(data, want) {
 		t.Fatalf("salted commit data\n%x\nwant\n%x", data, want)
 	}
@@ -572,7 +573,8 @@ func TestSaltedCommitDataLengthIsExact(t *testing.T) {
 	}{
 		{"429 bytes", data[:429]},
 		{"431 bytes", with(func(d []byte) []byte { return append(d, 0) })},
-		{"446 bytes, the salt twice", with(func(d []byte) []byte { return append(d, salt...) })},
+		{"462 bytes, the salt twice", with(func(d []byte) []byte { return append(d, salt...) })},
+		{"430 bytes, without the lookup tag", data[:430]},
 		{"430 bytes of version 1", with(func(d []byte) []byte { d[1] = 1; return d })},
 		{"430 bytes of version 2", with(func(d []byte) []byte { d[1] = 2; return d })},
 		{"430 bytes of version 4", with(func(d []byte) []byte { d[1] = 4; return d })},
