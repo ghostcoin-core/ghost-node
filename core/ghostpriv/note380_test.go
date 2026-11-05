@@ -37,8 +37,9 @@ import (
 // bytes, or 430), version 1 and 429 or 431 bytes are ErrCommitData. The
 // receipt logs of both commits carry the whole 380-byte note, and
 // HistoryRecords returns it, as it returns the whole 380-byte remainder note
-// of a version 2 reveal; a version 1 reveal's 156-byte remainder note is
-// recorded zero-padded to 380 bytes.
+// of a version 2 reveal; a version 1 reveal's 156-byte remainder note, and
+// the 156-byte note of the 244-byte log of an old salted commit, are recorded
+// zero-padded to 380 bytes.
 func TestNote380Commit(t *testing.T) {
 	if ghostpriv.NoteSize != 380 {
 		t.Fatalf("NoteSize %d, want 380", ghostpriv.NoteSize)
@@ -198,10 +199,19 @@ func TestNote380Commit(t *testing.T) {
 		t.Errorf("reveal marker record %+v", r)
 	}
 
-	// A commit log of the old 156-byte note is no receipt of the coin rules.
+	// The 244-byte log of a salted commit made with the old 156-byte note,
+	// which the test chain holds, is read: the record keeps its leaf and
+	// salt, with the note zero-padded on the right to 380 bytes.
 	old := &types.Log{Address: coinLog.Address, Topics: coinLog.Topics, Data: append(append([]byte{}, coinLog.Data[:72+156]...), salt...)}
-	if _, err := ghostpriv.HistoryRecords(types.Receipts{{Logs: []*types.Log{old}}}); !errors.Is(err, ghostpriv.ErrReceiptLog) {
-		t.Errorf("commit log of a 156-byte note: %v, want %v", err, ghostpriv.ErrReceiptLog)
+	if len(old.Data) != 244 {
+		t.Fatalf("old commit log of %d bytes, want 244", len(old.Data))
+	}
+	records, err = ghostpriv.HistoryRecords(types.Receipts{{Logs: []*types.Log{old}}})
+	if err != nil || len(records) != 1 {
+		t.Fatalf("commit log of a 156-byte note: %d records, %v", len(records), err)
+	}
+	if r := records[0]; r.Kind != ghosttree.Coin || r.Leaf != cc.Commitment() || !bytes.Equal(r.Note[:156], c.note[:156]) || !bytes.Equal(r.Note[156:], make([]byte, 380-156)) || r.Salt == nil || !bytes.Equal(r.Salt[:], salt) {
+		t.Errorf("old commit record: kind %v leaf %x note %x salt %v", r.Kind, r.Leaf, r.Note[:], r.Salt)
 	}
 	// A version 1 reveal's log keeps its 156-byte note, which the record
 	// holds zero-padded on the right to 380 bytes. A note of any other
