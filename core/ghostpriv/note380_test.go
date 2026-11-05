@@ -47,8 +47,8 @@ func TestNote380Commit(t *testing.T) {
 	if ghosttree.NoteBytes != 380 {
 		t.Fatalf("ghosttree.NoteBytes %d, want 380", ghosttree.NoteBytes)
 	}
-	if ghostpriv.SaltedCommitDataSize != 2+32+16+380 {
-		t.Fatalf("SaltedCommitDataSize %d, want 430", ghostpriv.SaltedCommitDataSize)
+	if ghostpriv.SaltedCommitDataSize != 2+32+16+380+16 {
+		t.Fatalf("SaltedCommitDataSize %d, want 446", ghostpriv.SaltedCommitDataSize)
 	}
 	if ghostpriv.SaltedCommitVersion != 0x0003 {
 		t.Fatalf("SaltedCommitVersion %#x, want 0x0003", ghostpriv.SaltedCommitVersion)
@@ -63,9 +63,10 @@ func TestNote380Commit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	tag := ghostpriv.FallbackLookupTag(c.f)
 	want := binary.BigEndian.AppendUint16(nil, 0x0003)
-	want = append(append(append(want, c.f[:]...), salt...), c.note...)
-	if len(data) != 430 || !bytes.Equal(data, want) {
+	want = append(append(append(append(want, c.f[:]...), salt...), c.note...), tag[:]...)
+	if len(data) != 446 || !bytes.Equal(data, want) {
 		t.Fatalf("commit data of %d bytes\n%x\nwant\n%x", len(data), data, want)
 	}
 	if _, err := ghostpriv.SaltedCommitData(c.f, salt, c.note[:156]); err == nil {

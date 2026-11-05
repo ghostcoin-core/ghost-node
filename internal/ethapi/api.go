@@ -1212,6 +1212,18 @@ func RPCMarshalHeader(head *types.Header) map[string]interface{} {
 	if head.DataMarkerRoot != nil {
 		result["dataMarkerRoot"] = head.DataMarkerRoot
 	}
+	if head.CoinLookupRoot != nil {
+		result["coinLookupRoot"] = head.CoinLookupRoot
+	}
+	if head.DataLookupRoot != nil {
+		result["dataLookupRoot"] = head.DataLookupRoot
+	}
+	if head.CoinMarkerRoot != nil {
+		result["coinMarkerRoot"] = head.CoinMarkerRoot
+	}
+	if head.LookupDigest != nil {
+		result["lookupDigest"] = head.LookupDigest
+	}
 	return result
 }
 
@@ -1239,6 +1251,10 @@ type RPCMarshalHeaderT struct {
 	CoinTreeRoot     *common.Hash      `json:"coinTreeRoot,omitempty"`
 	DataTreeRoot     *common.Hash      `json:"dataTreeRoot,omitempty"`
 	DataMarkerRoot   *common.Hash      `json:"dataMarkerRoot,omitempty"`
+	CoinLookupRoot   *common.Hash      `json:"coinLookupRoot,omitempty"`
+	DataLookupRoot   *common.Hash      `json:"dataLookupRoot,omitempty"`
+	CoinMarkerRoot   *common.Hash      `json:"coinMarkerRoot,omitempty"`
+	LookupDigest     *common.Hash      `json:"lookupDigest,omitempty"`
 }
 
 // NewRPCMarshalHeaderTFromHeader constructs a new RPCMarshalHeaderT struct from a given header.
@@ -1279,6 +1295,10 @@ func NewRPCMarshalHeaderTFromHeader(header *types.Header) *RPCMarshalHeaderT {
 	head.CoinTreeRoot = header.CoinTreeRoot
 	head.DataTreeRoot = header.DataTreeRoot
 	head.DataMarkerRoot = header.DataMarkerRoot
+	head.CoinLookupRoot = header.CoinLookupRoot
+	head.DataLookupRoot = header.DataLookupRoot
+	head.CoinMarkerRoot = header.CoinMarkerRoot
+	head.LookupDigest = header.LookupDigest
 
 	return head
 }

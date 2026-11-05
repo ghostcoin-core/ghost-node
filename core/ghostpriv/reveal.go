@@ -551,7 +551,11 @@ func checkRevealFields(st StateDB, env *BlockEnv, r *Reveal) (Fee, RevealFailure
 		return Fee{}, RevealState, fmt.Errorf("%w: %x", ErrRevealRoot, r.Root)
 	}
 	// Check 8: the marker, against the spent set, which holds the markers of
-	// earlier reveals of this block too.
+	// earlier reveals of this block too. The zero marker is the coin marker
+	// set's sentinel and never spendable.
+	if r.Marker == (common.Hash{}) {
+		return Fee{}, RevealState, fmt.Errorf("%w: %w", ErrRevealMarker, ghosttree.ErrZeroMarker)
+	}
 	if ghosttree.IsSpent(st, ghosttree.Coin, r.Marker) {
 		return Fee{}, RevealState, fmt.Errorf("%w: %x", ErrRevealMarker, r.Marker)
 	}
@@ -636,8 +640,13 @@ func applyCheckedReveal(st StateDB, env *BlockEnv, r *Reveal, fee Fee) error {
 	if err != nil {
 		return fail(fmt.Errorf("%w: %w", ErrRevealTree, err))
 	}
-	// Check 13: the change.
-	if err := ghosttree.MarkSpent(st, ghosttree.Coin, r.Marker); err != nil {
+	appended, err := ghosttree.GlobalPositionOf(res)
+	if err != nil {
+		return fail(fmt.Errorf("%w: %w", ErrRevealTree, err))
+	}
+	// Check 13: the change. The marker's leaf in the coin marker set names
+	// the remainder this reveal appended.
+	if err := ghosttree.MarkSpent(st, ghosttree.Coin, height, r.Marker, appended); err != nil {
 		return fail(fmt.Errorf("%w: %w", ErrRevealMarker, err))
 	}
 	if err := addTotal(st, SlotTotalOut, new(uint256.Int).Add(r.Out, r.Fee)); err != nil {
@@ -947,7 +956,7 @@ func ApplyDataReveal(st StateDB, env *BlockEnv, verifier Verifier, envelope []by
 		return err
 	}
 	snap := st.Snapshot()
-	if err := ghosttree.MarkSpent(st, ghosttree.Data, r.Marker); err != nil {
+	if err := ghosttree.MarkSpent(st, ghosttree.Data, env.Header.Number.Uint64(), r.Marker, ghosttree.NoGlobalPosition); err != nil {
 		st.RevertToSnapshot(snap)
 		return fmt.Errorf("%w: %w", ErrDataRevealMarker, err)
 	}

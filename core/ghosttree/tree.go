@@ -324,14 +324,69 @@ type AppendResult struct {
 }
 
 // Append appends leaf to the current tree of a kind in the block at height,
-// as spec 05, section 3 fixes. When the tree is full, the leaf starts the
-// next tree, unless the tree filled in this block (ErrFillingBlock) or its
-// index is the last (ErrIndexExhausted). On an error nothing is written.
+// as spec 05, section 3 fixes, with no lookup entry: AppendTagged with the
+// zero tag.
 func Append(st StateDB, kind Kind, height uint64, leaf common.Hash) (AppendResult, error) {
+	return AppendTagged(st, kind, height, leaf, LookupTag{})
+}
+
+// AppendTagged appends leaf to the current tree of a kind in the block at
+// height, as spec 05, section 3 fixes, and, for a tag other than zero, puts
+// the entry (tag, g) of its global position g into the kind's lookup index
+// (decision 0004). When the tree is full, the leaf starts the next tree,
+// unless the tree filled in this block (ErrFillingBlock) or its index is the
+// last (ErrIndexExhausted); a leaf without a usable global position is
+// ErrGlobalPosition. The first append of a block records where the block's
+// leaves start, for its lookup digest. On an error nothing is written.
+func AppendTagged(st StateDB, kind Kind, height uint64, leaf common.Hash, tag LookupTag) (AppendResult, error) {
 	if err := Release.Check(); err != nil {
 		return AppendResult{}, err
 	}
-	return appendLeaf(Release, st, kind, height, leaf)
+	if !kind.valid() {
+		return AppendResult{}, ErrUnknownKind
+	}
+	if leaf == (common.Hash{}) {
+		return AppendResult{}, ErrZeroLeaf
+	}
+	g, err := nextGlobal(Release, st, kind, height)
+	if err != nil {
+		return AppendResult{}, err
+	}
+	var lookup *iset
+	if !tag.IsZero() {
+		if lookup, err = planLookup(st, kind, g, tag); err != nil {
+			return AppendResult{}, err
+		}
+	}
+	res, err := appendLeaf(Release, st, kind, height, leaf)
+	if err != nil {
+		return AppendResult{}, err
+	}
+	noteBlockStart(st, leafList(kind), height, g)
+	if lookup != nil {
+		lookup.commit()
+	}
+	return res, nil
+}
+
+// nextGlobal returns the global position the next leaf of a kind takes in
+// the block at height, with the errors appendLeaf gives for a full tree.
+func nextGlobal(p Params, st StateDB, kind Kind, height uint64) (uint64, error) {
+	s, err := load(p, st, kind)
+	if err != nil {
+		return 0, err
+	}
+	index, pos := s.index, s.count
+	if s.count == p.capacity() {
+		switch {
+		case s.lastFilled == height:
+			return 0, ErrFillingBlock
+		case s.index == math.MaxUint64:
+			return 0, ErrIndexExhausted
+		}
+		index, pos = s.index+1, 0
+	}
+	return GlobalPosition(index, uint32(pos))
 }
 
 func appendLeaf(p Params, st StateDB, kind Kind, height uint64, leaf common.Hash) (AppendResult, error) {
@@ -464,31 +519,41 @@ func IsSpent(st StateDB, kind Kind, marker common.Hash) bool {
 	return st.GetState(MarkerAccount(kind), marker) != (common.Hash{})
 }
 
-// MarkSpent adds marker to the spent set of the kind, writing 1 to the slot
-// keyed by the marker. A data marker also goes into the data marker-set
-// tree in the same call (markerset.go), so DataMarkerRoot follows every data
-// reveal and revoke; the zero data marker is ErrZeroMarker. A marker already
-// spent, including by an earlier transaction of the same block, is
-// ErrMarkerSpent. On an error nothing is written.
-func MarkSpent(st StateDB, kind Kind, marker common.Hash) error {
+// MarkSpent adds marker to the spent set of the kind in the block at
+// height, writing 1 to the slot keyed by the marker. The marker also goes
+// into the kind's marker-set tree in the same call (markerset.go), so
+// DataMarkerRoot and CoinMarkerRoot follow every reveal and revoke; a coin
+// marker's leaf carries appended, the global position of the leaf the same
+// reveal appended, or NoGlobalPosition for none (a data marker has no such
+// field and appended is ignored). The zero marker is ErrZeroMarker. A marker
+// already spent, including by an earlier transaction of the same block, is
+// ErrMarkerSpent. The first marker of a kind in a block records where the
+// block's markers start, for its lookup digest. On an error nothing is
+// written.
+func MarkSpent(st StateDB, kind Kind, height uint64, marker common.Hash, appended uint64) error {
 	if !kind.valid() {
 		return ErrUnknownKind
 	}
 	if IsSpent(st, kind, marker) {
 		return ErrMarkerSpent
 	}
-	var set *markerSet
 	if kind == Data {
-		set = newMarkerSet(st)
-		if err := set.plan(marker); err != nil {
-			return err
-		}
+		appended = 0
+	}
+	set := newISet(markerSpec(kind), st)
+	pos, err := planMarker(set, marker, appended)
+	if err != nil {
+		return err
 	}
 	addr := MarkerAccount(kind)
 	ensureAccount(st, addr)
 	st.SetState(addr, marker, word(1))
-	if set != nil {
-		set.commit()
-	}
+	noteBlockStart(st, markerList(kind), height, pos)
+	set.commit()
 	return nil
+}
+
+// GlobalPositionOf returns the global position of an appended leaf.
+func GlobalPositionOf(res AppendResult) (uint64, error) {
+	return GlobalPosition(res.TreeIndex, res.Position)
 }

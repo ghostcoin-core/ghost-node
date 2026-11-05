@@ -257,23 +257,31 @@ func (r *RandomX) verifyHeader(chain consensus.ChainHeaderReader, header, parent
 	return nil
 }
 
-// checkTreeRootFields checks that a header carries both tree roots and the
-// data marker root when its chain has EIP-1559 in force, and none of them
-// otherwise. The roots take the Ghost layout, which requires the base fee, so
-// a chain without EIP-1559 (so far only developer mode) cannot carry them
-// after its genesis.
+// checkTreeRootFields checks that a header carries both tree roots, the data
+// marker root and the four lookup fields of decision 0004 when its chain has
+// EIP-1559 in force, and none of them otherwise. The fields take the Ghost
+// layout, which requires the base fee, so a chain without EIP-1559 (so far
+// only developer mode) cannot carry them after its genesis.
 func checkTreeRootFields(london bool, header *types.Header) error {
-	switch {
-	case !london && (header.CoinTreeRoot != nil || header.DataTreeRoot != nil || header.DataMarkerRoot != nil):
-		return fmt.Errorf("%w: tree roots without a base fee", errUnsupportedField)
-	case !london:
-		return nil
-	case header.CoinTreeRoot == nil:
-		return fmt.Errorf("%w: coinTreeRoot", errMissingTreeRoot)
-	case header.DataTreeRoot == nil:
-		return fmt.Errorf("%w: dataTreeRoot", errMissingTreeRoot)
-	case header.DataMarkerRoot == nil:
-		return fmt.Errorf("%w: dataMarkerRoot", errMissingTreeRoot)
+	fields := []struct {
+		name string
+		set  bool
+	}{
+		{"coinTreeRoot", header.CoinTreeRoot != nil},
+		{"dataTreeRoot", header.DataTreeRoot != nil},
+		{"dataMarkerRoot", header.DataMarkerRoot != nil},
+		{"coinLookupRoot", header.CoinLookupRoot != nil},
+		{"dataLookupRoot", header.DataLookupRoot != nil},
+		{"coinMarkerRoot", header.CoinMarkerRoot != nil},
+		{"lookupDigest", header.LookupDigest != nil},
+	}
+	for _, f := range fields {
+		switch {
+		case !london && f.set:
+			return fmt.Errorf("%w: tree roots without a base fee", errUnsupportedField)
+		case london && !f.set:
+			return fmt.Errorf("%w: %s", errMissingTreeRoot, f.name)
+		}
 	}
 	return nil
 }
@@ -352,20 +360,13 @@ func (r *RandomX) FinalizeAndAssemble(chain consensus.ChainHeaderReader, header 
 	}
 	r.Finalize(chain, header, state, txs, nil, nil)
 	header.CoinTreeRoot, header.DataTreeRoot, header.DataMarkerRoot = nil, nil, nil
+	header.CoinLookupRoot, header.DataLookupRoot, header.CoinMarkerRoot, header.LookupDigest = nil, nil, nil, nil
 	if london {
-		coinRoot, err := ghosttree.Root(state, ghosttree.Coin)
+		fields, err := ghosttree.ReadHeaderFields(state, header.Number.Uint64())
 		if err != nil {
 			return nil, err
 		}
-		dataRoot, err := ghosttree.Root(state, ghosttree.Data)
-		if err != nil {
-			return nil, err
-		}
-		markerRoot, err := ghosttree.DataMarkerRoot(state)
-		if err != nil {
-			return nil, err
-		}
-		header.CoinTreeRoot, header.DataTreeRoot, header.DataMarkerRoot = &coinRoot, &dataRoot, &markerRoot
+		fields.SetOn(header)
 	}
 	header.Root = state.IntermediateRoot(config.IsEnabled(config.GetEIP161dTransition, header.Number))
 	return types.NewBlock(header, txs, nil, receipts, trie.NewStackTrie(nil)), nil

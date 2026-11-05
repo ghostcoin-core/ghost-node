@@ -543,8 +543,11 @@ func GenesisToBlock(g *genesisT.Genesis, db ethdb.Database) *types.Block {
 }
 
 // setGenesisTreeRoots gives the genesis header of a Ghost chain the roots of
-// the empty coin and data trees and of the empty data marker set. The genesis
-// state holds no tree state, so its state root stays that of the allocation.
+// the empty coin and data trees and of the empty data marker set, and the
+// lookup fields of decision 0004: the roots of the empty coin and data lookup
+// indices and of the empty coin marker set, and the digest of empty lists.
+// The genesis state holds no tree state, so its state root stays that of the
+// allocation.
 //
 // The Ghost chains are the public test network, the internal test network
 // and developer mode, all Core-Geth configurations. Upstream test configurations share developer
@@ -565,9 +568,7 @@ func setGenesisTreeRoots(g *genesisT.Genesis, head *types.Header) {
 	if head.BaseFee == nil || head.WithdrawalsHash != nil || head.BlobGasUsed != nil || head.ExcessBlobGas != nil || head.ParentBeaconRoot != nil {
 		return
 	}
-	coin, data := ghosttree.EmptyRoot(ghosttree.Coin), ghosttree.EmptyRoot(ghosttree.Data)
-	marker := ghosttree.EmptyMarkerSetRoot
-	head.CoinTreeRoot, head.DataTreeRoot, head.DataMarkerRoot = &coin, &data, &marker
+	ghosttree.GenesisHeaderFields().SetOn(head)
 }
 
 // CommitGenesis writes the block and state of a genesis specification to the database.

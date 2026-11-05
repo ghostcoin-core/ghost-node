@@ -2,7 +2,9 @@
 
 The node keeps the two commitment trees of the specification (spec 05,
 sections 3, 4, 6, 7 and 10): the coin tree and the data tree, each of depth
-32 (2^32 leaves per tree), and one spent-marker set per kind. The code is in
+32 (2^32 leaves per tree), and one spent-marker set per kind. With decision
+0004 of the Ghost repository, the lookup formats, it also keeps a lookup index per tree, a tree of the spent coin markers, and a
+lookup digest per block, all in the header. The code is in
 `core/ghosttree`.
 
 ## Hashing
@@ -54,8 +56,8 @@ in the same call that writes the marker slot, so a data reveal and a data
 revoke both insert; the slot check that refuses a repeat runs first
 (`ErrMarkerSpent`). The marker of 32 zero bytes is the sentinel's value and is
 refused with `ErrZeroMarker`, and a data reveal carrying it fails check 10
-with `ErrDataRevealMarker` before its proof is checked. Coin markers have no
-tree.
+with `ErrDataRevealMarker` before its proof is checked. Coin markers have a
+tree of their own, below.
 
 The tree lives in the data marker account's storage, under keys
 `K("ghost/data-marker-set-slot/v1", ...)`, which no marker can be:
@@ -91,6 +93,112 @@ position's bits gives the root, `low.value < m` and `m < low.nextValue` or
 `low.nextValue` is zero. Both are Go functions only; no RPC method serves a
 witness.
 
+The data marker set, the coin marker set and the two lookup indices below
+are the same indexed tree of depth 40 with their own hash and slot tags
+(`core/ghosttree/indexedset.go`).
+
+## The coin marker-set tree
+
+Decision 0004 supersedes the rule of spec 05 that the coin spent-marker set
+has no root. The coin marker account also keeps an indexed tree of depth 40
+of the spent coin markers, in ascending order from its sentinel. A leaf is
+74 bytes, `value (32) | nextValue (32) | nextIndex (5) | appended (5)`, and
+hashes as `K("ghost/coin-marker-set-leaf/v1", leaf)`; a node at level `l` is
+`K("ghost/coin-marker-set-node/v1", l, left, right)`. `appended` is the
+global position (below) of the leaf the same reveal appended, its remainder,
+and `ffffffffff` for none; the sentinel is `(0, 0, 0, ffffffffff)`. A marker
+takes the next position, so the leaves are in the order the chain spent the
+markers. The empty set's root is
+`84e7c602ab3870f46bf300eff5581ae88029f7c58afb3758a652e0129e9e85cc`.
+
+`MarkSpent(st, Coin, height, m, appended)` inserts in the same call that
+writes the marker slot; the reveal and the policy reveal append their
+remainder first and pass its global position. The zero coin marker is the
+sentinel's value: `MarkSpent` refuses it with `ErrZeroMarker`, and a reveal
+carrying it fails check 8 with `ErrRevealMarker`. `CoinMarkerWitness(st,
+position)` and `CoinMarkerAbsenceWitness(st, m)` give the 1,359-byte witness
+`value | nextValue | nextIndex | appended | position (5) | 40 siblings`, and
+`VerifyCoinMarker` and `VerifyCoinMarkerAbsence` check them against a root.
+The tree lives under keys `K("ghost/coin-marker-set-slot/v1", ...)` of the
+layout of the data marker-set tree, with a fourth leaf word for `appended`.
+
+## Lookup indices
+
+Each commitment tree has a lookup index (decision 0004): an indexed tree of
+depth 40 whose leaves, 47 bytes,
+`tag (16) | position (5) | nextTag (16) | nextPosition (5) | nextIndex (5)`,
+link the entries in ascending order of `(tag, position)` from the sentinel of
+47 zero bytes at index position 0. A leaf hashes as
+`K("ghost/coin-lookup-leaf/v1", leaf)` or `K("ghost/data-lookup-leaf/v1",
+leaf)`, a node as `K("ghost/coin-lookup-node/v1", l, left, right)` or the
+data tag. The empty roots are
+`994a8bc5ba72f53f4449d4981c3ea8294d504b148afa58abec873819b143554b` (coin) and
+`c0ad355e8462fbe6093fa0ac37c0afc450b36cbe679bb7de3050a9a1b2cddece` (data).
+
+A leaf's global position is its tree index in one byte and its position in
+four, 5 bytes big-endian: tree 1 position 0 is `0100000000`. The last
+position of tree 255 is not usable, so `fffffffffe` is the last global
+position and a leaf beyond it is refused with `ErrGlobalPosition`; the entry
+of the leaf at global position `g` sits at index position `g + 1`. A lookup
+tag is the first 16 bytes of `S("ghost/note-lookup/v1", k_note, i)`, `S` being
+SHA3-256 over `len(tag) | tag | inputs` and `i` 8 bytes
+(`ghosttree.DeriveLookupTag`); the wallet derives it, the node only stores
+it. Tags may repeat; entries of one tag are ordered by position.
+
+`AppendTagged(st, kind, height, leaf, tag)` appends the leaf and inserts its
+entry in the same call; `Append` is the same with no tag, and its leaf's
+index position stays the empty leaf. `LookupMembershipWitness`,
+`LookupLowWitness` and the three checks `VerifyLookupMembership` (the leaf at
+`g` has the tag), `VerifyLookupFirst` (the entry below the tag's first points
+at `g`) and `VerifyLookupAbsence` (no entry has the tag) use the 1,332-byte
+witness `leaf (47) | index position (5) | 40 siblings`. The coin index lives
+in the coin tree account under `K("ghost/coin-lookup-slot/v1", ...)`, the
+data index in the data tree account under `K("ghost/data-lookup-slot/v1",
+...)`, with the layout of the marker-set trees and no leaf count.
+
+Which leaves carry a tag:
+
+| Leaf | Tag |
+|---|---|
+| commit, data commit | the 16 bytes after the note in the commit data, 446 bytes in all; 16 zero bytes are refused with `ErrCommitLookupTag`, any other length with `ErrCommitData` |
+| reveal remainder | none yet: the reveal does not carry `remainder_tag` (see below) |
+| policy reveal remainder, escrow recommit | none |
+
+`ghostpriv.LookupCommitData(f, salt, note, tag)` builds the commit data;
+`SaltedCommitData(f, salt, note)` builds it with `FallbackLookupTag(f)`,
+`DeriveLookupTag(f, 0)`, for a sender without a lookup key. The receipt logs
+are unchanged.
+
+Decision 0004 also adds `remainder_tag` to the coin reveal and its binding.
+The node does not carry it yet: the binding is a public input of the proof,
+and the reveal's envelope length is fixed with its gas (spec 10) and its
+proof's statement, so the change comes with the prover in its own change.
+
+## The block lookup digest
+
+Each header carries `K("ghost/block-lookup-digest/v1", encoding)` over
+
+```text
+coinStart (5) | coinTagCount (4) | coinTags (16 each) |
+dataStart (5) | dataTagCount (4) | dataTags (16 each) |
+coinMarkerCount (4) | coinMarkers (32 each) | dataMarkerCount (4) | dataMarkers (32 each)
+```
+
+the tags of the leaves the block appended to each tree in order from the
+global position of its first, and the markers it spent of each kind in
+order. A leaf without an entry is listed with 16 zero bytes, a tag no
+transaction may carry, so the `i`-th tag is that of the leaf at `start + i`;
+a block that appends no leaf to a tree starts the list at the position the
+next leaf would take. The digest of empty lists from 0, the genesis value,
+is `9217af84b49597c35c570275e095d6a0245cab03c6f0126ce995acaa5023cd7b`.
+
+The node reads the lists from the state after the block
+(`ghosttree.ReadBlockLookup`): each list keeps a record in its account,
+under `K("ghost/block-lookup-slot/v1", list, field)`, of the height of the
+last block that changed it plus one and the position its first change took.
+`Append` and `MarkSpent` write it with the first change of a block, so a
+block that changes nothing writes nothing.
+
 The root is computed from the stored state alone: the final root for a full
 tree, otherwise the fold over the frontier and the empty subtrees. A count
 above 2^32, a set bit of the count over an empty frontier slot, a full tree
@@ -112,27 +220,34 @@ transaction-format specification and replace them in a constants-only change.
 
 ## Header layout
 
-`Header` has three fields, `CoinTreeRoot`, `DataTreeRoot` and
-`DataMarkerRoot`, encoded by the hand-written `EncodeRLP` and `DecodeRLP` of
+`Header` has seven Ghost fields, `CoinTreeRoot`, `DataTreeRoot`,
+`DataMarkerRoot`, `CoinLookupRoot`, `DataLookupRoot`, `CoinMarkerRoot` and
+`LookupDigest`, encoded by the hand-written `EncodeRLP` and `DecodeRLP` of
 `core/types/header_ghost.go`:
 
-- With all three roots nil, a header encodes exactly as before, with the base
+- With all seven nil, a header encodes exactly as before, with the base
   client's optional fields.
-- With all three roots set, the base fee set and no withdrawals root, blob gas
-  fields or parent beacon root, a header is the 19-item list of spec 05,
-  section 10: fields 0 to 14, the base fee, the coin tree root, the data tree
-  root and the data marker root.
-- Any other combination, including one or two of the three roots, does not
-  encode.
+- With all seven set, the base fee set and no withdrawals root, blob gas
+  fields or parent beacon root, a header is the 23-item list of spec 05,
+  section 10, and decision 0004: fields 0 to 14, the base fee, the coin tree
+  root, the data tree root, the data marker root, and as fields 19 to 22 the
+  coin lookup root, the data lookup root, the coin marker root and the block
+  lookup digest.
+- With the three roots set and the four lookup fields nil, a header is the
+  19-item list before decision 0004. Only the base client's test engines
+  write it; it is not a Ghost header, and the RandomX engine refuses it.
+- Any other combination, including some but not all of the three roots or of
+  the four lookup fields, does not encode.
 
-The decoder reads a list of exactly 19 items with a 32-byte string at index 18
-as the Ghost layout, and anything else as before; in the base layout index 18
-is the excess blob gas, an integer of at most 8 bytes. The 18-item layout
-before the marker root is not a Ghost header: `DecodeGhostHeader` rejects it
-with `item-count`. `DecodeGhostHeader` is the strict reference decoder of the
-specification, which rejects with the reasons `non-canonical-rlp`, `trailing-bytes`, `item-count`, `field-size`,
-`non-canonical-integer` and `integer-range`. The JSON encoding of
-`types.Header` is unchanged.
+The decoder reads a list of exactly 23 or 19 items with a 32-byte string last
+as those layouts, and anything else as before; the base layout has at most 20
+items, and in it index 18 is the excess blob gas, an integer of at most 8
+bytes. `DecodeGhostHeader` is the strict reference decoder of the
+specification, which accepts only the 23 items and rejects with the reasons
+`non-canonical-rlp`, `trailing-bytes`, `item-count`, `field-size`,
+`non-canonical-integer` and `integer-range`; the 19 items before the lookup
+fields and the 18 before the marker root are `item-count`. The JSON encoding
+of `types.Header` is unchanged.
 
 The data marker root is the root of the data spent-marker set of spec 05,
 section 6. `ghosttree.DataMarkerRoot` (`core/ghosttree/markerroot.go`)
@@ -142,18 +257,26 @@ returns it for a state, from the data marker-set tree above: it is
 `marker-set-empty`) until the first data marker is spent, and changes with
 every data reveal and revoke.
 
-The RandomX engine sets the three roots from the final state in
-`FinalizeAndAssemble`, after the block reward and before the state root,
-requires them in every header with a base fee, and covers them with the seal
-hash. Block validation recomputes the three roots after execution and rejects
-a block whose roots differ. The genesis of the internal network and of
-developer mode carries the empty roots and the empty marker-set root; the
-genesis state root stays that of the allocation. Developer mode's configuration has no EIP-1559, so its later
-blocks have no base fee and carry no roots.
+The RandomX engine sets the seven fields from the final state in
+`FinalizeAndAssemble` (`ghosttree.ReadHeaderFields`), after the block reward
+and before the state root, requires all of them in every header with a base
+fee, and covers them with the seal hash. Block validation recomputes them
+after execution and rejects a block with any root or the digest different,
+naming the field; a header with the roots but no lookup fields is left to
+the engine. The genesis of every Ghost chain carries the empty roots, the
+empty marker-set roots and the digest of empty lists
+(`ghosttree.GenesisHeaderFields`); the genesis state root stays that of the
+allocation. The lookup fields change every Ghost genesis hash: the public
+test network's is now
+`1beeb3088d741bdde1f5285fec7fea05b2d598237657e37741099d3e82867176`, and a
+node with the old chain moves it aside and starts on the new genesis.
+Developer mode's configuration has no EIP-1559, so its later blocks have no
+base fee and carry no Ghost fields.
 
 The JSON header of `eth_getBlockByNumber`, `eth_getBlockByHash` and the
-header methods carries `coinTreeRoot`, `dataTreeRoot` and `dataMarkerRoot`
-when the header has them, and leaves them out otherwise.
+header methods carries `coinTreeRoot`, `dataTreeRoot`, `dataMarkerRoot`,
+`coinLookupRoot`, `dataLookupRoot`, `coinMarkerRoot` and `lookupDigest` when
+the header has them, and leaves them out otherwise.
 
 ## Pages
 
@@ -469,7 +592,13 @@ removed branch, and so does the index.
   storage. They hold no code and no balance.
 - Only the commit and reveal transactions will append leaves and mark markers;
   nothing in this change makes a commit or a reveal valid.
-- Each header carries only the current root of each tree kind and the root
-  of the data spent-marker set; the coin spent-marker set has no root.
+- Each header carries the current root of each tree kind, the roots of both
+  spent-marker sets and of both lookup indices, and the block lookup digest.
+  Decision 0004 supersedes the rule of spec 05 that the coin set has no root.
+- The lookup indices, the coin marker set and the block records are
+  journaled state under the state root like the data marker set, so a
+  reorganisation leaves them, and every header field, equal to those of a
+  node that only saw the new chain; a spend made only on a disconnected
+  block is absent again.
 - Uncertain means reject: unreadable or corrupt tree state, a nil root or any
   mismatch is an error or `false`.

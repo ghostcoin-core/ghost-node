@@ -23,6 +23,11 @@ import "github.com/ethereum/go-ethereum/common"
 // index 18 (spec 05, section 10).
 var EmptyMarkerSetRoot = common.HexToHash("0ef484d17824d5fefb2533c70af81a3267af1169dd091395ad7607762aeee0a3")
 
+// EmptyCoinMarkerSetRoot is the root of the empty coin spent-marker set,
+// decision 0004 vector coin-marker-set-empty, the coinMarkerRoot of every
+// Ghost genesis.
+var EmptyCoinMarkerSetRoot = common.HexToHash("84e7c602ab3870f46bf300eff5581ae88029f7c58afb3758a652e0129e9e85cc")
+
 // DataMarkerRoot returns the root of the data spent-marker set of a state
 // (spec 05, section 6): the stored root node of the data marker-set tree
 // (markerset.go), one slot read, or EmptyMarkerSetRoot while no data marker
@@ -31,5 +36,15 @@ func DataMarkerRoot(st StateDB) (common.Hash, error) {
 	if err := Release.Check(); err != nil {
 		return common.Hash{}, err
 	}
-	return newMarkerSet(st).node(MarkerSetDepth, 0), nil
+	return newMarkerSet(st).root(), nil
+}
+
+// CoinMarkerRoot returns the root of the coin spent-marker set of a state
+// (decision 0004): the stored root node of the coin marker-set tree, or
+// EmptyCoinMarkerSetRoot while no coin marker is spent.
+func CoinMarkerRoot(st StateDB) (common.Hash, error) {
+	if err := Release.Check(); err != nil {
+		return common.Hash{}, err
+	}
+	return newISet(coinMarkerSpec, st).root(), nil
 }
