@@ -41,12 +41,14 @@ const setCodeTxType = 0x04
 
 // CheckTxType refuses a transaction by its type byte alone, before any
 // signature work: the coin reveal (0x50), the data reveal (0x51), the account
-// transaction (0x52), the policy reveal (0x53), the policy action (0x54) and
-// the bundle (0x55) are the only types taken. The pools take the account
-// transaction and the reveals only, by checks of their own.
+// transaction (0x52), the policy reveal (0x53), the policy action (0x54), the
+// bundle (0x55), the public root (0x56) and the binding transaction (0x57)
+// are the only types taken. The pools take the account transaction and the
+// reveals only, by checks of their own.
 func CheckTxType(tx *Transaction) error {
 	switch typ := tx.Type(); typ {
-	case GhostRevealTxType, GhostDataRevealTxType, GhostAccountTxType, GhostPolicyRevealTxType, GhostPolicyActionTxType, GhostBundleTxType:
+	case GhostRevealTxType, GhostDataRevealTxType, GhostAccountTxType, GhostPolicyRevealTxType, GhostPolicyActionTxType, GhostBundleTxType,
+		GhostPublicRootTxType, GhostBindingTxType:
 		return nil
 	case LegacyTxType, AccessListTxType, DynamicFeeTxType, BlobTxType, setCodeTxType:
 		return fmt.Errorf("%w: type %#x", ErrSecp256k1TxType, typ)
@@ -161,10 +163,15 @@ func MustSignNewTx(prv *ecdsa.PrivateKey, s Signer, txdata TxData) *Transaction 
 // signing method. The cache is invalidated if the cached signer does
 // not match the signer used in the current call.
 func Sender(signer Signer, tx *Transaction) (common.Address, error) {
-	// A coin, data or policy reveal, a policy action or a bundle has no
-	// account: no signer ever gives it an address.
-	if tx.IsGhostReveal() || tx.Type() == GhostBundleTxType {
+	// A coin, data or policy reveal, a policy action, a bundle or a public
+	// root has no account: no signer ever gives it an address.
+	if tx.IsGhostReveal() || tx.Type() == GhostBundleTxType || tx.Type() == GhostPublicRootTxType {
 		return common.Address{}, ErrNoSender
+	}
+	// A binding transaction's account is proved by the public root of its
+	// block, which only the block processor checks: no signer gives it.
+	if tx.Type() == GhostBindingTxType {
+		return common.Address{}, ErrGhostBindingSender
 	}
 	if sc := tx.from.Load(); sc != nil {
 		sigCache := sc.(sigCache)

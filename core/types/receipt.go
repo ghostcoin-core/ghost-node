@@ -204,7 +204,8 @@ func (r *Receipt) decodeTyped(b []byte) error {
 		return errShortTypedReceipt
 	}
 	switch b[0] {
-	case DynamicFeeTxType, AccessListTxType, BlobTxType, GhostRevealTxType, GhostDataRevealTxType, GhostAccountTxType, GhostPolicyRevealTxType, GhostPolicyActionTxType, GhostBundleTxType:
+	case DynamicFeeTxType, AccessListTxType, BlobTxType, GhostRevealTxType, GhostDataRevealTxType, GhostAccountTxType, GhostPolicyRevealTxType, GhostPolicyActionTxType, GhostBundleTxType,
+		GhostPublicRootTxType, GhostBindingTxType:
 		var data receiptRLP
 		err := rlp.DecodeBytes(b[1:], &data)
 		if err != nil {
@@ -312,7 +313,8 @@ func (rs Receipts) EncodeIndex(i int, w *bytes.Buffer) {
 	}
 	w.WriteByte(r.Type)
 	switch r.Type {
-	case AccessListTxType, DynamicFeeTxType, BlobTxType, GhostRevealTxType, GhostDataRevealTxType, GhostAccountTxType, GhostPolicyRevealTxType, GhostPolicyActionTxType, GhostBundleTxType:
+	case AccessListTxType, DynamicFeeTxType, BlobTxType, GhostRevealTxType, GhostDataRevealTxType, GhostAccountTxType, GhostPolicyRevealTxType, GhostPolicyActionTxType, GhostBundleTxType,
+		GhostPublicRootTxType, GhostBindingTxType:
 		rlp.Encode(w, data)
 	default:
 		// For unsupported types, write nothing. Since this is for
@@ -348,15 +350,19 @@ func (rs Receipts) DeriveFields(config ctypes.ChainConfigurator, hash common.Has
 		rs[i].TransactionIndex = uint(i)
 
 		// The contract address can be derived from the transaction itself
-		// A coin, data or policy reveal, a policy action or a bundle has no
-		// sender and creates nothing.
-		if txs[i].To() == nil && !txs[i].IsGhostReveal() && txs[i].Type() != GhostBundleTxType {
+		// A coin, data or policy reveal, a policy action, a bundle or a
+		// public root has no sender and creates nothing.
+		if txs[i].To() == nil && !txs[i].IsGhostReveal() && txs[i].Type() != GhostBundleTxType && txs[i].Type() != GhostPublicRootTxType {
 			// Deriving the signer is expensive, only do if it's actually needed.
 			// The sender of an account transaction in a block is derived
 			// from its public key; the block import verified the signature.
+			// The sender of a binding transaction is the account of its
+			// binding; the block import verified the root that proves it.
 			var from common.Address
 			if txs[i].Type() == GhostAccountTxType {
 				from, _ = GhostAccountAddress(signer, txs[i])
+			} else if _, binding, ok := txs[i].GhostBinding(); ok {
+				from = binding.Account()
 			} else {
 				from, _ = Sender(signer, txs[i])
 			}
