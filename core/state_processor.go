@@ -28,7 +28,6 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
-	"github.com/ethereum/go-ethereum/params/ghost"
 	"github.com/ethereum/go-ethereum/params/mutations"
 	"github.com/ethereum/go-ethereum/params/types/ctypes"
 	"github.com/ethereum/go-ethereum/params/vars"
@@ -391,8 +390,10 @@ func applyGhostPublicRoot(config ctypes.ChainConfigurator, statedb *state.StateD
 // identity recorded and carried, the node's transaction hash) and the next
 // one the root proved; then it runs as an account transaction of its
 // binding's account, with every state-dependent check (nonce, balance,
-// code, gas) and the gas of an account transaction of its scheme. Any
-// failure makes the block invalid.
+// code, gas). Its intrinsic gas is that of an account transaction of its
+// scheme without the signature's byte gas and VERIFY_GAS: it carries no
+// signature and has none verified, its block's root standing for it
+// (GhostBindingExtraIntrinsicGas). Any failure makes the block invalid.
 func applyGhostBindingTx(config ctypes.ChainConfigurator, gp *GasPool, statedb *state.StateDB, header *types.Header, genesis common.Hash, blockHash common.Hash, tx *types.Transaction, usedGas *uint64, evm *vm.EVM, roots *ghostPublicRoots) (*types.Receipt, error) {
 	scheme, carried, ok := tx.GhostBinding()
 	if !ok {
@@ -428,7 +429,8 @@ func applyGhostBindingTx(config ctypes.ChainConfigurator, gp *GasPool, statedb *
 
 // ghostBindingMessage converts a binding transaction into a Message from the
 // account of its binding, which the block's root proved, carrying its scheme
-// and key identity as an account transaction's message does.
+// and key identity as an account transaction's message does, and the extra
+// intrinsic gas of a binding transaction (GhostBindingExtraIntrinsicGas).
 func ghostBindingMessage(tx *types.Transaction, scheme uint16, binding types.GhostBinding, baseFee *big.Int) (*Message, error) {
 	msg := &Message{
 		From:               binding.Account(),
@@ -448,24 +450,8 @@ func ghostBindingMessage(tx *types.Transaction, scheme uint16, binding types.Gho
 		msg.GasPrice = cmath.BigMin(msg.GasPrice.Add(msg.GasTipCap, baseFee), msg.GasFeeCap)
 	}
 	var err error
-	msg.ExtraIntrinsicGas, err = ghostBindingExtraIntrinsicGas(scheme)
+	msg.ExtraIntrinsicGas, err = GhostBindingExtraIntrinsicGas(scheme)
 	return msg, err
-}
-
-// ghostBindingExtraIntrinsicGas is the intrinsic gas a binding transaction
-// takes on top of the type 0x02 intrinsic gas: that of an account
-// transaction of its scheme (GhostAccountExtraIntrinsicGas), as if it carried
-// the scheme's public key and signature.
-func ghostBindingExtraIntrinsicGas(scheme uint16) (uint64, error) {
-	pubKey, sig, ok := types.GhostSchemeSizes(scheme)
-	if !ok {
-		return 0, fmt.Errorf("%w: scheme %#04x", types.ErrGhostAccountScheme, scheme)
-	}
-	verify := ghost.AccountTxVerifyGas(scheme)
-	if verify == 0 {
-		return 0, fmt.Errorf("%w: scheme %#04x", ErrGhostAccountVerifyGas, scheme)
-	}
-	return ghost.AccountTxSigByteGas*uint64(2+pubKey+sig) + verify, nil
 }
 
 // ghostNativeReceipt finalises the state after a native transaction without

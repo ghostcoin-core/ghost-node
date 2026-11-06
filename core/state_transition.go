@@ -161,6 +161,31 @@ func GhostAccountExtraIntrinsicGas(tx *types.Transaction) (uint64, error) {
 	return ghost.AccountTxSigByteGas*uint64(2+len(publicKey)+len(signature)) + verify, nil
 }
 
+// GhostBindingExtraIntrinsicGas returns the intrinsic gas a binding
+// transaction (type 0x57) of scheme takes on top of the type 0x02 intrinsic
+// gas. It carries no signature bytes and has no signature verified at its
+// execution, the public root of its block proving its signature, so the
+// account transaction's gas of its scheme (spec 09, section 8.1) is taken
+// without SIG_BYTE_GAS * len(signature) and without VERIFY_GAS:
+//
+//	16 * (2 + len(public_key))
+//
+// An account transaction with its raw signature (type 0x52) is priced as
+// before (GhostAccountExtraIntrinsicGas). An unknown scheme, and a scheme
+// whose verification gas is not set, are refused as for an account
+// transaction: no transaction of such a scheme is accepted (spec 09, section
+// 13).
+func GhostBindingExtraIntrinsicGas(scheme uint16) (uint64, error) {
+	pubKey, _, ok := types.GhostSchemeSizes(scheme)
+	if !ok {
+		return 0, fmt.Errorf("%w: scheme %#04x", types.ErrGhostAccountScheme, scheme)
+	}
+	if ghost.AccountTxVerifyGas(scheme) == 0 {
+		return 0, fmt.Errorf("%w: scheme %#04x", ErrGhostAccountVerifyGas, scheme)
+	}
+	return ghost.AccountTxSigByteGas * uint64(2+pubKey), nil
+}
+
 // toWordSize returns the ceiled word size required for init code payment calculation.
 func toWordSize(size uint64) uint64 {
 	if size > math.MaxUint64-31 {
@@ -187,7 +212,8 @@ type Message struct {
 	BlobHashes    []common.Hash
 
 	// ExtraIntrinsicGas is added to the intrinsic gas: the signature gas of
-	// an account transaction (GhostAccountExtraIntrinsicGas), zero otherwise.
+	// an account transaction (GhostAccountExtraIntrinsicGas), the key gas of
+	// a binding transaction (GhostBindingExtraIntrinsicGas), zero otherwise.
 	ExtraIntrinsicGas uint64
 
 	// GhostAccountScheme is the scheme ID of an account transaction, zero
