@@ -121,9 +121,12 @@ unsigned = rlp([chain_id, nonce, max_priority_fee_per_gas, max_fee_per_gas,
 sighash  = K("ghost/account-tx/v1", 0x52, genesis_hash, keccak256(unsigned))
 ```
 
-The signature is of the transaction's scheme over the 32-byte `sighash`. There is no key
-registry and no public key recovery: the sender is derived from the key the
-transaction carries. The vectors of `TestGhostAccountTxSenderVectors` are
+The signature is of the transaction's scheme over the 32-byte `sighash`. There is no
+public key recovery: the sender is derived from the key the transaction
+carries. The key registry of
+[key identity and key registration](#key-identity-and-key-registration)
+records the key of an account; it never changes how the sender is derived.
+The vectors of `TestGhostAccountTxSenderVectors` are
 computed independently of the node by the pure Keccak-256 of
 `scripts/test_ghost_account_vectors.py`, which also checks them against the
 Go test.
@@ -487,6 +490,170 @@ checks that no signature is verified before a block's result, that the
 signatures of a block whose header passed are, and that none of a block
 whose seal failed is.
 
+## Key identity and key registration
+
+The key identity of an account is the 32-byte name of the public key it
+signs with, `K("ghost/account-key/v1", scheme, public_key)`, with scheme
+`0x0004` taken as `0x0003` as for the address, so the two halves of a
+rescue-key account have one identity (`types.GhostAccountKeyIdentityOf`).
+
+The node records it in the storage of the key registry account
+`0x67686f737400000000000000000000000000000b`
+(`types.GhostKeyRegistryAccount`), at the key
+`K("ghost/key-registry/v1", account)` (`types.GhostKeyRegistryKey`); "the key
+identity read from state" is that word (`types.GhostRecordedKeyIdentity`).
+It is zero until the account registers its key. The registry holds no code
+and no balance and gets nonce 1 when first written; only the node's own
+rules write its storage.
+
+A key registration is an account transaction (type `0x52`, with its raw
+signature) to the registry with no value and no data. It runs no code: it
+takes the account's nonce and its gas, and records the identity of the key
+that signed it, in state for every later transaction of the same block and
+of the blocks after it. Any other transaction to the registry, one that is
+not an account transaction or that sends value or data, is refused with
+`core.ErrGhostKeyRegistration`, and the block that holds it is invalid. Once
+an identity is recorded, an account transaction whose key identity is not
+the recorded one is refused with `core.ErrGhostAccountKeyIdentity`. An
+account that never registers changes no state it did not change before.
+
+## Public root and binding transactions
+
+A public root lets one root proof stand in for the signatures of the
+binding transactions of its block (`core/types/tx_ghost_public_root.go`,
+`core/ghostpriv/publicroot.go`, `core/state_processor.go`). An account
+transaction with its raw signature (type `0x52`) stays valid and unchanged
+beside them.
+
+### The binding transaction
+
+A binding transaction, the public transaction of the root, is type `0x57`:
+the type byte followed by an RLP list of exactly eleven items, the fields of
+an account transaction with the 84-byte binding in place of the public key
+and the signature: `chain_id`, `nonce`, `max_priority_fee_per_gas`,
+`max_fee_per_gas`, `gas_limit`, `to`, `value`, `data`, `access_list`,
+`scheme` (2 bytes) and `binding` (84 bytes). Decoding is as strict as for
+type `0x52`; an unknown scheme is refused. Its hash is
+`keccak256(0x57 || rlp(list))`, the binding included. A binding is
+
+    account (20) | key identity (32) | transaction hash (32)
+
+where the transaction hash, what the account's key signs and the root
+proves, covers every field but the binding:
+
+```
+unbound = rlp([chain_id, nonce, max_priority_fee_per_gas, max_fee_per_gas,
+               gas_limit, to, value, data, access_list, scheme])
+tx_hash = K("ghost/binding-tx/v1", 0x57, genesis_hash, keccak256(unbound))
+```
+
+(`types.GhostBindingTx.TxHash`). No signer gives a binding transaction a
+sender: `types.Sender` refuses it with `types.ErrGhostBindingSender`. Its
+sender is the account of its binding, proved by the public root of its
+block. Its receipt is a typed receipt of type `0x57`, and in JSON it carries
+the fields of an account transaction with `binding` in place of `publicKey`
+and `signature`.
+
+### The public root
+
+A public root is type `0x56`, `0x56 || payload`, with hash
+`keccak256(0x56 || payload)`. The payload is a fixed layout, not RLP:
+
+| Offset | Length | Field |
+|---|---|---|
+| 0 | 2 | version, `0x0001` |
+| 2 | 8 | chain id |
+| 10 | 2 | count, at least 1 |
+| 12 | 1,310,720 | root proof, then zeros |
+| 1,310,732 | 84 * count | the bindings, in block order |
+
+The envelope is 1,310,733 + 84 * count bytes. Like the reveals and the
+bundle it has no sender, nonce or signature (`types.ErrNoSender`).
+
+The node builds the root's public inputs itself, from the binding
+transactions of the block that follow the root, in block order, on the
+state at the root: for each, the account it carries, the key identity read
+from state and the transaction hash the node computes
+(`ghostpriv.NodeBinding`). Nothing is taken from the proof or from the
+root. Then:
+
+- the contents digest `K("ghost/public-root-contents/v1", b_1 || ... || b_n)`
+  over those 84-byte bindings;
+- the root binding `K("ghost/public-root-binding/v1", fields)` over 77
+  bytes: chain id (8), root version `0x0001` (2), domain (32, the genesis
+  block hash), purpose `0x09` (public root), the count (2) and the contents
+  digest (32).
+
+Neither tag is a reveal's or a bundle's. The root proves the signatures
+only: every state-dependent check of a binding transaction still runs at its
+execution. The verifier is found as for a bundle, and no verifier but the
+stub verifies a public root yet
+([private transactions](private-transactions.md#proof-verifier)).
+
+### Block rules
+
+A block holds at most one public root, before every binding transaction it
+proves. The root's checks run in this order, and any failure makes the
+block invalid:
+
+1. no second public root in the block (`ErrPublicRootRepeated`);
+2. shape: type `0x56`, a count of at least 1 and the exact length of that
+   count (`ErrPublicRootLength`), version 1 (`ErrPublicRootVersion`);
+3. the chain id is this chain's (`ErrPublicRootChainID`);
+4. the count is that of the block's binding transactions after the root
+   (`ErrPublicRootCount`);
+5. each binding the root lists is the node's binding of the block's binding
+   transaction at that place (`ErrPublicRootBinding`);
+6. the active verifier verifies public roots (`ErrPublicRootUnsupported`)
+   and accepts the proof for the inputs the node built
+   (`ErrPublicRootProof`).
+
+Each binding transaction is then checked when the block reaches it, and any
+failure makes the block invalid too:
+
+1. a public root before it in the block (`ErrPublicRootMissing`) that
+   lists a binding for it (`ErrPublicRootCount`);
+2. a known scheme and integer fields of at most 256 bits;
+3. the chain id is this chain's (`types.ErrInvalidChainId`);
+4. the account has a key identity recorded and the binding carries it
+   (`ErrPublicKeyIdentity`): an account must register its key before it
+   sends a binding transaction;
+5. the binding's transaction hash is the one the node computes
+   (`ErrPublicRootBinding`);
+6. the node's binding is the next one the root proved
+   (`ErrPublicRootBinding`);
+7. then it runs as an account transaction from the binding's account, with
+   every check of one: nonce, balance, no code at the sender, the fee caps
+   and the gas.
+
+At the end of the block a root that lists more bindings than the block
+applied makes it invalid (`ErrPublicRootCount`). The errors are those of
+`core/ghostpriv`.
+
+### Gas
+
+The public root takes no gas from the block gas pool and changes no state:
+its receipt is of type `0x56`, status 1, with no gas and no logs. Each
+binding transaction pays its own gas: the intrinsic gas of an account
+transaction of its scheme, as if it carried the scheme's public key and
+signature, `type 0x02 intrinsic gas + 16 * (2 + len(public_key) +
+len(signature)) + VERIFY_GAS[scheme]`
+([intrinsic gas](#intrinsic-gas)). A plain transfer of a binding transaction
+of scheme `0x0001` takes 83,744 gas, as one of type `0x52`. A scheme whose
+`VERIFY_GAS` is zero has no binding transaction accepted.
+
+### Admission
+
+No pool takes a public root or a binding transaction: the transaction pool
+takes type `0x52` only and the reveal pool the reveals, so types `0x56` and
+`0x57` are refused with `core.ErrTxTypeNotSupported`, from RPC and from
+peers alike, and the miner builds neither. `types.CheckTxType` takes both,
+so a block that carries them is processed: the state processor and the
+chain maker of the tests (`core/chain_makers.go`) apply them.
+
+The verification time of the root proofs is in
+[root verification time](private-transactions.md#root-verification-time).
+
 ## Block gas limit and message size
 
 The consensus maximum block gas limit is 30,000,000 gas, `MaxBlockGasLimit`
@@ -815,7 +982,9 @@ key is not converted: its account is not reachable by an ML-DSA-44 key.
 The node refuses the legacy (`0x00`), EIP-2930 (`0x01`), EIP-1559 (`0x02`),
 EIP-4844 (`0x03`) and EIP-7702 (`0x04`) transaction types from genesis, on
 every chain it runs (spec 09, sections 6 and 12, QS-1). The coin reveal
-(`0x50`), the data reveal (`0x51`) and the account transaction (`0x52`) are
+(`0x50`), the data reveal (`0x51`), the account transaction (`0x52`), the
+policy reveal (`0x53`), the policy action (`0x54`), the private bundle
+(`0x55`), the public root (`0x56`) and the binding transaction (`0x57`) are
 the only types it takes; every other type byte is refused too.
 
 The refusal is by the type byte alone, before any signature work
