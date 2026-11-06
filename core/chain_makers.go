@@ -24,6 +24,7 @@ import (
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/consensus/misc/eip1559"
 	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
+	"github.com/ethereum/go-ethereum/core/ghostpriv"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -53,6 +54,10 @@ type BlockGen struct {
 	receipts    []*types.Receipt
 	uncles      []*types.Header
 	withdrawals []*types.Withdrawal
+
+	// publicRoots is the block's public root and the binding transactions
+	// applied after it.
+	publicRoots ghostPublicRoots
 
 	engine consensus.Engine
 }
@@ -136,6 +141,21 @@ func (b *BlockGen) addTx(bc *BlockChain, vmConfig vm.Config, tx *types.Transacti
 		receipt, err = ApplyPolicyAction(b.cm.config, b.cm, b.gasPool, b.statedb, b.header, genesis, b.header.Hash(), tx, &b.header.GasUsed, vmConfig)
 	case tx.Type() == types.GhostBundleTxType:
 		receipt, err = applyGhostBundle(b.cm.config, b.gasPool, b.statedb, b.header, b.cm, genesis, b.header.Hash(), tx, &b.header.GasUsed)
+	case tx.Type() == types.GhostPublicRootTxType:
+		// The binding transactions a root proves are added after it, so the
+		// chain maker takes the bindings the root lists for the block's: each
+		// binding transaction added next is checked against the next of
+		// them, as the block processor checks it, and a block whose root
+		// lists more than its binding transactions is refused when it ends.
+		var bindings []types.GhostBinding
+		if root, derr := ghostpriv.DecodePublicRoot(tx.GhostPublicRootEnvelope()); derr == nil {
+			bindings = root.Bindings
+		}
+		receipt, err = applyGhostPublicRoot(b.cm.config, b.statedb, b.header, b.cm, genesis, b.header.Hash(), tx, &b.header.GasUsed, &b.publicRoots, bindings)
+	case tx.Type() == types.GhostBindingTxType:
+		blockContext := NewEVMBlockContext(b.header, b.cm, &b.header.Coinbase)
+		vmenv := vm.NewEVM(blockContext, vm.TxContext{}, b.statedb, b.cm.config, vmConfig)
+		receipt, err = applyGhostBindingTx(b.cm.config, b.gasPool, b.statedb, b.header, genesis, b.header.Hash(), tx, &b.header.GasUsed, vmenv, &b.publicRoots)
 	case tx.IsGhostReveal():
 		receipt, err = applyGhostReveal(b.cm.config, b.gasPool, b.statedb, b.header, b.cm, genesis, b.header.Hash(), tx, &b.header.GasUsed)
 	default:
@@ -374,6 +394,9 @@ func GenerateChain(config ctypes.ChainConfigurator, parent *types.Block, engine 
 		// Execute any user modifications to the block
 		if gen != nil {
 			gen(i, b)
+		}
+		if err := b.publicRoots.finish(); err != nil {
+			panic(err)
 		}
 
 		block, err := b.engine.FinalizeAndAssemble(cm, b.header, statedb, b.txs, b.uncles, b.receipts, b.withdrawals)

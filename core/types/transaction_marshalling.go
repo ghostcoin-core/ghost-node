@@ -19,6 +19,7 @@ package types
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -52,6 +53,10 @@ type txJSON struct {
 	Scheme    *hexutil.Uint64 `json:"scheme,omitempty"`
 	PublicKey *hexutil.Bytes  `json:"publicKey,omitempty"`
 	Signature *hexutil.Bytes  `json:"signature,omitempty"`
+
+	// Binding transaction authentication, in place of the public key and
+	// the signature:
+	Binding *hexutil.Bytes `json:"binding,omitempty"`
 
 	// Blob transaction sidecar encoding:
 	Blobs       []kzg4844.Blob       `json:"blobs,omitempty"`
@@ -210,6 +215,30 @@ func (tx *Transaction) MarshalJSON() ([]byte, error) {
 		enc.Scheme = (*hexutil.Uint64)(&scheme)
 		enc.PublicKey = (*hexutil.Bytes)(&itx.PublicKey)
 		enc.Signature = (*hexutil.Bytes)(&itx.Signature)
+
+	case *GhostPublicRootTx:
+		// A public root, like a bundle: only its payload and the chain ID
+		// field of the payload.
+		enc.ChainID = (*hexutil.Big)(itx.chainID())
+		payload := hexutil.Bytes(common.CopyBytes(itx.Payload))
+		enc.Input = &payload
+
+	case *GhostBindingTx:
+		// A binding transaction, like an account transaction, with its 84
+		// binding bytes in place of the public key and the signature.
+		enc.ChainID = (*hexutil.Big)(itx.ChainID)
+		enc.Nonce = (*hexutil.Uint64)(&itx.Nonce)
+		enc.To = tx.To()
+		enc.Gas = (*hexutil.Uint64)(&itx.Gas)
+		enc.MaxFeePerGas = (*hexutil.Big)(itx.GasFeeCap)
+		enc.MaxPriorityFeePerGas = (*hexutil.Big)(itx.GasTipCap)
+		enc.Value = (*hexutil.Big)(itx.Value)
+		enc.Input = (*hexutil.Bytes)(&itx.Data)
+		enc.AccessList = &itx.AccessList
+		scheme := uint64(itx.SchemeID())
+		enc.Scheme = (*hexutil.Uint64)(&scheme)
+		binding := hexutil.Bytes(common.CopyBytes(itx.Binding[:]))
+		enc.Binding = &binding
 	}
 	return json.Marshal(&enc)
 }
@@ -566,6 +595,66 @@ func (tx *Transaction) UnmarshalJSON(input []byte) error {
 		itx.Signature = *dec.Signature
 		// The same checks as the binary decoding: a known scheme and its
 		// exact lengths; nothing is repaired.
+		if err := itx.checkShape(); err != nil {
+			return err
+		}
+		inner = &itx
+
+	case GhostPublicRootTxType:
+		if dec.Input == nil {
+			return errors.New("missing required field 'input' in transaction")
+		}
+		var itx GhostPublicRootTx
+		if err := itx.decode(*dec.Input); err != nil {
+			return err
+		}
+		inner = &itx
+
+	case GhostBindingTxType:
+		var itx GhostBindingTx
+		if dec.ChainID == nil {
+			return errors.New("missing required field 'chainId' in transaction")
+		}
+		itx.ChainID = (*big.Int)(dec.ChainID)
+		if dec.Nonce == nil {
+			return errors.New("missing required field 'nonce' in transaction")
+		}
+		itx.Nonce = uint64(*dec.Nonce)
+		if dec.To != nil {
+			itx.To = dec.To
+		}
+		if dec.Gas == nil {
+			return errors.New("missing required field 'gas' for txdata")
+		}
+		itx.Gas = uint64(*dec.Gas)
+		if dec.MaxPriorityFeePerGas == nil {
+			return errors.New("missing required field 'maxPriorityFeePerGas' for txdata")
+		}
+		itx.GasTipCap = (*big.Int)(dec.MaxPriorityFeePerGas)
+		if dec.MaxFeePerGas == nil {
+			return errors.New("missing required field 'maxFeePerGas' for txdata")
+		}
+		itx.GasFeeCap = (*big.Int)(dec.MaxFeePerGas)
+		if dec.Value == nil {
+			return errors.New("missing required field 'value' in transaction")
+		}
+		itx.Value = (*big.Int)(dec.Value)
+		if dec.Input == nil {
+			return errors.New("missing required field 'input' in transaction")
+		}
+		itx.Data = *dec.Input
+		if dec.AccessList != nil {
+			itx.AccessList = *dec.AccessList
+		}
+		if dec.Scheme == nil || uint64(*dec.Scheme) > 0xffff {
+			return errors.New("missing or invalid field 'scheme' in transaction")
+		}
+		itx.Scheme = GhostScheme(uint16(*dec.Scheme))
+		if dec.Binding == nil || len(*dec.Binding) != GhostBindingSize {
+			return fmt.Errorf("missing or invalid field 'binding' in transaction: want %d bytes", GhostBindingSize)
+		}
+		copy(itx.Binding[:], *dec.Binding)
+		// The same checks as the binary decoding; nothing is repaired.
 		if err := itx.checkShape(); err != nil {
 			return err
 		}

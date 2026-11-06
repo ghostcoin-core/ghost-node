@@ -21,12 +21,14 @@ import (
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
+	cmath "github.com/ethereum/go-ethereum/common/math"
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/core/ghostpriv"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/params/ghost"
 	"github.com/ethereum/go-ethereum/params/mutations"
 	"github.com/ethereum/go-ethereum/params/types/ctypes"
 	"github.com/ethereum/go-ethereum/params/vars"
@@ -83,12 +85,50 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 	if beaconRoot := block.BeaconRoot(); beaconRoot != nil {
 		ProcessBeaconBlockRoot(*beaconRoot, vmenv, statedb)
 	}
+	// The block's public root, if any, and the binding transactions it has
+	// proved so far.
+	var roots ghostPublicRoots
 	// Iterate over and process the individual transactions
 	for i, tx := range block.Transactions() {
 		// Only the reveals and the account transaction are taken: a block
 		// holding a secp256k1 type, or any other type, is invalid.
 		if err := types.CheckTxType(tx); err != nil {
 			return nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: %w", i, tx.Hash().Hex(), err)
+		}
+		// A public root is checked against the bindings the node builds from
+		// the binding transactions of this block, which follow it, on the
+		// state at the root.
+		if tx.Type() == types.GhostPublicRootTxType {
+			if p.bc == nil {
+				return nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: no chain for a public root", i, tx.Hash().Hex())
+			}
+			genesis := p.bc.Genesis().Hash()
+			statedb.SetTxContext(tx.Hash(), i)
+			bindings, err := ghostBlockBindings(statedb, genesis, block.Transactions()[i+1:])
+			if err != nil {
+				return nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: %w", i, tx.Hash().Hex(), err)
+			}
+			receipt, err := applyGhostPublicRoot(p.config, statedb, header, p.bc, genesis, blockHash, tx, usedGas, &roots, bindings)
+			if err != nil {
+				return nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: %w", i, tx.Hash().Hex(), err)
+			}
+			receipts = append(receipts, receipt)
+			continue
+		}
+		// A binding transaction runs as an account transaction once the
+		// block's root has proved its binding.
+		if tx.Type() == types.GhostBindingTxType {
+			if p.bc == nil {
+				return nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: no chain for a binding transaction", i, tx.Hash().Hex())
+			}
+			statedb.SetTxContext(tx.Hash(), i)
+			receipt, err := applyGhostBindingTx(p.config, gp, statedb, header, p.bc.Genesis().Hash(), blockHash, tx, usedGas, vmenv, &roots)
+			if err != nil {
+				return nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: %w", i, tx.Hash().Hex(), err)
+			}
+			receipts = append(receipts, receipt)
+			allLogs = append(allLogs, receipt.Logs...)
+			continue
 		}
 		// A bundle is no reveal (IsGhostReveal), but is applied beside them.
 		if tx.Type() == types.GhostBundleTxType {
@@ -138,6 +178,9 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 		}
 		receipts = append(receipts, receipt)
 		allLogs = append(allLogs, receipt.Logs...)
+	}
+	if err := roots.finish(); err != nil {
+		return nil, nil, 0, fmt.Errorf("could not apply the block's public root: %w", err)
 	}
 	// Fail if Shanghai not enabled and len(withdrawals) is non-zero.
 	withdrawals := block.Withdrawals()
@@ -274,6 +317,155 @@ func applyGhostBundle(config ctypes.ChainConfigurator, gp *GasPool, statedb *sta
 		return nil, err
 	}
 	return ghostNativeReceipt(config, statedb, header, blockHash, tx, gas, usedGas), nil
+}
+
+// ghostPublicRoots is the public root of a block being applied, at most one,
+// and the count of the binding transactions after it applied so far.
+type ghostPublicRoots struct {
+	root *ghostpriv.PublicRoot
+	next int
+}
+
+// finish checks, at the end of the block, that every binding the root lists
+// was applied: a root with bindings the block does not hold is invalid.
+func (r *ghostPublicRoots) finish() error {
+	if r.root != nil && r.next != len(r.root.Bindings) {
+		return fmt.Errorf("%w: root of %d, block of %d", ghostpriv.ErrPublicRootCount, len(r.root.Bindings), r.next)
+	}
+	return nil
+}
+
+// ghostBlockBindings returns the bindings the node builds for the binding
+// transactions among txs, the rest of the block after its public root, in
+// order: the account each carries, the key identity read from statedb and
+// the transaction hash the node computes on the chain of genesis. Every
+// other transaction is passed over; a second public root is
+// ErrPublicRootRepeated.
+func ghostBlockBindings(statedb *state.StateDB, genesis common.Hash, txs []*types.Transaction) ([]types.GhostBinding, error) {
+	var bindings []types.GhostBinding
+	for _, tx := range txs {
+		if tx.Type() == types.GhostPublicRootTxType {
+			return nil, ghostpriv.ErrPublicRootRepeated
+		}
+		_, carried, ok := tx.GhostBinding()
+		if !ok {
+			continue
+		}
+		hash, _ := tx.GhostBindingTxHash(genesis)
+		bindings = append(bindings, ghostpriv.NodeBinding(statedb, carried.Account(), hash))
+	}
+	return bindings, nil
+}
+
+// applyGhostPublicRoot applies a public root (type 0x56) in the block of
+// header: the block's first and only one, before every binding transaction
+// of the block. It checks the root against the bindings the node built from
+// the block's binding transactions (ghostpriv.CheckPublicRoot) with the
+// active proof verifier; any failure makes the block invalid. The root takes
+// no gas and changes no state; its receipt is of type 0x56, status
+// successful, with no gas and no logs.
+func applyGhostPublicRoot(config ctypes.ChainConfigurator, statedb *state.StateDB, header *types.Header, chain ghostpriv.ChainReader, genesis common.Hash, blockHash common.Hash, tx *types.Transaction, usedGas *uint64, roots *ghostPublicRoots, bindings []types.GhostBinding) (*types.Receipt, error) {
+	if tx.Type() != types.GhostPublicRootTxType {
+		return nil, fmt.Errorf("%w: type %#x is not a public root", types.ErrTxTypeNotSupported, tx.Type())
+	}
+	if roots.root != nil {
+		return nil, ghostpriv.ErrPublicRootRepeated
+	}
+	env := &ghostpriv.BlockEnv{
+		Header:  header,
+		Chain:   chain,
+		ChainID: config.GetChainID(),
+		Genesis: genesis,
+	}
+	root, err := ghostpriv.CheckPublicRoot(env, ghostpriv.ActiveVerifier(), tx.GhostPublicRootEnvelope(), bindings)
+	if err != nil {
+		return nil, err
+	}
+	roots.root = root
+	return ghostNativeReceipt(config, statedb, header, blockHash, tx, 0, usedGas), nil
+}
+
+// applyGhostBindingTx applies a binding transaction (type 0x57) in the block
+// of header, after the block's public root. Its binding must be the one the
+// node builds on the state at this point of the block (the account's key
+// identity recorded and carried, the node's transaction hash) and the next
+// one the root proved; then it runs as an account transaction of its
+// binding's account, with every state-dependent check (nonce, balance,
+// code, gas) and the gas of an account transaction of its scheme. Any
+// failure makes the block invalid.
+func applyGhostBindingTx(config ctypes.ChainConfigurator, gp *GasPool, statedb *state.StateDB, header *types.Header, genesis common.Hash, blockHash common.Hash, tx *types.Transaction, usedGas *uint64, evm *vm.EVM, roots *ghostPublicRoots) (*types.Receipt, error) {
+	scheme, carried, ok := tx.GhostBinding()
+	if !ok {
+		return nil, fmt.Errorf("%w: type %#x is not a binding transaction", types.ErrTxTypeNotSupported, tx.Type())
+	}
+	if roots.root == nil {
+		return nil, ghostpriv.ErrPublicRootMissing
+	}
+	if roots.next >= len(roots.root.Bindings) {
+		return nil, fmt.Errorf("%w: root of %d, block of more", ghostpriv.ErrPublicRootCount, len(roots.root.Bindings))
+	}
+	if err := tx.CheckGhostBindingShape(); err != nil {
+		return nil, err
+	}
+	if chainID := config.GetChainID(); chainID == nil || tx.ChainId().Cmp(chainID) != 0 {
+		return nil, fmt.Errorf("%w: have %d want %d", types.ErrInvalidChainId, tx.ChainId(), chainID)
+	}
+	hash, _ := tx.GhostBindingTxHash(genesis)
+	node, err := ghostpriv.CheckBinding(statedb, carried, hash)
+	if err != nil {
+		return nil, err
+	}
+	if node != roots.root.Bindings[roots.next] {
+		return nil, fmt.Errorf("%w: binding %d of the root is not the block's", ghostpriv.ErrPublicRootBinding, roots.next)
+	}
+	roots.next++
+	msg, err := ghostBindingMessage(tx, scheme, carried, header.BaseFee)
+	if err != nil {
+		return nil, err
+	}
+	return applyTransaction(msg, config, gp, statedb, header.Number, blockHash, tx, usedGas, evm)
+}
+
+// ghostBindingMessage converts a binding transaction into a Message from the
+// account of its binding, which the block's root proved, carrying its scheme
+// and key identity as an account transaction's message does.
+func ghostBindingMessage(tx *types.Transaction, scheme uint16, binding types.GhostBinding, baseFee *big.Int) (*Message, error) {
+	msg := &Message{
+		From:               binding.Account(),
+		Nonce:              tx.Nonce(),
+		GasLimit:           tx.Gas(),
+		GasPrice:           new(big.Int).Set(tx.GasPrice()),
+		GasFeeCap:          new(big.Int).Set(tx.GasFeeCap()),
+		GasTipCap:          new(big.Int).Set(tx.GasTipCap()),
+		To:                 tx.To(),
+		Value:              tx.Value(),
+		Data:               tx.Data(),
+		AccessList:         tx.AccessList(),
+		GhostAccountScheme: scheme,
+		GhostKeyIdentity:   binding.KeyIdentity(),
+	}
+	if baseFee != nil {
+		msg.GasPrice = cmath.BigMin(msg.GasPrice.Add(msg.GasTipCap, baseFee), msg.GasFeeCap)
+	}
+	var err error
+	msg.ExtraIntrinsicGas, err = ghostBindingExtraIntrinsicGas(scheme)
+	return msg, err
+}
+
+// ghostBindingExtraIntrinsicGas is the intrinsic gas a binding transaction
+// takes on top of the type 0x02 intrinsic gas: that of an account
+// transaction of its scheme (GhostAccountExtraIntrinsicGas), as if it carried
+// the scheme's public key and signature.
+func ghostBindingExtraIntrinsicGas(scheme uint16) (uint64, error) {
+	pubKey, sig, ok := types.GhostSchemeSizes(scheme)
+	if !ok {
+		return 0, fmt.Errorf("%w: scheme %#04x", types.ErrGhostAccountScheme, scheme)
+	}
+	verify := ghost.AccountTxVerifyGas(scheme)
+	if verify == 0 {
+		return 0, fmt.Errorf("%w: scheme %#04x", ErrGhostAccountVerifyGas, scheme)
+	}
+	return ghost.AccountTxSigByteGas*uint64(2+pubKey+sig) + verify, nil
 }
 
 // ghostNativeReceipt finalises the state after a native transaction without
