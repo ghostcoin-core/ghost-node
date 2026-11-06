@@ -21,11 +21,11 @@ record.
 |---|---|---|---|
 | 1 | Zero genesis balances; no mint path except the block reward and Reveal | Met on this tree; open against the frozen release | `TestSupplyChangesOnlyByRewardAndReveal` |
 | 2a | No fake-seal mode in release builds | Met | `TestReleaseHasNoFakeSeals` |
-| 2b | No verifier swap in release builds | Check written; run pending | `TestReleaseBuildInstallsNoVerifier` |
-| 2c | No checkpoint override in release builds | Check written; run pending | `TestReleaseHasNoCheckpointOverride` |
+| 2b | No verifier swap in release builds | Met | `TestReleaseBuildInstallsNoVerifier` |
+| 2c | No checkpoint override in release builds | Met | `TestReleaseHasNoCheckpointOverride` |
 | 3 | Two independent operators derive the same genesis, byte for byte, from the frozen software's Bitcoin-block rule | Open | Needs the frozen release and two operators' records |
-| 4 | Solo mining through getWork with an existing RandomX miner configured for Ghost | Check written for the getWork protocol, run pending; open for a named third-party miner | `TestSoloMiningExternalMiner`, [mining.md](mining.md) |
-| 5a | The one-command installer verifies signatures | Check written; run pending | `TestPinVerifierHashesInstalls` and the installer's refusal tests |
+| 4 | Solo mining through getWork with an existing RandomX miner configured for Ghost | Met for the getWork protocol; open for a named third-party miner | `TestSoloMiningExternalMiner`, [mining.md](mining.md) |
+| 5a | The one-command installer verifies signatures | Met | `TestPinVerifierHashesInstalls` and the installer's refusal tests |
 | 5b | A normal downloadable app exists | Open | Needs the published app |
 | 6 | The outline's pre-launch list is complete | Open | Needs the list checked item by item |
 | 7 | The date was made public 30 or more days ahead; the final software was frozen and published 14 or more days ahead | Open | Needs the frozen release and the announcement |
@@ -112,8 +112,13 @@ skip-verification mode at all (`consensus/randomx` holds none).
 `core/ghostpriv/ghostprivtest/install_default_test.go`.
 
 ```sh
-go test -tags ghostrelease ./core/ghostpriv/ghostprivtest/ -run '^TestReleaseBuildInstallsNoVerifier$' -v
+go run build/ci.go ghostverifier
+LIBRARY_PATH=$PWD/build/cache/ghostverifier/release CGO_ENABLED=1 \
+  go test -tags ghostrelease ./core/ghostpriv/ghostprivtest/ -run '^TestReleaseBuildInstallsNoVerifier$' -v
 ```
+
+The first line builds the proof verifier's static library, which a
+`ghostrelease` build with cgo links (see [Results](#results)).
 
 It imports the stub verifier package without the test-depth tag and checks
 that the active verifier is not the stub and that it rejects the stub proof
@@ -134,8 +139,12 @@ What keeps a release build from swapping the verifier:
 `eth/ethconfig/checkpoint_release_test.go`, built only with `ghostrelease`.
 
 ```sh
-go test -tags ghostrelease ./eth/ethconfig/ -run '^TestReleaseHasNoCheckpointOverride$' -v
+LIBRARY_PATH=$PWD/build/cache/ghostverifier/release CGO_ENABLED=1 \
+  go test -tags ghostrelease ./eth/ethconfig/ -run '^TestReleaseHasNoCheckpointOverride$' -v
 ```
+
+This needs the verifier library built by `go run build/ci.go ghostverifier`,
+as in 2b.
 
 It checks that `CheckpointsAllowed` is false; that `ethconfig.Config` has no
 checkpoint field; that a configuration file naming `SyncFromCheckpoint`,
@@ -231,29 +240,36 @@ publication date of the frozen final software, 14 or more days before it.
 
 ## Results
 
-Recorded on 2026-11-05 on the tree of commit `a3a43d0b8`, which this record
-does not change, on linux/arm64 with Go 1.26.9. The commands above were run
-in order from the repository root, as one command that stops at the first
-failure:
+Recorded on 2026-11-05 on the tree of commit `45c831497`, whose code is that
+of `a3a43d0b8` (the record changes only this file), on linux/arm64 with
+Go 1.26.9 and rustc 1.99.1. The commands above were run in order from the
+repository root, as one command that stops at the first failure, with the
+verifier library built by `go run build/ci.go ghostverifier` before the
+release checks that link `core/ghostpriv`:
 
 | Check | Result |
 |---|---|
 | `TestSupplyChangesOnlyByRewardAndReveal` | PASS (0.79s) |
 | `TestReleaseHasNoFakeSeals` | PASS (0.00s) |
-| `TestReleaseBuildInstallsNoVerifier` | Did not build: `ld: cannot find -lghostverifier` |
-| `TestReleaseHasNoCheckpointOverride` | Not reached |
-| `TestSoloMiningExternalMiner` | Not reached |
-| `TestPinVerifierHashesInstalls` | Not reached |
+| `go run build/ci.go ghostverifier` | Built (`cargo build --release --locked`) |
+| `TestReleaseBuildInstallsNoVerifier` | PASS (0.00s) |
+| `TestReleaseHasNoCheckpointOverride` | PASS (0.01s) |
+| `TestSoloMiningExternalMiner` | PASS (1.05s) |
+| `TestPinVerifierHashesInstalls` | PASS (28.40s): linux, darwin and another platform's checker refused |
 
 A `ghostrelease` build with cgo on Linux or macOS links the proof verifier's
 static library (`core/ghostpriv/verifier_cgo.go`), and a release build names
-only the library, not its folder. CI first builds it with
-`go run build/ci.go ghostverifier` and then runs the release tests with
-`LIBRARY_PATH=build/cache/ghostverifier/release CGO_ENABLED=1`
-(`build/ci-gate.sh`). Run without them, as here, the release tests of
-packages that link `core/ghostpriv` do not build. Until those three rows and
-the rows after them hold a PASS, items 2b, 2c, 4 and 5a are not shown met by
-this record.
+only the library, not its folder. So, as CI does (`build/ci-gate.sh`), the
+library is built first and the release checks of packages that link
+`core/ghostpriv` (2b and 2c) are run with
+`LIBRARY_PATH=$PWD/build/cache/ghostverifier/release CGO_ENABLED=1`. An
+earlier run on the same code without them stopped at
+`TestReleaseBuildInstallsNoVerifier` with `ld: cannot find -lghostverifier`.
+
+With every row passing, items 2a, 2b, 2c and 5a are met on this tree, item 1
+is met on this tree and item 4 is met for the getWork protocol, each within
+the limits stated in its section. All of them must be run again on the
+frozen release's commit.
 
 ## Gaps found
 
@@ -263,4 +279,6 @@ this record.
   (item 4).
 - The release checks of packages that link `core/ghostpriv` build only with
   the proof verifier's library on the linker path, so they cannot be run as
-  plain `go test -tags ghostrelease` commands (see [Results](#results)).
+  plain `go test -tags ghostrelease` commands; they need the steps in 2b
+  (see [Results](#results)). This is how the release build works, not a
+  defect, but anyone rerunning this record must follow those steps.
