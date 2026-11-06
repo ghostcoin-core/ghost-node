@@ -43,8 +43,10 @@ const setCodeTxType = 0x04
 // signature work: the coin reveal (0x50), the data reveal (0x51), the account
 // transaction (0x52), the policy reveal (0x53), the policy action (0x54), the
 // bundle (0x55), the public root (0x56) and the binding transaction (0x57)
-// are the only types taken. The pools take the account transaction and the
-// reveals only, by checks of their own.
+// are the only types taken. The pools take the account transaction, the
+// reveals and the bundle only, by checks of their own. The direct reveal
+// (0x58) decodes but is not taken: its chain rules are not in core/ghostpriv
+// yet, so a block that includes one is invalid.
 func CheckTxType(tx *Transaction) error {
 	switch typ := tx.Type(); typ {
 	case GhostRevealTxType, GhostDataRevealTxType, GhostAccountTxType, GhostPolicyRevealTxType, GhostPolicyActionTxType, GhostBundleTxType,
@@ -163,9 +165,9 @@ func MustSignNewTx(prv *ecdsa.PrivateKey, s Signer, txdata TxData) *Transaction 
 // signing method. The cache is invalidated if the cached signer does
 // not match the signer used in the current call.
 func Sender(signer Signer, tx *Transaction) (common.Address, error) {
-	// A coin, data or policy reveal, a policy action, a bundle or a public
-	// root has no account: no signer ever gives it an address.
-	if tx.IsGhostReveal() || tx.Type() == GhostBundleTxType || tx.Type() == GhostPublicRootTxType {
+	// A coin, data, policy or direct reveal, a policy action, a bundle or a
+	// public root has no account: no signer ever gives it an address.
+	if tx.IsGhostReveal() || tx.Type() == GhostBundleTxType || tx.Type() == GhostPublicRootTxType || tx.Type() == GhostDirectRevealTxType {
 		return common.Address{}, ErrNoSender
 	}
 	// A binding transaction's account is proved by the public root of its

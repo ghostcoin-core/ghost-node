@@ -43,6 +43,21 @@
 // actions have caps of their own and share every peer budget. On each new
 // head a held action runs checks 1 to 8 again, never its proof.
 //
+// A private bundle (type 0x55) is checked by its structure first: its
+// decoding, its count and the chain id of the bundle and of every body, all
+// read from its bytes, and that some body's marker is not spent yet. Then its
+// root proof is verified natively, once, last: an invalid root costs one
+// verification and nothing more, is remembered as refused, and counts as a
+// failed proof of the peer under the same limit as the reveals' and the
+// actions' proofs. A bundle takes no marker: a bundled reveal whose marker a
+// block spent first is skipped when the bundle is applied. Bundles have a
+// cap of their own; a held bundle is dropped on the head where every
+// bundled marker is spent.
+//
+// The pool takes no account transaction (type 0x52): those stay in the
+// legacy pool under its raw-signature bounds, a peer's signature budget among
+// them.
+//
 // A public root (type 0x56) is checked and never held: it is valid only in a
 // block beside the binding transactions (type 0x57) it proves, which no pool
 // takes. Its cheap checks run first, under the lock: the shape, the chain id
@@ -130,6 +145,11 @@ const (
 	// the head moves.
 	PeerMaxFailedProofs = 3
 
+	// MaxBundles is the most private bundles the pool holds, apart from the
+	// reveals and the actions: with the largest bundle envelope, of 1,408
+	// bodies, 4,226,586 bytes.
+	MaxBundles = 2
+
 	// announceExpiry is how long an agreed fetch counts against a peer's
 	// in-flight budget when the transaction never arrives.
 	announceExpiry = time.Minute
@@ -181,6 +201,12 @@ var (
 	// the pool refused before for a reason that no head can change: it is
 	// refused again without any check.
 	ErrRejectedBefore = errors.New("reveal refused before")
+
+	// ErrBundleSpent is returned for a bundle every one of whose bundled
+	// reveals has a marker spent on the pool's head: applied, it would change
+	// nothing. Its root is not verified, and the peer is not counted a failed
+	// proof.
+	ErrBundleSpent = errors.New("every reveal of the bundle has a spent marker")
 
 	// ErrPublicRootNotPooled is returned for a public root whose checks and
 	// proof passed: a root is valid only in a block beside the binding
@@ -247,6 +273,8 @@ var permanentRefusals = []error{
 	ghostpriv.ErrPolicyRevealChainID, ghostpriv.ErrPolicyRevealProof,
 	ghostpriv.ErrActionLength, ghostpriv.ErrActionVersion, ghostpriv.ErrActionEncoding,
 	ghostpriv.ErrActionChainID, ghostpriv.ErrActionProof,
+	ghostpriv.ErrBundleLength, ghostpriv.ErrBundleCount, ghostpriv.ErrBundleVersion,
+	ghostpriv.ErrBundleChainID, ghostpriv.ErrBundleBody, ghostpriv.ErrBundleProof,
 	// A public root's proof is verified against the bindings it lists, once
 	// their key identities are the recorded ones, so its verdict is that of
 	// its bytes; and the pool holds no root, whatever the head.
@@ -269,15 +297,17 @@ func permanentRefusal(err error) bool {
 }
 
 // proofRefusals are the refusals of a proof the verifier rejected, one per
-// type.
+// type, the bundle's root among them.
 var proofRefusals = []error{
 	ghostpriv.ErrRevealProof, ghostpriv.ErrDataRevealProof,
 	ghostpriv.ErrPolicyRevealProof, ghostpriv.ErrActionProof,
-	ghostpriv.ErrPublicRootProof,
+	ghostpriv.ErrBundleProof, ghostpriv.ErrPublicRootProof,
 }
 
 // failedProof reports whether err is the refusal of a proof the verifier
-// checked and rejected. A node without a verifier is not the peer's fault.
+// checked and rejected. A node without a verifier, or with one that does not
+// verify bundle roots (ghostpriv.ErrBundleUnsupported), is not the peer's
+// fault.
 func failedProof(err error) bool {
 	if err == nil || errors.Is(err, ghostpriv.ErrNoVerifier) {
 		return false
@@ -333,6 +363,7 @@ const (
 	classData                  // the data reveal, G_DATA
 	classPolicy                // the policy reveal, G_POLICY
 	classAction                // the policy action, G_ACTION
+	classBundle                // the private bundle, the gas of its count
 )
 
 // gas is the gas of a transaction of the class.
@@ -353,12 +384,22 @@ func (c txClass) gas() uint64 {
 
 // entry is one held transaction.
 type entry struct {
-	tx    *types.Transaction
-	class txClass
-	key   markerKey    // the marker of a reveal
-	akey  actionKey    // the slot nonce of an action
-	paid  *uint256.Int // the fee field of a reveal, the debit of an action
-	peer  string       // the peer that first delivered it, empty for a local one
+	tx      *types.Transaction
+	class   txClass
+	key     markerKey     // the marker of a reveal
+	akey    actionKey     // the slot nonce of an action
+	markers []common.Hash // the coin markers of a bundle's reveals, read only
+	paid    *uint256.Int  // the fee field of a reveal, the debit of an action
+	peer    string        // the peer that first delivered it, empty for a local one
+}
+
+// gas is the gas of the held transaction: that of its class, or for a
+// bundle that of its count.
+func (e *entry) gas() uint64 {
+	if e.class == classBundle {
+		return e.tx.Gas()
+	}
+	return e.class.gas()
 }
 
 // peerBudget is what one peer has used of its budgets.
@@ -407,6 +448,9 @@ type Pool struct {
 	actionBytes  uint64                    // envelope bytes of the held actions
 	actionChecks map[common.Hash]bool      // actions being checked, true for a local one
 	localActions int                       // local actions among those being checked
+	bundles      int                       // held bundles
+	bundleChecks map[common.Hash]bool      // bundles being checked, true for a local one
+	localBundles int                       // local bundles among those being checked
 	rootChecks   map[common.Hash]struct{}  // public roots whose proof is being verified
 	peers        map[string]*peerBudget
 	rejected     rejectedSet // transactions refused for good, refused again unchecked
@@ -442,15 +486,22 @@ func New(chain BlockChain) *Pool {
 		validating:   make(map[markerKey]common.Hash),
 		actions:      make(map[actionKey]common.Hash),
 		actionChecks: make(map[common.Hash]bool),
+		bundleChecks: make(map[common.Hash]bool),
 		rootChecks:   make(map[common.Hash]struct{}),
 		peers:        make(map[string]*peerBudget),
 	}
 }
 
-// Filter accepts the coin reveal, the data reveal, the policy reveal and
-// the policy action, and the public root, which it checks and never holds.
+// Filter accepts the coin reveal, the data reveal, the policy reveal, the
+// policy action and the private bundle, and the public root, which it checks
+// and never holds. The account transaction is the legacy pool's, and the
+// direct reveal no pool's yet.
 func (p *Pool) Filter(tx *types.Transaction) bool {
-	return tx.IsGhostReveal() || tx.Type() == types.GhostPublicRootTxType
+	switch tx.Type() {
+	case types.GhostBundleTxType, types.GhostPublicRootTxType:
+		return true
+	}
+	return tx.IsGhostReveal()
 }
 
 // classFees are the fees of one reveal class the block that would come next
@@ -518,8 +569,9 @@ func (p *Pool) Close() error {
 // that no longer passes, among them every reveal whose marker a block spent
 // and every action whose slot closed, whose nonce moved, whose policy a
 // reorganisation removed, whose debit no longer pays G_ACTION at the base
-// fee or whose expiry passed. A held action runs checks 1 to 8 again; its
-// proof, verified once, is not verified again.
+// fee or whose expiry passed, and every bundle all of whose markers are
+// spent. A held action runs checks 1 to 8 again; its proof, verified once,
+// is not verified again, nor is a held bundle's root.
 func (p *Pool) Reset(oldHead, newHead *types.Header) {
 	st, err := p.chain.StateAt(newHead.Root)
 	if err != nil {
@@ -560,9 +612,14 @@ func (p *Pool) Reset(oldHead, newHead *types.Header) {
 	var failed []common.Hash
 	for _, e := range held {
 		var err error
-		if e.class == classAction {
+		switch e.class {
+		case classAction:
 			err = p.actionRules(newHead, recheck.Copy(), e.tx)
-		} else {
+		case classBundle:
+			// The root verified once; only what the head decides is checked
+			// again.
+			err = bundleLive(recheck, e.markers)
+		default:
 			err = p.check(newHead, recheck.Copy(), e.tx, e.peer == "")
 		}
 		if err != nil {
@@ -670,6 +727,8 @@ func (p *Pool) add(tx *types.Transaction, peer string) error {
 	switch tx.Type() {
 	case types.GhostPolicyActionTxType:
 		return p.addAction(tx, peer)
+	case types.GhostBundleTxType:
+		return p.addBundle(tx, peer)
 	case types.GhostPublicRootTxType:
 		return p.addPublicRoot(tx, peer)
 	}
@@ -919,6 +978,154 @@ func (p *Pool) addAction(tx *types.Transaction, peer string) error {
 
 	p.feed.Send(core.NewTxsEvent{Txs: []*types.Transaction{tx}})
 	return nil
+}
+
+// addBundle checks and inserts one private bundle. The checks its bytes
+// alone decide run first, under the lock (admitBundle); then the bundle
+// holds a check slot and a place under the bundle cap while, outside the
+// lock, the pool checks that some bundled marker is not spent on its head
+// and then verifies the root natively, once, last. The root's inputs are
+// built from the bundle's bytes, the chain id and the genesis only, so when
+// the head moves during the check only the markers are checked again. An
+// invalid root is refused with ghostpriv.ErrBundleProof, remembered for
+// good, and counted to the peer as a failed proof.
+func (p *Pool) addBundle(tx *types.Transaction, peer string) error {
+	hash := tx.Hash()
+	b, decodeErr := ghostpriv.DecodeBundle(tx.GhostBundleEnvelope())
+	size := tx.Size()
+	p.mu.Lock()
+	slot, err := p.admitBundle(hash, b, decodeErr, size, peer)
+	if err != nil {
+		p.rejected.add(hash, err)
+		p.mu.Unlock()
+		return err
+	}
+	local := peer == ""
+	p.bundleChecks[hash] = local
+	if local {
+		p.localBundles++
+	} else {
+		p.peers[peer].validating++
+	}
+	head, st, err := p.snapshot()
+	p.mu.Unlock()
+
+	markers := bundleMarkers(b)
+	in := b.Inputs(b.ChainID, p.chain.Genesis().Hash())
+	verified := false
+	slot = p.takeSlot(slot)
+	err = p.checkUntilSettled(head, st, err, func(_ *types.Header, st *state.StateDB) error {
+		if err := bundleLive(st, markers); err != nil {
+			return err
+		}
+		if verified {
+			return nil
+		}
+		verified = true
+		return ghostpriv.VerifyBundleRoot(p.verifier(), in, b.Proof)
+	})
+	// The lock is held from here.
+	<-slot
+	delete(p.bundleChecks, hash)
+	pb, ok := p.peers[peer]
+	if local {
+		p.localBundles--
+	} else if ok && pb.validating > 0 {
+		pb.validating--
+	}
+	// Places a local bundle took while this one was checked are not counted
+	// against it at admission, so the cap is checked again here.
+	if err == nil && p.bundles >= MaxBundles {
+		err = fmt.Errorf("%w: %d bundles", ErrPoolFull, p.bundles)
+	}
+	if err != nil {
+		err = p.refuse(hash, peer, err)
+		p.mu.Unlock()
+		return err
+	}
+	if !ok {
+		peer = ""
+	}
+	p.insert(&entry{tx: tx, class: classBundle, markers: markers, peer: peer})
+	p.bundles++
+	p.mu.Unlock()
+
+	p.feed.Send(core.NewTxsEvent{Txs: []*types.Transaction{tx}})
+	return nil
+}
+
+// admitBundle runs the cheap refusals of a new bundle, decoded as b or
+// refused by decodeErr, charging the peer first as admit does: the decoding
+// (the length, the count, the version and every body a version 2 reveal),
+// the peer's one check slot and held cap, the chain id of the bundle and of
+// every body, and the bundle cap. None verifies anything. The caller holds
+// the lock.
+func (p *Pool) admitBundle(hash common.Hash, b *ghostpriv.Bundle, decodeErr error, size uint64, peer string) (chan struct{}, error) {
+	if _, ok := p.all[hash]; ok {
+		return nil, txpool.ErrAlreadyKnown
+	}
+	if _, ok := p.bundleChecks[hash]; ok {
+		return nil, txpool.ErrAlreadyKnown
+	}
+	pb, err := p.charge(peer, hash)
+	if err != nil {
+		return nil, err
+	}
+	if decodeErr != nil {
+		return nil, decodeErr
+	}
+	if err := p.peerRoom(pb, peer, size); err != nil {
+		return nil, err
+	}
+	if err := bundleChainIDs(b, p.chain.Config().GetChainID()); err != nil {
+		return nil, err
+	}
+	pending := len(p.bundleChecks)
+	if peer == "" {
+		pending = p.localBundles
+	}
+	if count := p.bundles + pending; count >= MaxBundles {
+		return nil, fmt.Errorf("%w: %d bundles", ErrPoolFull, count)
+	}
+	return p.remoteSlot(peer)
+}
+
+// bundleChainIDs refuses a bundle whose chain id, or the chain id of any of
+// whose bodies, is not chainID, as ghostpriv.CheckBundle does.
+func bundleChainIDs(b *ghostpriv.Bundle, chainID *big.Int) error {
+	if chainID == nil || !chainID.IsUint64() {
+		return fmt.Errorf("%w: chain %v", ghostpriv.ErrBundleChainID, chainID)
+	}
+	id := chainID.Uint64()
+	if b.ChainID != id {
+		return fmt.Errorf("%w: have %d, chain %d", ghostpriv.ErrBundleChainID, b.ChainID, id)
+	}
+	for i, r := range b.Reveals {
+		if r.ChainID != id {
+			return fmt.Errorf("%w: body %d has %d, chain %d", ghostpriv.ErrBundleChainID, i, r.ChainID, id)
+		}
+	}
+	return nil
+}
+
+// bundleMarkers returns the coin markers of a bundle's reveals, in order.
+func bundleMarkers(b *ghostpriv.Bundle) []common.Hash {
+	markers := make([]common.Hash, len(b.Reveals))
+	for i, r := range b.Reveals {
+		markers[i] = r.Marker
+	}
+	return markers
+}
+
+// bundleLive refuses with ErrBundleSpent a bundle every one of whose coin
+// markers is spent in st: applied, each of its reveals would be skipped.
+func bundleLive(st *state.StateDB, markers []common.Hash) error {
+	for _, m := range markers {
+		if !ghosttree.IsSpent(st, ghosttree.Coin, m) {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: %d reveals", ErrBundleSpent, len(markers))
 }
 
 // takeSlot returns the check slot of a transaction: slot when admission
@@ -1312,10 +1519,13 @@ func (p *Pool) remove(hash common.Hash) {
 		return
 	}
 	delete(p.all, hash)
-	if e.class == classAction {
+	switch e.class {
+	case classAction:
 		delete(p.actions, e.akey)
 		p.actionBytes -= e.tx.Size()
-	} else {
+	case classBundle:
+		p.bundles--
+	default:
 		delete(p.markers, e.key)
 		p.bytes -= e.tx.Size()
 	}
@@ -1355,6 +1565,15 @@ func announcedSize(kind byte, size uint32) (sized, ours bool) {
 		return size == types.GhostPolicyRevealEnvelopeSize, true
 	case types.GhostPolicyActionTxType:
 		return size == types.GhostPolicyActionEnvelopeSize, true
+	case types.GhostBundleTxType:
+		// The envelope of a count of 1 to GhostBundleMaxReveals bodies.
+		fixed := uint32(1 + types.GhostBundleFixedSize)
+		if size <= fixed {
+			return false, true
+		}
+		bodies := size - fixed
+		count := bodies / types.GhostBundleBodySize
+		return bodies%types.GhostBundleBodySize == 0 && count <= types.GhostBundleMaxReveals, true
 	}
 	return false, false
 }
@@ -1362,8 +1581,8 @@ func announcedSize(kind byte, size uint32) (sized, ours bool) {
 // FilterAnnounced applies a peer's budgets to an announcement of the
 // existing announce message and reports for each announced hash whether to
 // fetch it. Only the pool's types are limited: the coin, data and policy
-// reveals and the policy action. One announced with a size other than its
-// envelope's is never fetched; one the pool holds or already agreed to
+// reveals, the policy action and the bundle. One announced with a size other
+// than its envelope's, for a bundle that of no count, is never fetched; one the pool holds or already agreed to
 // fetch from this peer costs nothing; any other takes one of the peer's
 // transactions of this head and one in-flight place, and is not fetched
 // when either is used up. Without types, as before the typed announcement,
@@ -1430,9 +1649,10 @@ func (p *Pool) Pending(filter txpool.PendingFilter) map[common.Address][]*txpool
 // in block order: the highest tip per gas in the block that comes next on
 // the pool's head first, then by hash ascending. A reveal's tip is that of
 // the cover rule for its class's gas at the next block's base fee, an
-// action's its debit less G_ACTION times that base fee; the tips per gas
-// are compared as exact fractions. Each passed its checks against the block
-// that comes next on the pool's head.
+// action's its debit less G_ACTION times that base fee, a bundle's zero, its
+// fees being those of its bodies; the tips per gas are compared as exact
+// fractions. Each passed its checks against the block that comes next on
+// the pool's head.
 func (p *Pool) PendingReveals() []*types.Transaction {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -1449,7 +1669,7 @@ func (p *Pool) PendingReveals() []*types.Transaction {
 	list := make([]ranked, 0, len(p.order))
 	for _, hash := range p.order {
 		e := p.all[hash]
-		gas := e.class.gas()
+		gas := e.gas()
 		list = append(list, ranked{tx: e.tx, hash: hash, tip: p.tip(e, baseFee), gas: new(big.Int).SetUint64(gas)})
 	}
 	sort.Slice(list, func(i, j int) bool {

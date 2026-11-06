@@ -73,7 +73,8 @@ func NewTx(inner TxData) *Transaction {
 //
 // This is implemented by DynamicFeeTx, LegacyTx, AccessListTx, BlobTx,
 // GhostRevealTx, GhostDataRevealTx, GhostPolicyRevealTx, GhostPolicyActionTx,
-// GhostBundleTx, GhostPublicRootTx, GhostAccountTx and GhostBindingTx.
+// GhostBundleTx, GhostPublicRootTx, GhostAccountTx, GhostBindingTx and
+// GhostDirectRevealTx.
 type TxData interface {
 	txType() byte // returns the type ID
 	copy() TxData // creates a deep copy and initializes all fields
@@ -224,6 +225,8 @@ func (tx *Transaction) decodeTyped(b []byte) (TxData, error) {
 		inner = new(GhostAccountTx)
 	case GhostBindingTxType:
 		inner = new(GhostBindingTx)
+	case GhostDirectRevealTxType:
+		inner = new(GhostDirectRevealTx)
 	default:
 		return nil, ErrTxTypeNotSupported
 	}
@@ -496,6 +499,8 @@ func (tx *Transaction) Hash() common.Hash {
 		h = bundle.hash()
 	} else if root, ok := tx.inner.(*GhostPublicRootTx); ok {
 		h = root.hash()
+	} else if reveal, ok := tx.inner.(*GhostDirectRevealTx); ok {
+		h = reveal.hash()
 	} else if tx.Type() == LegacyTxType {
 		h = rlpHash(tx.inner)
 	} else {
@@ -539,6 +544,11 @@ func (tx *Transaction) Size() uint64 {
 	}
 	if root, ok := tx.inner.(*GhostPublicRootTx); ok {
 		size := uint64(1 + len(root.Payload))
+		tx.size.Store(size)
+		return size
+	}
+	if reveal, ok := tx.inner.(*GhostDirectRevealTx); ok {
+		size := uint64(1 + len(reveal.Payload))
 		tx.size.Store(size)
 		return size
 	}
