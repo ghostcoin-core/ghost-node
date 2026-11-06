@@ -2,6 +2,7 @@ package ghostpir
 
 import (
 	"encoding/hex"
+	"fmt"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -52,4 +53,33 @@ func (s *Server) Answer(client string, query []byte) ([]byte, error) {
 	s.log.Debug("Answered PIR query", "snapshot", snapshot, "client", client,
 		"query", len(query), "answer", len(out), "elapsed", common.PrettyDuration(time.Since(start)))
 	return out, nil
+}
+
+// EntryShape is the shape of the PIR database of entry i of a snapshot
+// header: the records the header lists for it, under the entry's seed. A
+// client derives every shape from the header alone. An entry without
+// records has no database (ErrShape).
+func EntryShape(h *SnapshotHeader, i int) (Shape, error) {
+	if h == nil || i < 0 || i >= len(h.Entries) {
+		return Shape{}, fmt.Errorf("%w: entry %d", ErrNoDatabase, i)
+	}
+	e := h.Entries[i]
+	return NewShape(DatabaseSeed(h.ID(), i), e.RecordSize, e.Records)
+}
+
+// Query answers a PIR query to the database of entry i of the snapshot
+// served (the hint buckets and overflow entries of a tree, its notes, its
+// witness or lookup records, or a marker list), as Server.Answer does. The
+// request is charged to client's budget before anything else: one past it is
+// refused with ErrClientBudget or ErrTotalBudget and no work is done. A
+// query made under another snapshot's seed is refused (ErrStaleSnapshot).
+func (s *BulkServer) Query(client string, i int, query []byte) ([]byte, error) {
+	st, err := s.state(client, "query")
+	if err != nil {
+		return nil, err
+	}
+	if i < 0 || i >= len(st.servers) || st.servers[i] == nil {
+		return nil, fmt.Errorf("%w: entry %d of %d", ErrNoDatabase, i, len(st.servers))
+	}
+	return st.servers[i].Answer(client, query)
 }
