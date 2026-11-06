@@ -28,6 +28,7 @@ import (
 	"github.com/ethereum/go-ethereum/consensus/beacon"
 	"github.com/ethereum/go-ethereum/consensus/ethash"
 	"github.com/ethereum/go-ethereum/core/rawdb"
+	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -657,6 +658,279 @@ func TestGhostRescueSunsetBlock(t *testing.T) {
 		if number == height {
 			if _, err := ApplyTransaction(config, chain, &header.Coinbase, new(GasPool).AddGas(header.GasLimit), statedb, header, tx, &header.GasUsed, vm.Config{}); err != nil {
 				t.Errorf("0x0003 in a block of height %d: %v", height-1, err)
+			}
+		}
+		chain.Stop()
+	}
+}
+
+// TestGhostAccountKeyIdentityRecordedInState checks the key identity an
+// account records in state: K("ghost/account-key/v1", scheme, public_key), in
+// the storage of the key registry account at the key of the sender and not in
+// the sender's own account. Ordinary account transactions record nothing and
+// leave the registry absent; a key registration, an account transaction to
+// the registry with no value and no data, runs no code, takes the nonce and
+// records the identity from its block on; both halves of a rescue-key
+// account record one identity; a registration with value or data is invalid;
+// and a transaction whose key is not the recorded one makes its block
+// invalid.
+func TestGhostAccountKeyIdentityRecordedInState(t *testing.T) {
+	mlKey, slhKey, rescuePk := ghostRescueBlockKeys(t, 10)
+	var (
+		config     = ghostAccountTestConfig()
+		key        = ghostBlockKey(9)
+		pk         = key.Public().(*mldsa44.PublicKey).Bytes()
+		from       = types.GhostAccountAddressOf(types.GhostSchemeMLDSA44, pk)
+		plainKey   = ghostBlockKey(11)
+		plainPk    = plainKey.Public().(*mldsa44.PublicKey).Bytes()
+		plainFrom  = types.GhostAccountAddressOf(types.GhostSchemeMLDSA44, plainPk)
+		rescueFrom = types.GhostAccountAddressOf(types.GhostSchemeMLDSA44Rescue, rescuePk)
+		recipient  = common.HexToAddress("0x00000000000000000000000000000000000000bb")
+		registry   = types.GhostKeyRegistryAccount
+		balance    = big.NewInt(1_000_000_000_000_000_000)
+		gspec      = &genesisT.Genesis{
+			Config: config,
+			Alloc: genesisT.GenesisAlloc{
+				from:       {Balance: balance},
+				plainFrom:  {Balance: balance},
+				rescueFrom: {Balance: balance},
+			},
+		}
+		engine     = beacon.New(ethash.NewFaker())
+		gasML      = vars.TxGas + ghostExtraGas
+		gas3       = vars.TxGas + ghostRescueExtraGas
+		gas4       = vars.TxGas + ghostRescueSLHDSAExtraGas
+		identity   = types.GhostAccountKeyIdentityOf(types.GhostSchemeMLDSA44, pk)
+		plainID    = types.GhostAccountKeyIdentityOf(types.GhostSchemeMLDSA44, plainPk)
+		rescueID   = types.GhostAccountKeyIdentityOf(types.GhostSchemeMLDSA44Rescue, rescuePk)
+		registryOf = func(account common.Address) common.Hash { return types.GhostKeyRegistryKey(account) }
+	)
+	transfer := func(nonce, gas uint64, to common.Address, value int64) *types.GhostAccountTx {
+		return ghostRescueTransfer(config, nonce, gas, to, value)
+	}
+	signML := func(t *testing.T, signer types.Signer, k *mldsa44.PrivateKey, txdata *types.GhostAccountTx) *types.Transaction {
+		t.Helper()
+		tx, err := types.SignGhostAccountTx(signer, k, txdata)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tx
+	}
+
+	// The identity is the tagged hash of the scheme and the public key: not
+	// the address hash, one per key, and one for both rescue halves.
+	scheme := types.GhostScheme(types.GhostSchemeMLDSA44)
+	if want := crypto.Keccak256Hash(append([]byte{byte(len(types.GhostAccountKeyTag))}, types.GhostAccountKeyTag...), scheme[:], pk); identity != want {
+		t.Fatalf("key identity %v, want K(%q, scheme, public_key) = %v", identity, types.GhostAccountKeyTag, want)
+	}
+	addrHash := crypto.Keccak256Hash(append([]byte{byte(len(types.GhostAccountAddressTag))}, types.GhostAccountAddressTag...), scheme[:], pk)
+	if identity == addrHash || identity == plainID || identity == rescueID || identity == (common.Hash{}) {
+		t.Fatal("the key identities are not distinct")
+	}
+	if types.GhostAccountKeyIdentityOf(types.GhostSchemeSLHDSARescue, rescuePk) != rescueID {
+		t.Fatal("scheme 0x0004 has another key identity than 0x0003 of the same account")
+	}
+	if registryOf(from) == registryOf(plainFrom) || registryOf(from) == common.BytesToHash(from[:]) {
+		t.Fatal("the registry keys are not distinct")
+	}
+
+	// Block 1: ordinary transfers only. Block 2: the first account and the
+	// rescue account (with its ML-DSA-44 half) register, and the rescue
+	// account transfers with its SLH-DSA half. Block 3: transfers of all
+	// three, and a second registration of the rescue account with its
+	// SLH-DSA half, which changes nothing.
+	var (
+		signer      types.Signer
+		genesisHash common.Hash
+	)
+	_, blocks, receipts := GenerateChainWithGenesis(gspec, engine, 3, func(i int, b *BlockGen) {
+		b.SetPoS()
+		if signer == nil {
+			genesisHash = b.PrevBlock(-1).Hash()
+			signer = types.NewGhostAccountSigner(types.LatestSigner(config), genesisHash)
+		}
+		switch i {
+		case 0:
+			b.AddTx(signML(t, signer, key, transfer(0, gasML, recipient, 1000)))
+			b.AddTx(signML(t, signer, plainKey, transfer(0, gasML, recipient, 1000)))
+		case 1:
+			b.AddTx(signML(t, signer, key, transfer(1, gasML, registry, 0)))
+			b.AddTx(ghostSignRescue(t, signer, mlKey, rescuePk, transfer(0, gas3, registry, 0)))
+			b.AddTx(ghostSignRescueSLHDSA(t, signer, slhKey, rescuePk, transfer(1, gas4, recipient, 1000)))
+		case 2:
+			b.AddTx(signML(t, signer, key, transfer(2, gasML, recipient, 1000)))
+			b.AddTx(signML(t, signer, plainKey, transfer(1, gasML, recipient, 1000)))
+			b.AddTx(ghostSignRescueSLHDSA(t, signer, slhKey, rescuePk, transfer(2, gas4, registry, 0)))
+		}
+	})
+	// A registration runs no code: it takes exactly its intrinsic gas.
+	for _, tc := range []struct {
+		block, index int
+		gas          uint64
+	}{{1, 0, gasML}, {1, 1, gas3}, {2, 2, gas4}} {
+		r := receipts[tc.block][tc.index]
+		if r.Status != types.ReceiptStatusSuccessful || r.GasUsed != tc.gas {
+			t.Fatalf("registration in block %d: status %d, gas used %d, want success and %d", tc.block+1, r.Status, r.GasUsed, tc.gas)
+		}
+	}
+
+	chain, err := NewBlockChain(rawdb.NewMemoryDatabase(), nil, gspec, nil, engine, vm.Config{}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer chain.Stop()
+	if n, err := chain.InsertChain(blocks); err != nil {
+		t.Fatalf("block %d not imported: %v", n+1, err)
+	}
+	stateAt := func(root common.Hash) *state.StateDB {
+		t.Helper()
+		st, err := chain.StateAt(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+	// Ordinary transactions record nothing: the registry account does not
+	// exist after block 1.
+	for _, root := range []common.Hash{chain.Genesis().Root(), blocks[0].Root()} {
+		if stateAt(root).Exist(registry) {
+			t.Fatalf("the key registry account exists at state %v, before any registration", root)
+		}
+	}
+	for _, tc := range []struct {
+		block    int
+		account  common.Address
+		identity common.Hash
+	}{
+		{0, from, common.Hash{}},
+		{0, plainFrom, common.Hash{}},
+		{0, rescueFrom, common.Hash{}},
+		{1, from, identity},
+		{1, plainFrom, common.Hash{}},
+		{1, rescueFrom, rescueID},
+		{2, from, identity},
+		{2, plainFrom, common.Hash{}},
+		{2, rescueFrom, rescueID},
+	} {
+		st := stateAt(blocks[tc.block].Root())
+		if got := types.GhostRecordedKeyIdentity(st, tc.account); got != tc.identity {
+			t.Errorf("block %d, %v: key identity %v, want %v", tc.block+1, tc.account, got, tc.identity)
+		}
+		if got := st.GetState(types.GhostKeyRegistryAccount, registryOf(tc.account)); got != tc.identity {
+			t.Errorf("block %d, %v: registry word %v, want %v", tc.block+1, tc.account, got, tc.identity)
+		}
+	}
+	head, err := chain.State()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The registry account survives as a system account, and the senders
+	// hold nothing but their nonce and balance.
+	if got := head.GetNonce(types.GhostKeyRegistryAccount); got != 1 {
+		t.Errorf("key registry nonce %d, want 1", got)
+	}
+	if code := head.GetCode(types.GhostKeyRegistryAccount); len(code) != 0 {
+		t.Errorf("key registry code %x, want none", code)
+	}
+	if got := head.GetBalance(types.GhostKeyRegistryAccount); !got.IsZero() {
+		t.Errorf("key registry balance %v, want 0", got)
+	}
+	for _, account := range []common.Address{from, plainFrom, rescueFrom} {
+		if root := head.GetStorageRoot(account); root != (common.Hash{}) && root != types.EmptyRootHash {
+			t.Errorf("%v: storage root %v, want empty: the identity is not the account's", account, root)
+		}
+	}
+	for _, tc := range []struct {
+		account common.Address
+		nonce   uint64
+	}{{from, 3}, {plainFrom, 2}, {rescueFrom, 3}} {
+		if got := head.GetNonce(tc.account); got != tc.nonce {
+			t.Errorf("%v: nonce %d, want %d: a registration takes a nonce", tc.account, got, tc.nonce)
+		}
+	}
+	if got := head.GetBalance(recipient).Uint64(); got != 5000 {
+		t.Errorf("recipient balance %d, want 5000", got)
+	}
+
+	// A registration with value or data is invalid, and so is a block
+	// holding it.
+	withData := transfer(0, gasML+16, registry, 0)
+	withData.Data = []byte{0x01}
+	for _, tc := range []struct {
+		name   string
+		txdata *types.GhostAccountTx
+	}{
+		{"registration with value", transfer(0, gasML, registry, 1)},
+		{"registration with data", withData},
+	} {
+		chain, err := NewBlockChain(rawdb.NewMemoryDatabase(), nil, gspec, nil, engine, vm.Config{}, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bad := GenerateBadBlock(chain.Genesis(), engine, types.Transactions{signML(t, signer, key, tc.txdata)}, config)
+		if _, err := chain.InsertChain(types.Blocks{bad}); !errors.Is(err, ErrGhostKeyRegistration) {
+			t.Errorf("%s: import error %v, want %v", tc.name, err, ErrGhostKeyRegistration)
+		}
+		if chain.CurrentBlock().Number.Sign() != 0 {
+			t.Errorf("%s: the invalid block became the head", tc.name)
+		}
+		chain.Stop()
+	}
+
+	// A transaction whose key is not the recorded one makes its block
+	// invalid; the same transaction with its own identity recorded is valid.
+	other := plainID
+	for _, tc := range []struct {
+		name     string
+		recorded common.Hash
+		want     error
+	}{
+		{"another key recorded", other, ErrGhostAccountKeyIdentity},
+		{"its key recorded", identity, nil},
+	} {
+		spec := &genesisT.Genesis{
+			Config: config,
+			Alloc: genesisT.GenesisAlloc{
+				from: {Balance: balance},
+				types.GhostKeyRegistryAccount: {
+					Balance: new(big.Int),
+					Nonce:   1,
+					Storage: map[common.Hash]common.Hash{registryOf(from): tc.recorded},
+				},
+			},
+		}
+		chain, err := NewBlockChain(rawdb.NewMemoryDatabase(), nil, spec, nil, engine, vm.Config{}, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := types.NewGhostAccountSigner(types.LatestSigner(config), chain.Genesis().Hash())
+		tx := signML(t, s, key, transfer(0, gasML, recipient, 1000))
+		if tc.want != nil {
+			bad := GenerateBadBlock(chain.Genesis(), engine, types.Transactions{tx}, config)
+			if _, err := chain.InsertChain(types.Blocks{bad}); !errors.Is(err, tc.want) {
+				t.Errorf("%s: import error %v, want %v", tc.name, err, tc.want)
+			}
+			if chain.CurrentBlock().Number.Sign() != 0 {
+				t.Errorf("%s: the invalid block became the head", tc.name)
+			}
+			// Applied alone, the transaction is refused the same way.
+			st, _ := chain.State()
+			header := types.CopyHeader(bad.Header())
+			header.GasUsed = 0
+			if _, err := ApplyTransaction(config, chain, &header.Coinbase, new(GasPool).AddGas(header.GasLimit), st, header, tx, &header.GasUsed, vm.Config{}); !errors.Is(err, tc.want) {
+				t.Errorf("%s: apply error %v, want %v", tc.name, err, tc.want)
+			}
+		} else {
+			_, good, _ := GenerateChainWithGenesis(spec, engine, 1, func(i int, b *BlockGen) {
+				b.SetPoS()
+				b.AddTx(tx)
+			})
+			if n, err := chain.InsertChain(good); err != nil {
+				t.Errorf("%s: block %d not imported: %v", tc.name, n+1, err)
+			}
+			st, _ := chain.State()
+			if got := types.GhostRecordedKeyIdentity(st, from); got != identity {
+				t.Errorf("%s: key identity %v, want %v", tc.name, got, identity)
 			}
 		}
 		chain.Stop()

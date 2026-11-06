@@ -135,6 +135,16 @@ var ErrGhostAccountVerifyGas = errors.New("account transaction scheme has no ver
 // same account stays accepted.
 var ErrGhostAccountSunset = errors.New("account transaction scheme 0x0003 is past ML_RESCUE_HEIGHT")
 
+// ErrGhostAccountKeyIdentity is returned for an account transaction whose key
+// identity is not the one recorded in state for its sender
+// (types.GhostRecordedKeyIdentity).
+var ErrGhostAccountKeyIdentity = errors.New("account transaction key identity is not the recorded one")
+
+// ErrGhostKeyRegistration is returned for a transaction to the key registry
+// account (types.GhostKeyRegistryAccount) that is no key registration: not an
+// account transaction, or one that sends value or data.
+var ErrGhostKeyRegistration = errors.New("transaction to the key registry is no key registration")
+
 // GhostAccountExtraIntrinsicGas returns the intrinsic gas an account
 // transaction (type 0x52) takes on top of the type 0x02 intrinsic gas:
 // 16 * (2 + len(public_key) + len(signature)) + VERIFY_GAS of its scheme
@@ -184,6 +194,12 @@ type Message struct {
 	// for every other message.
 	GhostAccountScheme uint16
 
+	// GhostKeyIdentity is the key identity of an account transaction
+	// (types.GhostAccountKeyIdentityOf): checked against the identity
+	// recorded for its sender, and recorded by a key registration. It is
+	// zero for every other message.
+	GhostKeyIdentity common.Hash
+
 	// When SkipAccountChecks is true, the message nonce is not checked against the
 	// account nonce in state. It also disables checking that the sender is an EOA.
 	// This field will be set to true for operations like RPC eth_call.
@@ -222,6 +238,9 @@ func TransactionToMessage(tx *types.Transaction, s types.Signer, baseFee *big.In
 	}
 	if scheme, _, _, ok := tx.GhostAccountAuth(); ok {
 		msg.GhostAccountScheme = scheme
+	}
+	if identity, ok := tx.GhostAccountKeyIdentity(); ok {
+		msg.GhostKeyIdentity = identity
 	}
 	msg.ExtraIntrinsicGas, err = GhostAccountExtraIntrinsicGas(tx)
 	return msg, err
@@ -287,6 +306,10 @@ type StateTransition struct {
 	// dataCommit is the parsed data commit of a top-level call to the data
 	// commit entry address, set by preCheck; nil for any other message.
 	dataCommit *ghostpriv.DataCommit
+
+	// keyRegistration is set by preCheck for a key registration, an account
+	// transaction to types.GhostKeyRegistryAccount.
+	keyRegistration bool
 }
 
 // NewStateTransition initialises and returns a new state transition object.
@@ -373,6 +396,15 @@ func (st *StateTransition) preCheck() error {
 		if msg.GhostAccountScheme == types.GhostSchemeMLDSA44Rescue && ghost.MLRescueSunset(st.evm.Context.BlockNumber.Uint64()) {
 			return fmt.Errorf("%w: address %v, block %d", ErrGhostAccountSunset, msg.From.Hex(), st.evm.Context.BlockNumber)
 		}
+		// The key identity read from state at this block: once recorded,
+		// a transaction of the account must carry the recorded key.
+		if msg.GhostKeyIdentity != (common.Hash{}) {
+			recorded := types.GhostRecordedKeyIdentity(st.state, msg.From)
+			if recorded != (common.Hash{}) && recorded != msg.GhostKeyIdentity {
+				return fmt.Errorf("%w: address %v, key identity %v, recorded %v", ErrGhostAccountKeyIdentity,
+					msg.From.Hex(), msg.GhostKeyIdentity, recorded)
+			}
+		}
 	}
 	// Make sure that transaction gasFeeCap is greater than the baseFee (post london)
 	if st.evm.ChainConfig().IsEnabled(st.evm.ChainConfig().GetEIP1559Transition, st.evm.Context.BlockNumber) {
@@ -441,6 +473,11 @@ func (st *StateTransition) preCheck() error {
 			return err
 		}
 	}
+	if msg.To != nil && *msg.To == types.GhostKeyRegistryAccount {
+		if err := st.checkKeyRegistration(); err != nil {
+			return err
+		}
+	}
 	return st.buyGas()
 }
 
@@ -477,6 +514,25 @@ func (st *StateTransition) checkCommit() error {
 		return fmt.Errorf("%w: address %v", err, msg.From.Hex())
 	}
 	st.commit = commit
+	return nil
+}
+
+// checkKeyRegistration checks a transaction to the key registry account: it
+// must be an account transaction, which carries a key identity, with no value
+// and no data. The registry holds no balance and runs no code. A simulated
+// call (SkipAccountChecks, as for eth_call and gas estimation) carries no key
+// identity; it passes as a registration that records nothing.
+func (st *StateTransition) checkKeyRegistration() error {
+	msg := st.msg
+	switch {
+	case msg.GhostKeyIdentity == (common.Hash{}) && !msg.SkipAccountChecks:
+		return fmt.Errorf("%w: address %v, not an account transaction", ErrGhostKeyRegistration, msg.From.Hex())
+	case msg.Value != nil && msg.Value.Sign() != 0:
+		return fmt.Errorf("%w: address %v, value %v", ErrGhostKeyRegistration, msg.From.Hex(), msg.Value)
+	case len(msg.Data) != 0:
+		return fmt.Errorf("%w: address %v, %d bytes of data", ErrGhostKeyRegistration, msg.From.Hex(), len(msg.Data))
+	}
+	st.keyRegistration = true
 	return nil
 }
 
@@ -601,6 +657,11 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 		if err := ghostpriv.ApplyDataCommit(st.state, st.evm.Context.BlockNumber.Uint64(), msg.From, st.dataCommit); err != nil {
 			return nil, err
 		}
+	case st.keyRegistration:
+		// A key registration runs no code: it records the key identity of
+		// its sender, from this transaction on.
+		st.state.SetNonce(msg.From, st.state.GetNonce(msg.From)+1)
+		st.recordKeyIdentity()
 	case contractCreation:
 		ret, _, st.gasRemaining, vmerr = st.evm.Create(sender, msg.Data, st.gasRemaining, value)
 	default:
@@ -639,6 +700,26 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 		Err:         vmerr,
 		ReturnData:  ret,
 	}, nil
+}
+
+// recordKeyIdentity writes the key identity of a key registration to the
+// storage of types.GhostKeyRegistryAccount, at the key of its sender, unless
+// it is recorded already. The registry account gets nonce 1 when it is first
+// written, so it is never removed as an empty account. A message without a
+// key identity records nothing.
+func (st *StateTransition) recordKeyIdentity() {
+	identity := st.msg.GhostKeyIdentity
+	if identity == (common.Hash{}) {
+		return
+	}
+	key := types.GhostKeyRegistryKey(st.msg.From)
+	if st.state.GetState(types.GhostKeyRegistryAccount, key) == identity {
+		return
+	}
+	st.state.SetState(types.GhostKeyRegistryAccount, key, identity)
+	if st.state.GetNonce(types.GhostKeyRegistryAccount) == 0 {
+		st.state.SetNonce(types.GhostKeyRegistryAccount, 1)
+	}
 }
 
 func (st *StateTransition) refundGas(refundQuotient uint64) uint64 {

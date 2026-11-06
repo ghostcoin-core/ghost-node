@@ -33,7 +33,8 @@ import (
 // the only transaction of an account, signed with a quantum-safe signature
 // scheme. Its envelope is the type byte followed by an RLP list of twelve
 // items. The sender is derived from the scheme and the public key; there is no
-// key registry and no public key recovery.
+// public key recovery. The key identity of the sender is recorded in state by
+// a key registration (GhostKeyRegistryAccount, below).
 const (
 	// GhostAccountTxType is the type byte of an account transaction. Spec 09
 	// proposes 0x51, which is the data reveal in this node.
@@ -74,7 +75,77 @@ const (
 	// GhostAccountTxContext is the context string of the signature, for
 	// ML-DSA-44 and SLH-DSA alike.
 	GhostAccountTxContext = "ghost/tx/v1"
+
+	// GhostAccountKeyTag is the hash tag of an account's key identity.
+	GhostAccountKeyTag = "ghost/account-key/v1"
+
+	// GhostKeyRegistryTag is the hash tag of the storage key under which the
+	// key identity of an account is recorded.
+	GhostKeyRegistryTag = "ghost/key-registry/v1"
 )
+
+// The key identity of an account.
+//
+// The key identity is the 32-byte name of the public key an account signs
+// with: K("ghost/account-key/v1", scheme, public_key), where scheme is the
+// two-byte scheme ID, with 0x0004 taken as 0x0003 as for the address, so the
+// two halves of a rescue-key account have one identity. It is the second of
+// the three public inputs a public transaction binds (the 20-byte account,
+// the 32-byte key identity and the 32-byte transaction hash): the 84 binding
+// bytes that stand for the key and the signature when a public root proves
+// the signature.
+//
+// "The key identity read from state" is the word the node records in the
+// storage of GhostKeyRegistryAccount, at GhostKeyRegistryKey(account). It is
+// not a field of the account itself: the account keeps its nonce, balance,
+// storage root and code hash, nothing more. The word is zero until the
+// account registers its key: a key registration is an account transaction
+// (type 0x52, with its raw signature) to GhostKeyRegistryAccount with no
+// value and no data. It runs no code; it takes the account's nonce and
+// records the identity of the key that signed it, which is in state for
+// every later transaction of the same block and of the blocks after it. Any
+// other account transaction leaves the registry as it is, so an account that
+// never registers changes no state it did not change before. A transaction
+// whose key identity is not the recorded one is refused. The sender is still
+// derived from the public key (spec 09 has no key change yet), so a recorded
+// identity is always the one of the account's own key.
+var (
+	// GhostKeyRegistryAccount is the system account whose storage holds the
+	// key identity of every account that has registered its key.
+	// Like the tree accounts and the policy registry it holds no code and no
+	// balance and gets nonce 1 when it is first written; only the node's own
+	// rules write its storage.
+	GhostKeyRegistryAccount = common.HexToAddress("0x67686f737400000000000000000000000000000b")
+)
+
+// GhostKeyIdentityReader is the part of the state the key identity is read
+// from.
+type GhostKeyIdentityReader interface {
+	GetState(common.Address, common.Hash) common.Hash
+}
+
+// GhostAccountKeyIdentityOf returns the key identity of a scheme and a public
+// key, K("ghost/account-key/v1", scheme, public_key). It checks nothing.
+// Scheme 0x0004 is taken as scheme 0x0003, as for the address.
+func GhostAccountKeyIdentityOf(scheme uint16, publicKey []byte) common.Hash {
+	if scheme == GhostSchemeSLHDSARescue {
+		scheme = GhostSchemeMLDSA44Rescue
+	}
+	id := GhostScheme(scheme)
+	return ghostTaggedHash(GhostAccountKeyTag, id[:], publicKey)
+}
+
+// GhostKeyRegistryKey returns the storage key, in GhostKeyRegistryAccount, of
+// the key identity of account: K("ghost/key-registry/v1", account).
+func GhostKeyRegistryKey(account common.Address) common.Hash {
+	return ghostTaggedHash(GhostKeyRegistryTag, account[:])
+}
+
+// GhostRecordedKeyIdentity returns the key identity of account read from
+// state, and the zero hash if none is recorded.
+func GhostRecordedKeyIdentity(st GhostKeyIdentityReader, account common.Address) common.Hash {
+	return st.GetState(GhostKeyRegistryAccount, GhostKeyRegistryKey(account))
+}
 
 // ghostSLHDSAParams is the one SLH-DSA parameter set of scheme 0x0002.
 const ghostSLHDSAParams = slhdsa.SHAKE_128s
@@ -353,6 +424,17 @@ func (tx *Transaction) GhostAccountAuth() (scheme uint16, publicKey, signature [
 		return 0, nil, nil, false
 	}
 	return inner.SchemeID(), common.CopyBytes(inner.PublicKey), common.CopyBytes(inner.Signature), true
+}
+
+// GhostAccountKeyIdentity returns the key identity of the scheme and public
+// key of an account transaction, and false for any other transaction. It
+// checks nothing.
+func (tx *Transaction) GhostAccountKeyIdentity() (common.Hash, bool) {
+	inner, ok := tx.inner.(*GhostAccountTx)
+	if !ok {
+		return common.Hash{}, false
+	}
+	return GhostAccountKeyIdentityOf(inner.SchemeID(), inner.PublicKey), true
 }
 
 // GhostAccountAddress returns the sender of an account transaction without
