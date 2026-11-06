@@ -308,6 +308,9 @@ run_buffered() {
 	start=$SECONDS
 	if bash "$self" $stage >"$file.log" 2>&1; then
 		echo "ok   $stage ($((SECONDS - start))s)"
+		# A unit shard that passed only on its re-run says so: keep that
+		# visible, as the rest of a passing stage's output is not shown.
+		grep -E '^flaky: re-ran ' "$file.log" || true
 		echo ok >"$file.result"
 	else
 		echo "FAIL $stage ($((SECONDS - start))s), last 100 lines:"
