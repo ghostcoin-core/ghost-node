@@ -17,11 +17,12 @@
 // than a cell, at a fixed run of cells inside one column), so its column is a
 // public function of i.
 //
-// Every snapshot has a public 32-byte seed (the snapshot's identity). From
-// the seed alone anyone expands one uniform ring element a_j per column,
-// AES-256-CTR keyed with SHA-256 of a domain label and the seed. No key or
-// permission is needed to build or serve a database: any full node holding
-// the same public data derives the same database and the same a_j.
+// Every database of a snapshot has a public 32-byte seed, derived from the
+// snapshot's identity (see Snapshots below). From the seed alone anyone
+// expands one uniform ring element a_j per column, AES-256-CTR keyed with
+// SHA-256 of a domain label and the seed. No key or permission is needed to
+// build or serve a database: any full node holding the same public data
+// derives the same database and the same a_j.
 //
 // A query for record i in column c is, for every column j,
 //
@@ -67,4 +68,25 @@
 // Delta' = 2^12 at about twelve standard deviations, against the half of
 // Delta' that decoding tolerates: a coefficient decodes wrong with
 // probability far below 2^-60.
+//
+// # Snapshots
+//
+// A restore server answers from a snapshot: every database of the tree
+// history as of one anchor block (the notes, coin-tree witness records,
+// lookup and marker leaves, and the bucket and overflow records of every
+// hint table), each preprocessed for PIR. The anchor is the block whose
+// number is the last multiple of SnapshotInterval (20) at or below the
+// head, on the head's own chain, so a snapshot is rebuilt every 20 blocks
+// and whenever a reorganisation replaces its anchor block; a reorganisation
+// above the anchor keeps it. A build checks that the last tree of each kind
+// folds to the anchor header's root of that kind.
+//
+// The snapshot header lists the anchor's number and hash, its coin tree,
+// data tree and data marker roots, and for every database its table, kind,
+// tree index, record size, record count, tree or list root and a SHA-256
+// digest of its records. The snapshot's identity is SHA-256 of a domain
+// label and the header's encoding, and the seed of database i is SHA-256 of
+// another domain label, the identity and i. Any node with the same chain
+// builds the same header and so the same identity and seeds, and a server
+// refuses a query made under the seed of another snapshot.
 package ghostpir
