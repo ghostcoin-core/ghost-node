@@ -89,4 +89,37 @@
 // another domain label, the identity and i. Any node with the same chain
 // builds the same header and so the same identity and seeds, and a server
 // refuses a query made under the seed of another snapshot.
+//
+// # Serving a restore
+//
+// A BulkServer keeps the snapshot of the node's head and serves it in two
+// ways. What every wallet reads whole is served in bulk, and so says nothing
+// about the wallet: the snapshot header (from which a client derives the
+// shape of every database, EntryShape), the tops of every coin and data tree
+// at level TopLevel (20), which fold to the anchor header's roots, and, for
+// every block after the anchor up to the head, the lookup tag and position
+// of every leaf it appended and every marker it spent with its position in
+// its marker list. The rest is read through PIR over the snapshot's
+// databases: a hint bucket and the overflow entries past its 16 slots at
+// their public indexes, a note, its witness or lookup record, a marker.
+//
+// Every request, bulk or PIR, is charged to a Budget before any work: at most
+// PerClient requests from one client and Total from all clients together in
+// every Window. A request past either is refused (ErrClientBudget,
+// ErrTotalBudget), charged nothing and logged as refused; a client is an
+// opaque label the caller gives (its address, say). A server whose last
+// update failed serves nothing (ErrNoSnapshot) rather than a chain the node
+// has left.
+//
+// # Costs at chain scale
+//
+// BenchmarkRestoreSizes records the figures at the chain sizes of one and five
+// years: database sizes, query and answer bytes, server core-seconds per
+// query, preprocessing core-seconds per rebuild, and the totals of one
+// restore beside the published 187.7 MB / 404.4 MB total download and
+// 479 / 2,394 core-seconds a restore. The chain is a fixture (30-second
+// blocks; two coin leaves, one coin marker, one data leaf and half a data
+// marker a block), laid out exactly as a snapshot lays it out; the per-row
+// and per-cell costs are measured on the machine the benchmark runs on, which
+// it names, and multiplied out to every grid.
 package ghostpir
