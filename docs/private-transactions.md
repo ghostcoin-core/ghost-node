@@ -316,6 +316,96 @@ the policy address, out and the instruction (32 bytes each),
 `ghost/slot-recommitted/v1` with the amount and `ghost/slot-closed/v1` with
 the forfeited value.
 
+## Private bundle
+
+A private bundle carries one root proof in place of the proofs of up to
+1,408 version 2 ordinary reveals (44 batches of 32), each without its proof
+field (`core/types/tx_ghost_bundle.go`, `core/ghostpriv/bundle.go`). It is
+the typed transaction `0x55 || payload`, with hash
+`keccak256(0x55 || payload)`. The payload is a fixed layout, not RLP:
+
+| Offset | Length | Field |
+|---|---|---|
+| 0 | 2 | version, `0x0001` |
+| 2 | 8 | chain id |
+| 10 | 2 | count, 1 to 1,408 |
+| 12 | 1,310,720 | root proof, then zeros |
+| 1,310,732 | 570 * count | the bodies, in order |
+
+The envelope is 1,310,733 + 570 * count bytes: 1,311,303 for one reveal and
+2,113,293 for 1,408 (`types.GhostBundlePayloadSize`). A body is a version 2
+reveal payload without its proof field: its first 190 bytes (version 2,
+chain id, marker, root, remainder, recipient, out and fee, at the offsets of
+the reveal) followed by its 380-byte note. Like the reveals, a bundle has no
+sender, nonce or signature: `types.Sender` returns `types.ErrNoSender` for
+it.
+
+### Root inputs
+
+The node builds the public inputs of the root itself, from the bundle;
+nothing is taken from the proof (`ghostpriv.NewBundleInputs`). For each body
+in order it computes the reveal's version 2 binding digest `b_i` on this
+chain ([Binding digest](#binding-digest)), then:
+
+- the contents digest `K("ghost/bundle-contents/v1", b_1 || ... || b_n)`;
+- the bundle binding `K("ghost/bundle-binding/v1", fields)` over 79 bytes:
+  chain id (8), bundle version `0x0001` (2), domain (32, the genesis block
+  hash), statement `0x01`, reveal version `0x02`, purpose `0x08` (bundle),
+  the count (2) and the contents digest (32).
+
+Neither tag is a reveal's, so no reveal's digest or proof stands in for a
+root. The root proves that the bundled reveals' proofs are valid, and
+nothing of the state.
+
+### Bundle checks
+
+The structural checks run first and read no state; any failure makes the
+block invalid before any change of the bundle's (`ghostpriv.CheckBundle`):
+
+1. type `0x55` and a payload that holds the fixed fields
+   (`ErrBundleLength`);
+2. a count of 1 to 1,408 (`ErrBundleCount`);
+3. the exact length of that count (`ErrBundleLength`);
+4. version 1 (`ErrBundleVersion`);
+5. every body a version 2 reveal whose out and fee are amount words
+   (`ErrBundleBody`);
+6. the bundle's chain id and every body's are this chain's
+   (`ErrBundleChainID`);
+7. the active verifier verifies bundle roots (`ErrBundleUnsupported`) and
+   accepts the root proof for the inputs the node built (`ErrBundleProof`).
+
+Then each reveal runs, in order and on the state the reveals before it left,
+checks 5 to 9 of a lone reveal and the coin tree check: the window fee, a
+recipient that is not a registered policy, an eligible root, a marker not
+spent (a marker repeated within the bundle included), the backstop and room
+in the coin tree for the remainder. A reveal that fails one is skipped: it
+pays nothing and writes nothing, no marker, no log and no total, and the rest
+of the bundle runs. A reveal that passes makes the very change a lone reveal
+makes (`ghostpriv.ApplyBundle`). An ancestry the node cannot read is the
+block's failure, not the reveal's.
+
+### Bundle gas and receipt
+
+A bundle takes `count x G_PRIV` gas from the block gas pool
+(`types.GhostBundleGas`), the gas the same reveals take as lone reveals,
+skipped reveals included; a block whose pool holds less is invalid. At the
+consensus maximum block gas limit of 30,000,000
+([account transactions](account-transactions.md#block-gas-limit-and-message-size))
+a block holds a bundle of one reveal, 21,371,656 gas; a bundle of two takes
+42,743,312 gas and fits no block. The bundle has no gas price of its own:
+each applied reveal pays its window fee as a lone reveal does, and a skipped
+reveal pays none. The receipt is one typed receipt of type `0x55`, status 1,
+with the bundle's whole gas and the reveal logs of the applied reveals in
+order, each the version 2 reveal log of [Receipts](#receipts).
+
+### Bundle admission
+
+No pool takes a bundle: the transaction pool and the reveal pool refuse type
+`0x55` with `core.ErrTxTypeNotSupported`, so neither an RPC submission nor a
+peer brings one in, and the miner builds none. `types.CheckTxType` takes the
+type, so a block that carries a bundle is processed: the state processor and
+the chain maker of the tests (`core/chain_makers.go`) apply it.
+
 ## Proof verifier
 
 `ghostpriv.Verifier` checks a proof against `VerifyInputs`, the binding digest
@@ -381,6 +471,31 @@ exactly a proof field whose first 32 bytes are
 checks nothing else; for a version 1 reveal it also accepts the stub of the
 salted binding digest. Only `_test.go` files may import it.
 
+A root proof, of a bundle or of a public root
+([account transactions](account-transactions.md#public-root-and-binding-transactions)),
+is verified through an interface of its own beside `Verifier`:
+`ghostpriv.BundleVerifier` and `ghostpriv.PublicRootVerifier`, found by a
+type assertion on the active verifier. A verifier without one fails every
+root of that kind closed, with `ErrBundleUnsupported` or
+`ErrPublicRootUnsupported`, before any change. Neither the linked verifier
+nor the default of a build without it has either interface yet, so a release
+node finds every block that carries a bundle or a public root invalid. The
+stub verifier has both: it accepts exactly a root proof field whose first 32
+bytes are `K("ghost/test-proof/v1", root binding)` and whose other bytes are
+zero (`ghostprivtest.BundleProof`, `ghostprivtest.PublicRootProof`), and
+checks nothing of the proofs or signatures the root stands for.
+
+## Root verification time
+
+Spec 07, section 4, gives the node a budget of 3,000 ms to verify the four
+root proofs of a block. No verification time is recorded against it yet. A
+time counts only when it is measured on named hardware, with the real linked
+verifier, over real root proofs; the stub verifier above checks one hash and
+times nothing of a proof, and the linked verifier verifies no root yet. The
+measurement waits for a real Poseidon2 shrink proof from the stage 2 prover
+of the proof system; until one exists the benchmark is blocked, and this
+document gives no time, measured or estimated.
+
 ## Accounting
 
 The totals account holds `total_in` in slot 0, `total_out` in slot 1 and
@@ -445,7 +560,12 @@ For the wallet and the tests that build on this:
   calls;
 - `types.NewGhostRevealTx(envelope)`, which wraps an envelope into a
   transaction of type `0x50`;
-- `ghostprivtest.Verifier` and `ghostprivtest.Proof(binding digest)`.
+- `ghostpriv.Bundle` with `MarshalBinary` and `Inputs`,
+  `ghostpriv.DecodeBundle`, `CheckBundle` and `ApplyBundle`,
+  `ghostpriv.BundleBody` and `NewBundleInputs`;
+  `types.NewGhostBundleTx(envelope)` and `types.GhostBundleGas(count)`;
+- `ghostprivtest.Verifier`, `ghostprivtest.Proof(binding digest)` and
+  `ghostprivtest.BundleProof(root binding)`.
 
 ## What is not here
 
