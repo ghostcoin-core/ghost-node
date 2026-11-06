@@ -222,9 +222,9 @@ func (s *publicChain) unchecked(t *testing.T, txs ...*types.Transaction) []*type
 // TestPublicRootBlockImportsAndRefuses checks a block with a public root
 // (0x56) and the binding transactions (0x57) it proves on the stub
 // verifier: it imports, each binding transaction runs as an account
-// transaction of its binding's account at the gas of a raw-signature one,
-// and a raw-signature account transaction (0x52) in the same block still
-// imports. A wrong binding, a key identity that is not the recorded one, a
+// transaction of its binding's account at the gas of a raw-signature one
+// without the signature's byte gas and VERIFY_GAS, and a raw-signature
+// account transaction (0x52) in the same block still imports at its gas. A wrong binding, a key identity that is not the recorded one, a
 // wrong root proof, a root with no binding transactions, binding
 // transactions with no root, a second root, a binding transaction before
 // the root and a failing state-dependent check of a binding transaction each
@@ -295,18 +295,26 @@ func TestPublicRootBlockImportsAndRefuses(t *testing.T) {
 		if rs[k].Type != types.GhostBindingTxType || rs[k].Status != types.ReceiptStatusSuccessful {
 			t.Fatalf("binding receipt %d: type %#x status %d", k, rs[k].Type, rs[k].Status)
 		}
-		// The gas of a raw-signature account transaction of the scheme.
-		if rs[k].GasUsed != rs[2].GasUsed || rs[k].GasUsed != 21_000+accountExtraGas {
-			t.Fatalf("binding receipt %d: gas %d, raw-signature %d, want %d", k, rs[k].GasUsed, rs[2].GasUsed, 21_000+accountExtraGas)
+		// The gas of a raw-signature account transaction of the scheme
+		// without its signature bytes and its verification.
+		if rs[k].GasUsed != 21_000+bindingExtraGas || rs[k].GasUsed >= rs[2].GasUsed {
+			t.Fatalf("binding receipt %d: gas %d, raw-signature %d, want %d", k, rs[k].GasUsed, rs[2].GasUsed, 21_000+bindingExtraGas)
 		}
+	}
+	// The raw-signature transaction keeps the gas of its signature.
+	if rs[2].GasUsed != 21_000+accountExtraGas {
+		t.Fatalf("raw-signature receipt: gas %d, want %d", rs[2].GasUsed, 21_000+accountExtraGas)
 	}
 	if len(receipts[1]) != 4 || receipts[1][1].GasUsed != rs[1].GasUsed {
 		t.Fatal("the chain maker's receipts are not the processor's")
 	}
-	// The gas of a binding transaction is the account transaction's for its
-	// scheme, signature bytes and verification included.
+	// The gas of an account transaction is its scheme's, signature bytes
+	// and verification included; a binding transaction's drops both.
 	if want := ghost.AccountTxSigByteGas*(2+types.GhostMLDSA44PublicKeySize+types.GhostMLDSA44SignatureSize) + ghost.AccountTxVerifyGas(types.GhostSchemeMLDSA44); accountExtraGas != want {
 		t.Fatalf("extra gas %d, want %d", accountExtraGas, want)
+	}
+	if want := accountExtraGas - ghost.AccountTxSigByteGas*types.GhostMLDSA44SignatureSize - ghost.AccountTxVerifyGas(types.GhostSchemeMLDSA44); bindingExtraGas != want {
+		t.Fatalf("binding extra gas %d, want %d", bindingExtraGas, want)
 	}
 
 	// A key registered earlier in the same block is read from state at the
@@ -363,14 +371,14 @@ func TestPublicRootBlockImportsAndRefuses(t *testing.T) {
 		}
 	}
 
-	// A binding transaction whose gas does not cover an account
-	// transaction's intrinsic gas is refused: its gas is not repriced.
+	// A binding transaction whose gas does not cover a binding
+	// transaction's intrinsic gas is refused.
 	low := s.unbound(1, pubTo(1), value)
-	low.Gas = 21_000 + accountExtraGas - 1
+	low.Gas = 21_000 + bindingExtraGas - 1
 	low.Binding = types.NewGhostBinding(addrA, idA, s.txHash(low))
 	lowTx := types.NewTx(low)
-	if err := s.insertBad(t, "gas below an account transaction's", s.unchecked(t, rootTx(t, s.rootOf(lowTx)), lowTx)); !errors.Is(err, core.ErrIntrinsicGas) {
-		t.Errorf("gas below an account transaction's: block imported with %v, want %v", err, core.ErrIntrinsicGas)
+	if err := s.insertBad(t, "gas below a binding transaction's", s.unchecked(t, rootTx(t, s.rootOf(lowTx)), lowTx)); !errors.Is(err, core.ErrIntrinsicGas) {
+		t.Errorf("gas below a binding transaction's: block imported with %v, want %v", err, core.ErrIntrinsicGas)
 	}
 }
 

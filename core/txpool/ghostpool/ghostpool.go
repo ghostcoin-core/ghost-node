@@ -43,6 +43,19 @@
 // actions have caps of their own and share every peer budget. On each new
 // head a held action runs checks 1 to 8 again, never its proof.
 //
+// A public root (type 0x56) is checked and never held: it is valid only in a
+// block beside the binding transactions (type 0x57) it proves, which no pool
+// takes. Its cheap checks run first, under the lock: the shape, the chain id
+// and, for every binding it lists, the key identity recorded in the head's
+// state for the binding's account. Then its proof is verified once, against
+// the public inputs the pool builds from those bindings, the chain id and
+// the genesis hash. An invalid root so costs at most one native verification
+// and is refused (ghostpriv.ErrPublicRootProof, a failed proof of the peer);
+// a valid one is refused with ErrPublicRootNotPooled. Either is remembered by
+// its hash and refused again without any check. The account transactions
+// with their raw signatures stay in the legacy pool under its signature
+// bounds, which a public root does not change.
+//
 // A peer whose transactions fail their proof PeerMaxFailedProofs times on
 // one head is refused with ErrPeerFailLimit, which the network handler
 // answers by disconnecting it.
@@ -68,6 +81,7 @@ import (
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params/types/ctypes"
+	"github.com/ethereum/go-ethereum/params/vars"
 	"github.com/holiman/uint256"
 )
 
@@ -167,6 +181,12 @@ var (
 	// the pool refused before for a reason that no head can change: it is
 	// refused again without any check.
 	ErrRejectedBefore = errors.New("reveal refused before")
+
+	// ErrPublicRootNotPooled is returned for a public root whose checks and
+	// proof passed: a root is valid only in a block beside the binding
+	// transactions it proves, which no pool takes, so the pool never holds
+	// one.
+	ErrPublicRootNotPooled = errors.New("public root is not held by the pool: it is valid only in a block beside its binding transactions")
 )
 
 // maxRejected is the most hashes of refused reveals the pool remembers; the
@@ -227,6 +247,11 @@ var permanentRefusals = []error{
 	ghostpriv.ErrPolicyRevealChainID, ghostpriv.ErrPolicyRevealProof,
 	ghostpriv.ErrActionLength, ghostpriv.ErrActionVersion, ghostpriv.ErrActionEncoding,
 	ghostpriv.ErrActionChainID, ghostpriv.ErrActionProof,
+	// A public root's proof is verified against the bindings it lists, once
+	// their key identities are the recorded ones, so its verdict is that of
+	// its bytes; and the pool holds no root, whatever the head.
+	ghostpriv.ErrPublicRootLength, ghostpriv.ErrPublicRootVersion, ghostpriv.ErrPublicRootChainID,
+	ghostpriv.ErrPublicRootProof, ErrPublicRootNotPooled,
 }
 
 // permanentRefusal reports whether err is a refusal of a transaction that
@@ -248,6 +273,7 @@ func permanentRefusal(err error) bool {
 var proofRefusals = []error{
 	ghostpriv.ErrRevealProof, ghostpriv.ErrDataRevealProof,
 	ghostpriv.ErrPolicyRevealProof, ghostpriv.ErrActionProof,
+	ghostpriv.ErrPublicRootProof,
 }
 
 // failedProof reports whether err is the refusal of a proof the verifier
@@ -381,6 +407,7 @@ type Pool struct {
 	actionBytes  uint64                    // envelope bytes of the held actions
 	actionChecks map[common.Hash]bool      // actions being checked, true for a local one
 	localActions int                       // local actions among those being checked
+	rootChecks   map[common.Hash]struct{}  // public roots whose proof is being verified
 	peers        map[string]*peerBudget
 	rejected     rejectedSet // transactions refused for good, refused again unchecked
 
@@ -415,14 +442,15 @@ func New(chain BlockChain) *Pool {
 		validating:   make(map[markerKey]common.Hash),
 		actions:      make(map[actionKey]common.Hash),
 		actionChecks: make(map[common.Hash]bool),
+		rootChecks:   make(map[common.Hash]struct{}),
 		peers:        make(map[string]*peerBudget),
 	}
 }
 
 // Filter accepts the coin reveal, the data reveal, the policy reveal and
-// the policy action.
+// the policy action, and the public root, which it checks and never holds.
 func (p *Pool) Filter(tx *types.Transaction) bool {
-	return tx.IsGhostReveal()
+	return tx.IsGhostReveal() || tx.Type() == types.GhostPublicRootTxType
 }
 
 // classFees are the fees of one reveal class the block that would come next
@@ -639,10 +667,127 @@ func (p *Pool) add(tx *types.Transaction, peer string) error {
 		return fmt.Errorf("%w: %w", ErrRejectedBefore, first)
 	}
 	p.mu.Unlock()
-	if tx.Type() == types.GhostPolicyActionTxType {
+	switch tx.Type() {
+	case types.GhostPolicyActionTxType:
 		return p.addAction(tx, peer)
+	case types.GhostPublicRootTxType:
+		return p.addPublicRoot(tx, peer)
 	}
 	return p.addReveal(tx, peer)
+}
+
+// addPublicRoot checks a public root and refuses it: the pool holds no root.
+// Under the lock, the peer is charged first, as for any transaction, then
+// come the decoding (the length, the count and the version), the peer's one
+// check slot, the chain id, a count no block's gas limit on the head can pay
+// for (ghostpriv.ErrPublicRootCount) and the key identities: each binding the root
+// lists must name an account whose key identity the head's state records,
+// and that identity. None of them verifies anything. Then the root takes a
+// check slot, a remote root without waiting, and its proof is verified once,
+// outside the lock, with the active verifier against the inputs the pool
+// builds from those bindings, this chain's id and its genesis hash. A proof
+// refused is ghostpriv.ErrPublicRootProof, counted to the peer as a failed
+// proof; a proof accepted is ErrPublicRootNotPooled. Both are remembered by
+// the root's hash, so the same root costs no second verification.
+func (p *Pool) addPublicRoot(tx *types.Transaction, peer string) error {
+	hash := tx.Hash()
+	root, decodeErr := ghostpriv.DecodePublicRoot(tx.GhostPublicRootEnvelope())
+	p.mu.Lock()
+	slot, bindings, err := p.admitPublicRoot(hash, root, decodeErr, peer)
+	if err != nil {
+		p.rejected.add(hash, err)
+		p.mu.Unlock()
+		return err
+	}
+	p.rootChecks[hash] = struct{}{}
+	if peer != "" {
+		p.peers[peer].validating++
+	}
+	p.mu.Unlock()
+
+	slot = p.takeSlot(slot)
+	in := ghostpriv.NewPublicRootInputs(root.ChainID, p.chain.Genesis().Hash(), bindings)
+	err = ghostpriv.VerifyPublicRoot(p.verifier(), in, root.Proof)
+	p.mu.Lock()
+	<-slot
+	delete(p.rootChecks, hash)
+	if b, ok := p.peers[peer]; ok && peer != "" && b.validating > 0 {
+		b.validating--
+	}
+	if err == nil {
+		err = fmt.Errorf("%w: %x", ErrPublicRootNotPooled, hash)
+	}
+	err = p.refuse(hash, peer, err)
+	p.mu.Unlock()
+	return err
+}
+
+// admitPublicRoot runs the checks of a public root that verify nothing,
+// decoded as root or refused by decodeErr, charging the peer first, and
+// returns the check slot of a remote root and the bindings the pool builds
+// for the root's proof: for each binding the root lists, its account, the
+// key identity recorded for it in the head's state and its transaction
+// hash. A binding whose account has no key identity recorded, or another
+// one, is ghostpriv.ErrPublicKeyIdentity. The caller holds the lock.
+func (p *Pool) admitPublicRoot(hash common.Hash, root *ghostpriv.PublicRoot, decodeErr error, peer string) (chan struct{}, []types.GhostBinding, error) {
+	// The same root being verified for another sender is not verified twice.
+	if _, ok := p.rootChecks[hash]; ok {
+		return nil, nil, txpool.ErrAlreadyKnown
+	}
+	b, err := p.charge(peer, hash)
+	if err != nil {
+		return nil, nil, err
+	}
+	if decodeErr != nil {
+		return nil, nil, decodeErr
+	}
+	if b != nil && b.validating > 0 {
+		return nil, nil, fmt.Errorf("%w: peer %s", ErrPeerBusy, peer)
+	}
+	if id := p.chain.Config().GetChainID(); id == nil || !id.IsUint64() || id.Uint64() != root.ChainID {
+		return nil, nil, fmt.Errorf("%w: have %d, chain %v", ghostpriv.ErrPublicRootChainID, root.ChainID, id)
+	}
+	if p.head == nil || p.state == nil {
+		return nil, nil, errors.New("reveal pool not initialised")
+	}
+	// No block on the head holds more binding transactions than its gas
+	// limit pays for at the cheapest binding transaction's intrinsic gas, so
+	// a root listing more is refused before any state is read.
+	if most := p.head.GasLimit / minBindingTxGas(); uint64(len(root.Bindings)) > most {
+		return nil, nil, fmt.Errorf("%w: %d bindings, a block of gas limit %d holds at most %d", ghostpriv.ErrPublicRootCount, len(root.Bindings), p.head.GasLimit, most)
+	}
+	bindings := make([]types.GhostBinding, len(root.Bindings))
+	for i, listed := range root.Bindings {
+		node, err := ghostpriv.CheckBinding(p.state, listed, listed.TxHash())
+		if err != nil {
+			return nil, nil, fmt.Errorf("binding %d: %w", i, err)
+		}
+		bindings[i] = node
+	}
+	slot, err := p.remoteSlot(peer)
+	if err != nil {
+		return nil, nil, err
+	}
+	return slot, bindings, nil
+}
+
+// minBindingTxGas is the least intrinsic gas of a binding transaction: a
+// plain transfer of the scheme whose binding transaction is the cheapest.
+func minBindingTxGas() uint64 {
+	least := uint64(0)
+	for _, scheme := range []uint16{types.GhostSchemeMLDSA44, types.GhostSchemeSLHDSA, types.GhostSchemeMLDSA44Rescue, types.GhostSchemeSLHDSARescue} {
+		extra, err := core.GhostBindingExtraIntrinsicGas(scheme)
+		if err != nil {
+			continue
+		}
+		if gas := vars.TxGas + extra; least == 0 || gas < least {
+			least = gas
+		}
+	}
+	if least == 0 {
+		return vars.TxGas
+	}
+	return least
 }
 
 // addReveal checks and inserts one reveal, of any of the three reveal
