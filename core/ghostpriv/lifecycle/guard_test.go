@@ -35,15 +35,30 @@ import (
 // cancels before the hold, re-committing to a new key, and which otherwise
 // pays instr once 8,640 blocks and 72 hours have passed.
 
-// TestGuardLifecycleOverrideSpend commits a Guard coin and a plain coin and
-// spends each with an ordinary reveal in the same fee window: the commits,
-// the reveals, their receipts and what they change have one shape, byte for
-// byte, and no slot is opened.
-func TestGuardLifecycleOverrideSpend(t *testing.T) {
-	s := newScenario(t)
+// Each part of the lifecycle runs on the stub verifier here and on the real
+// linked verifier, with real proofs, in TestRealProofGuardLifecycle
+// (realproof_guard_test.go): the same steps and checks on either.
+
+// TestGuardLifecycleOverrideSpend runs guardOverrideSpend on the stub
+// verifier.
+func TestGuardLifecycleOverrideSpend(t *testing.T) { guardOverrideSpend(t, newScenario(t)) }
+
+// TestGuardLifecycleTheftCancelled runs guardTheftCancelled on the stub
+// verifier.
+func TestGuardLifecycleTheftCancelled(t *testing.T) { guardTheftCancelled(t, newScenario(t)) }
+
+// TestGuardLifecycleReleaseAfterHold runs guardReleaseAfterHold on the stub
+// verifier.
+func TestGuardLifecycleReleaseAfterHold(t *testing.T) { guardReleaseAfterHold(t, newScenario(t)) }
+
+// guardOverrideSpend commits a Guard coin and a plain coin and spends each
+// with an ordinary reveal in the same fee window: the commits, the reveals,
+// their receipts and what they change have one shape, byte for byte, and no
+// slot is opened.
+func guardOverrideSpend(t *testing.T, s *scenario) {
 	s.createGuard(s.node(0))
 	var (
-		owner     = newGuardOwner("synthetic words of the override owner", "synthetic stop card of the override owner")
+		owner     = s.guardOwner("synthetic words of the override owner", "synthetic stop card of the override owner")
 		guarded   = owner.words.coin(0, ghostAmount(3, 1))
 		plain     = s.owner.coin(0, ghostAmount(3, 1))
 		zero      = new(uint256.Int)
@@ -134,19 +149,18 @@ func TestGuardLifecycleOverrideSpend(t *testing.T) {
 	s.requireGuardCurrent(s.owner, &ordinary.rest)
 }
 
-// TestGuardLifecycleTheftCancelled has a thief who holds only the words
-// sweep a Guard coin into Guard to the thief's address: the slot opens, the
-// coin cannot be spent any more, a second sweep is refused and a release
-// before the hold fails. The stop card's cancel then re-commits the slot to
-// a new key, closing it for good: a second cancel and a release fail, and
-// the new key spends its coin.
-func TestGuardLifecycleTheftCancelled(t *testing.T) {
-	s := newScenario(t)
+// guardTheftCancelled has a thief who holds only the words sweep a Guard
+// coin into Guard to the thief's address: the slot opens, the coin cannot be
+// spent any more, a second sweep is refused and a release before the hold
+// fails. The stop card's cancel then re-commits the slot to a new key,
+// closing it for good: a second cancel and a release fail, and the new key
+// spends its coin.
+func guardTheftCancelled(t *testing.T, s *scenario) {
 	s.createGuard(s.node(0))
 	var (
-		owner   = newGuardOwner("synthetic words of the robbed owner", "synthetic stop card of the robbed owner")
-		thief   = newWallet("synthetic words the thief made up")
-		newKey  = newWallet("synthetic words of the new key")
+		owner   = s.guardOwner("synthetic words of the robbed owner", "synthetic stop card of the robbed owner")
+		thief   = s.wallet("synthetic words the thief made up")
+		newKey  = s.wallet("synthetic words of the new key")
 		c       = owner.words.coin(0, ghostAmount(4, 1))
 		zero    = new(uint256.Int)
 		stolen  = address("guard thief")
@@ -223,20 +237,19 @@ func TestGuardLifecycleTheftCancelled(t *testing.T) {
 	s.net.converged()
 }
 
-// TestGuardLifecycleReleaseAfterHold sweeps two Guard coins with the words
-// alone and waits out the hold in blocks of 30 seconds. Release fails before
-// the hold, one block short of it at its time floor and one second short of
-// it at its block floor; at both floors it pays instr all of the slot. A
-// release and the stop card's cancel then race in one block, in either
-// order: the first lands, the miner refuses or the call reverts for the
-// second with the slot closed, and every node takes the block.
-func TestGuardLifecycleReleaseAfterHold(t *testing.T) {
-	s := newScenario(t)
+// guardReleaseAfterHold sweeps two Guard coins with the words alone and
+// waits out the hold in blocks of 30 seconds. Release fails before the hold,
+// one block short of it at its time floor and one second short of it at its
+// block floor; at both floors it pays instr all of the slot. A release and
+// the stop card's cancel then race in one block, in either order: the first
+// lands, the miner refuses or the call reverts for the second with the slot
+// closed, and every node takes the block.
+func guardReleaseAfterHold(t *testing.T, s *scenario) {
 	s.createGuard(s.node(0))
 	var (
-		owner   = newGuardOwner("synthetic words of the release owner", "synthetic stop card of the release owner")
-		racer   = newGuardOwner("synthetic words of the race owner", "synthetic stop card of the race owner")
-		newKey  = newWallet("synthetic words of the race new key")
+		owner   = s.guardOwner("synthetic words of the release owner", "synthetic stop card of the release owner")
+		racer   = s.guardOwner("synthetic words of the race owner", "synthetic stop card of the race owner")
+		newKey  = s.wallet("synthetic words of the race new key")
 		a       = owner.words.coin(0, ghostAmount(3, 1))
 		b       = racer.words.coin(0, ghostAmount(2, 1))
 		destA   = address("guard release destination")

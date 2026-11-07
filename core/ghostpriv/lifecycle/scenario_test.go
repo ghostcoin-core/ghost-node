@@ -53,18 +53,23 @@ type scenario struct {
 	funder *mldsa44.PrivateKey
 	payer  common.Address
 	owner  *wallet
+	proofs *realProofs // the real proofs of the scenario's wallets; nil for the stub's
 }
 
-// newScenario starts a network and funds the payer with the rewards of the
-// first blocks, one mined by each node: the internal network's genesis
-// allocates nothing.
+// newScenario starts a network with the stub verifier and funds the payer
+// with the rewards of the first blocks, one mined by each node: the internal
+// network's genesis allocates nothing.
 func newScenario(t *testing.T) *scenario {
 	t.Helper()
-	s := &scenario{
-		t:     t,
-		net:   newNetwork(t, networkSize),
-		owner: newWallet("synthetic digits for the owner wallet"),
-	}
+	return newScenarioOn(t, newNetwork(t, networkSize), nil)
+}
+
+// newScenarioOn is newScenario on net, with wallets of real proofs from
+// proofs when it is not nil.
+func newScenarioOn(t *testing.T, net *network, proofs *realProofs) *scenario {
+	t.Helper()
+	s := &scenario{t: t, net: net, proofs: proofs}
+	s.owner = s.wallet("synthetic digits for the owner wallet")
 	s.funder, _, s.payer = testAccount(payerSeed)
 	for _, n := range s.net.nodes {
 		s.net.mine(n, blockPlan{coinbase: s.payer})
@@ -75,12 +80,22 @@ func newScenario(t *testing.T) *scenario {
 
 func (s *scenario) node(i int) *node { return s.net.nodes[i%len(s.net.nodes)] }
 
+// wallet is the wallet of digits: the stand-in, or a real-proof wallet when
+// the scenario makes real proofs.
+func (s *scenario) wallet(digits string) *wallet {
+	w := newWallet(digits)
+	if s.proofs != nil {
+		w.real = &realKeys{proofs: s.proofs, rules: make(map[int]*realRule)}
+	}
+	return w
+}
+
 // commitTx is the payer's commit of c, signed with the payer's next nonce on
 // n's head.
 func (s *scenario) commitTx(n *node, c coin) *types.Transaction {
 	s.t.Helper()
-	note := c.note()
-	data, err := ghostpriv.SaltedCommitData(c.owner.fingerprint(c.index), make([]byte, ghostpriv.SaltSize), note[:])
+	note, salt := c.note(), c.owner.commitSalt(c.index)
+	data, err := ghostpriv.SaltedCommitData(c.owner.fingerprint(c.index), salt[:], note[:])
 	if err != nil {
 		s.t.Fatal(err)
 	}

@@ -123,8 +123,24 @@ type guardOwner struct {
 	card  string
 }
 
-func newGuardOwner(words, card string) *guardOwner {
-	return &guardOwner{words: newWallet(words), card: card}
+// guardOwner is the owner of words and card in the scenario. Commitment 0 of
+// the words is the Guard coin of every Guard test; in a scenario of real
+// proofs its fingerprint binds Guard's rule with the card's action key of
+// commitment 0 and an override of the words, and every other commitment is
+// a plain coin.
+func (s *scenario) guardOwner(words, card string) *guardOwner {
+	o := &guardOwner{words: s.wallet(words), card: card}
+	if o.words.real != nil {
+		o.words.real.rules[0] = &realRule{
+			policy:         ghost.GuardAddress,
+			codeHash:       ghost.GuardCodeHash,
+			paramsHash:     guardParamsHash,
+			actionTag:      o.actionTag(0),
+			actionSalt:     o.actionSalt(0),
+			overrideSecret: o.words.secret(tagRealOverride, 0),
+		}
+	}
+	return o
 }
 
 func (o *guardOwner) cardSecret(tag string, i int) common.Hash {
@@ -516,6 +532,9 @@ func prepareSweep(t *testing.T, miner *node, spend coin, owner *guardOwner, rest
 	note := rest.note()
 	copy(r.Note[:], note[:])
 	r.Proof = ghostprivtest.Proof(r.BindingDigest(r.ChainID, miner.chain.Genesis().Hash()))
+	if spend.owner.real != nil {
+		r.Proof = spend.owner.real.proofs.policyReveal(miner, r, spend, rest)
+	}
 	env, err := r.MarshalBinary()
 	if err != nil {
 		t.Fatal(err)
@@ -625,7 +644,9 @@ type guardCancel struct {
 // prepareCancel builds the card's cancel of the slot of sw for a block on
 // parent, re-committing to commitment index of newKey. The proof is the stub
 // over the action's binding digest, which binds the slot's action tag and
-// salt: the real one shows knowledge of the card's action root behind them.
+// salt: the real one, made for a card of a real-proof wallet, shows
+// knowledge of the card's action root behind them. A real-proof new key's
+// fingerprint binds its own salt, so the cancel re-commits under that salt.
 func prepareCancel(t *testing.T, n *node, parent *types.Header, sw *guardSweep, newKey *wallet, index int) *guardCancel {
 	t.Helper()
 	marker := sw.spend.marker()
@@ -646,6 +667,9 @@ func prepareCancel(t *testing.T, n *node, parent *types.Header, sw *guardSweep, 
 	}
 	c := newKey.coin(index, sub(slot.Remaining, debit))
 	salt := sw.owner.recommitSalt(sw.spend.index)
+	if newKey.real != nil {
+		salt = newKey.commitSalt(index)
+	}
 	chainID := n.chain.Config().GetChainID().Uint64()
 	a := &ghostpriv.Action{
 		Version:           ghostpriv.PolicyActionVersion,
@@ -658,6 +682,9 @@ func prepareCancel(t *testing.T, n *node, parent *types.Header, sw *guardSweep, 
 		Calldata:          guardCancelIn(newKey.fingerprint(index), salt, c.note()),
 	}
 	a.Proof = ghostprivtest.ActionProof(a.BindingDigest(chainID, n.chain.Genesis().Hash(), slot))
+	if card := sw.owner.words.real; card != nil {
+		a.Proof = card.proofs.action(n, a, slot, sw.owner.actionRoot(sw.spend.index))
+	}
 	env, err := a.MarshalBinary()
 	if err != nil {
 		t.Fatal(err)
