@@ -39,6 +39,7 @@ package ghostpriv
 #include "ghost_hold.h"
 #include "ghost_policy.h"
 #include "ghost_action.h"
+#include "ghost_preimage.h"
 */
 import "C"
 
@@ -61,19 +62,31 @@ const (
 	ghostPolicyReveal     = C.GHOST_POLICY_REVEAL_BYTES
 	ghostActionStatement  = C.GHOST_ACTION_STATEMENT_BYTES
 	ghostActionProofBytes = C.GHOST_ACTION_PROOF_BYTES
+	ghostPreimageContext  = C.GHOST_PREIMAGE_CONTEXT_BYTES
+	ghostPreimageBytes    = C.GHOST_PREIMAGE_STATEMENT_BYTES
+	ghostPreimageProof    = C.GHOST_PREIMAGE_PROOF_BYTES
 	ghostDataRevealBytes  = C.GHOST_DATA_REVEAL_BYTES
 	ghostHoldContextBytes = C.GHOST_HOLD_CONTEXT_BYTES
 	ghostProofMaxBytes    = C.GHOST_PROOFS_PROOF_MAX_BYTES
 )
 
+// The statement checker's lengths in ghost_preimage.h are the node's: the
+// context, the statement (address, y and context) and the proof field.
+var (
+	_ = [1]struct{}{}[ghostPreimageContext-PreimageContextSize]
+	_ = [1]struct{}{}[ghostPreimageBytes-(common.AddressLength+common.HashLength+PreimageContextSize)]
+	_ = [1]struct{}{}[ghostPreimageProof-ActionProofSize]
+)
+
 var (
 	// ErrProofStatement is returned, without calling the proof verifier, for
 	// a statement it does not verify: anything but an ordinary coin reveal of
-	// version 1 or 2, a policy reveal or policy action of version 1, or a
-	// data reveal or revoke. An ordinary reveal, policy reveal or policy
-	// action of another version is among them, and its error also wraps
+	// version 1 or 2, a policy reveal, policy action or statement checker
+	// statement (preimage.go) of version 1, or a data reveal or revoke. An
+	// ordinary reveal, policy reveal, policy action or statement checker
+	// statement of another version is among them, and its error also wraps
 	// ErrStatementUnsupported.
-	ErrProofStatement = errors.New("reveal proof verifier checks only coin, policy and data reveals, data revokes and policy actions")
+	ErrProofStatement = errors.New("reveal proof verifier checks only coin, policy and data reveals, data revokes, policy actions and statement checks")
 
 	// ErrProofRejected is returned for every answer of the proof verifier
 	// but acceptance; the error names the status.
@@ -83,9 +96,14 @@ var (
 // ghostVerifier is the reveal verifier of the ghost repository's
 // ghost-proofs, linked in through C interfaces: ghost_proofs.h for coin
 // reveals of both versions, ghostverifier's ghost_policy.h for policy
-// reveals, its ghost_action.h for policy actions (KNOW_ACTION_v1) and its
-// ghost_data.h for data reveals and revokes.
+// reveals, its ghost_action.h for policy actions (KNOW_ACTION_v1), its
+// ghost_preimage.h for the statement checker's statement (KNOW_PREIMAGE_v1)
+// and its ghost_data.h for data reveals and revokes.
 type ghostVerifier struct{}
+
+// VerifiesPreimage implements PreimageVerifier: the linked library has the
+// proof system of KNOW_PREIMAGE_v1, so the statement checker at 0x61 asks it.
+func (ghostVerifier) VerifiesPreimage() bool { return true }
 
 // DefaultVerifier returns the verifier the node uses until another is set:
 // the proof verifier of the ghost repository. It accepts a coin reveal whose
@@ -96,9 +114,10 @@ type ghostVerifier struct{}
 func DefaultVerifier() Verifier { return ghostVerifier{} }
 
 // VerifyReveal verifies the proof of an ordinary coin reveal (version 1 or
-// 2), a policy reveal, a policy action, a data reveal or a data revoke
-// against the chain parameters and statement it builds from in, in the
-// layout of ghost_proofs.h, ghost_policy.h, ghost_action.h or ghost_data.h.
+// 2), a policy reveal, a policy action, a statement checker statement, a
+// data reveal or a data revoke against the chain parameters and statement it
+// builds from in, in the layout of ghost_proofs.h, ghost_policy.h,
+// ghost_action.h, ghost_preimage.h or ghost_data.h.
 // The chain parameters carry the statement's own version, as its binding
 // does. The proof may be followed by zero bytes, as in the proof field. The binding digest is not
 // passed: the verifier computes its own from the same fields.
@@ -145,6 +164,18 @@ func (ghostVerifier) VerifyReveal(in *VerifyInputs, proof []byte) error {
 		}
 	case in.Kind == ghosttree.Coin && in.Purpose == PurposeAction:
 		return fmt.Errorf("%w: %w: policy action version %d", ErrProofStatement, ErrStatementUnsupported, in.Version)
+	case in.Kind == ghosttree.Coin && in.Purpose == PurposePreimage && in.Version == PreimageVersion:
+		// The statement checker's statement (preimage.go), whose proof
+		// field is the policy action's, ActionProofSize.
+		if len(proof) == 0 || len(proof) > ghostPreimageProof {
+			return fmt.Errorf("%w: proof of %d bytes", ErrProofRejected, len(proof))
+		}
+		statement, version = ghostPreimageStatementBytes(in), PreimageVersion
+		verify = func(p, s, q *C.uint8_t, pl, sl, ql C.size_t) C.int32_t {
+			return C.ghost_verify_know_preimage(p, pl, s, sl, q, ql)
+		}
+	case in.Kind == ghosttree.Coin && in.Purpose == PurposePreimage:
+		return fmt.Errorf("%w: %w: statement checker statement version %d", ErrProofStatement, ErrStatementUnsupported, in.Version)
 	case in.Kind == ghosttree.Data && (in.Purpose == PurposeReveal || in.Purpose == PurposeRevoke):
 		statement = ghostDataStatement(in)
 		verify = func(p, s, q *C.uint8_t, pl, sl, ql C.size_t) C.int32_t {
@@ -240,6 +271,16 @@ func ghostActionStatementBytes(in *VerifyInputs) []byte {
 	b = append(b, amountWord(amountOrZero(in.Debit))...)
 	b = binary.BigEndian.AppendUint64(b, in.Expiry)
 	return append(b, in.CalldataHash[:]...)
+}
+
+// ghostPreimageStatementBytes returns the KNOW_PREIMAGE_v1 statement of
+// ghost_preimage.h, of GHOST_PREIMAGE_STATEMENT_BYTES: the calling policy's
+// address (20), y (32) and the context (64), the order of the binding.
+func ghostPreimageStatementBytes(in *VerifyInputs) []byte {
+	b := make([]byte, 0, ghostPreimageBytes)
+	b = append(b, in.Policy[:]...)
+	b = append(b, in.Y[:]...)
+	return append(b, in.Context[:]...)
 }
 
 // ghostCoinStatementV2 returns the version 2 coin reveal statement of

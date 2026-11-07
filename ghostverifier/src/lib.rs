@@ -25,7 +25,9 @@
 //! crate adds [`ghost_verify_policy_reveal`], declared in `ghost_policy.h`,
 //! around `verify_policy_reveal`. Nor has the policy action's statement
 //! `KNOW_ACTION_v1`: [`ghost_verify_know_action`], declared in
-//! `ghost_action.h`, wraps `verify_know_action`.
+//! `ghost_action.h`, wraps `verify_know_action`. Nor has the statement
+//! checker's statement `KNOW_PREIMAGE_v1`: [`ghost_verify_know_preimage`],
+//! declared in `ghost_preimage.h`, wraps `verify_know_preimage`.
 //!
 //! A proof of holding never goes on chain; the node checks none. The function
 //! is for a verifier that holds the node's headers, and for the node's tests.
@@ -40,8 +42,9 @@ use ghost_proofs::ffi::{
     chain_params_from_bytes, verify_coin_reveal_bytes,
 };
 use ghost_proofs::{
-    ACTION_PROOF_BYTES, DataPurpose, DataReveal, HoldContext, KnowAction, NOTE_V3_BYTES, POLICY_ADDRESS_BYTES,
-    PolicyReveal, Proof, ProofError, verify_hold, verify_know_action, verify_policy_reveal, verify_salted_data_reveal,
+    ACTION_PROOF_BYTES, DataPurpose, DataReveal, HoldContext, KnowAction, KnowPreimage, NOTE_V3_BYTES,
+    POLICY_ADDRESS_BYTES, PREIMAGE_CONTEXT_BYTES, PolicyReveal, Proof, ProofError, verify_hold, verify_know_action,
+    verify_know_preimage, verify_policy_reveal, verify_salted_data_reveal,
 };
 
 pub use ghost_proofs::ffi::{ghost_verify_coin_reveal, ghost_verify_coin_reveal_v2};
@@ -533,6 +536,100 @@ pub unsafe extern "C" fn ghost_verify_know_action(
             )
         };
         verify_know_action_bytes(params, statement, proof)
+    }))
+    .unwrap_or(GHOST_PROOFS_PANICKED)
+}
+
+/// Length of a `KNOW_PREIMAGE_v1` statement: the calling policy's address
+/// (20), `y` (32) and the context (64), in the order of the binding.
+pub const PREIMAGE_STATEMENT_BYTES: usize = POLICY_ADDRESS_BYTES + 32 + PREIMAGE_CONTEXT_BYTES;
+
+/// Decodes a `KNOW_PREIMAGE_v1` statement in the layout of ghost_preimage.h.
+pub fn know_preimage_from_bytes(bytes: &[u8; PREIMAGE_STATEMENT_BYTES]) -> KnowPreimage {
+    let (policy_address, rest) = bytes.split_at(POLICY_ADDRESS_BYTES);
+    let (y, context) = rest.split_at(32);
+    KnowPreimage {
+        policy_address: policy_address.try_into().expect("20 bytes"),
+        y: y.try_into().expect("32 bytes"),
+        context: context.try_into().expect("64 bytes"),
+    }
+}
+
+/// Encodes a `KNOW_PREIMAGE_v1` statement in the layout of ghost_preimage.h.
+pub fn know_preimage_to_bytes(s: &KnowPreimage) -> [u8; PREIMAGE_STATEMENT_BYTES] {
+    let mut b = [0u8; PREIMAGE_STATEMENT_BYTES];
+    b[..POLICY_ADDRESS_BYTES].copy_from_slice(&s.policy_address);
+    b[POLICY_ADDRESS_BYTES..POLICY_ADDRESS_BYTES + 32].copy_from_slice(&s.y);
+    b[POLICY_ADDRESS_BYTES + 32..].copy_from_slice(&s.context);
+    b
+}
+
+fn verify_preimage_unguarded(params: &[u8], statement: &[u8], proof: &[u8]) -> i32 {
+    let (Ok(params), Ok(statement)) = (
+        <&[u8; CHAIN_PARAMS_BYTES]>::try_from(params),
+        <&[u8; PREIMAGE_STATEMENT_BYTES]>::try_from(statement),
+    ) else {
+        return GHOST_PROOFS_BAD_ARGUMENT;
+    };
+    if proof.is_empty() || proof.len() > ACTION_PROOF_BYTES {
+        return GHOST_PROOFS_MALFORMED_INPUT;
+    }
+    let s = know_preimage_from_bytes(statement);
+    let Some(len) = serialized_len(proof) else {
+        return GHOST_PROOFS_MALFORMED_INPUT;
+    };
+    let params = chain_params_from_bytes(params);
+    match verify_know_preimage(&params, &s, &Proof::from_bytes(proof[..len].to_vec())) {
+        Ok(()) => GHOST_PROOFS_ACCEPTED,
+        Err(ProofError::MalformedProof) => GHOST_PROOFS_MALFORMED_INPUT,
+        Err(_) => GHOST_PROOFS_REJECTED,
+    }
+}
+
+/// Verifies a `KNOW_PREIMAGE_v1` proof given as bytes in the layout of
+/// ghost_preimage.h with the shipped verifier of ghost-proofs. Never panics.
+pub fn verify_know_preimage_bytes(params: &[u8], statement: &[u8], proof: &[u8]) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| verify_preimage_unguarded(params, statement, proof)))
+        .unwrap_or(GHOST_PROOFS_PANICKED)
+}
+
+/// Verifies a statement checker proof (`KNOW_PREIMAGE_v1`) against the
+/// statement and the chain parameters, as declared in ghost_preimage.h. The
+/// node's own checks of the caller, the input's length and statement code
+/// and the gas are the caller's.
+///
+/// # Safety
+///
+/// Each non-null pointer must point to at least its length of readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ghost_verify_know_preimage(
+    params: *const u8,
+    params_len: usize,
+    statement: *const u8,
+    statement_len: usize,
+    proof: *const u8,
+    proof_len: usize,
+) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| {
+        if params.is_null() || statement.is_null() || proof.is_null() {
+            return GHOST_PROOFS_BAD_ARGUMENT;
+        }
+        if params_len != CHAIN_PARAMS_BYTES || statement_len != PREIMAGE_STATEMENT_BYTES {
+            return GHOST_PROOFS_BAD_ARGUMENT;
+        }
+        if proof_len == 0 || proof_len > ACTION_PROOF_BYTES {
+            return GHOST_PROOFS_MALFORMED_INPUT;
+        }
+        // SAFETY: the pointers are not null and the caller guarantees each
+        // points to at least its length of readable bytes.
+        let (params, statement, proof) = unsafe {
+            (
+                std::slice::from_raw_parts(params, params_len),
+                std::slice::from_raw_parts(statement, statement_len),
+                std::slice::from_raw_parts(proof, proof_len),
+            )
+        };
+        verify_know_preimage_bytes(params, statement, proof)
     }))
     .unwrap_or(GHOST_PROOFS_PANICKED)
 }

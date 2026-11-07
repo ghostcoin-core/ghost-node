@@ -31,6 +31,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/ghostpriv"
 	"github.com/ethereum/go-ethereum/core/vm"
+	"github.com/ethereum/go-ethereum/params/ghost"
 )
 
 // The verification measurement of spec 10, section 10.2: at least 1,000
@@ -140,4 +141,19 @@ func TestVerifyTimingPolicyAction(t *testing.T) {
 	timeVerify(t, "policy action", runs, verifyGasAction,
 		func() *ghostpriv.VerifyInputs { return dec.VerifyInputs(s.f.chainID, s.f.genesis.Hash(), slot) },
 		func(in *ghostpriv.VerifyInputs) { in.Marker[0] ^= 1 }, dec.Proof)
+}
+
+// TestVerifyTimingPreimage measures the statement checker's statement
+// (KNOW_PREIMAGE_v1) against PREIMAGE_VERIFY_GAS, the gas the checker at
+// 0x61 charges before it verifies: its slowest must be at most 43.0 ms. The
+// proof is the full proof field, as the checker's input carries it.
+func TestVerifyTimingPreimage(t *testing.T) {
+	runs := timingRuns(t)
+	p, proof := realPreimage(t)
+	field := append(common.CopyBytes(proof), make([]byte, ghostpriv.ActionProofSize-len(proof))...)
+	timeVerify(t, "statement check", runs, ghost.PreimageVerifyGas,
+		func() *ghostpriv.VerifyInputs {
+			return p.VerifyInputs(realPreimageChainID, realPreimageGenesis, realPreimagePolicy)
+		},
+		func(in *ghostpriv.VerifyInputs) { in.Y[0] ^= 1 }, field)
 }
