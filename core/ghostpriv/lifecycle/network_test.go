@@ -316,10 +316,17 @@ type network struct {
 // for the test.
 func newNetwork(t *testing.T, size int) *network {
 	t.Helper()
+	return newNetworkWith(t, size, ghostprivtest.Verifier{})
+}
+
+// newNetworkWith starts size nodes, at least three, with v active for the
+// test; a nil v is the default verifier, the linked one in builds with it.
+func newNetworkWith(t *testing.T, size int, v ghostpriv.Verifier) *network {
+	t.Helper()
 	if size < 3 {
 		t.Fatalf("a network of %d nodes, want at least 3", size)
 	}
-	t.Cleanup(ghostpriv.SetVerifier(ghostprivtest.Verifier{}))
+	t.Cleanup(ghostpriv.SetVerifier(v))
 	net := &network{t: t}
 	for i := 0; i < size; i++ {
 		net.nodes = append(net.nodes, newNode(t, string(rune('a'+i))))

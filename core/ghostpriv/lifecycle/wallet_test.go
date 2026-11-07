@@ -51,6 +51,7 @@ const (
 
 type wallet struct {
 	digits string
+	real   *realKeys // set for a wallet of the real-proof tests, see realwallet_test.go
 }
 
 func newWallet(digits string) *wallet { return &wallet{digits: digits} }
@@ -59,11 +60,29 @@ func (w *wallet) secret(tag string, i int) common.Hash {
 	return ghosttree.K(tag, []byte(w.digits), binary.BigEndian.AppendUint64(nil, uint64(i)))
 }
 
-func (w *wallet) fingerprint(i int) common.Hash { return w.secret(tagFingerprint, i) }
+func (w *wallet) fingerprint(i int) common.Hash {
+	if w.real != nil {
+		return w.realFingerprint(i)
+	}
+	return w.secret(tagFingerprint, i)
+}
 
 func (w *wallet) marker(i int) common.Hash {
+	if w.real != nil {
+		return w.realMarker(i)
+	}
 	r, b := w.secret(tagRevealKey, i), w.secret(tagBlinding, i)
 	return ghosttree.K(tagMarker, r[:], b[:])
+}
+
+// commitSalt is the salt commitment i is committed with: zero for the
+// stand-in wallet, whose commitments do not bind it, and the salt its
+// fingerprint binds for a real-proof wallet.
+func (w *wallet) commitSalt(i int) [ghostpriv.SaltSize]byte {
+	if w.real != nil {
+		return w.realSalt(i)
+	}
+	return [ghostpriv.SaltSize]byte{}
 }
 
 // note is the note of commitment i with value v: v masked, then the check
@@ -116,7 +135,8 @@ func (c coin) marker() common.Hash { return c.owner.marker(c.index) }
 func (c coin) note() [ghostpriv.NoteSize]byte { return c.owner.note(c.index, c.value) }
 
 // newReveal is a reveal of spend that leaves rest, with the stub proof of
-// its binding digest on the network's chain.
+// its binding digest on the network's chain, or for a coin of a real-proof
+// wallet the real proof (realwallet_test.go).
 func newReveal(n *node, spend, rest coin, root common.Hash, recipient common.Address, out, fee *uint256.Int) *ghostpriv.Reveal {
 	r := &ghostpriv.Reveal{
 		Version:   ghostpriv.RevealVersion,
@@ -131,6 +151,9 @@ func newReveal(n *node, spend, rest coin, root common.Hash, recipient common.Add
 	note := rest.note()
 	copy(r.Note[:], note[:]) // the version 2 reveal's 380-byte note
 	r.Proof = ghostprivtest.Proof(r.BindingDigest(r.ChainID, n.chain.Genesis().Hash()))
+	if spend.owner.real != nil {
+		r.Proof = spend.owner.real.proofs.reveal(n, r, spend, rest)
+	}
 	return r
 }
 
