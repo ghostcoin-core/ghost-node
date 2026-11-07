@@ -26,6 +26,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -208,6 +209,139 @@ func TestGhostDataVerifierPlainRejection(t *testing.T) {
 	if err := v.VerifyReveal(in, proof()); !errors.Is(err, ghostpriv.ErrProofStatement) {
 		t.Errorf("unknown kind: %v, want %v", err, ghostpriv.ErrProofStatement)
 	}
+}
+
+// TestGhostVerifierKnownAnswerPreimage checks the statement checker's
+// verifier, linked from ghostverifier's ghost_preimage.h, against the pinned
+// prover's real proof: the default verifier, which is the active one, says
+// it verifies the statement and accepts the proof through VerifyPreimage, the
+// statement checker's path, and through VerifyReveal with the proof field
+// padded or not. It rejects the proof with any public input changed, with a
+// flipped proof byte, of a bad length or as another statement, and refuses
+// another version of the statement without calling the library.
+func TestGhostVerifierKnownAnswerPreimage(t *testing.T) {
+	defer ghostpriv.SetVerifier(nil)()
+	p, proof := realPreimage(t)
+	if p.Y != ghostpriv.PreimageY(realPreimageX) {
+		t.Fatalf("y %x is not K of the fixture's x", p.Y)
+	}
+	v := ghostpriv.DefaultVerifier()
+	pv, ok := v.(ghostpriv.PreimageVerifier)
+	if !ok || !pv.VerifiesPreimage() {
+		t.Fatal("the default verifier does not verify the statement checker's statement")
+	}
+	input, err := p.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(input) != ghostpriv.PreimageInputSize {
+		t.Fatalf("checker input of %d bytes", len(input))
+	}
+	clone := func() *ghostpriv.VerifyInputs {
+		return p.VerifyInputs(realPreimageChainID, realPreimageGenesis, realPreimagePolicy)
+	}
+	field := func() []byte {
+		return append(common.CopyBytes(proof), make([]byte, ghostpriv.ActionProofSize-len(proof))...)
+	}
+	rejected := func(t *testing.T, name string, err error, want error) {
+		t.Helper()
+		if !errors.Is(err, want) {
+			t.Errorf("%s: %v, want %v", name, err, want)
+		}
+	}
+
+	t.Run("valid proof accepted", func(t *testing.T) {
+		// The statement checker's path: the active verifier, then the
+		// default one given outright.
+		if err := ghostpriv.VerifyPreimage(nil, realPreimageChainID, realPreimageGenesis, realPreimagePolicy, input); err != nil {
+			t.Fatalf("statement check with the active verifier: %v", err)
+		}
+		if err := ghostpriv.VerifyPreimage(v, realPreimageChainID, realPreimageGenesis, realPreimagePolicy, input); err != nil {
+			t.Fatalf("statement check with the default verifier: %v", err)
+		}
+		if err := v.VerifyReveal(clone(), common.CopyBytes(proof)); err != nil {
+			t.Fatalf("the proof: %v", err)
+		}
+		if err := v.VerifyReveal(clone(), field()); err != nil {
+			t.Fatalf("the proof field: %v", err)
+		}
+		if err := ghostpriv.ActiveVerifier().VerifyReveal(clone(), field()); err != nil {
+			t.Fatalf("the active verifier: %v", err)
+		}
+	})
+
+	t.Run("changed public input rejected", func(t *testing.T) {
+		for name, change := range map[string]func(in *ghostpriv.VerifyInputs){
+			"chain id":      func(in *ghostpriv.VerifyInputs) { in.ChainID++ },
+			"domain":        func(in *ghostpriv.VerifyInputs) { in.Domain[31] ^= 1 },
+			"policy":        func(in *ghostpriv.VerifyInputs) { in.Policy[19] ^= 1 },
+			"y":             func(in *ghostpriv.VerifyInputs) { in.Y[0] ^= 1 },
+			"context start": func(in *ghostpriv.VerifyInputs) { in.Context[0] ^= 1 },
+			"context end":   func(in *ghostpriv.VerifyInputs) { in.Context[ghostpriv.PreimageContextSize-1] ^= 1 },
+		} {
+			in := clone()
+			change(in)
+			rejected(t, name, v.VerifyReveal(in, field()), ghostpriv.ErrProofRejected)
+		}
+		// Through the statement checker's path: another caller, chain or
+		// genesis, or a changed y or context in the input.
+		check := func(name string, chainID uint64, genesis common.Hash, policy common.Address, in []byte) {
+			err := ghostpriv.VerifyPreimage(nil, chainID, genesis, policy, in)
+			rejected(t, name, err, ghostpriv.ErrPreimageProof)
+			rejected(t, name, err, ghostpriv.ErrProofRejected)
+		}
+		other := realPreimagePolicy
+		other[0] ^= 1
+		check("other policy", realPreimageChainID, realPreimageGenesis, other, input)
+		check("other chain", realPreimageChainID+1, realPreimageGenesis, realPreimagePolicy, input)
+		check("other genesis", realPreimageChainID, common.Hash{0x01}, realPreimagePolicy, input)
+		for _, at := range []int{1, 32, 33, 33 + ghostpriv.PreimageContextSize - 1} {
+			bad := common.CopyBytes(input)
+			bad[at] ^= 1
+			check("input byte "+strconv.Itoa(at), realPreimageChainID, realPreimageGenesis, realPreimagePolicy, bad)
+		}
+	})
+
+	t.Run("bad proof rejected", func(t *testing.T) {
+		n := len(proof)
+		for _, at := range []int{0, 1, n / 3, n / 2, 2 * n / 3, n - 1} {
+			q := field()
+			q[at] ^= 1
+			rejected(t, "flipped byte "+strconv.Itoa(at), v.VerifyReveal(clone(), q), ghostpriv.ErrProofRejected)
+		}
+		padded := field()
+		padded[n+10] = 1
+		rejected(t, "non-zero padding", v.VerifyReveal(clone(), padded), ghostpriv.ErrProofRejected)
+		rejected(t, "truncated", v.VerifyReveal(clone(), common.CopyBytes(proof[:n-1])), ghostpriv.ErrProofRejected)
+		rejected(t, "empty", v.VerifyReveal(clone(), nil), ghostpriv.ErrProofRejected)
+		rejected(t, "longer than the field", v.VerifyReveal(clone(), append(field(), 0)), ghostpriv.ErrProofRejected)
+		rejected(t, "zero proof field", v.VerifyReveal(clone(), make([]byte, ghostpriv.ActionProofSize)), ghostpriv.ErrProofRejected)
+		ka := loadKnownAnswer(t)
+		rejected(t, "a coin reveal's proof", v.VerifyReveal(clone(), common.CopyBytes(ka.proof)), ghostpriv.ErrProofRejected)
+		bad := common.CopyBytes(input)
+		bad[1+32+ghostpriv.PreimageContextSize+n/2] ^= 1
+		err := ghostpriv.VerifyPreimage(nil, realPreimageChainID, realPreimageGenesis, realPreimagePolicy, bad)
+		rejected(t, "statement check with a flipped proof byte", err, ghostpriv.ErrPreimageProof)
+	})
+
+	t.Run("other statements and versions", func(t *testing.T) {
+		in := clone()
+		in.Purpose = ghostpriv.PurposeAction
+		in.Version = ghostpriv.PolicyActionVersion
+		if err := v.VerifyReveal(in, field()); err == nil {
+			t.Error("the statement checker's proof was accepted as a policy action")
+		}
+		for _, version := range []uint16{0, 2, 0xffff} {
+			in := clone()
+			in.Version = version
+			err := v.VerifyReveal(in, field())
+			rejected(t, "version "+strconv.Itoa(int(version)), err, ghostpriv.ErrStatementUnsupported)
+			rejected(t, "version "+strconv.Itoa(int(version)), err, ghostpriv.ErrProofStatement)
+			if errors.Is(err, ghostpriv.ErrProofRejected) {
+				t.Errorf("version %d reached the library: %v", version, err)
+			}
+		}
+	})
 }
 
 // TestGhostVerifierKnownAnswer checks the linked proof verifier against a
