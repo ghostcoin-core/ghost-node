@@ -238,6 +238,18 @@ tree roots beside it. The seal hash covers it.
 The JSON header of the RPC methods carries `headerMmrRoot` when the header
 has it, beside the tree roots.
 
+### Scale benchmark
+
+`core/ghostscale` times the import of one block of 3,500 reveals, in three
+bundles, and 3,500 public transactions, binding transactions under one public
+root, into a fresh database: the body checks, the state processor with its
+coin tree appends and spent markers, the root checks, the state commit and
+the header MMR append. The root proofs are the stub verifier's, so the time
+is block execution without root proof verification. The measured result, on
+a named machine, against the 3,000 ms budget of spec 07, section 4, and the
+disk growth a day are in [the scale benchmark](scale/README.md)
+(`scale/block-3500.json`). `GHOST_SCALE_BENCH_TXS=50` runs it small.
+
 The data marker root is the root of the data spent-marker set of spec 05,
 section 6. `ghosttree.DataMarkerRoot` (`core/ghosttree/markerroot.go`)
 returns it for a state, from the data marker-set tree above: it is

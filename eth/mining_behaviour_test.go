@@ -43,6 +43,7 @@ import (
 	"github.com/ethereum/go-ethereum/consensus/misc/eip1559"
 	"github.com/ethereum/go-ethereum/consensus/randomx"
 	"github.com/ethereum/go-ethereum/core"
+	"github.com/ethereum/go-ethereum/core/ghostmmr"
 	"github.com/ethereum/go-ethereum/core/ghosttree"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -882,6 +883,26 @@ func TestMiningHeaderFlood(t *testing.T) {
 	headTD := target.td()
 	config := target.chain.Config()
 
+	// The header MMR root a child of the head commits to: the head's state
+	// with the head's own leaf appended.
+	headMMR, err := target.chain.HeaderMMR(head.Hash(), head.Number.Uint64())
+	if err != nil {
+		t.Fatal(err)
+	}
+	headWork, err := ghostmmr.WorkFromBig(head.Difficulty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	childMMR, _, err := headMMR.Append(ghostmmr.Leaf(head.Hash(), headWork))
+	if err != nil {
+		t.Fatal(err)
+	}
+	childMMRRoot, err := childMMR.Root()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mmrRoot := common.Hash(childMMRRoot)
+
 	// A thousand low-work headers, unsolicited: no request asked for them.
 	lowWork := make([]*types.Header, 1024)
 	for i := range lowWork {
@@ -914,6 +935,7 @@ func TestMiningHeaderFlood(t *testing.T) {
 			CoinTreeRoot:   head.CoinTreeRoot,
 			DataTreeRoot:   head.DataTreeRoot,
 			DataMarkerRoot: head.DataMarkerRoot,
+			HeaderMmrRoot:  &mmrRoot,
 		}
 		return types.NewBlock(h, nil, nil, nil, trie.NewStackTrie(nil))
 	}
