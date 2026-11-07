@@ -31,6 +31,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -438,20 +439,52 @@ func (b *Bench) check(chain *core.BlockChain, db ethdb.Database, block *types.Bl
 }
 
 // settledBytes compacts the database, so that what was written is in its
-// tables, and returns the bytes of its table files.
+// tables, and returns the bytes of its table files. The database deletes the
+// tables a compaction made obsolete in the background, so a table can go
+// between listing the folder and reading its size: it is no longer part of
+// the database and is not counted. The folder is measured until two walks in
+// a row agree, so that obsolete tables not yet deleted are not counted.
 func settledBytes(db ethdb.Database, dir string) (int64, error) {
 	if err := db.Compact(nil, nil); err != nil {
 		return 0, err
 	}
+	const (
+		walks = 50
+		pause = 20 * time.Millisecond
+	)
+	last := int64(-1)
+	for range walks {
+		total, err := tableBytes(dir)
+		if err != nil {
+			return 0, err
+		}
+		if total == last {
+			return total, nil
+		}
+		last = total
+		time.Sleep(pause)
+	}
+	return last, nil
+}
+
+// tableBytes returns the bytes of the table files under dir, skipping a
+// table deleted while the folder is walked.
+func tableBytes(dir string) (int64, error) {
 	var total int64
 	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) && path != dir {
+				return nil
+			}
 			return err
 		}
 		if d.IsDir() || !strings.HasSuffix(path, ".sst") {
 			return nil
 		}
 		info, err := d.Info()
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
 		if err != nil {
 			return err
 		}

@@ -111,8 +111,13 @@ func (r *RandomX) headerMMROf(chain consensus.ChainHeaderReader, lookup headerLo
 			return s, true, nil
 		}
 		if reader != nil && chain.GetHeader(hash, n) != nil {
-			s, err := reader.HeaderMMR(hash, n)
-			return s, err == nil, err
+			// A chain reader can answer for headers its store has not
+			// imported, such as a miner's headers built on it but not yet
+			// inserted. Its store does not know their state, so such a
+			// header is walked down from its parent like any other.
+			if s, err := reader.HeaderMMR(hash, n); err == nil {
+				return s, true, nil
+			}
 		}
 		return ghostmmr.State{}, false, nil
 	}

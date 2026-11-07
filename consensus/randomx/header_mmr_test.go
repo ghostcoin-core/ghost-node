@@ -430,3 +430,49 @@ func TestHeaderMMRGenesis(t *testing.T) {
 		}
 	}
 }
+
+// pendingMMRReader is a chain that keeps the header MMR in a store that knows
+// none of its headers, as a miner's chain with headers built on it and not yet
+// imported: it finds them, its store does not.
+type pendingMMRReader struct {
+	*testReader
+	asked int
+}
+
+func (r *pendingMMRReader) HeaderMMR(hash common.Hash, number uint64) (ghostmmr.State, error) {
+	r.asked++
+	return ghostmmr.State{}, errors.New("not in the store")
+}
+
+// TestHeaderMMRPendingHeaders checks that the engine computes the header MMR
+// a child commits to from the headers when the chain finds the parent but its
+// store does not know the parent's state, as when a miner builds a block on
+// blocks it has sealed and not imported yet.
+func TestHeaderMMRPendingHeaders(t *testing.T) {
+	headers := []*types.Header{{Number: new(big.Int), Difficulty: big.NewInt(5), Time: testGenesisAt}}
+	for i := 1; i <= 6; i++ {
+		parent := headers[i-1]
+		headers = append(headers, &types.Header{
+			ParentHash: parent.Hash(),
+			Number:     big.NewInt(int64(i)),
+			Difficulty: big.NewInt(int64(100 + i)),
+			Time:       parent.Time + testBlockTime,
+		})
+	}
+	reader := &pendingMMRReader{testReader: newTestReader(testConfig(), headers[0], headers[1:]...)}
+	engine := newTestEngine(t, testParams())
+	tip := headers[len(headers)-1]
+	state, err := engine.expectedHeaderMMR(reader, chainLookup(reader), tip)
+	if err != nil {
+		t.Fatalf("header MMR on headers the store does not know: %v", err)
+	}
+	if reader.asked == 0 {
+		t.Fatal("the engine never asked the chain's store")
+	}
+	if state.N != uint64(len(headers)) {
+		t.Fatalf("state of %d leaves, want %d", state.N, len(headers))
+	}
+	if root, err := state.Root(); err != nil || root != mmrRootOver(t, headers) {
+		t.Fatalf("root %x (%v), want the root over the %d headers", root, err, len(headers))
+	}
+}

@@ -24,6 +24,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus/misc/eip1559"
+	"github.com/ethereum/go-ethereum/core/ghostmmr"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/params/ghost"
 	"github.com/ethereum/go-ethereum/params/vars"
@@ -43,6 +44,7 @@ func TestGasLimitAboveConsensusMaximumRejected(t *testing.T) {
 		coin   = common.Hash{11}
 		data   = common.Hash{12}
 		marker = common.Hash{13}
+		empty  = common.Hash(ghostmmr.EmptyRoot)
 		parent = &types.Header{
 			Number:         new(big.Int),
 			GasLimit:       ghost.MaxBlockGasLimit,
@@ -53,8 +55,11 @@ func TestGasLimitAboveConsensusMaximumRejected(t *testing.T) {
 			CoinTreeRoot:   &coin,
 			DataTreeRoot:   &data,
 			DataMarkerRoot: &marker,
+			HeaderMmrRoot:  &empty,
 		}
 		reader = newTestReader(config, parent)
+		// The header MMR root a child commits to: the root over its parent.
+		mmr = mmrRootOver(t, []*types.Header{parent})
 	)
 	child := func(gasLimit uint64) *types.Header {
 		h := &types.Header{
@@ -68,7 +73,8 @@ func TestGasLimitAboveConsensusMaximumRejected(t *testing.T) {
 			t.Fatal(err)
 		}
 		h.UncleHash = types.EmptyUncleHash
-		h.CoinTreeRoot, h.DataTreeRoot, h.DataMarkerRoot = &coin, &data, &marker
+		root := mmr
+		h.CoinTreeRoot, h.DataTreeRoot, h.DataMarkerRoot, h.HeaderMmrRoot = &coin, &data, &marker, &root
 		return h
 	}
 	// The largest step up the gas limit rule allows from the parent.
