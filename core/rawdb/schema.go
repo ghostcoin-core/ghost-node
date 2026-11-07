@@ -156,6 +156,10 @@ var (
 	ghostRootIndexPrefix  = []byte("ghost-root-")        // ghostRootIndexPrefix + kind (1 byte) + root -> height of the first canonical header carrying it (uint64 big endian)
 	ghostRootIndexHeadKey = []byte("GhostRootIndexHead") // block number (uint64 big endian) + block hash of the head of the indexed chain
 
+	// The header MMR store, content addressed (core/ghostmmr).
+	headerMMRStatePrefix = []byte("ghost-mmr-block-") // headerMMRStatePrefix + block hash -> leaf count (uint64 big endian) + peaks (48 bytes each)
+	headerMMRNodePrefix  = []byte("ghost-mmr-node-")  // headerMMRNodePrefix + inner node hash -> left entry + right entry (48 bytes each)
+
 	BestUpdateKey         = []byte("update-")    // bigEndian64(syncPeriod) -> RLP(types.LightClientUpdate)  (nextCommittee only referenced by root hash)
 	FixedCommitteeRootKey = []byte("fixedRoot-") // bigEndian64(syncPeriod) -> committee root hash
 	SyncCommitteeKey      = []byte("committee-") // bigEndian64(syncPeriod) -> serialized committee
@@ -316,6 +320,16 @@ func ghostRootIndexKey(kind uint8, root common.Hash) []byte {
 	key[len(ghostRootIndexPrefix)] = kind
 	copy(key[len(ghostRootIndexPrefix)+1:], root[:])
 	return key
+}
+
+// headerMMRStateKey = headerMMRStatePrefix + block hash
+func headerMMRStateKey(hash common.Hash) []byte {
+	return append(append([]byte{}, headerMMRStatePrefix...), hash.Bytes()...)
+}
+
+// headerMMRNodeKey = headerMMRNodePrefix + inner node hash
+func headerMMRNodeKey(hash common.Hash) []byte {
+	return append(append([]byte{}, headerMMRNodePrefix...), hash.Bytes()...)
 }
 
 // preimageKey = PreimagePrefix + hash

@@ -216,11 +216,13 @@ func vectorItems(t *testing.T, b []byte) [][]byte {
 }
 
 // headerForbiddenField is the vector header-forbidden-field of spec 05,
-// section 11: block one with a withdrawals root after the base fee. Its logs
-// bloom of 256 zero bytes is written with strings.Repeat.
-var headerForbiddenField = "f90285a0039d14f59db29e2e76c8ed76f90b70de42e48f8a67dba060b363501af50e3ba4a01dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d493479400000000000000000000000000000000000004d2a01111111111111111111111111111111111111111111111111111111111111111a02222222222222222222222222222222222222222222222222222222222222222a03333333333333333333333333333333333333333333333333333333333333333" +
+// section 11, with the header MMR root as its last item: block one with a
+// withdrawals root after the base fee, 21 items. Its logs bloom of 256 zero
+// bytes is written with strings.Repeat.
+var headerForbiddenField = "f902a6a0039d14f59db29e2e76c8ed76f90b70de42e48f8a67dba060b363501af50e3ba4a01dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d493479400000000000000000000000000000000000004d2a01111111111111111111111111111111111111111111111111111111111111111a02222222222222222222222222222222222222222222222222222222222222222a03333333333333333333333333333333333333333333333333333333333333333" +
 	"b90100" + strings.Repeat("00", types.BloomByteLength) +
-	"8401000000018401c9c3808301ec30846b37040e80a0444444444444444444444444444444444444444444444444444444444444444488010203040506070884342770c0a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a0142c6bdf0882396330f9942ddd49df5d860b05a5218dad1ce6ef8e69238b6ec5a0dfc2bf39581c30d2cf1f025586af2f821524daa2e496fea9f950731202f3237aa0f121b372119409a7d6fda684a14ab815c7ef9a07ba48f50ff59ea5fc62d36e4f"
+	"8401000000018401c9c3808301ec30846b37040e80a0444444444444444444444444444444444444444444444444444444444444444488010203040506070884342770c0a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a0142c6bdf0882396330f9942ddd49df5d860b05a5218dad1ce6ef8e69238b6ec5a0dfc2bf39581c30d2cf1f025586af2f821524daa2e496fea9f950731202f3237aa0f121b372119409a7d6fda684a14ab815c7ef9a07ba48f50ff59ea5fc62d36e4f" +
+	"a0b1f684aabd11aa3966ac25d6ac9c50e10cc53cbfb48957f3f514fb4b08fd23ac"
 
 // TestMissingTreeRootsRejected checks that a header without either root, and
 // one carrying the forbidden field of the header-forbidden-field vector,
@@ -261,14 +263,14 @@ func TestMissingTreeRootsRejected(t *testing.T) {
 		t.Errorf("strict decoder: %v, want %s", err, types.GhostReasonItemCount)
 	}
 	items := vectorItems(t, vector)
-	if len(items) != 20 {
+	if len(items) != 21 {
 		t.Fatalf("vector has %d items", len(items))
 	}
 	withdrawals := common.BytesToHash(items[16])
 	if withdrawals != types.EmptyWithdrawalsHash {
 		t.Fatalf("vector withdrawals root %x", withdrawals)
 	}
-	coin, data, marker := common.BytesToHash(items[17]), common.BytesToHash(items[18]), common.BytesToHash(items[19])
+	coin, data, marker, mmr := common.BytesToHash(items[17]), common.BytesToHash(items[18]), common.BytesToHash(items[19]), common.BytesToHash(items[20])
 
 	// The vector's own fields, read item by item.
 	decoded := &types.Header{
@@ -292,6 +294,7 @@ func TestMissingTreeRootsRejected(t *testing.T) {
 		CoinTreeRoot:    &coin,
 		DataTreeRoot:    &data,
 		DataMarkerRoot:  &marker,
+		HeaderMmrRoot:   &mmr,
 	}
 	if err := f.engine.VerifyHeader(reader, decoded, true); err == nil {
 		t.Error("the vector's header is accepted")

@@ -20,8 +20,10 @@ import (
 	"fmt"
 	"math/big"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus/ghostrules"
 	"github.com/ethereum/go-ethereum/core"
+	"github.com/ethereum/go-ethereum/core/ghostmmr"
 	"github.com/ethereum/go-ethereum/core/ghosttree"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/params/ghost"
@@ -126,7 +128,8 @@ func genesisTime(medianTime uint32) uint64 {
 }
 
 // genesisBlock builds the block of a genesis, with the roots of the empty
-// coin and data trees and of the empty data marker set in its header.
+// coin and data trees, of the empty data marker set and of the empty header
+// MMR in its header.
 func genesisBlock(g *genesisT.Genesis) (*types.Block, error) {
 	if len(g.Alloc) != 0 {
 		return nil, fmt.Errorf("genesis allocates to %d accounts, want none", len(g.Alloc))
@@ -137,6 +140,7 @@ func genesisBlock(g *genesisT.Genesis) (*types.Block, error) {
 	}
 	coin, data := ghosttree.EmptyRoot(ghosttree.Coin), ghosttree.EmptyRoot(ghosttree.Data)
 	marker := ghosttree.EmptyMarkerSetRoot
-	header.CoinTreeRoot, header.DataTreeRoot, header.DataMarkerRoot = &coin, &data, &marker
+	mmr := common.Hash(ghostmmr.EmptyRoot)
+	header.CoinTreeRoot, header.DataTreeRoot, header.DataMarkerRoot, header.HeaderMmrRoot = &coin, &data, &marker, &mmr
 	return types.NewBlockWithHeader(header), nil
 }

@@ -27,6 +27,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/lru"
 	"github.com/ethereum/go-ethereum/consensus"
+	"github.com/ethereum/go-ethereum/core/ghostmmr"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethdb"
@@ -36,9 +37,10 @@ import (
 )
 
 const (
-	headerCacheLimit = 512
-	tdCacheLimit     = 1024
-	numberCacheLimit = 2048
+	headerCacheLimit    = 512
+	tdCacheLimit        = 1024
+	numberCacheLimit    = 2048
+	headerMMRCacheLimit = 4096
 )
 
 // HeaderChain implements the basic block header chain logic that is shared by
@@ -63,8 +65,9 @@ type HeaderChain struct {
 	currentHeaderHash common.Hash  // Hash of the current head of the header chain (prevent recomputing all the time)
 
 	headerCache *lru.Cache[common.Hash, *types.Header]
-	tdCache     *lru.Cache[common.Hash, *big.Int] // most recent total difficulties
-	numberCache *lru.Cache[common.Hash, uint64]   // most recent block numbers
+	tdCache     *lru.Cache[common.Hash, *big.Int]       // most recent total difficulties
+	numberCache *lru.Cache[common.Hash, uint64]         // most recent block numbers
+	mmrCache    *lru.Cache[common.Hash, ghostmmr.State] // most recent header MMR states, never changed in place
 
 	procInterrupt func() bool
 
@@ -80,6 +83,7 @@ func NewHeaderChain(chainDb ethdb.Database, config ctypes.ChainConfigurator, eng
 		headerCache:   lru.NewCache[common.Hash, *types.Header](headerCacheLimit),
 		tdCache:       lru.NewCache[common.Hash, *big.Int](tdCacheLimit),
 		numberCache:   lru.NewCache[common.Hash, uint64](numberCacheLimit),
+		mmrCache:      lru.NewCache[common.Hash, ghostmmr.State](headerMMRCacheLimit),
 		procInterrupt: procInterrupt,
 		engine:        engine,
 	}
@@ -205,6 +209,7 @@ func (hc *HeaderChain) WriteHeaders(headers []*types.Header) (int, error) {
 		inserted    []rawdb.NumberHash      // Ephemeral lookup of number/hash for the chain
 		parentKnown = true                  // Set to true to force hc.HasHeader check the first iteration
 		batch       = hc.chainDb.NewBatch()
+		mmrParent   *ghostmmr.State // header MMR state of the previous header, once computed here
 	)
 	for i, header := range headers {
 		var hash common.Hash
@@ -231,6 +236,28 @@ func (hc *HeaderChain) WriteHeaders(headers []*types.Header) (int, error) {
 			inserted = append(inserted, rawdb.NumberHash{Number: number, Hash: hash})
 			hc.headerCache.Add(hash, header)
 			hc.numberCache.Add(hash, number)
+
+			// The header MMR state of the block, from its parent's.
+			var parent *types.Header
+			if i > 0 {
+				parent = headers[i-1]
+			} else if parent = hc.GetHeader(header.ParentHash, number-1); parent == nil {
+				return 0, consensus.ErrUnknownAncestor
+			}
+			if mmrParent == nil {
+				state, err := hc.HeaderMMR(header.ParentHash, number-1)
+				if err != nil {
+					return 0, err
+				}
+				mmrParent = &state
+			}
+			state, err := hc.appendHeaderMMR(batch, *mmrParent, parent, hash)
+			if err != nil {
+				return 0, err
+			}
+			mmrParent = &state
+		} else {
+			mmrParent = nil
 		}
 		parentKnown = alreadyKnown
 	}
@@ -244,6 +271,165 @@ func (hc *HeaderChain) WriteHeaders(headers []*types.Header) (int, error) {
 		log.Crit("Failed to write headers", "error", err)
 	}
 	return len(inserted), nil
+}
+
+// The header MMR (decision 0005, core/ghostmmr) is kept per block, content
+// addressed: the state a block's header commits to, the leaf count and the
+// peaks of the MMR over blocks 0 to number-1 of its own chain, is stored by
+// block hash, and every inner node by its own hash. A block's state is its
+// parent's with the parent's leaf appended, so the blocks of any fork hold
+// their own states and a reorganisation rewrites nothing: whichever chain is
+// canonical, each state is found by the hash of its block.
+
+// headerMMRLeaf returns the leaf of a block: its header hash and difficulty.
+func headerMMRLeaf(header *types.Header) (ghostmmr.Entry, error) {
+	work, err := ghostmmr.WorkFromBig(header.Difficulty)
+	if err != nil {
+		return ghostmmr.Entry{}, err
+	}
+	return ghostmmr.Leaf(header.Hash(), work), nil
+}
+
+// storedHeaderMMR returns the header MMR state of a block from the cache or
+// the database, and false if neither has it.
+func (hc *HeaderChain) storedHeaderMMR(hash common.Hash) (ghostmmr.State, bool, error) {
+	if state, ok := hc.mmrCache.Get(hash); ok {
+		return state, true, nil
+	}
+	enc, err := rawdb.ReadHeaderMMRState(hc.chainDb, hash)
+	if err != nil || enc == nil {
+		return ghostmmr.State{}, false, err
+	}
+	state, err := ghostmmr.DecodeState(enc)
+	if err != nil {
+		return ghostmmr.State{}, false, fmt.Errorf("header MMR state of %x: %w", hash, err)
+	}
+	hc.mmrCache.Add(hash, state)
+	return state, true, nil
+}
+
+// appendHeaderMMR returns the header MMR state of the child, with the given
+// hash, of the block parent whose state is parentState, and writes the state
+// and the inner nodes it creates to w.
+func (hc *HeaderChain) appendHeaderMMR(w ethdb.KeyValueWriter, parentState ghostmmr.State, parent *types.Header, hash common.Hash) (ghostmmr.State, error) {
+	leaf, err := headerMMRLeaf(parent)
+	if err != nil {
+		return ghostmmr.State{}, err
+	}
+	state, inners, err := parentState.Append(leaf)
+	if err != nil {
+		return ghostmmr.State{}, fmt.Errorf("header MMR of block %d: %w", parent.Number.Uint64()+1, err)
+	}
+	for _, in := range inners {
+		if err := rawdb.WriteHeaderMMRNode(w, in.Node.Hash, ghostmmr.EncodeChildren(in.Left, in.Right)); err != nil {
+			return ghostmmr.State{}, err
+		}
+	}
+	if err := rawdb.WriteHeaderMMRState(w, hash, state.Encode()); err != nil {
+		return ghostmmr.State{}, err
+	}
+	hc.mmrCache.Add(hash, state)
+	return state, nil
+}
+
+// HeaderMMR returns the header MMR state the block with the given hash and
+// number commits to: the MMR over blocks 0 to number-1 of its own chain. The
+// genesis commits to the empty MMR. A block whose state is not stored, as one
+// written before the store existed, gets it from the nearest ancestor that
+// has one, and the states on the way are stored. The state returned must not
+// be changed in place.
+func (hc *HeaderChain) HeaderMMR(hash common.Hash, number uint64) (ghostmmr.State, error) {
+	if number == 0 {
+		return ghostmmr.State{}, nil
+	}
+	if state, ok, err := hc.storedHeaderMMR(hash); err != nil || ok {
+		return state, err
+	}
+	header := hc.GetHeader(hash, number)
+	if header == nil {
+		return ghostmmr.State{}, fmt.Errorf("header MMR: unknown block %d %x", number, hash)
+	}
+	// Walk down to the nearest ancestor with a known state.
+	var (
+		pending = []*types.Header{header} // blocks without a state, newest first
+		base    ghostmmr.State            // the state of parent
+		parent  *types.Header
+	)
+	for {
+		h := pending[len(pending)-1]
+		n := h.Number.Uint64()
+		if parent = hc.GetHeader(h.ParentHash, n-1); parent == nil {
+			return ghostmmr.State{}, fmt.Errorf("header MMR: unknown block %d %x", n-1, h.ParentHash)
+		}
+		if n-1 == 0 {
+			break
+		}
+		state, ok, err := hc.storedHeaderMMR(h.ParentHash)
+		if err != nil {
+			return ghostmmr.State{}, err
+		}
+		if ok {
+			base = state
+			break
+		}
+		pending = append(pending, parent)
+	}
+	batch := hc.chainDb.NewBatch()
+	for k := len(pending) - 1; k >= 0; k-- {
+		hash := pending[k].Hash()
+		state, err := hc.appendHeaderMMR(batch, base, parent, hash)
+		if err != nil {
+			return ghostmmr.State{}, err
+		}
+		base, parent = state, pending[k]
+	}
+	if err := batch.Write(); err != nil {
+		log.Warn("Failed to store header MMR states", "number", number, "hash", hash, "err", err)
+	}
+	return base, nil
+}
+
+// HeaderMMRPath returns the path of block index in the header MMR of the tip
+// block, the MMR its header commits to: index must be below the tip's
+// number. The path is the concatenation of 48-byte entries of decision 0005,
+// read by walking down from the tip's peaks through the stored inner nodes;
+// ghostmmr.VerifyPath checks it against the tip's HeaderMmrRoot.
+func (hc *HeaderChain) HeaderMMRPath(tip common.Hash, index uint64) ([]byte, error) {
+	number := hc.GetBlockNumber(tip)
+	if number == nil {
+		return nil, fmt.Errorf("header MMR: unknown tip %x", tip)
+	}
+	state, err := hc.HeaderMMR(tip, *number)
+	if err != nil {
+		return nil, err
+	}
+	return ghostmmr.Path(state, index, func(hash [ghostmmr.HashSize]byte) (ghostmmr.Entry, ghostmmr.Entry, bool, error) {
+		enc, err := rawdb.ReadHeaderMMRNode(hc.chainDb, hash)
+		if err != nil || enc == nil {
+			return ghostmmr.Entry{}, ghostmmr.Entry{}, false, err
+		}
+		left, right, err := ghostmmr.DecodeChildren(enc)
+		return left, right, err == nil, err
+	})
+}
+
+// writeHeaderMMR writes the header MMR state of the block with the given
+// header, whose parent is stored, and its new inner nodes to w.
+func (hc *HeaderChain) writeHeaderMMR(w ethdb.KeyValueWriter, header *types.Header) error {
+	number := header.Number.Uint64()
+	if number == 0 {
+		return nil
+	}
+	parent := hc.GetHeader(header.ParentHash, number-1)
+	if parent == nil {
+		return consensus.ErrUnknownAncestor
+	}
+	parentState, err := hc.HeaderMMR(header.ParentHash, number-1)
+	if err != nil {
+		return err
+	}
+	_, err = hc.appendHeaderMMR(w, parentState, parent, header.Hash())
+	return err
 }
 
 // writeHeadersAndSetHead writes a batch of block headers and applies the last

@@ -24,6 +24,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/consensus/ghostrules"
+	"github.com/ethereum/go-ethereum/core/ghostmmr"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -42,7 +43,7 @@ func TestSealHashCoversEveryField(t *testing.T) {
 	engine := newTestEngine(t, testParams())
 	legacy := fullHeader()
 	legacy.BaseFee, legacy.WithdrawalsHash, legacy.BlobGasUsed, legacy.ExcessBlobGas, legacy.ParentBeaconRoot = nil, nil, nil, nil, nil
-	baseOnly := map[string]bool{"CoinTreeRoot": true, "DataTreeRoot": true, "DataMarkerRoot": true}
+	baseOnly := map[string]bool{"CoinTreeRoot": true, "DataTreeRoot": true, "DataMarkerRoot": true, "HeaderMmrRoot": true}
 	ghostForbids := map[string]bool{"WithdrawalsHash": true, "BlobGasUsed": true, "ExcessBlobGas": true, "ParentBeaconRoot": true}
 
 	for name, c := range map[string]struct {
@@ -187,7 +188,7 @@ func TestCalcDifficultyMatchesRules(t *testing.T) {
 			t.Errorf("parent %d: Prepare set difficulty %v, mix %x, nonce %x; want %v and zero seal fields", c.parent, header.Difficulty, header.MixDigest, header.Nonce, want)
 		}
 		header.Difficulty = new(big.Int).Add(want, common.Big1)
-		if err := engine.verifyHeader(reader, header, parent, false, common.Hash{}, c.time); !errors.Is(err, errInvalidDifficulty) {
+		if err := engine.verifyHeader(reader, header, parent, false, common.Hash{}, ghostmmr.State{}, c.time); !errors.Is(err, errInvalidDifficulty) {
 			t.Errorf("parent %d: difficulty off by one: error %v, want %v", c.parent, err, errInvalidDifficulty)
 		}
 	}
@@ -222,7 +223,7 @@ func TestTimestampErrors(t *testing.T) {
 		{"at 2^63", 1 << 63, false},
 	} {
 		header := &types.Header{ParentHash: genesis.Hash(), Number: big.NewInt(1), Time: c.time, Difficulty: big.NewInt(16)}
-		err := engine.verifyHeader(reader, header, genesis, false, common.Hash{}, now)
+		err := engine.verifyHeader(reader, header, genesis, false, common.Hash{}, ghostmmr.State{}, now)
 		if isFuture := errors.Is(err, consensus.ErrFutureBlock); isFuture != c.future || err == nil {
 			t.Errorf("%s: error %v, future block %v, want %v", c.name, err, isFuture, c.future)
 		}
@@ -232,7 +233,7 @@ func TestTimestampErrors(t *testing.T) {
 	}
 	// At the edge of the drift the timestamp passes and checking goes on.
 	header := &types.Header{ParentHash: genesis.Hash(), Number: big.NewInt(1), Time: now + params.FutureDrift, Difficulty: big.NewInt(1)}
-	if err := engine.verifyHeader(reader, header, genesis, false, common.Hash{}, now); !errors.Is(err, errInvalidDifficulty) {
+	if err := engine.verifyHeader(reader, header, genesis, false, common.Hash{}, ghostmmr.State{}, now); !errors.Is(err, errInvalidDifficulty) {
 		t.Errorf("timestamp at the drift edge: error %v, want the next check's %v", err, errInvalidDifficulty)
 	}
 }

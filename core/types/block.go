@@ -100,6 +100,11 @@ type Header struct {
 	CoinTreeRoot   *common.Hash `json:"-" rlp:"-"`
 	DataTreeRoot   *common.Hash `json:"-" rlp:"-"`
 	DataMarkerRoot *common.Hash `json:"-" rlp:"-"`
+
+	// HeaderMmrRoot is the root of the header MMR over every earlier block of
+	// the chain (decision 0005, core/ghostmmr), the last item of the Ghost
+	// layout. Only a header with the tree roots carries it.
+	HeaderMmrRoot *common.Hash `json:"-" rlp:"-"`
 }
 
 // field type overrides for gencodec
@@ -139,6 +144,9 @@ func (h *Header) Size() common.StorageSize {
 		roots += common.HashLength
 	}
 	if h.DataMarkerRoot != nil {
+		roots += common.HashLength
+	}
+	if h.HeaderMmrRoot != nil {
 		roots += common.HashLength
 	}
 	return headerSize + common.StorageSize(len(h.Extra)+roots+(h.Difficulty.BitLen()+h.Number.BitLen()+baseFeeBits)/8)
@@ -332,6 +340,10 @@ func CopyHeader(h *Header) *Header {
 	if h.DataMarkerRoot != nil {
 		cpy.DataMarkerRoot = new(common.Hash)
 		*cpy.DataMarkerRoot = *h.DataMarkerRoot
+	}
+	if h.HeaderMmrRoot != nil {
+		cpy.HeaderMmrRoot = new(common.Hash)
+		*cpy.HeaderMmrRoot = *h.HeaderMmrRoot
 	}
 	return &cpy
 }

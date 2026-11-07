@@ -61,8 +61,9 @@ const (
 	TestNetMinDifficulty = 1 << 12
 )
 
-// TestNetGenesisHash is the hash of the public test network's first block.
-var TestNetGenesisHash = common.HexToHash("0xdfe4271fd12d302e15c68e381ade8076207f70d3778eebd69604566fb6979436")
+// TestNetGenesisHash is the hash of the public test network's first block,
+// whose header carries the root of the empty header MMR.
+var TestNetGenesisHash = common.HexToHash("0x31623be2322884e2243343cb1e4e437354d2e1d027fa3611287ba4d8aee2a6dc")
 
 // TestNetBootnodes are the seed nodes of the public test network, the
 // bootstrap nodes a node uses when neither --bootnodes nor the config file

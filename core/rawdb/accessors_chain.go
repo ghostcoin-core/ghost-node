@@ -403,6 +403,11 @@ func DeleteHeader(db ethdb.KeyValueWriter, hash common.Hash, number uint64) {
 	if err := db.Delete(headerNumberKey(hash)); err != nil {
 		log.Crit("Failed to delete hash to number mapping", "err", err)
 	}
+	// The header MMR state of the block goes with it; its inner nodes may
+	// be shared with other blocks and stay.
+	if err := DeleteHeaderMMRState(db, hash); err != nil {
+		log.Crit("Failed to delete header MMR state", "err", err)
+	}
 }
 
 // deleteHeaderWithoutNumber removes only the block header but does not remove

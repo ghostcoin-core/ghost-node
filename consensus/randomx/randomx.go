@@ -38,6 +38,7 @@ import (
 	"github.com/ethereum/go-ethereum/common/lru"
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/consensus/ghostrules"
+	"github.com/ethereum/go-ethereum/core/ghostmmr"
 	"github.com/ethereum/go-ethereum/log"
 )
 
@@ -58,6 +59,11 @@ const (
 
 	// keyMemoSize is the number of header-to-key results remembered.
 	keyMemoSize = 1 << 15
+
+	// mmrMemoSize is the number of header MMR states remembered, for chains
+	// that do not keep the header MMR themselves and for headers of a batch
+	// being verified.
+	mmrMemoSize = 1 << 12
 )
 
 var (
@@ -96,8 +102,9 @@ type RandomX struct {
 	log         log.Logger
 
 	caches *cacheSet
-	keys   *lru.Cache[common.Hash, common.Hash] // header hash -> key block hash
-	remote *remoteSealer                        // work for remote miners
+	keys   *lru.Cache[common.Hash, common.Hash]    // header hash -> key block hash
+	mmrs   *lru.Cache[common.Hash, ghostmmr.State] // header hash -> header MMR state it commits to, never changed in place
+	remote *remoteSealer                           // work for remote miners
 
 	lock    sync.Mutex    // guards threads
 	threads int           // mining threads; 0 means one per CPU, negative none
@@ -147,6 +154,7 @@ func New(config Config) (*RandomX, error) {
 		log:         config.Log,
 		caches:      sharedCaches(),
 		keys:        lru.NewCache[common.Hash, common.Hash](keyMemoSize),
+		mmrs:        lru.NewCache[common.Hash, ghostmmr.State](mmrMemoSize),
 		update:      make(chan struct{}),
 		now:         time.Now,
 	}

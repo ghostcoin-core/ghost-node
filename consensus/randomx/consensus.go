@@ -28,6 +28,7 @@ import (
 	"github.com/ethereum/go-ethereum/consensus/ghostrules"
 	"github.com/ethereum/go-ethereum/consensus/misc"
 	"github.com/ethereum/go-ethereum/consensus/misc/eip1559"
+	"github.com/ethereum/go-ethereum/core/ghostmmr"
 	"github.com/ethereum/go-ethereum/core/ghosttree"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -52,7 +53,140 @@ var (
 	errMissingTreeRoot   = errors.New("header has no tree root")
 	errMissingBaseFee    = errors.New("header has no base fee")
 	errGasLimitAboveMax  = errors.New("gas limit above the consensus maximum")
+
+	// ErrHeaderMmrRoot is a header whose HeaderMmrRoot is missing or is not
+	// the root of the header MMR over the earlier blocks of its chain.
+	ErrHeaderMmrRoot = errors.New("header MMR root missing or wrong")
+
+	// ErrWorkOverflow is a block whose chain's total difficulty, its own
+	// included, would reach 2^128, the reason work-overflow of decision 0005.
+	ErrWorkOverflow = fmt.Errorf("invalid block: %w", ghostmmr.ErrWorkOverflow)
 )
+
+// HeaderMMRReader is a chain that keeps the header MMR: core.BlockChain and
+// core.HeaderChain. HeaderMMR returns the state the header with the given
+// hash and number commits to, the MMR over blocks 0 to number-1 of its own
+// chain, which the caller must not change. For any other chain the engine
+// computes the state from the headers.
+type HeaderMMRReader interface {
+	HeaderMMR(hash common.Hash, number uint64) (ghostmmr.State, error)
+}
+
+// headerMMRLeaf returns the leaf of a block: its header hash and difficulty.
+func headerMMRLeaf(header *types.Header) (ghostmmr.Entry, error) {
+	work, err := ghostmmr.WorkFromBig(header.Difficulty)
+	if err != nil {
+		return ghostmmr.Entry{}, ErrWorkOverflow
+	}
+	return ghostmmr.Leaf(header.Hash(), work), nil
+}
+
+// childMMR returns the header MMR state a child of parent commits to: the
+// parent's state with the parent's leaf appended.
+func childMMR(parentState ghostmmr.State, parent *types.Header) (ghostmmr.State, error) {
+	leaf, err := headerMMRLeaf(parent)
+	if err != nil {
+		return ghostmmr.State{}, err
+	}
+	state, _, err := parentState.Append(leaf)
+	if errors.Is(err, ghostmmr.ErrWorkOverflow) {
+		return ghostmmr.State{}, ErrWorkOverflow
+	}
+	return state, err
+}
+
+// headerMMROf returns the header MMR state the given header commits to. It
+// asks the chain when it keeps the MMR, and the engine's memo of states; a
+// header neither knows is walked down through lookup, parent by parent, to
+// one they know or to the genesis, which commits to the empty MMR.
+func (r *RandomX) headerMMROf(chain consensus.ChainHeaderReader, lookup headerLookup, header *types.Header) (ghostmmr.State, error) {
+	reader, _ := chain.(HeaderMMRReader)
+	known := func(h *types.Header) (ghostmmr.State, bool, error) {
+		n := h.Number.Uint64()
+		if n == 0 {
+			return ghostmmr.State{}, true, nil
+		}
+		hash := h.Hash()
+		if s, ok := r.mmrs.Get(hash); ok {
+			return s, true, nil
+		}
+		if reader != nil && chain.GetHeader(hash, n) != nil {
+			s, err := reader.HeaderMMR(hash, n)
+			return s, err == nil, err
+		}
+		return ghostmmr.State{}, false, nil
+	}
+	var pending []*types.Header // headers without a known state, newest first
+	state, ok, err := known(header)
+	for h := header; !ok; {
+		if err != nil {
+			return ghostmmr.State{}, err
+		}
+		pending = append(pending, h)
+		n := h.Number.Uint64()
+		parent := lookup(h.ParentHash, n-1)
+		if parent == nil {
+			return ghostmmr.State{}, consensus.ErrUnknownAncestor
+		}
+		state, ok, err = known(parent)
+		h = parent
+	}
+	if err != nil {
+		return ghostmmr.State{}, err
+	}
+	for k := len(pending) - 1; k >= 0; k-- {
+		parent := lookup(pending[k].ParentHash, pending[k].Number.Uint64()-1)
+		if state, err = childMMR(state, parent); err != nil {
+			return ghostmmr.State{}, err
+		}
+		r.mmrs.Add(pending[k].Hash(), state)
+	}
+	return state, nil
+}
+
+// expectedHeaderMMR returns the header MMR state a child of parent commits
+// to.
+func (r *RandomX) expectedHeaderMMR(chain consensus.ChainHeaderReader, lookup headerLookup, parent *types.Header) (ghostmmr.State, error) {
+	parentState, err := r.headerMMROf(chain, lookup, parent)
+	if err != nil {
+		return ghostmmr.State{}, err
+	}
+	return childMMR(parentState, parent)
+}
+
+// checkHeaderMMR checks the header MMR root of a header against the state its
+// chain gives, and that the chain's total difficulty with the header's own
+// stays below 2^128. A header without the Ghost layout carries no root.
+func checkHeaderMMR(header *types.Header, expected ghostmmr.State) error {
+	total, err := expected.TotalWork()
+	if err != nil {
+		return ErrWorkOverflow
+	}
+	own, err := ghostmmr.WorkFromBig(header.Difficulty)
+	if err != nil {
+		return ErrWorkOverflow
+	}
+	if _, ok := total.Add(own); !ok {
+		return ErrWorkOverflow
+	}
+	if header.CoinTreeRoot == nil {
+		if header.HeaderMmrRoot != nil {
+			return fmt.Errorf("%w: header MMR root without tree roots", errUnsupportedField)
+		}
+		return nil
+	}
+	if header.HeaderMmrRoot == nil {
+		return fmt.Errorf("%w: header has none", ErrHeaderMmrRoot)
+	}
+	root, err := expected.Root()
+	if err != nil {
+		return err
+	}
+	if *header.HeaderMmrRoot != root {
+		return fmt.Errorf("%w: have %x, want %x over %d blocks", ErrHeaderMmrRoot, *header.HeaderMmrRoot, root, expected.N)
+	}
+	return nil
+}
 
 // Author implements consensus.Engine, returning the header's coinbase.
 func (r *RandomX) Author(header *types.Header) (common.Address, error) {
@@ -79,7 +213,12 @@ func (r *RandomX) VerifyHeader(chain consensus.ChainHeaderReader, header *types.
 			return err
 		}
 	}
-	return r.verifyHeader(chain, header, parent, seal, key, uint64(r.now().Unix()))
+	mmr, err := r.expectedHeaderMMR(chain, chainLookup(chain), parent)
+	if err != nil {
+		return err
+	}
+	r.mmrs.Add(header.Hash(), mmr)
+	return r.verifyHeader(chain, header, parent, seal, key, mmr, uint64(r.now().Unix()))
 }
 
 // VerifyHeaders implements consensus.Engine. One sequential pass finds every
@@ -96,6 +235,7 @@ func (r *RandomX) VerifyHeaders(chain consensus.ChainHeaderReader, headers []*ty
 		lookup  = batchLookup(chain, headers)
 		parents = make([]*types.Header, len(headers))
 		keys    = make([]common.Hash, len(headers))
+		mmrs    = make([]ghostmmr.State, len(headers))
 		errs    = make([]error, len(headers))
 	)
 	for i, header := range headers {
@@ -109,7 +249,14 @@ func (r *RandomX) VerifyHeaders(chain consensus.ChainHeaderReader, headers []*ty
 			continue
 		}
 		if seals[i] {
-			keys[i], errs[i] = r.keyOf(lookup, header)
+			if keys[i], errs[i] = r.keyOf(lookup, header); errs[i] != nil {
+				continue
+			}
+		}
+		// The header MMR state each header commits to, in order, so that a
+		// header's parent in the batch is remembered when it is reached.
+		if mmrs[i], errs[i] = r.expectedHeaderMMR(chain, lookup, parents[i]); errs[i] == nil {
+			r.mmrs.Add(header.Hash(), mmrs[i])
 		}
 	}
 
@@ -122,7 +269,7 @@ func (r *RandomX) VerifyHeaders(chain consensus.ChainHeaderReader, headers []*ty
 		go func() {
 			for i := range inputs {
 				if errs[i] == nil {
-					errs[i] = r.verifyHeader(chain, headers[i], parents[i], seals[i], keys[i], now)
+					errs[i] = r.verifyHeader(chain, headers[i], parents[i], seals[i], keys[i], mmrs[i], now)
 				}
 				done <- i
 			}
@@ -165,8 +312,10 @@ func (r *RandomX) VerifyUncles(chain consensus.ChainReader, block *types.Block) 
 }
 
 // verifyHeader checks a header against its parent, cheapest checks first and
-// the RandomX hash last. now is the local clock in seconds.
-func (r *RandomX) verifyHeader(chain consensus.ChainHeaderReader, header, parent *types.Header, seal bool, key common.Hash, now uint64) error {
+// the RandomX hash last. mmr is the header MMR state the header must commit
+// to, its parent's with the parent's leaf appended. now is the local clock in
+// seconds.
+func (r *RandomX) verifyHeader(chain consensus.ChainHeaderReader, header, parent *types.Header, seal bool, key common.Hash, mmr ghostmmr.State, now uint64) error {
 	// Parent link.
 	if header.Number == nil || header.Number.Cmp(new(big.Int).Add(parent.Number, common.Big1)) != 0 {
 		return consensus.ErrInvalidNumber
@@ -226,6 +375,12 @@ func (r *RandomX) verifyHeader(chain consensus.ChainHeaderReader, header, parent
 	if err := checkTreeRootFields(config.IsEnabled(config.GetEIP1559Transition, header.Number), header); err != nil {
 		return err
 	}
+	// The header MMR root, which depends on the earlier headers only, so it
+	// is checked here before any body is executed; and the total difficulty
+	// below 2^128.
+	if err := checkHeaderMMR(header, mmr); err != nil {
+		return err
+	}
 	// Uncle hash and mix digest.
 	if header.UncleHash != types.EmptyUncleHash {
 		return errInvalidUncleHash
@@ -242,7 +397,7 @@ func (r *RandomX) verifyHeader(chain consensus.ChainHeaderReader, header, parent
 
 // checkTreeRootFields checks that a header carries both tree roots and the
 // data marker root when its chain has EIP-1559 in force, and none of them
-// otherwise. The roots take the Ghost layout, which requires the base fee, so
+// otherwise. checkHeaderMMR checks the header MMR root that goes with them. The roots take the Ghost layout, which requires the base fee, so
 // a chain without EIP-1559 (so far only developer mode) cannot carry them
 // after its genesis.
 func checkTreeRootFields(london bool, header *types.Header) error {
@@ -320,7 +475,8 @@ func (r *RandomX) Finalize(chain consensus.ChainHeaderReader, header *types.Head
 }
 
 // FinalizeAndAssemble implements consensus.Engine, paying the block reward,
-// setting the tree roots and the state root and assembling the block.
+// setting the tree roots, the header MMR root and the state root and
+// assembling the block.
 func (r *RandomX) FinalizeAndAssemble(chain consensus.ChainHeaderReader, header *types.Header, state *state.StateDB, txs []*types.Transaction, uncles []*types.Header, receipts []*types.Receipt, withdrawals []*types.Withdrawal) (*types.Block, error) {
 	if len(withdrawals) > 0 {
 		return nil, errNoWithdrawals
@@ -334,8 +490,29 @@ func (r *RandomX) FinalizeAndAssemble(chain consensus.ChainHeaderReader, header 
 		return nil, errMissingBaseFee
 	}
 	r.Finalize(chain, header, state, txs, nil, nil)
-	header.CoinTreeRoot, header.DataTreeRoot, header.DataMarkerRoot = nil, nil, nil
+	header.CoinTreeRoot, header.DataTreeRoot, header.DataMarkerRoot, header.HeaderMmrRoot = nil, nil, nil, nil
 	if london {
+		// The header MMR root over the earlier blocks: the parent's state
+		// with the parent's leaf appended. It is set here with the tree
+		// roots, not in Prepare, because the root needs the tree roots
+		// beside it to be encoded.
+		number := header.Number.Uint64()
+		parent := chain.GetHeader(header.ParentHash, number-1)
+		if parent == nil {
+			return nil, consensus.ErrUnknownAncestor
+		}
+		mmr, err := r.expectedHeaderMMR(chain, chainLookup(chain), parent)
+		if err != nil {
+			return nil, err
+		}
+		if err := checkHeaderMMR(&types.Header{Difficulty: header.Difficulty}, mmr); err != nil {
+			return nil, err
+		}
+		root, err := mmr.Root()
+		if err != nil {
+			return nil, err
+		}
+		mmrRoot := common.Hash(root)
 		coinRoot, err := ghosttree.Root(state, ghosttree.Coin)
 		if err != nil {
 			return nil, err
@@ -349,6 +526,7 @@ func (r *RandomX) FinalizeAndAssemble(chain consensus.ChainHeaderReader, header 
 			return nil, err
 		}
 		header.CoinTreeRoot, header.DataTreeRoot, header.DataMarkerRoot = &coinRoot, &dataRoot, &markerRoot
+		header.HeaderMmrRoot = &mmrRoot
 	}
 	header.Root = state.IntermediateRoot(config.IsEnabled(config.GetEIP161dTransition, header.Number))
 	return types.NewBlock(header, txs, nil, receipts, trie.NewStackTrie(nil)), nil

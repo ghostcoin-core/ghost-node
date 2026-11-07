@@ -30,6 +30,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus/ghostrules"
+	"github.com/ethereum/go-ethereum/core/ghostmmr"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -116,6 +117,8 @@ func requireGenesis(t *testing.T, name string, out output, want fixtureHeader, h
 		t.Errorf("genesis state root %x, want the empty root", h.Root)
 	case h.CoinTreeRoot == nil || h.DataTreeRoot == nil || h.DataMarkerRoot == nil:
 		t.Errorf("genesis without the coin and data tree roots and the data marker root")
+	case h.HeaderMmrRoot == nil || *h.HeaderMmrRoot != common.Hash(ghostmmr.EmptyRoot):
+		t.Errorf("genesis header MMR root %v, want the root of the empty MMR", h.HeaderMmrRoot)
 	case len(block.Transactions()) != 0 || len(block.Uncles()) != 0:
 		t.Errorf("genesis with a body")
 	}

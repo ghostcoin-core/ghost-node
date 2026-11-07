@@ -34,6 +34,7 @@ import (
 	"github.com/ethereum/go-ethereum/common/prque"
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
+	"github.com/ethereum/go-ethereum/core/ghostmmr"
 	"github.com/ethereum/go-ethereum/core/ghostpriv"
 	"github.com/ethereum/go-ethereum/core/ghosttree"
 	"github.com/ethereum/go-ethereum/core/rawdb"
@@ -1483,10 +1484,29 @@ func (bc *BlockChain) writeBlockWithoutState(block *types.Block, td *big.Int) (e
 	batch := bc.db.NewBatch()
 	rawdb.WriteTd(batch, block.Hash(), block.NumberU64(), td)
 	rawdb.WriteBlock(batch, block)
+	if err := bc.hc.writeHeaderMMR(batch, block.Header()); err != nil {
+		return err
+	}
 	if err := batch.Write(); err != nil {
 		log.Crit("Failed to write block into disk", "err", err)
 	}
 	return nil
+}
+
+// HeaderMMR returns the header MMR state the block with the given hash and
+// number commits to, the MMR over blocks 0 to number-1 of its own chain
+// (core/ghostmmr). The RandomX engine checks a header's HeaderMmrRoot
+// against the root of its parent's state with the parent's leaf appended.
+// The state returned must not be changed in place.
+func (bc *BlockChain) HeaderMMR(hash common.Hash, number uint64) (ghostmmr.State, error) {
+	return bc.hc.HeaderMMR(hash, number)
+}
+
+// HeaderMMRPath returns the path of block index in the header MMR the tip's
+// header commits to, which ghostmmr.VerifyPath checks against the tip's
+// HeaderMmrRoot with the block's header hash and difficulty.
+func (bc *BlockChain) HeaderMMRPath(tip common.Hash, index uint64) ([]byte, error) {
+	return bc.hc.HeaderMMRPath(tip, index)
 }
 
 // writeKnownBlockAsHead updates the head block flag with a known block
@@ -1523,6 +1543,9 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 	rawdb.WriteBlock(blockBatch, block)
 	rawdb.WriteReceipts(blockBatch, block.Hash(), block.NumberU64(), receipts)
 	rawdb.WritePreimages(blockBatch, state.Preimages())
+	if err := bc.hc.writeHeaderMMR(blockBatch, block.Header()); err != nil {
+		return err
+	}
 	if err := blockBatch.Write(); err != nil {
 		log.Crit("Failed to write block into disk", "err", err)
 	}

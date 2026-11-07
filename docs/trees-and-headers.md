@@ -112,27 +112,131 @@ transaction-format specification and replace them in a constants-only change.
 
 ## Header layout
 
-`Header` has three fields, `CoinTreeRoot`, `DataTreeRoot` and
-`DataMarkerRoot`, encoded by the hand-written `EncodeRLP` and `DecodeRLP` of
-`core/types/header_ghost.go`:
+`Header` has four Ghost fields, `CoinTreeRoot`, `DataTreeRoot`,
+`DataMarkerRoot` and `HeaderMmrRoot`, encoded by the hand-written
+`EncodeRLP` and `DecodeRLP` of `core/types/header_ghost.go`:
 
-- With all three roots nil, a header encodes exactly as before, with the base
+- With all four nil, a header encodes exactly as before, with the base
   client's optional fields.
-- With all three roots set, the base fee set and no withdrawals root, blob gas
-  fields or parent beacon root, a header is the 19-item list of spec 05,
-  section 10: fields 0 to 14, the base fee, the coin tree root, the data tree
-  root and the data marker root.
-- Any other combination, including one or two of the three roots, does not
-  encode.
+- With all four set, the base fee set and no withdrawals root, blob gas
+  fields or parent beacon root, a header is the 20-item Ghost layout: fields
+  0 to 14, the base fee, the coin tree root, the data tree root, the data
+  marker root and, last, the header MMR root (below).
+- With the three tree roots and no header MMR root it is the 19-item list
+  before the header MMR root. That list is not a Ghost header: the RandomX
+  engine rejects it, and `DecodeGhostHeader` rejects it with `item-count`. It
+  still encodes and decodes, so that the test engines of other packages,
+  which keep no header MMR, can hash and store their headers.
+- Any other combination, including one or two of the three tree roots, or
+  the header MMR root without them, does not encode.
 
-The decoder reads a list of exactly 19 items with a 32-byte string at index 18
-as the Ghost layout, and anything else as before; in the base layout index 18
-is the excess blob gas, an integer of at most 8 bytes. The 18-item layout
-before the marker root is not a Ghost header: `DecodeGhostHeader` rejects it
-with `item-count`. `DecodeGhostHeader` is the strict reference decoder of the
-specification, which rejects with the reasons `non-canonical-rlp`, `trailing-bytes`, `item-count`, `field-size`,
-`non-canonical-integer` and `integer-range`. The JSON encoding of
-`types.Header` is unchanged.
+The decoder reads a list of 19 items with a 32-byte string at index 18, or
+of 20 items with 32-byte strings at indexes 18 and 19, as the Ghost layout,
+and anything else as before; in the base layout index 18 is the excess blob
+gas, an integer of at most 8 bytes. The 18-item layout before the marker root
+is not a Ghost header either. `DecodeGhostHeader` is the strict reference
+decoder of the specification: it takes the 20 items only and rejects with
+the reasons `non-canonical-rlp`, `trailing-bytes`, `item-count`,
+`field-size`, `non-canonical-integer` and `integer-range`. The JSON encoding
+of `types.Header` is unchanged.
+
+The spec 05 vectors in `core/types/header_ghost_test.go` are the 19-item
+lists; the tests append the header MMR root to them (the genesis vector with
+the empty root, block one, on that genesis, with the root over it) for the
+Ghost layout, and build the negative vectors on block one with the root. The
+lookup trees' digest field is not in the layout yet; when it lands it goes
+before the header MMR root, which stays the last item.
+
+## Header MMR
+
+Every Ghost header commits to a Merkle mountain range over all earlier
+blocks of its chain, with the work below each node (decision 0005 of the
+ghost repository). The code is `core/ghostmmr`, which depends on nothing of
+the node.
+
+- A leaf is `K("ghost/header-mmr-leaf/v1", header hash, difficulty)`, the
+  header hash being the Keccak-256 of the whole RLP header, seal and own
+  header MMR root included.
+- An inner node is `K("ghost/header-mmr-node/v1", left hash, left work,
+  right hash, right work)` with the sum of the two works.
+- The peaks, one perfect subtree per set bit of the leaf count `n` and the
+  highest first, are bagged from the right with
+  `K("ghost/header-mmr-bag/v1", peak hash, peak work, bag hash, bag work)`;
+  one peak is its own bag, and no peak is 32 zero bytes with work 0.
+- The root is `K("ghost/header-mmr-root/v1", n as 8 bytes, bag hash, bag
+  work)`. The empty root,
+  `b1f684aabd11aa3966ac25d6ac9c50e10cc53cbfb48957f3f514fb4b08fd23ac`, is the
+  `HeaderMmrRoot` of every Ghost genesis.
+- Every work value is 16 bytes big-endian, and a sum that reaches 2^128 is
+  refused.
+
+The header of block `N` carries the root over blocks 0 to `N - 1`, so `n` is
+`N`: block one carries the root of the genesis leaf alone. Its tests take the
+record's vectors as literals: the empty root, the genesis leaf, the one-leaf
+root, the seven-leaf MMR with three paths, and the five-year MMR of
+5,256,000 leaves (five years of 30-second blocks) with its root and the
+genesis path of 23 entries, 1,104 bytes.
+
+### Paths
+
+A path is a concatenation of 48-byte entries, hash then work, with no count
+or index: the siblings from the bottom, at heights 0 to `h - 1` of the
+leaf's peak; the bag of the peaks after it, unless it is the last; and the
+peaks before it, nearest first. Its length, `h + j` plus one unless the peak
+`j` is the last, is fixed by `n` and the index, and is at most
+`floor(log2 n) + 1` entries: 21 at one year, 23 at five years.
+`ghostmmr.VerifyPath(root, n, i, header hash, difficulty, path)` folds it
+back and checks the root; it returns the work of the blocks before `i` and
+the total work, and refuses an index not below `n`, another length, any
+changed byte, and a fold that reaches 2^128.
+
+`BlockChain.HeaderMMRPath(tip, i)` returns the path of block `i` in the MMR
+the tip's header commits to, which verifies against the tip's
+`HeaderMmrRoot`. Paths are Go functions only; no RPC method and no peer
+message serves one.
+
+### Storage
+
+The store is content addressed, so that no two forks share or overwrite an
+entry (`core/rawdb/accessors_ghostmmr.go`):
+
+| Prefix | Key | Value |
+|---|---|---|
+| `ghost-mmr-block-` | block hash | leaf count (8 bytes) and peaks (48 bytes each) of the MMR the block's header commits to |
+| `ghost-mmr-node-` | inner node hash | its left and right entries, 96 bytes |
+
+A block's state is its parent's with the parent's leaf appended, written
+with the header (`HeaderChain.WriteHeaders`, and `writeBlockWithState` and
+`writeBlockWithoutState` in `core/blockchain.go`) together with the inner
+nodes the append creates. A path is read by walking down from the tip's
+peaks through the stored inner nodes. A reorganisation rewrites nothing: the
+blocks of the new chain already hold their own states, and every state is
+found by the hash of its block, so the MMR follows whichever chain is
+canonical. A rewind or the pruning of a side fork deletes a block's state
+with its header (`rawdb.DeleteHeader`); inner nodes, which blocks of several
+forks may share, stay. A block without a stored state, as in a database
+from before the store, gets it from the nearest ancestor that has one, and
+the states on the way are stored. The headers of a header-only sync get
+their states as they are written.
+
+### Validation
+
+`HeaderMmrRoot` depends only on earlier headers, so the RandomX engine
+checks it with the header, in `verifyHeader` next to the tree root fields,
+before any body is executed: a Ghost header without it, or with another
+value than the root of its parent's state with the parent's leaf appended,
+is `randomx.ErrHeaderMmrRoot`. The engine reads the parent's state from the
+chain (`core.BlockChain` and `core.HeaderChain` implement
+`randomx.HeaderMMRReader`); for headers of a batch being verified, and for
+chains that keep no header MMR, it computes the state from the headers and
+remembers it by header hash. A block whose chain's total difficulty, its own
+included, would reach 2^128 is invalid with `randomx.ErrWorkOverflow`, whose
+reason is `work-overflow`. `FinalizeAndAssemble` sets the root with the tree
+roots; `Prepare` leaves it unset, as the root cannot be encoded without the
+tree roots beside it. The seal hash covers it.
+
+The JSON header of the RPC methods carries `headerMmrRoot` when the header
+has it, beside the tree roots.
 
 The data marker root is the root of the data spent-marker set of spec 05,
 section 6. `ghosttree.DataMarkerRoot` (`core/ghosttree/markerroot.go`)
@@ -147,13 +251,13 @@ The RandomX engine sets the three roots from the final state in
 requires them in every header with a base fee, and covers them with the seal
 hash. Block validation recomputes the three roots after execution and rejects
 a block whose roots differ. The genesis of the internal network and of
-developer mode carries the empty roots and the empty marker-set root; the
-genesis state root stays that of the allocation. Developer mode's configuration has no EIP-1559, so its later
+developer mode carries the empty roots, the empty marker-set root and the
+empty header MMR root; the genesis state root stays that of the allocation. Developer mode's configuration has no EIP-1559, so its later
 blocks have no base fee and carry no roots.
 
 The JSON header of `eth_getBlockByNumber`, `eth_getBlockByHash` and the
-header methods carries `coinTreeRoot`, `dataTreeRoot` and `dataMarkerRoot`
-when the header has them, and leaves them out otherwise.
+header methods carries `coinTreeRoot`, `dataTreeRoot`, `dataMarkerRoot` and
+`headerMmrRoot` when the header has them, and leaves them out otherwise.
 
 ## Pages
 
@@ -461,6 +565,10 @@ removed branch, and so does the index.
 - Existing headers keep their exact bytes; only a header with all three roots
   takes the Ghost layout. Rejecting a header without roots is the engine's check,
   not the decoder's.
+- So is rejecting a Ghost header without the header MMR root: the decoder
+  takes the 19-item list without it, which the RandomX engine refuses and
+  which test engines that keep no header MMR produce. The strict decoder
+  takes the 20 items only.
 - The tree-state account holds one slot beyond the specification's table, the
   final root, because a full tree's root cannot be recovered from a frontier.
   It is derived data, zero unless the tree is full.

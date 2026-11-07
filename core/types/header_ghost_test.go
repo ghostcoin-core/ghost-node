@@ -55,24 +55,87 @@ var (
 	vectorBlockOneHash = "81ca961404b518ee3ded78ebee1c4e23eba18b7c86515b6471e970cfed8538f4"
 )
 
-// The negative vectors: header-block-one-example with one fault each.
-var negativeHeaderVectors = []struct {
-	name, reason, rlp string
-}{
-	// A withdrawals root after the base fee.
-	{"header-forbidden-field", GhostReasonItemCount, "f90285" + blockOneBody + blockOneFee + "a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421" + blockOneCoin + blockOneData + blockOneMarker},
-	// An empty string appended.
-	{"header-extra-trailing-field", GhostReasonItemCount, "f90265" + blockOneBody + blockOneFee + blockOneCoin + blockOneData + blockOneMarker + "80"},
-	// No base fee.
-	{"header-missing-required-field", GhostReasonItemCount, "f9025f" + blockOneBody + blockOneCoin + blockOneData + blockOneMarker},
-	// The block number with a leading zero byte.
-	{"header-non-canonical-integer", GhostReasonNonCanonicalInteger, "f90266" + blockOneHead + zeroBloom + blockOneDifficulty + "820001" + blockOneRest + blockOneFee + blockOneCoin + blockOneData + blockOneMarker},
-	// The coin tree root cut to 31 bytes.
-	{"header-short-tree-root", GhostReasonFieldSize, "f90263" + blockOneBody + blockOneFee + "9f142c6bdf0882396330f9942ddd49df5d860b05a5218dad1ce6ef8e69238b6e" + blockOneData + blockOneMarker},
-	// One byte after the list.
-	{"header-trailing-bytes", GhostReasonTrailingBytes, vectorBlockOneRLP + "00"},
-	// The 18-item layout, without the data marker root.
-	{"header-eighteen-items", GhostReasonItemCount, vectorBlockOneEighteenItems},
+// The vectors above are the 19-item list before the header MMR root. The
+// Ghost layout appends the root as item 19: the genesis vector carries the
+// empty root, and block one, on that genesis, the root of the one-leaf MMR
+// over it. Their bytes are the items above with the root item appended, so
+// they do not come from the encoder under test.
+var (
+	mmrEmptyRootHex = "b1f684aabd11aa3966ac25d6ac9c50e10cc53cbfb48957f3f514fb4b08fd23ac" // decision 0005
+	genesisMmrItem  = "a0" + mmrEmptyRootHex
+
+	// vectorGenesisMmrBody is the content of the genesis vector's list with
+	// the header MMR root.
+	vectorGenesisMmrBody = strings.TrimPrefix(vectorGenesisRLP, "f90281") + genesisMmrItem
+)
+
+// mmrVectors returns the encodings and hashes of the genesis and block one
+// vectors with the header MMR root, and block one's root.
+func mmrVectors(t *testing.T) (genesis []byte, genesisHash common.Hash, blockOne []byte, blockOneHash common.Hash, blockOneRoot common.Hash) {
+	t.Helper()
+	body := mustHex(t, vectorGenesisMmrBody)
+	genesis = append(rlpListHeader(len(body)), body...)
+	genesisHash = crypto.Keccak256Hash(genesis)
+	blockOneRoot = oneLeafRoot(t, genesisHash, big.NewInt(16777216))
+	blockOne = mustHex(t, blockOneMmrRLPHex(t, genesisHash, blockOneRoot, blockOneDifficulty+blockOneNumber, blockOneFee, blockOneCoin, ""))
+	return genesis, genesisHash, blockOne, crypto.Keccak256Hash(blockOne), blockOneRoot
+}
+
+// blockOneMmrRLPHex is block one on the genesis with the header MMR root, with
+// the given pieces between the bloom and the rest, as the base fee and as the
+// coin tree root, and extra appended after the root item.
+func blockOneMmrRLPHex(t *testing.T, parent, root common.Hash, difficultyNumber, fee, coin, extra string) string {
+	t.Helper()
+	head := "a0" + common.Bytes2Hex(parent[:]) + blockOneHead[66:]
+	body := head + zeroBloom + difficultyNumber + blockOneRest + fee + coin + blockOneData + blockOneMarker + "a0" + common.Bytes2Hex(root[:]) + extra
+	return common.Bytes2Hex(rlpListHeader(len(body)/2)) + body
+}
+
+// oneLeafRoot is the header MMR root over one leaf, computed from decision
+// 0005's formulas here rather than with core/ghostmmr.
+func oneLeafRoot(t *testing.T, headerHash common.Hash, difficulty *big.Int) common.Hash {
+	t.Helper()
+	tagged := func(tag string, parts ...[]byte) []byte {
+		return crypto.Keccak256(append([][]byte{{byte(len(tag))}, []byte(tag)}, parts...)...)
+	}
+	work := make([]byte, 16)
+	difficulty.FillBytes(work)
+	leaf := tagged("ghost/header-mmr-leaf/v1", headerHash[:], work)
+	return common.BytesToHash(tagged("ghost/header-mmr-root/v1", []byte{0, 0, 0, 0, 0, 0, 0, 1}, leaf, work))
+}
+
+// The negative vectors: block one with the header MMR root and one fault
+// each.
+func negativeHeaderVectors(t *testing.T) []struct {
+	name, reason string
+	rlp          []byte
+} {
+	_, genesis, blockOne, _, root := mmrVectors(t)
+	pieces := func(difficultyNumber, fee, coin, extra string) []byte {
+		return mustHex(t, blockOneMmrRLPHex(t, genesis, root, difficultyNumber, fee, coin, extra))
+	}
+	plain := blockOneDifficulty + blockOneNumber
+	return []struct {
+		name, reason string
+		rlp          []byte
+	}{
+		// A withdrawals root after the base fee.
+		{"header-forbidden-field", GhostReasonItemCount, pieces(plain, blockOneFee+"a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421", blockOneCoin, "")},
+		// An empty string appended.
+		{"header-extra-trailing-field", GhostReasonItemCount, pieces(plain, blockOneFee, blockOneCoin, "80")},
+		// No base fee.
+		{"header-missing-required-field", GhostReasonItemCount, pieces(plain, "", blockOneCoin, "")},
+		// The block number with a leading zero byte.
+		{"header-non-canonical-integer", GhostReasonNonCanonicalInteger, pieces(blockOneDifficulty+"820001", blockOneFee, blockOneCoin, "")},
+		// The coin tree root cut to 31 bytes.
+		{"header-short-tree-root", GhostReasonFieldSize, pieces(plain, blockOneFee, "9f142c6bdf0882396330f9942ddd49df5d860b05a5218dad1ce6ef8e69238b6e", "")},
+		// One byte after the list.
+		{"header-trailing-bytes", GhostReasonTrailingBytes, append(append([]byte{}, blockOne...), 0)},
+		// The 18-item layout, without the data marker root.
+		{"header-eighteen-items", GhostReasonItemCount, mustHex(t, vectorBlockOneEighteenItems)},
+		// The 19-item list, without the header MMR root.
+		{"header-nineteen-items", GhostReasonItemCount, mustHex(t, vectorBlockOneRLP)},
+	}
 }
 
 func mustHex(t *testing.T, s string) []byte {
@@ -134,18 +197,38 @@ func vectorBlockOne() *Header {
 	}
 }
 
+// vectorGenesisMmr and vectorBlockOneMmr are the field values of the vectors
+// with the header MMR root.
+func vectorGenesisMmr() *Header {
+	h := vectorGenesis()
+	h.HeaderMmrRoot = hashPtr(mmrEmptyRootHex)
+	return h
+}
+
+func vectorBlockOneMmr(t *testing.T) *Header {
+	_, genesis, _, _, root := mmrVectors(t)
+	h := vectorBlockOne()
+	h.ParentHash, h.HeaderMmrRoot = genesis, &root
+	return h
+}
+
 // TestGhostHeaderVectors checks the positive header vectors: the fields
 // encode to the stated bytes and hash, and the bytes decode back to the same
-// header with both decoders.
+// header with both decoders. The vectors without the header MMR root still
+// encode and decode through rlp, and the strict decoder refuses them.
 func TestGhostHeaderVectors(t *testing.T) {
+	genesisMmr, genesisMmrHash, blockOneMmr, blockOneMmrHash, _ := mmrVectors(t)
 	for _, v := range []struct {
 		name   string
 		header *Header
 		rlp    string
 		hash   string
+		strict bool
 	}{
-		{"header-genesis-example", vectorGenesis(), vectorGenesisRLP, vectorGenesisHash},
-		{"header-block-one-example", vectorBlockOne(), vectorBlockOneRLP, vectorBlockOneHash},
+		{"header-genesis-example", vectorGenesis(), vectorGenesisRLP, vectorGenesisHash, false},
+		{"header-block-one-example", vectorBlockOne(), vectorBlockOneRLP, vectorBlockOneHash, false},
+		{"header-genesis-with-mmr", vectorGenesisMmr(), common.Bytes2Hex(genesisMmr), common.Bytes2Hex(genesisMmrHash[:]), true},
+		{"header-block-one-with-mmr", vectorBlockOneMmr(t), common.Bytes2Hex(blockOneMmr), common.Bytes2Hex(blockOneMmrHash[:]), true},
 	} {
 		want := mustHex(t, v.rlp)
 		if h := crypto.Keccak256Hash(want); h != common.HexToHash(v.hash) {
@@ -182,15 +265,26 @@ func TestGhostHeaderVectors(t *testing.T) {
 			t.Errorf("%s: decoded hash %x", v.name, dec.Hash())
 		}
 
+		if (dec.HeaderMmrRoot != nil) != v.strict || (v.strict && *dec.HeaderMmrRoot != *v.header.HeaderMmrRoot) {
+			t.Errorf("%s: decoded header MMR root %v", v.name, dec.HeaderMmrRoot)
+		}
+
 		strict, err := DecodeGhostHeader(want)
-		if err != nil {
-			t.Fatalf("%s: strict decoder rejects a positive vector: %v", v.name, err)
-		}
-		if re, _ := rlp.EncodeToBytes(strict); !bytes.Equal(re, want) {
-			t.Errorf("%s: strict decode and encode gives\n%x", v.name, re)
-		}
-		if strict.Hash() != common.HexToHash(v.hash) {
-			t.Errorf("%s: strict decoded hash %x", v.name, strict.Hash())
+		if !v.strict {
+			var reject *GhostHeaderError
+			if !errors.As(err, &reject) || reject.Reason != GhostReasonItemCount {
+				t.Errorf("%s: strict decoder without the header MMR root: %v, want %s", v.name, err, GhostReasonItemCount)
+			}
+		} else {
+			if err != nil {
+				t.Fatalf("%s: strict decoder rejects a positive vector: %v", v.name, err)
+			}
+			if re, _ := rlp.EncodeToBytes(strict); !bytes.Equal(re, want) {
+				t.Errorf("%s: strict decode and encode gives\n%x", v.name, re)
+			}
+			if strict.Hash() != common.HexToHash(v.hash) {
+				t.Errorf("%s: strict decoded hash %x", v.name, strict.Hash())
+			}
 		}
 
 		// The whole block round trips too.
@@ -207,18 +301,25 @@ func TestGhostHeaderVectors(t *testing.T) {
 			t.Errorf("%s: block hash %x after a round trip", v.name, decBlock.Hash())
 		}
 	}
-	// Block one's parent is the genesis vector.
+	// Block one's parent is the genesis vector, and so with the root.
 	if vectorBlockOne().ParentHash != vectorGenesis().Hash() {
 		t.Error("block one does not build on the genesis vector")
+	}
+	if vectorBlockOneMmr(t).ParentHash != vectorGenesisMmr().Hash() {
+		t.Error("block one with the header MMR root does not build on the genesis with it")
+	}
+	// The genesis with the root is 33 bytes longer than without it.
+	if len(genesisMmr) != len(mustHex(t, vectorGenesisRLP))+33 || len(blockOneMmr) != len(mustHex(t, vectorBlockOneRLP))+33 {
+		t.Errorf("vectors with the root are %d and %d bytes", len(genesisMmr), len(blockOneMmr))
 	}
 }
 
 // TestGhostHeaderNegativeVectors checks that the strict decoder rejects each
 // negative vector with its stated reason, and that the ordinary decoder never
-// reads one as a Ghost header with both roots.
+// reads one as a Ghost header with the header MMR root.
 func TestGhostHeaderNegativeVectors(t *testing.T) {
-	for _, v := range negativeHeaderVectors {
-		b := mustHex(t, v.rlp)
+	for _, v := range negativeHeaderVectors(t) {
+		b := v.rlp
 		h, err := DecodeGhostHeader(b)
 		var reject *GhostHeaderError
 		if !errors.As(err, &reject) {
@@ -229,12 +330,12 @@ func TestGhostHeaderNegativeVectors(t *testing.T) {
 			t.Errorf("%s: rejected for %s (%v), want %s", v.name, reject.Reason, err, v.reason)
 		}
 		var dec Header
-		if err := rlp.DecodeBytes(b, &dec); err == nil && dec.CoinTreeRoot != nil && dec.DataTreeRoot != nil {
+		if err := rlp.DecodeBytes(b, &dec); err == nil && dec.HeaderMmrRoot != nil {
 			t.Errorf("%s: the ordinary decoder reads it as a Ghost header", v.name)
 		}
 	}
 	// The reasons the vectors do not reach.
-	good := mustHex(t, vectorBlockOneRLP)
+	_, _, good, _, _ := mmrVectors(t)
 	for _, c := range []struct {
 		name, reason string
 		b            []byte
@@ -472,7 +573,7 @@ func TestGhostHeaderRejectsPartialOrMixedFields(t *testing.T) {
 	}
 	// A forbidden field between the base fee and the roots decodes as
 	// neither layout.
-	if err := rlp.DecodeBytes(mustHex(t, negativeHeaderVectors[0].rlp), &dec); err == nil {
+	if err := rlp.DecodeBytes(negativeHeaderVectors(t)[0].rlp, &dec); err == nil {
 		t.Error("the forbidden-field vector decodes")
 	}
 
@@ -525,27 +626,28 @@ var vectorBlockOneEighteenItems = "f90243" + blockOneBody + blockOneFee + blockO
 // 19-item base header still decodes as a base header.
 func TestGhostHeaderDataMarkerRoot(t *testing.T) {
 	// Both positive vectors encode to their bytes and hash.
+	genesisMmr, genesisMmrHash, blockOneMmr, blockOneMmrHash, _ := mmrVectors(t)
 	for _, v := range []struct {
 		name   string
 		header *Header
-		rlp    string
-		hash   string
+		rlp    []byte
+		hash   common.Hash
 	}{
-		{"header-genesis-example", vectorGenesis(), vectorGenesisRLP, vectorGenesisHash},
-		{"header-block-one-example", vectorBlockOne(), vectorBlockOneRLP, vectorBlockOneHash},
+		{"header-genesis-with-mmr", vectorGenesisMmr(), genesisMmr, genesisMmrHash},
+		{"header-block-one-with-mmr", vectorBlockOneMmr(t), blockOneMmr, blockOneMmrHash},
 	} {
 		got, err := rlp.EncodeToBytes(v.header)
 		if err != nil {
 			t.Fatalf("%s: encode: %v", v.name, err)
 		}
-		if want := mustHex(t, v.rlp); !bytes.Equal(got, want) {
-			t.Errorf("%s: encoding\n got %x\nwant %x", v.name, got, want)
+		if !bytes.Equal(got, v.rlp) {
+			t.Errorf("%s: encoding\n got %x\nwant %x", v.name, got, v.rlp)
 		}
-		if n := countItems(t, got); n != 19 {
-			t.Errorf("%s: %d items, want 19", v.name, n)
+		if n := countItems(t, got); n != 20 {
+			t.Errorf("%s: %d items, want 20", v.name, n)
 		}
-		if h := v.header.Hash(); h != common.HexToHash(v.hash) {
-			t.Errorf("%s: hash %x, want %s", v.name, h, v.hash)
+		if h := v.header.Hash(); h != v.hash {
+			t.Errorf("%s: hash %x, want %x", v.name, h, v.hash)
 		}
 		dec, err := DecodeGhostHeader(got)
 		if err != nil {
@@ -626,5 +728,116 @@ func TestGhostHeaderDataMarkerRoot(t *testing.T) {
 	}
 	if dec.ExcessBlobGas == nil || *dec.ExcessBlobGas != excess || dec.Hash() != base.Hash() {
 		t.Errorf("a 19-item base header decoded as %+v", dec)
+	}
+}
+
+// TestHeaderMMRRootField checks the header MMR root, the last item of the
+// Ghost layout: its place and bytes, the round trip through both decoders,
+// the hash, copy and size, and the combinations that do not encode.
+func TestHeaderMMRRootField(t *testing.T) {
+	_, genesis, blockOne, blockOneHash, root := mmrVectors(t)
+	h := vectorBlockOneMmr(t)
+	got, err := rlp.EncodeToBytes(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, blockOne) || h.Hash() != blockOneHash {
+		t.Fatalf("block one with the root encodes to\n%x\nwant\n%x", got, blockOne)
+	}
+	// The root is the last of the 20 items, after the data marker root.
+	content, _, _ := rlp.SplitList(got)
+	var items [][]byte
+	for len(content) > 0 {
+		_, item, rest, err := rlp.Split(content)
+		if err != nil {
+			t.Fatal(err)
+		}
+		items, content = append(items, item), rest
+	}
+	if len(items) != 20 || !bytes.Equal(items[19], root[:]) || !bytes.Equal(items[18], h.DataMarkerRoot[:]) {
+		t.Fatalf("%d items, the last %x", len(items), items[len(items)-1])
+	}
+	if h.ParentHash != genesis {
+		t.Fatal("block one is not on the genesis with the root")
+	}
+	// Both decoders give the root back.
+	var dec Header
+	if err := rlp.DecodeBytes(got, &dec); err != nil || dec.HeaderMmrRoot == nil || *dec.HeaderMmrRoot != root {
+		t.Fatalf("decoded root %v (%v)", dec.HeaderMmrRoot, err)
+	}
+	strict, err := DecodeGhostHeader(got)
+	if err != nil || strict.HeaderMmrRoot == nil || *strict.HeaderMmrRoot != root || strict.Hash() != blockOneHash {
+		t.Fatalf("strict decoded root %v (%v)", strict, err)
+	}
+	// A 31-byte root is a field-size; 21 items an item-count.
+	short := withItem(t, got, 19, append([]byte{0x9f}, root[:31]...))
+	var reject *GhostHeaderError
+	if _, err := DecodeGhostHeader(short); !errors.As(err, &reject) || reject.Reason != GhostReasonFieldSize {
+		t.Errorf("a 31-byte header MMR root: %v", err)
+	}
+	if err := rlp.DecodeBytes(short, &dec); err == nil && dec.HeaderMmrRoot != nil {
+		t.Error("the ordinary decoder takes a 31-byte header MMR root")
+	}
+	// The hash covers the root, CopyHeader copies it, Size counts it.
+	cpy := CopyHeader(h)
+	if cpy.HeaderMmrRoot == h.HeaderMmrRoot || *cpy.HeaderMmrRoot != *h.HeaderMmrRoot {
+		t.Error("CopyHeader shares or changes the header MMR root")
+	}
+	cpy.HeaderMmrRoot[31] ^= 1
+	if cpy.Hash() == h.Hash() {
+		t.Error("a changed header MMR root leaves the hash unchanged")
+	}
+	without := CopyHeader(h)
+	without.HeaderMmrRoot = nil
+	if diff := h.Size() - without.Size(); diff != common.HashLength {
+		t.Errorf("the header MMR root adds %v to the size", diff)
+	}
+	// Without it the header is the 19-item list, which is not a Ghost header.
+	pre, err := rlp.EncodeToBytes(without)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := countItems(t, pre); n != 19 {
+		t.Fatalf("a header without the root has %d items", n)
+	}
+	if _, err := DecodeGhostHeader(pre); !errors.As(err, &reject) || reject.Reason != GhostReasonItemCount {
+		t.Errorf("19 items: %v, want %s", err, GhostReasonItemCount)
+	}
+	if err := rlp.DecodeBytes(pre, &dec); err != nil || dec.HeaderMmrRoot != nil || dec.Hash() != without.Hash() {
+		t.Errorf("19 items decode as %v (%v)", dec.HeaderMmrRoot, err)
+	}
+	// The root without the tree roots does not encode, in a header or a block.
+	bare := CopyHeader(h)
+	bare.CoinTreeRoot, bare.DataTreeRoot, bare.DataMarkerRoot = nil, nil, nil
+	if b, err := rlp.EncodeToBytes(bare); !errors.Is(err, errMmrRootNoRoots) {
+		t.Errorf("the root without the tree roots encodes as %x (%v)", b, err)
+	}
+	if _, err := rlp.EncodeToBytes(NewBlockWithHeader(bare)); err == nil {
+		t.Error("a block with the root and no tree roots encodes")
+	}
+	// The root with a partial set of tree roots is still a partial set.
+	partial := CopyHeader(h)
+	partial.DataMarkerRoot = nil
+	if _, err := rlp.EncodeToBytes(partial); !errors.Is(err, errPartialTreeRoots) {
+		t.Errorf("the root with two tree roots: %v", err)
+	}
+	// A base header of 20 items, every optional field, stays a base header.
+	for _, c := range baseHeaders() {
+		if c.name != "every optional field" {
+			continue
+		}
+		b := mustHex(t, c.rlp)
+		if n := countItems(t, b); n != 20 {
+			t.Fatalf("base header with every optional field has %d items", n)
+		}
+		var base Header
+		if err := rlp.DecodeBytes(b, &base); err != nil || base.HeaderMmrRoot != nil || base.CoinTreeRoot != nil || base.ParentBeaconRoot == nil {
+			t.Errorf("a 20-item base header decoded as %+v (%v)", base, err)
+		}
+	}
+	// The genesis vector carries the empty root.
+	g := vectorGenesisMmr()
+	if g.HeaderMmrRoot == nil || *g.HeaderMmrRoot != common.HexToHash(mmrEmptyRootHex) {
+		t.Error("the genesis vector does not carry the empty root")
 	}
 }

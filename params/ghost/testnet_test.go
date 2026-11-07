@@ -37,7 +37,7 @@ import (
 // block: a change to its genesis is a new network, so it has to be made on
 // purpose, here and in TestNetGenesisHash together.
 func TestPublicTestNetGenesisHashStable(t *testing.T) {
-	want := common.HexToHash("0xdfe4271fd12d302e15c68e381ade8076207f70d3778eebd69604566fb6979436")
+	want := common.HexToHash("0x31623be2322884e2243343cb1e4e437354d2e1d027fa3611287ba4d8aee2a6dc")
 	block := core.GenesisToBlock(ghost.TestNetGenesis(), nil)
 	if block.Hash() != want {
 		t.Errorf("test network genesis hash %x, want %x", block.Hash(), want)
@@ -45,10 +45,14 @@ func TestPublicTestNetGenesisHashStable(t *testing.T) {
 	if ghost.TestNetGenesisHash != want {
 		t.Errorf("TestNetGenesisHash is %x, want %x", ghost.TestNetGenesisHash, want)
 	}
-	// The header carries the Ghost tree roots, as every Ghost chain does.
+	// The header carries the Ghost tree roots and the root of the empty
+	// header MMR, as every Ghost chain does.
 	h := block.Header()
 	if h.CoinTreeRoot == nil || h.DataTreeRoot == nil || h.DataMarkerRoot == nil {
 		t.Error("test network genesis header has no Ghost tree roots")
+	}
+	if h.HeaderMmrRoot == nil || *h.HeaderMmrRoot != common.HexToHash("b1f684aabd11aa3966ac25d6ac9c50e10cc53cbfb48957f3f514fb4b08fd23ac") {
+		t.Errorf("test network genesis header MMR root %v, want the empty root", h.HeaderMmrRoot)
 	}
 	if block.Hash() == core.GenesisToBlock(ghost.InternalNetGenesis(), nil).Hash() {
 		t.Error("test network genesis is the internal network's")

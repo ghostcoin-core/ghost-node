@@ -28,23 +28,36 @@ import (
 
 // A header has one of two layouts (docs/trees-and-headers.md):
 //
-//   - the base layout, with all three roots nil: fields 0 to 14 and the
-//     optional fields BaseFee, WithdrawalsHash, BlobGasUsed, ExcessBlobGas and
-//     ParentBeaconRoot, exactly as the base client encodes them;
-//   - the Ghost layout of spec 05, section 10, with all three roots set: the
-//     19-item list of fields 0 to 14, BaseFee, CoinTreeRoot, DataTreeRoot and
-//     DataMarkerRoot, and none of the other optional fields.
+//   - the base layout, with all three roots and the header MMR root nil:
+//     fields 0 to 14 and the optional fields BaseFee, WithdrawalsHash,
+//     BlobGasUsed, ExcessBlobGas and ParentBeaconRoot, exactly as the base
+//     client encodes them;
+//   - the Ghost layout of spec 05, section 10, with all three roots and the
+//     header MMR root set: the 20-item list of fields 0 to 14, BaseFee,
+//     CoinTreeRoot, DataTreeRoot, DataMarkerRoot and HeaderMmrRoot, and none
+//     of the other optional fields.
 //
-// Any other combination cannot be encoded. The decoder tells the layouts
-// apart by shape: 19 items with a 32-byte string at index 18. In the base
-// layout index 18 is ExcessBlobGas, an integer of at most 8 bytes.
+// A header with the three roots and no header MMR root is written as the
+// 19-item list without its last item. It is not a Ghost header:
+// DecodeGhostHeader rejects it with item-count, and the RandomX engine
+// rejects it as missing the header MMR root. It still encodes and decodes so
+// that engines which keep no header MMR, as test engines do, can hash and
+// store their headers. A header MMR root without the three roots does not
+// encode, nor does any other combination. The decoder tells the layouts
+// apart by shape: 19 or 20 items with a 32-byte string at index 18, and at
+// index 19 for 20 items. In the base layout index 18 is ExcessBlobGas, an
+// integer of at most 8 bytes.
 
-const ghostHeaderItems = 19
+const (
+	ghostHeaderItems  = 20
+	preMmrHeaderItems = ghostHeaderItems - 1
+)
 
 var (
 	errPartialTreeRoots = errors.New("header sets some but not all of the tree and marker roots")
 	errTreeRootsNoFee   = errors.New("header with tree roots has no base fee")
 	errTreeRootsField   = errors.New("header with tree roots sets a field the Ghost layout forbids")
+	errMmrRootNoRoots   = errors.New("header sets the header MMR root without the tree and marker roots")
 )
 
 // ghostLayout reports whether the header takes the Ghost layout, and an error
@@ -52,6 +65,8 @@ var (
 func (obj *Header) ghostLayout() (bool, error) {
 	coin, data, marker := obj.CoinTreeRoot != nil, obj.DataTreeRoot != nil, obj.DataMarkerRoot != nil
 	switch {
+	case !coin && !data && !marker && obj.HeaderMmrRoot != nil:
+		return false, errMmrRootNoRoots
 	case !coin && !data && !marker:
 		return false, nil
 	case !coin || !data || !marker:
@@ -116,6 +131,9 @@ func (obj *Header) EncodeRLP(_w io.Writer) error {
 		w.WriteBytes(obj.CoinTreeRoot[:])
 		w.WriteBytes(obj.DataTreeRoot[:])
 		w.WriteBytes(obj.DataMarkerRoot[:])
+		if obj.HeaderMmrRoot != nil {
+			w.WriteBytes(obj.HeaderMmrRoot[:])
+		}
 		w.ListEnd(_tmp0)
 		return w.Flush()
 	}
@@ -168,10 +186,12 @@ func (obj *Header) EncodeRLP(_w io.Writer) error {
 
 // baseHeader has the fields and tags of Header but none of its methods, so
 // the rlp package decodes it by reflection, as it decoded Header before the
-// Ghost layout; the tree and marker roots are tagged rlp:"-" and stay nil.
+// Ghost layout; the tree, marker and header MMR roots are tagged rlp:"-" and
+// stay nil.
 type baseHeader Header
 
-// ghostHeaderRLP is the Ghost layout: every field required.
+// ghostHeaderRLP is the Ghost layout: every field required but the header MMR
+// root, which a header without it (the 19-item list) leaves nil.
 type ghostHeaderRLP struct {
 	ParentHash   common.Hash
 	UncleHash    common.Hash
@@ -193,10 +213,17 @@ type ghostHeaderRLP struct {
 	DataTreeRoot common.Hash
 	// DataMarkerRoot is the root of the data spent-marker set.
 	DataMarkerRoot common.Hash
+	// HeaderMmrRoot is the root of the header MMR over the earlier blocks.
+	HeaderMmrRoot *common.Hash `rlp:"optional"`
 }
 
 func (g *ghostHeaderRLP) header() *Header {
 	coin, data, marker := g.CoinTreeRoot, g.DataTreeRoot, g.DataMarkerRoot
+	var mmr *common.Hash
+	if g.HeaderMmrRoot != nil {
+		root := *g.HeaderMmrRoot
+		mmr = &root
+	}
 	return &Header{
 		ParentHash:     g.ParentHash,
 		UncleHash:      g.UncleHash,
@@ -217,35 +244,38 @@ func (g *ghostHeaderRLP) header() *Header {
 		CoinTreeRoot:   &coin,
 		DataTreeRoot:   &data,
 		DataMarkerRoot: &marker,
+		HeaderMmrRoot:  mmr,
 	}
 }
 
-// isGhostLayout reports whether raw is a list of exactly 19 items whose item
-// at index 18 is a 32-byte string. Malformed input is not; the base decoder
-// then reports what is wrong with it.
+// isGhostLayout reports whether raw is a list of 19 items whose item at index
+// 18 is a 32-byte string, or of 20 items whose items at indexes 18 and 19 are.
+// Malformed input is not; the base decoder then reports what is wrong with it.
 func isGhostLayout(raw []byte) bool {
 	content, _, err := rlp.SplitList(raw)
 	if err != nil {
 		return false
 	}
-	if n, err := rlp.CountValues(content); err != nil || n != ghostHeaderItems {
+	n, err := rlp.CountValues(content)
+	if err != nil || (n != ghostHeaderItems && n != preMmrHeaderItems) {
 		return false
 	}
-	for i := 0; i < ghostHeaderItems; i++ {
+	for i := 0; i < n; i++ {
 		kind, item, rest, err := rlp.Split(content)
 		if err != nil {
 			return false
 		}
-		if i == ghostHeaderItems-1 {
-			return kind == rlp.String && len(item) == common.HashLength
+		if i >= preMmrHeaderItems-1 && (kind != rlp.String || len(item) != common.HashLength) {
+			return false
 		}
 		content = rest
 	}
-	return false
+	return true
 }
 
 // DecodeRLP implements rlp.Decoder. A header in the Ghost layout decodes
-// with all three roots set; any other input decodes exactly as before.
+// with all three roots and the header MMR root set, the 19-item list without
+// the header MMR root; any other input decodes exactly as before.
 func (h *Header) DecodeRLP(s *rlp.Stream) error {
 	raw, err := s.Raw()
 	if err != nil {
@@ -376,15 +406,17 @@ func longLength(b []byte, n int) (int, error) {
 // Field sizes of the Ghost layout: exact sizes of the fixed fields, and the
 // widths in bytes of the integers.
 var (
-	ghostFixedSizes = map[int]int{0: 32, 1: 32, 2: 20, 3: 32, 4: 32, 5: 32, 6: 256, 13: 32, 14: 8, 16: 32, 17: 32, 18: 32}
+	ghostFixedSizes = map[int]int{0: 32, 1: 32, 2: 20, 3: 32, 4: 32, 5: 32, 6: 256, 13: 32, 14: 8, 16: 32, 17: 32, 18: 32, 19: 32}
 	ghostIntWidths  = []struct{ index, width int }{{7, 32}, {8, 8}, {9, 8}, {10, 8}, {11, 8}, {15, 32}}
 )
 
 const ghostMaxExtra = 32
 
 // DecodeGhostHeader is the strict reference decoder of spec 05, section 10.
-// It accepts only the Ghost layout and rejects anything else with a
-// *GhostHeaderError carrying the first reason that applies.
+// It accepts only the Ghost layout, the 20 items with the header MMR root,
+// and rejects anything else with a *GhostHeaderError carrying the first
+// reason that applies; the 19-item list without the header MMR root is an
+// item-count.
 func DecodeGhostHeader(b []byte) (*Header, error) {
 	// 1. One canonical RLP list.
 	top, rest, err := parseCanonical(b)
@@ -398,7 +430,7 @@ func DecodeGhostHeader(b []byte) (*Header, error) {
 	if len(rest) > 0 {
 		return nil, ghostReject(GhostReasonTrailingBytes, "%d bytes after the list", len(rest))
 	}
-	// 3. Exactly 19 items, none a list.
+	// 3. Exactly 20 items, none a list.
 	if len(top.items) != ghostHeaderItems {
 		return nil, ghostReject(GhostReasonItemCount, "%d items, want %d", len(top.items), ghostHeaderItems)
 	}
@@ -450,5 +482,7 @@ func DecodeGhostHeader(b []byte) (*Header, error) {
 	copy(g.CoinTreeRoot[:], items[16].content)
 	copy(g.DataTreeRoot[:], items[17].content)
 	copy(g.DataMarkerRoot[:], items[18].content)
+	g.HeaderMmrRoot = new(common.Hash)
+	copy(g.HeaderMmrRoot[:], items[19].content)
 	return g.header(), nil
 }

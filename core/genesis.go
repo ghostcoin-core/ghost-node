@@ -24,6 +24,7 @@ import (
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/ghostmmr"
 	"github.com/ethereum/go-ethereum/core/ghosttree"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state"
@@ -543,8 +544,9 @@ func GenesisToBlock(g *genesisT.Genesis, db ethdb.Database) *types.Block {
 }
 
 // setGenesisTreeRoots gives the genesis header of a Ghost chain the roots of
-// the empty coin and data trees and of the empty data marker set. The genesis
-// state holds no tree state, so its state root stays that of the allocation.
+// the empty coin and data trees and of the empty data marker set, and the
+// root of the empty header MMR: no block comes before it. The genesis state
+// holds no tree state, so its state root stays that of the allocation.
 //
 // The Ghost chains are the public test network, the internal test network
 // and developer mode, all Core-Geth configurations. Upstream test configurations share developer
@@ -567,7 +569,8 @@ func setGenesisTreeRoots(g *genesisT.Genesis, head *types.Header) {
 	}
 	coin, data := ghosttree.EmptyRoot(ghosttree.Coin), ghosttree.EmptyRoot(ghosttree.Data)
 	marker := ghosttree.EmptyMarkerSetRoot
-	head.CoinTreeRoot, head.DataTreeRoot, head.DataMarkerRoot = &coin, &data, &marker
+	mmr := common.Hash(ghostmmr.EmptyRoot)
+	head.CoinTreeRoot, head.DataTreeRoot, head.DataMarkerRoot, head.HeaderMmrRoot = &coin, &data, &marker, &mmr
 }
 
 // CommitGenesis writes the block and state of a genesis specification to the database.
