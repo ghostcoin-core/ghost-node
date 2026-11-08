@@ -88,7 +88,7 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 [[package]]
 name = "ghost-proofs"
 version = "0.1.0"
-source = "git+https://github.com/ghostcoin-core/ghost?rev=2ef3a4a53054294b191a1a486bd6f369a7f25c73#2ef3a4a53054294b191a1a486bd6f369a7f25c73"
+source = "git+https://github.com/ghostcoin-core/ghost?rev=580d08044112786467cc376761d67dfbeaaab5de#580d08044112786467cc376761d67dfbeaaab5de"
 dependencies = [
  "p3-air",
  "p3-baby-bear",

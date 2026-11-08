@@ -442,7 +442,7 @@ bytes is refused the same way. The stub verifier of the tests verifies both
 versions and the policy reveal. Version 2 and policy proofs on a release node
 come with a later change that links their verifier. The
 crate pins ghost-proofs at revision
-`450b6e1786e346c883af1009abce398b02bf1660` of the ghost repository in
+`580d08044112786467cc376761d67dfbeaaab5de` of the ghost repository in
 `ghostverifier/Cargo.toml` and `Cargo.lock`. A kind or purpose it
 does not verify is `ErrProofStatement`, without calling it; every answer but
 acceptance is `ErrProofRejected`.
@@ -477,24 +477,58 @@ is verified through an interface of its own beside `Verifier`:
 `ghostpriv.BundleVerifier` and `ghostpriv.PublicRootVerifier`, found by a
 type assertion on the active verifier. A verifier without one fails every
 root of that kind closed, with `ErrBundleUnsupported` or
-`ErrPublicRootUnsupported`, before any change. Neither the linked verifier
-nor the default of a build without it has either interface yet, so a release
-node finds every block that carries a bundle or a public root invalid. The
-stub verifier has both: it accepts exactly a root proof field whose first 32
-bytes are `K("ghost/test-proof/v1", root binding)` and whose other bytes are
-zero (`ghostprivtest.BundleProof`, `ghostprivtest.PublicRootProof`), and
-checks nothing of the proofs or signatures the root stands for.
+`ErrPublicRootUnsupported`, before any change.
+
+The linked verifier verifies both roots through ghost-proofs' own C
+functions in `ghost_proofs.h`, `ghost_verify_bundle_root` and
+`ghost_verify_public_root`, which the `ghostverifier` library carries
+(`core/ghostpriv/verifier_cgo_root.go`). Each takes the root's verifier key,
+124 bytes (`ghostpriv.RootKeySize`) whose first word names the root's path,
+the root inputs and the 1,310,720-byte root proof field. The node builds the
+root inputs itself: an 11-byte binding, the chain id (8, big endian), a
+protocol version (2) and a statement version (1), then the ordered items. A
+bundle's binding names the reveal version, 2, as both versions, and its items
+are its reveals' public values in order, each the reveal's 607-byte binding
+input ([Binding digest](#binding-digest)) followed by its binding digest
+(`BundleInputs.Reveals`, concatenated, and `BundleInputs.RootInputs`). A public root's binding
+names protocol version 2 and statement version 2
+(`PublicRootProtocolVersion`, `PublicRootStatementVersion`), and its items
+are the 84-byte bindings in block order (`PublicRootInputs.RootInputs`).
+Only acceptance passes; every other answer is `ErrProofRejected`, under
+`ErrBundleProof` or `ErrPublicRootProof`.
+
+The keys are an input: `ghostpriv.NewRootVerifier(bundleKey, publicKey)`
+returns the linked verifier with both, to be installed with
+`ghostpriv.SetVerifier`, and refuses a key of the wrong length or path
+(`ErrRootKey`). The node pins no production key yet. Neither the linked
+verifier nor the default of a build without it has either interface yet as
+`DefaultVerifier()`, which holds no key, so a release node built without a
+production key still finds every block that carries a bundle or a public
+root invalid, failing closed, and never falls back to the stub. The tests use test-shape keys and real test-shape root
+proofs made at test time by `ghostverifier/examples/rootfixture.rs`, never
+committed: a bundle of one version 2 reveal, whose block imports on a test
+chain that commits its coin, and a public root over one ML-DSA-44
+known-answer signature (`core/ghostpriv/verifier_cgo_root_test.go`, run with
+`GHOST_ROOT_FIXTURE_DIR` set to the generator's folder; it fails without
+it).
+
+The stub verifier has both interfaces too: it accepts exactly a root proof
+field whose first 32 bytes are `K("ghost/test-proof/v1", root binding)` and
+whose other bytes are zero (`ghostprivtest.BundleProof`,
+`ghostprivtest.PublicRootProof`), and checks nothing of the proofs or
+signatures the root stands for.
 
 ## Root verification time
 
 Spec 07, section 4, gives the node a budget of 3,000 ms to verify the four
 root proofs of a block. No verification time is recorded against it yet. A
 time counts only when it is measured on named hardware, with the real linked
-verifier, over real root proofs; the stub verifier above checks one hash and
-times nothing of a proof, and the linked verifier verifies no root yet. The
-measurement waits for a real Poseidon2 shrink proof from the stage 2 prover
-of the proof system; until one exists the benchmark is blocked, and this
-document gives no time, measured or estimated.
+verifier, over real root proofs of spec 07's shapes; the stub verifier above
+checks one hash and times nothing of a proof, and the linked verifier's
+tests verify test-shape roots only, far below those shapes. The measurement
+waits for a real Poseidon2 shrink proof of those shapes and its key; until
+one exists the benchmark is blocked, and this document gives no time,
+measured or estimated.
 
 ## Accounting
 
