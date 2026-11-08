@@ -500,11 +500,11 @@ Only acceptance passes; every other answer is `ErrProofRejected`, under
 The keys are an input: `ghostpriv.NewRootVerifier(bundleKey, publicKey)`
 returns the linked verifier with both, to be installed with
 `ghostpriv.SetVerifier`, and refuses a key of the wrong length or path
-(`ErrRootKey`). The node pins no production key yet. Neither the linked
-verifier nor the default of a build without it has either interface yet as
-`DefaultVerifier()`, which holds no key, so a release node built without a
-production key still finds every block that carries a bundle or a public
-root invalid, failing closed, and never falls back to the stub. The tests use test-shape keys and real test-shape root
+(`ErrRootKey`). The node pins no production key yet, and
+`DefaultVerifier()`, which holds no key, has neither interface: a release
+node built without a production key still finds every block that carries a
+bundle or a public root invalid, failing closed, and never falls back to the
+stub. The tests use test-shape keys and real test-shape root
 proofs made at test time by `ghostverifier/examples/rootfixture.rs`, never
 committed: a bundle of one version 2 reveal, whose block imports on a test
 chain that commits its coin, and a public root over one ML-DSA-44
