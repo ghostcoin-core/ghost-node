@@ -58,6 +58,25 @@ const (
 	// PurposeBundle is the purpose of the bundle statement.
 	PurposeBundle byte = 0x08
 
+	// BundleRevealPublicSize is the length of one bundled reveal's public
+	// values among a bundle root's inputs: its BindingInput, then its binding
+	// digest.
+	BundleRevealPublicSize = BindingSize + common.HashLength
+
+	// RootBindingSize is the length of the binding that starts the inputs of
+	// a root proof: the chain id (8), the protocol version (2) and the
+	// statement version (1).
+	RootBindingSize = 8 + 2 + 1
+
+	// RootKeySize is the length of a root proof's verifier key: 31 words of
+	// 4 bytes, little endian, the first the path of the root.
+	RootKeySize = 124
+
+	// RootKeyBundle and RootKeyPublic are the paths a root key's first word
+	// names: a bundle root or a public root.
+	RootKeyBundle uint32 = 1
+	RootKeyPublic uint32 = 2
+
 	// Offsets of the bundle payload.
 	offBundleVersion = 0
 	offBundleChainID = 2
@@ -92,6 +111,11 @@ var (
 // K(TagBundleContents, b_1 || ... || b_n) over the binding digests of the
 // bundled reveals in order, each the Binding of Reveal.VerifyInputs of that
 // reveal on this chain; Binding is K(TagBundleBinding, BindingInput()).
+// Reveals are the ordered items a root proof's verifier takes: for each
+// bundled reveal in order, its public values on this chain, the 607 bytes of
+// its BindingInput followed by its binding digest, BundleRevealPublicSize
+// bytes, concatenated. They are held as a string, immutable, so that inputs
+// stay comparable with ==.
 type BundleInputs struct {
 	ChainID       uint64
 	Domain        common.Hash // the genesis block hash
@@ -100,6 +124,22 @@ type BundleInputs struct {
 	Count         uint16
 	Contents      common.Hash
 	Binding       common.Hash
+	Reveals       string
+}
+
+// RevealCount returns the number of whole items in Reveals.
+func (in *BundleInputs) RevealCount() int { return len(in.Reveals) / BundleRevealPublicSize }
+
+// RootInputs returns the inputs of the bundle's root proof in the layout of
+// ghost_proofs.h: the binding, which is the chain id (8, big endian), the
+// reveal version as the protocol version (2) and the statement version
+// (1, the reveal version's), then Reveals.
+func (in *BundleInputs) RootInputs() []byte {
+	b := make([]byte, 0, RootBindingSize+len(in.Reveals))
+	b = binary.BigEndian.AppendUint64(b, in.ChainID)
+	b = binary.BigEndian.AppendUint16(b, in.RevealVersion)
+	b = append(b, byte(in.RevealVersion))
+	return append(b, in.Reveals...)
 }
 
 // BindingInput returns the 79 bytes the bundle binding digest hashes: the
@@ -131,9 +171,11 @@ type BundleVerifier interface {
 // on the chain of chainID and genesis.
 func NewBundleInputs(chainID uint64, genesis common.Hash, reveals []*Reveal) *BundleInputs {
 	digests := make([]byte, 0, 32*len(reveals))
+	items := make([]byte, 0, BundleRevealPublicSize*len(reveals))
 	for _, r := range reveals {
 		b := r.BindingDigest(chainID, genesis)
 		digests = append(digests, b[:]...)
+		items = append(append(items, r.BindingInput(chainID, genesis)...), b[:]...)
 	}
 	in := &BundleInputs{
 		ChainID:       chainID,
@@ -142,6 +184,7 @@ func NewBundleInputs(chainID uint64, genesis common.Hash, reveals []*Reveal) *Bu
 		RevealVersion: RevealVersion,
 		Count:         uint16(len(reveals)),
 		Contents:      ghosttree.K(TagBundleContents, digests),
+		Reveals:       string(items),
 	}
 	in.Binding = ghosttree.K(TagBundleBinding, in.BindingInput())
 	return in

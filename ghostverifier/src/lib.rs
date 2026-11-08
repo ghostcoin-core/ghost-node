@@ -29,6 +29,11 @@
 //! checker's statement `KNOW_PREIMAGE_v1`: [`ghost_verify_know_preimage`],
 //! declared in `ghost_preimage.h`, wraps `verify_know_preimage`.
 //!
+//! The root proofs of a block are ghost-proofs' own: [`ghost_verify_bundle_root`]
+//! for a bundle's root and [`ghost_verify_public_root`] for a public root,
+//! declared in `ghost_proofs.h`. Each takes the root's verifier key, 124 bytes,
+//! from its caller: this crate pins no key.
+//!
 //! A proof of holding never goes on chain; the node checks none. The function
 //! is for a verifier that holds the node's headers, and for the node's tests.
 //! Only the prover of a proof of holding is test-only, behind the
@@ -47,7 +52,9 @@ use ghost_proofs::{
     verify_know_preimage, verify_policy_reveal, verify_salted_data_reveal,
 };
 
-pub use ghost_proofs::ffi::{ghost_verify_coin_reveal, ghost_verify_coin_reveal_v2};
+pub use ghost_proofs::ffi::{
+    ghost_verify_bundle_root, ghost_verify_coin_reveal, ghost_verify_coin_reveal_v2, ghost_verify_public_root,
+};
 pub use ghost_proofs::{PURPOSE_REVEAL, PURPOSE_REVOKE};
 
 /// The test-only prover of a proof of holding and the absence witness of a

@@ -53,6 +53,13 @@ const (
 	// PurposePublicRoot is the purpose of the public root statement.
 	PurposePublicRoot byte = 0x09
 
+	// PublicRootProtocolVersion and PublicRootStatementVersion are the
+	// versions the binding of a public root's proof names after the chain
+	// id (PublicRootInputs.RootInputs): protocol version 2 and statement
+	// version 2, as ghost-proofs makes a public root.
+	PublicRootProtocolVersion  uint16 = 0x0002
+	PublicRootStatementVersion byte   = 0x02
+
 	// Offsets of the public root payload.
 	offRootVersion  = 0
 	offRootChainID  = 2
@@ -110,6 +117,22 @@ func (in *PublicRootInputs) BindingInput() []byte {
 	b = append(b, PurposePublicRoot)
 	b = binary.BigEndian.AppendUint16(b, in.Count)
 	b = append(b, in.Contents[:]...)
+	return b
+}
+
+// RootInputs returns the inputs of the public root's proof in the layout of
+// ghost_proofs.h: the binding, which is the chain id (8, big endian),
+// PublicRootProtocolVersion (2) and PublicRootStatementVersion (1), then
+// the 84-byte Bindings in block order, the ordered items of the root. The
+// root binding of ghost_proofs.h has no domain, so Domain is not among them.
+func (in *PublicRootInputs) RootInputs() []byte {
+	b := make([]byte, 0, RootBindingSize+PublicBindingSize*len(in.Bindings))
+	b = binary.BigEndian.AppendUint64(b, in.ChainID)
+	b = binary.BigEndian.AppendUint16(b, PublicRootProtocolVersion)
+	b = append(b, PublicRootStatementVersion)
+	for _, binding := range in.Bindings {
+		b = append(b, binding[:]...)
+	}
 	return b
 }
 

@@ -110,7 +110,11 @@ func (ghostVerifier) VerifiesPreimage() bool { return true }
 // proof verifies against the inputs and rejects everything else, and so for
 // a data reveal or revoke: it accepts one whose proof verifies, with a fee of
 // at most the data reserve and the empty rule. A fee above the reserve or a
-// non-empty rule is ErrProofRejected, like any other proof that fails.
+// non-empty rule is ErrProofRejected, like any other proof that fails. It
+// verifies no root proof: it is neither a BundleVerifier nor a
+// PublicRootVerifier, since the node pins no root verifier key yet, so every
+// bundle and public root fails closed. NewRootVerifier (verifier_cgo_root.go)
+// is the same verifier with the keys of both roots.
 func DefaultVerifier() Verifier { return ghostVerifier{} }
 
 // VerifyReveal verifies the proof of an ordinary coin reveal (version 1 or
