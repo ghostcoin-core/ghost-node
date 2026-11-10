@@ -32,7 +32,10 @@
 //! The root proofs of a block are ghost-proofs' own: [`ghost_verify_bundle_root`]
 //! for a bundle's root and [`ghost_verify_public_root`] for a public root,
 //! declared in `ghost_proofs.h`. Each takes the root's verifier key, 124 bytes,
-//! from its caller: this crate pins no key.
+//! from its caller. [`ghost_root_key_is_production`], declared there too,
+//! tells whether a key is the production key of its path: ghost-proofs pins
+//! the SHA-256 of each production key, and a release node checks the keys it
+//! carries (core/ghostpriv/verifier_cgo_productionroot.go) against it.
 //!
 //! A proof of holding never goes on chain; the node checks none. The function
 //! is for a verifier that holds the node's headers, and for the node's tests.
@@ -53,7 +56,8 @@ use ghost_proofs::{
 };
 
 pub use ghost_proofs::ffi::{
-    ghost_verify_bundle_root, ghost_verify_coin_reveal, ghost_verify_coin_reveal_v2, ghost_verify_public_root,
+    ghost_root_key_is_production, ghost_verify_bundle_root, ghost_verify_coin_reveal, ghost_verify_coin_reveal_v2,
+    ghost_verify_public_root,
 };
 pub use ghost_proofs::{PURPOSE_REVEAL, PURPOSE_REVOKE};
 

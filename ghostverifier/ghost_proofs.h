@@ -128,6 +128,32 @@ int32_t ghost_verify_public_root(const uint8_t *key, size_t key_len,
                                  const uint8_t *inputs, size_t inputs_len,
                                  const uint8_t *proof, size_t proof_len);
 
+/*
+ * Checks a root key against the SHA-256 digest of the production key of the
+ * path GHOST_PROOFS_ROOT_KEY_BUNDLE or GHOST_PROOFS_ROOT_KEY_PUBLIC, pinned
+ * in keys/ of this crate: GHOST_PROOFS_ACCEPTED when its digest is the pinned
+ * one, GHOST_PROOFS_REJECTED when it is not (and for every key of a path
+ * with no pinned digest). A non-null key must point to at least key_len
+ * readable bytes. A null pointer, an unknown path or a key that is not
+ * GHOST_PROOFS_ROOT_KEY_BYTES long returns GHOST_PROOFS_BAD_ARGUMENT before
+ * the key is read.
+ */
+int32_t ghost_root_key_is_production(uint32_t path, const uint8_t *key, size_t key_len);
+
+/*
+ * Rebuilds the production root key of the path from the real-shape circuits
+ * and their preprocessed commitments (no proof) into out, then returns
+ * GHOST_PROOFS_ACCEPTED when its digest is the pinned one and
+ * GHOST_PROOFS_REJECTED when it is not, or when the path's shape does not
+ * build (out is written whenever the key builds). It needs the memory the
+ * key's plan states (docs/scale/production-root-keys.md) and is not a call
+ * for a block's path. A non-null out must point to at least out_len writable
+ * bytes. A null pointer, an unknown path or an out_len other than
+ * GHOST_PROOFS_ROOT_KEY_BYTES returns GHOST_PROOFS_BAD_ARGUMENT before
+ * anything is built.
+ */
+int32_t ghost_production_root_key(uint32_t path, uint8_t *out, size_t out_len);
+
 #ifdef __cplusplus
 }
 #endif

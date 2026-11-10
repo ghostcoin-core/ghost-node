@@ -497,15 +497,30 @@ are the 84-byte bindings in block order (`PublicRootInputs.RootInputs`).
 Only acceptance passes; every other answer is `ErrProofRejected`, under
 `ErrBundleProof` or `ErrPublicRootProof`.
 
-The keys are an input: `ghostpriv.NewRootVerifier(bundleKey, publicKey)`
+A release build (`ghostrelease`) carries the two production root keys
+compiled in (`core/ghostpriv/verifier_cgo_productionroot.go`): the 124-byte
+keys exactly as the pinned ghost revision commits them in
+`proofs/keys/bundle-root-key.hex` and `proofs/keys/public-root-key.hex`.
+At package init the node checks each key's length and path, its SHA-256
+against the digest ghost pins in `proofs/keys/bundle-root-key.sha256`
+(`5a230c8f…`) or `proofs/keys/public-root-key.sha256` (`d00492b0…`), and
+that the linked library takes it for the production key of its path
+(`ghost_root_key_is_production`). The release build's `DefaultVerifier()`
+then verifies bundle roots and public roots under those keys, with nothing
+installed through `ghostpriv.SetVerifier`. A key that fails any check is not
+loaded, and that root kind fails closed with `ErrBundleUnsupported` or
+`ErrPublicRootUnsupported`. The node never derives a key at start
+(`TestProductionRootVerifier`).
+
+For the tests the keys are an input: `ghostpriv.NewRootVerifier(bundleKey, publicKey)`
 returns the linked verifier with both, to be installed with
 `ghostpriv.SetVerifier`, and refuses a key of the wrong length or path
-(`ErrRootKey`). The node pins no production key yet, and the verifier it
-uses without one is `DefaultVerifier()`, which holds no key. Neither the
-linked verifier nor the default of a build without it has either interface yet
-in that form, so a release node built without a production key still finds
-every block that carries a bundle or a public root invalid, failing closed,
-and never falls back to the stub. The tests use test-shape keys and real test-shape root
+(`ErrRootKey`). A build with the `ghostproofs` tag pins no production key,
+and the verifier it uses without one is `DefaultVerifier()`, which holds no
+key. Neither the linked verifier nor the default of a build without it has
+either interface yet in that form, so a node built without a production key
+still finds every block that carries a bundle or a public root invalid,
+failing closed, and never falls back to the stub. The tests use test-shape keys and real test-shape root
 proofs made at test time by `ghostverifier/examples/rootfixture.rs`, never
 committed: a bundle of one version 2 reveal, whose block imports on a test
 chain that commits its coin, and a public root over one ML-DSA-44
