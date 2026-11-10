@@ -57,10 +57,11 @@ var ErrRootKey = errors.New("root verifier key is not a 124-byte key of its root
 // root proofs: it verifies reveals as DefaultVerifier does, bundle roots
 // (BundleVerifier) through ghost_verify_bundle_root and public roots
 // (PublicRootVerifier) through ghost_verify_public_root, each under its
-// key. The keys are its caller's: the node pins none yet, so the default
-// verifier has neither interface and fails every root closed
-// (ErrBundleUnsupported, ErrPublicRootUnsupported). Install one with
-// SetVerifier.
+// key. The keys are its caller's, test-shape keys in the tests. A release
+// build's default verifier carries the production keys itself
+// (verifier_cgo_productionroot.go); a build with the ghostproofs tag carries
+// none, so its default verifier has neither interface and fails every root
+// closed (ErrBundleUnsupported, ErrPublicRootUnsupported).
 type RootVerifier struct {
 	ghostVerifier
 	bundleKey []byte
