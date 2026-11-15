@@ -81,16 +81,36 @@ const (
 	// MaxVerifications is the most record verifications running at once.
 	MaxVerifications = 8
 
+	// MaxSourceVerifications is the most of the MaxVerifications that run at
+	// once for endpoints of one source (VerifySubnet), so that a few hosts
+	// that never finish the connection cannot hold every slot.
+	MaxSourceVerifications = 2
+
+	// VerifySubnet and VerifySubnet6 are the prefix lengths that make one
+	// source of verifications: an IPv4 /24 or an IPv6 /48. A LAN address is
+	// a source of its own.
+	VerifySubnet, VerifySubnet6 = 24, 48
+
 	// VerifyInterval is the least time between two verifications started
-	// for one node ID at one endpoint. It is kept per endpoint so that a
-	// peer claiming an ID at its own endpoint cannot hold up the
-	// verification of that ID at the honest one.
+	// for one node ID at one endpoint. A verification counts as started when
+	// its record fetch begins, once the endpoint has answered our ping. It
+	// is kept per endpoint so that a peer claiming an ID at its own endpoint
+	// cannot hold up the verification of that ID at the honest one.
 	VerifyInterval = time.Minute
 
 	// MaxVerifyStarts is the most verification starts remembered to
 	// enforce VerifyInterval, and so the most that start in one
 	// VerifyInterval over all IDs and endpoints.
 	MaxVerifyStarts = 1024
+
+	// MaxSourceVerifyStarts is the most of the MaxVerifyStarts at endpoints
+	// of one source, so that one source cannot use the whole budget.
+	MaxSourceVerifyStarts = 64
+
+	// MaxRemoteVerifyStarts is the most of the MaxVerifyStarts that remote
+	// peers trigger. The others stay for the node's own lookups, which
+	// pings from remote peers cannot use up.
+	MaxRemoteVerifyStarts = 768
 
 	// MaxVerifyRetries is the most verifications a remote peer triggered
 	// that are queued to start later because all MaxVerifications were
@@ -99,8 +119,11 @@ const (
 	MaxVerifyRetries = 64
 
 	// MaxFailed is the size of the memory of failed verifications; the
-	// oldest is dropped first.
-	MaxFailed = 1024
+	// oldest is dropped first. FailedTime is how long a failure is
+	// remembered, so that one that failed for a passing reason is tried
+	// again.
+	MaxFailed  = 1024
+	FailedTime = 10 * time.Minute
 
 	// SourceRate and SourceBurst are the token bucket of each source
 	// address: packets a second, and the most at once. A packet over it is

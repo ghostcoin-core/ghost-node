@@ -1064,7 +1064,13 @@ func TestQSDiscoveryLimitsAreSet(t *testing.T) {
 		"RevalidateInterval": int64(RevalidateInterval),
 		"MaxRevalidateFails": MaxRevalidateFails,
 
-		"BootnodeRetryInterval": int64(BootnodeRetryInterval),
+		"BootnodeRetryInterval":  int64(BootnodeRetryInterval),
+		"MaxSourceVerifyStarts":  MaxSourceVerifyStarts,
+		"MaxRemoteVerifyStarts":  MaxRemoteVerifyStarts,
+		"MaxSourceVerifications": MaxSourceVerifications,
+		"VerifySubnet":           VerifySubnet,
+		"VerifySubnet6":          VerifySubnet6,
+		"FailedTime":             int64(FailedTime),
 	}
 	if BootnodeRetryInterval+2*PingTimeout > time.Minute/2 {
 		t.Errorf("BootnodeRetryInterval %v lets a first start wait too long for its bootnodes", BootnodeRetryInterval)
@@ -1076,6 +1082,13 @@ func TestQSDiscoveryLimitsAreSet(t *testing.T) {
 	}
 	if CookieReserve >= SourceBurst {
 		t.Errorf("CookieReserve %d leaves no requests without the cookie", CookieReserve)
+	}
+	if MaxSourceVerifyStarts >= MaxRemoteVerifyStarts || MaxRemoteVerifyStarts >= MaxVerifyStarts {
+		t.Errorf("MaxSourceVerifyStarts %d, MaxRemoteVerifyStarts %d and MaxVerifyStarts %d leave no starts for other sources or the node's own lookups",
+			MaxSourceVerifyStarts, MaxRemoteVerifyStarts, MaxVerifyStarts)
+	}
+	if MaxSourceVerifications >= MaxVerifications {
+		t.Errorf("MaxSourceVerifications %d lets one source hold every slot", MaxSourceVerifications)
 	}
 	if MaxRemotePings+MaxChallengePings >= MaxPendingPings {
 		t.Errorf("MaxRemotePings %d leaves no pings for the node's own checks", MaxRemotePings)
