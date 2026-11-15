@@ -202,7 +202,7 @@ func TestLegacyPoolAdmitsProofTx(t *testing.T) {
 // TestLegacyPoolRefusesInvalidProofTx checks that a proof that fails, a
 // statement code other than 0x06 and a statement made for another policy
 // than to are refused with a charged ErrProofFailed; that a failed hash is
-// refused again without a verification; that a bad signature is refused
+// refused again without a verification, and its sender barred; that a bad signature is refused
 // before the proof is looked at; and that a state failure costs no proof
 // check and is not charged.
 func TestLegacyPoolRefusesInvalidProofTx(t *testing.T) {
@@ -236,14 +236,22 @@ func TestLegacyPoolRefusesInvalidProofTx(t *testing.T) {
 	if v.count() != 1 {
 		t.Fatal("a wrong statement code was verified")
 	}
+	// The sender of the failed proof is barred: a valid proof of it is
+	// dropped unverified, charged to nobody.
+	if err := pool.addRemoteSync(proofTx(t, key, 0, 2, proofPolicy, 0, valid)); !errors.Is(err, txpool.ErrProofSenderBarred) || txpool.ProofCharged(err) {
+		t.Fatalf("valid proof of a barred sender: error %v, want an uncharged ErrProofSenderBarred", err)
+	}
+	if v.count() != 1 {
+		t.Fatal("a barred sender's proof was verified")
+	}
 	// A statement made for another policy, forwarded by to.
 	other := common.HexToAddress("0x00000000000000000000000000000000c0ffee21")
-	if err := pool.addRemoteSync(proofTx(t, key, 0, 1, proofPolicy, 0, proofInput(t, other, true))); !errors.Is(err, txpool.ErrProofFailed) {
+	if err := pool.addRemoteSync(proofTx(t, fundedProofKey(pool, 0x62), 0, 1, proofPolicy, 0, proofInput(t, other, true))); !errors.Is(err, txpool.ErrProofFailed) {
 		t.Fatalf("statement of another policy: error %v", err)
 	}
 
 	// A bad signature is refused before the proof.
-	good := proofTx(t, key, 0, 1, proofPolicy, 0, valid)
+	good := proofTx(t, fundedProofKey(pool, 0x63), 0, 1, proofPolicy, 0, valid)
 	_, pk, sig, _ := good.GhostAccountAuth()
 	sig[9] ^= 0x01
 	before := v.count()
@@ -402,5 +410,79 @@ func TestLegacyPoolProofTxNeedsCallablePolicy(t *testing.T) {
 	}
 	if v.count() != 1 {
 		t.Fatalf("%d verifications, the drop verified again", v.count())
+	}
+}
+
+// TestLegacyPoolGappedProofTxGivesWay checks that held proof-carrying
+// transactions with a nonce gap cannot keep out one that can be mined: at
+// the cap of four held, a fifth sender's executable one takes the place of
+// the oldest gapped one, a gapped newcomer is refused, and a sender's own
+// gapped one gives way to its executable one at another nonce. A held one
+// that can be mined never gives way.
+func TestLegacyPoolGappedProofTxGivesWay(t *testing.T) {
+	pool, v := setupProofPool(t, 0)
+	input := proofInput(t, proofPolicy, true)
+	keys := make([]*mldsa44.PrivateKey, ghost.ProofTxMaxHeld+2)
+	for i := range keys {
+		keys[i] = fundedProofKey(pool, byte(0xa0+i))
+	}
+	// Four held, all with a nonce gap: each at nonce 1 of a fresh account.
+	gapped := make([]*types.Transaction, ghost.ProofTxMaxHeld)
+	for i := range gapped {
+		gapped[i] = proofTx(t, keys[i], 1, 1, proofPolicy, 0, input)
+		if err := pool.addRemoteSync(gapped[i]); err != nil {
+			t.Fatalf("gapped proof-carrying transaction %d: %v", i, err)
+		}
+		if pool.Status(gapped[i].Hash()) != txpool.TxStatusQueued {
+			t.Fatalf("gapped proof-carrying transaction %d is not queued", i)
+		}
+	}
+	// A gapped newcomer is refused at the cap, before its proof is checked.
+	newcomer := keys[ghost.ProofTxMaxHeld]
+	verified := v.count()
+	if err := pool.addRemoteSync(proofTx(t, newcomer, 1, 1, proofPolicy, 0, input)); !errors.Is(err, txpool.ErrProofHeldCap) {
+		t.Fatalf("gapped newcomer at the cap: error %v, want ErrProofHeldCap", err)
+	}
+	if v.count() != verified {
+		t.Fatal("a gapped newcomer at the cap was verified")
+	}
+	// An executable one takes the place of the oldest gapped one.
+	mineable := proofTx(t, newcomer, 0, 1, proofPolicy, 0, input)
+	if err := pool.addRemoteSync(mineable); err != nil {
+		t.Fatalf("executable proof-carrying transaction at a cap of gapped ones: %v", err)
+	}
+	if !pool.Has(mineable.Hash()) || pool.Status(mineable.Hash()) != txpool.TxStatusPending {
+		t.Fatal("the executable proof-carrying transaction is not pending")
+	}
+	if pool.Has(gapped[0].Hash()) {
+		t.Fatal("the oldest gapped proof-carrying transaction did not give way")
+	}
+	for _, tx := range gapped[1:] {
+		if !pool.Has(tx.Hash()) {
+			t.Fatalf("gapped proof-carrying transaction %x gave way too", tx.Hash())
+		}
+	}
+	// A sender's own gapped one gives way to its executable one.
+	own := proofTx(t, keys[1], 0, 1, proofPolicy, 0, input)
+	if err := pool.addRemoteSync(own); err != nil {
+		t.Fatalf("sender's executable one beside its gapped one: %v", err)
+	}
+	if pool.Has(gapped[1].Hash()) || !pool.Has(own.Hash()) {
+		t.Fatal("the sender's gapped one did not give way to its executable one")
+	}
+	// Now two of the four can be mined, two are gapped; with every gapped
+	// one replaced, a held executable one never gives way.
+	for i, key := range []*mldsa44.PrivateKey{keys[2], keys[3]} {
+		tx := proofTx(t, key, 0, 1, proofPolicy, 0, input)
+		if err := pool.addRemoteSync(tx); err != nil {
+			t.Fatalf("executable one %d: %v", i, err)
+		}
+	}
+	last := proofTx(t, keys[ghost.ProofTxMaxHeld+1], 0, 1, proofPolicy, 0, input)
+	if err := pool.addRemoteSync(last); !errors.Is(err, txpool.ErrProofHeldCap) {
+		t.Fatalf("executable newcomer at a cap of executable ones: error %v, want ErrProofHeldCap", err)
+	}
+	if err := validatePoolInternals(pool); err != nil {
+		t.Fatal(err)
 	}
 }

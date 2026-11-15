@@ -238,6 +238,8 @@ func checkBundle(t *testing.T, doc string) {
 		"maximum block gas limit of "+comma(ghost.MaxBlockGasLimit),
 		"a bundle of one reveal, "+comma(one)+" gas",
 		"a bundle of two takes "+comma(two)+" gas and fits no block",
+		"only a bundle of one reveal can be mined",
+		"`txpool.ErrGasLimit` and before any verification",
 		"a skipped reveal pays none",
 		"typed receipt of type "+typeByte(types.GhostBundleTxType)+", status 1",
 		"the reveal logs of the applied reveals",
@@ -245,14 +247,11 @@ func checkBundle(t *testing.T, doc string) {
 
 	adm := section(t, privateDoc, doc, "### Bundle admission")
 	requireAll(t, where+", admission", adm,
-		"No pool takes a bundle",
-		typeByte(types.GhostBundleTxType)+" with `core.ErrTxTypeNotSupported`",
-		"the miner builds none",
+		"The reveal pool takes a bundle",
+		"a bundle from a peer reaches it with that peer",
+		"then its gas against the head's block gas limit",
 		"`types.CheckTxType` takes the type",
 	)
-	if core.ErrTxTypeNotSupported == nil {
-		t.Fatal("core.ErrTxTypeNotSupported is nil")
-	}
 }
 
 // checkRootVerifiers checks the statement that roots are verified through

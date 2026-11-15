@@ -71,9 +71,9 @@
 // with their raw signatures stay in the legacy pool under its signature
 // bounds, which a public root does not change.
 //
-// A peer whose transactions fail their proof PeerMaxFailedProofs times on
-// one head is refused with ErrPeerFailLimit, which the network handler
-// answers by disconnecting it.
+// A peer whose transactions fail their proof PeerMaxFailedProofs times while
+// it is connected, at any heads, is refused with ErrPeerFailLimit, which the
+// network handler answers by disconnecting it.
 package ghostpool
 
 import (
@@ -139,10 +139,11 @@ const (
 	PeerMaxHeldBytes = PeerMaxHeld * types.GhostPolicyRevealEnvelopeSize
 
 	// PeerMaxFailedProofs is the number of proofs of one peer's
-	// transactions, of any of the pool's types, that may fail on one head:
-	// at the last of them the pool refuses the transaction with
-	// ErrPeerFailLimit, and the peer is dropped. The count starts again when
-	// the head moves.
+	// transactions, of any of the pool's types, that may fail while the
+	// peer is connected: at the last of them the pool refuses the
+	// transaction with ErrPeerFailLimit, and the peer is dropped. The count
+	// is kept when the head moves, so that a peer cannot send a few garbage
+	// proofs at every head and stay connected.
 	PeerMaxFailedProofs = 3
 
 	// MaxBundles is the most private bundles the pool holds, apart from the
@@ -408,7 +409,7 @@ type peerBudget struct {
 	announced  map[common.Hash]time.Time // agreed fetches not delivered yet
 	held       int                       // transactions held that it delivered first
 	validating int                       // transactions it delivered being checked
-	failed     int                       // proofs of its transactions failed on this head
+	failed     int                       // proofs of its transactions failed, at any head
 }
 
 // Pool is the reveal pool.
@@ -563,8 +564,8 @@ func (p *Pool) Close() error {
 	return nil
 }
 
-// Reset moves the pool to the new head: it refills the peer budgets, starts
-// the count of failed proofs again when the head moved, and rechecks every
+// Reset moves the pool to the new head: it refills the peer budgets, keeping
+// their counts of failed proofs, and rechecks every
 // held transaction against the block that would come next, dropping each
 // that no longer passes, among them every reveal whose marker a block spent
 // and every action whose slot closed, whose nonce moved, whose policy a
@@ -587,14 +588,10 @@ func (p *Pool) Reset(oldHead, newHead *types.Header) {
 	}
 	fees := p.windowFees(newHead)
 	p.mu.Lock()
-	moved := p.head == nil || p.head.Hash() != newHead.Hash()
 	p.head, p.state, p.fees = newHead, st, fees
 	now := time.Now()
 	for _, b := range p.peers {
 		b.tokens = PeerRevealsPerBlock
-		if moved {
-			b.failed = 0
-		}
 		for hash, at := range b.announced {
 			// A transaction another peer delivered first, or one that never
 			// came, no longer holds an in-flight place.
@@ -617,8 +614,11 @@ func (p *Pool) Reset(oldHead, newHead *types.Header) {
 			err = p.actionRules(newHead, recheck.Copy(), e.tx)
 		case classBundle:
 			// The root verified once; only what the head decides is checked
-			// again.
+			// again: the markers and the gas against the head's limit.
 			err = bundleLive(recheck, e.markers)
+			if gas := e.tx.Gas(); err == nil && gas > newHead.GasLimit {
+				err = fmt.Errorf("%w: bundle takes %d gas, block gas limit %d", txpool.ErrGasLimit, gas, newHead.GasLimit)
+			}
 		default:
 			err = p.check(newHead, recheck.Copy(), e.tx, e.peer == "")
 		}
@@ -681,9 +681,8 @@ func (p *Pool) Add(txs []*types.Transaction, local bool, sync bool) []error {
 
 // AddFromPeer adds transactions delivered by a peer, under that peer's
 // budgets. A transaction whose proof failed as the peer's
-// PeerMaxFailedProofs-th on this head, and every one after it on the same
-// head, is refused with an error wrapping ErrPeerFailLimit: the caller drops
-// the peer.
+// PeerMaxFailedProofs-th, at any head, and every one after it, is refused
+// with an error wrapping ErrPeerFailLimit: the caller drops the peer.
 func (p *Pool) AddFromPeer(peer string, txs []*types.Transaction) []error {
 	errs := make([]error, len(txs))
 	for i, tx := range txs {
@@ -708,7 +707,7 @@ func (p *Pool) add(tx *types.Transaction, peer string) error {
 	}
 	hash := tx.Hash()
 	p.mu.Lock()
-	// A peer at the failed proof limit of this head gets no more checks.
+	// A peer at the failed proof limit gets no more checks.
 	if b, ok := p.peers[peer]; ok && peer != "" && b.failed >= PeerMaxFailedProofs {
 		p.mu.Unlock()
 		return fmt.Errorf("%w: peer %s, %d failed proofs", ErrPeerFailLimit, peer, b.failed)
@@ -1014,9 +1013,12 @@ func (p *Pool) addBundle(tx *types.Transaction, peer string) error {
 	in := b.Inputs(b.ChainID, p.chain.Genesis().Hash())
 	verified := false
 	slot = p.takeSlot(slot)
-	err = p.checkUntilSettled(head, st, err, func(_ *types.Header, st *state.StateDB) error {
+	err = p.checkUntilSettled(head, st, err, func(h *types.Header, st *state.StateDB) error {
 		if err := bundleLive(st, markers); err != nil {
 			return err
+		}
+		if gas := tx.Gas(); gas > h.GasLimit {
+			return fmt.Errorf("%w: bundle takes %d gas, block gas limit %d", txpool.ErrGasLimit, gas, h.GasLimit)
 		}
 		if verified {
 			return nil
@@ -1080,6 +1082,9 @@ func (p *Pool) admitBundle(hash common.Hash, b *ghostpriv.Bundle, decodeErr erro
 	if err := bundleChainIDs(b, p.chain.Config().GetChainID()); err != nil {
 		return nil, err
 	}
+	if err := p.bundleFits(len(b.Reveals)); err != nil {
+		return nil, err
+	}
 	pending := len(p.bundleChecks)
 	if peer == "" {
 		pending = p.localBundles
@@ -1088,6 +1093,21 @@ func (p *Pool) admitBundle(hash common.Hash, b *ghostpriv.Bundle, decodeErr erro
 		return nil, fmt.Errorf("%w: %d bundles", ErrPoolFull, count)
 	}
 	return p.remoteSlot(peer)
+}
+
+// bundleFits refuses with txpool.ErrGasLimit a bundle of count reveals
+// whose gas, count times G_PRIV (types.GhostBundleGas), is above the head's
+// block gas limit: no block on the head can include it. At the consensus
+// maximum of ghost.MaxBlockGasLimit that is every bundle of more than one
+// reveal. The caller holds the lock.
+func (p *Pool) bundleFits(count int) error {
+	if p.head == nil {
+		return errors.New("reveal pool not initialised")
+	}
+	if gas := types.GhostBundleGas(count); gas > p.head.GasLimit {
+		return fmt.Errorf("%w: bundle of %d reveals takes %d gas, block gas limit %d", txpool.ErrGasLimit, count, gas, p.head.GasLimit)
+	}
+	return nil
 }
 
 // bundleChainIDs refuses a bundle whose chain id, or the chain id of any of
@@ -1173,7 +1193,7 @@ func (p *Pool) checkUntilSettled(head *types.Header, st *state.StateDB, err erro
 
 // refuse records the refusal err of a checked transaction: its hash is
 // remembered when no head can lift err, and a failed proof is counted to
-// the peer, whose PeerMaxFailedProofs-th on this head turns the refusal into
+// the peer, whose PeerMaxFailedProofs-th turns the refusal into
 // one wrapping ErrPeerFailLimit. The remembered refusal is the plain one, so
 // that another peer sending the same transaction is not taken for this one.
 // The caller holds the lock.
@@ -1582,8 +1602,10 @@ func announcedSize(kind byte, size uint32) (sized, ours bool) {
 // existing announce message and reports for each announced hash whether to
 // fetch it. Only the pool's types are limited: the coin, data and policy
 // reveals, the policy action and the bundle. One announced with a size other
-// than its envelope's, for a bundle that of no count, is never fetched; one the pool holds or already agreed to
-// fetch from this peer costs nothing; any other takes one of the peer's
+// than its envelope's, for a bundle that of no count, is never fetched, nor
+// a bundle whose gas is above the head's block gas limit; one the pool holds
+// or already agreed to fetch from this peer costs nothing; any other takes
+// one of the peer's
 // transactions of this head and one in-flight place, and is not fetched
 // when either is used up. Without types, as before the typed announcement,
 // nothing is filtered here and the delivery is charged instead.
@@ -1605,6 +1627,10 @@ func (p *Pool) FilterAnnounced(peer string, kinds []byte, sizes []uint32, hashes
 			continue
 		}
 		if !sized {
+			continue
+		}
+		// A bundle no block on the head can include is not fetched.
+		if kinds[i] == types.GhostBundleTxType && p.bundleFits(int((sizes[i]-1-types.GhostBundleFixedSize)/types.GhostBundleBodySize)) != nil {
 			continue
 		}
 		if _, ok := p.all[hash]; ok {

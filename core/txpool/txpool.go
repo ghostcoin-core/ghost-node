@@ -312,8 +312,14 @@ func (p *TxPool) FilterType(kind byte) bool {
 
 // emptyTxOfType returns an empty transaction of the given type to ask the
 // subpools' Filter about, or nil for a type no subpool of this node takes
-// (the blob type included, its pool being turned off). The
+// from the network (the blob type included, its pool being turned off). The
 // subpools decide on the type alone, so the empty fields do not matter.
+//
+// The policy reveal, the policy action and the private bundle are above the
+// size the handler broadcasts whole, so they spread only by announcement:
+// their types must be here for the fetcher to request them. The public root
+// is not: the reveal pool checks one and never holds it, so no node
+// announces one, and fetching one would only cost a verification.
 func emptyTxOfType(kind byte) *types.Transaction {
 	switch kind {
 	case types.LegacyTxType:
@@ -328,6 +334,12 @@ func emptyTxOfType(kind byte) *types.Transaction {
 		return types.NewTx(&types.GhostDataRevealTx{})
 	case types.GhostAccountTxType:
 		return types.NewTx(&types.GhostAccountTx{})
+	case types.GhostPolicyRevealTxType:
+		return types.NewTx(&types.GhostPolicyRevealTx{})
+	case types.GhostPolicyActionTxType:
+		return types.NewTx(&types.GhostPolicyActionTx{})
+	case types.GhostBundleTxType:
+		return types.NewTx(&types.GhostBundleTx{})
 	default:
 		return nil
 	}

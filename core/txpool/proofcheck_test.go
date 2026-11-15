@@ -22,6 +22,7 @@ import (
 	"math/big"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -124,6 +125,13 @@ type plainVerifier struct{}
 
 func (plainVerifier) VerifyReveal(*ghostpriv.VerifyInputs, []byte) error { return nil }
 
+var senderSeq atomic.Uint64
+
+// newSender returns a sender address no other call returns.
+func newSender() common.Address {
+	return common.BigToAddress(new(big.Int).SetUint64(0x5e000000 + senderSeq.Add(1)))
+}
+
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
@@ -144,7 +152,8 @@ func TestProofTxClassAndSizeBounds(t *testing.T) {
 	if ghost.AccountTxMaxBytes != 131_072 || ghost.ProofTxMaxBytes != 1_048_576 || ghost.ProofTxMaxHeld != 4 {
 		t.Fatalf("caps %d, %d, %d", ghost.AccountTxMaxBytes, ghost.ProofTxMaxBytes, ghost.ProofTxMaxHeld)
 	}
-	if ghost.ProofPeerBudget != 4 || ghost.ProofFailLimit != 3 || ghost.ProofCheckSlots != 2 || ghost.ProofChecksPerHead != 16 || ghost.ProofRejectedMemory != 4096 {
+	if ghost.ProofPeerBudget != 4 || ghost.ProofFailLimit != 3 || ghost.ProofCheckSlots != 2 || ghost.ProofChecksPerHead != 16 || ghost.ProofRejectedMemory != 4096 ||
+		ghost.ProofRPCChecksPerHead != 4 || ghost.ProofSenderChecksPerHead != 2 || ghost.ProofSenderBarBlocks != 32 {
 		t.Fatal("proof budgets are not those of the admission rule")
 	}
 	input := gateInput(t, gatePolicy, true)
@@ -225,8 +234,8 @@ func TestProofTxClassAndSizeBounds(t *testing.T) {
 }
 
 // TestProofGateBudgetAndSlots checks a peer's budget of four proof-carrying
-// deliveries per head and its failed proof limit of three, both refilled
-// when the head moves, and the check slots: one open to peers, one kept for
+// deliveries per head, refilled when the head moves, and its failed proof
+// limit of three, kept across heads, and the check slots: one open to peers, one kept for
 // local RPC, each refusing a second check with a busy error while taken.
 func TestProofGateBudgetAndSlots(t *testing.T) {
 	peers := NewProofPeers(16)
@@ -251,8 +260,19 @@ func TestProofGateBudgetAndSlots(t *testing.T) {
 	if !peers.Fail("a", h2) {
 		t.Fatal("the third failure at one head does not drop the peer")
 	}
-	if peers.Fail("a", common.Hash{3}) {
-		t.Fatal("the failures are not counted again from a new head")
+	// The failures are kept when the head moves: two at one head and one
+	// at each of the next heads drop the peer at its third.
+	if peers.Fail("c", h1) || peers.Fail("c", h1) {
+		t.Fatal("peer c is dropped before its third failure")
+	}
+	if peers.Available("c", h2) != ghost.ProofPeerBudget {
+		t.Fatal("the budget is not refilled when the head moves")
+	}
+	if !peers.Fail("c", h2) {
+		t.Fatal("a third failure at a new head does not drop the peer: failures were forgiven with the head")
+	}
+	if !peers.Fail("a", common.Hash{3}) {
+		t.Fatal("a peer at its limit is forgiven at a new head")
 	}
 
 	// The slots.
@@ -264,14 +284,14 @@ func TestProofGateBudgetAndSlots(t *testing.T) {
 	input := gateInput(t, gatePolicy, true)
 	to := gatePolicy
 	results := make(chan error, 2)
-	go func() { results <- g.Check(SigFromPeer, h1, gateTx(1, &to, nil, input)) }()
+	go func() { results <- g.Check(SigFromPeer, h1, 0, newSender(), gateTx(1, &to, nil, input)) }()
 	waitFor(t, "the peer check runs", func() bool { _, active, _ := v.stats(); return active == 1 })
-	if err := g.Check(SigFromPeer, h1, gateTx(2, &to, nil, input)); !errors.Is(err, ErrProofBusy) || ProofCharged(err) {
+	if err := g.Check(SigFromPeer, h1, 0, newSender(), gateTx(2, &to, nil, input)); !errors.Is(err, ErrProofBusy) || ProofCharged(err) {
 		t.Fatalf("second peer check: error %v, want an uncharged busy error", err)
 	}
-	go func() { results <- g.Check(SigFromRPC, h1, gateTx(3, &to, nil, input)) }()
+	go func() { results <- g.Check(SigFromRPC, h1, 0, newSender(), gateTx(3, &to, nil, input)) }()
 	waitFor(t, "the RPC check runs beside the peer's", func() bool { _, active, _ := v.stats(); return active == 2 })
-	if err := g.Check(SigFromRPC, h1, gateTx(4, &to, nil, input)); !errors.Is(err, ErrProofBusy) {
+	if err := g.Check(SigFromRPC, h1, 0, newSender(), gateTx(4, &to, nil, input)); !errors.Is(err, ErrProofBusy) {
 		t.Fatalf("second RPC check: error %v, want busy", err)
 	}
 	if g.InFlight(SigFromPeer) != 1 || g.InFlight(SigFromRPC) != 1 {
@@ -287,7 +307,7 @@ func TestProofGateBudgetAndSlots(t *testing.T) {
 		t.Fatalf("verifications %d, peak %d, want 2 and 2", calls, peak)
 	}
 	// The slots are free again.
-	if err := g.Check(SigFromPeer, h1, gateTx(2, &to, nil, input)); err != nil {
+	if err := g.Check(SigFromPeer, h1, 0, newSender(), gateTx(2, &to, nil, input)); err != nil {
 		t.Fatalf("peer check after the slot is freed: %v", err)
 	}
 }
@@ -303,7 +323,7 @@ func TestProofGateFailedHashRefusedWithoutCheck(t *testing.T) {
 	g := NewProofGate(gateChainID, gateGenesis, v)
 	to := gatePolicy
 	bad := gateTx(1, &to, nil, gateInput(t, gatePolicy, false))
-	err := g.Check(SigFromPeer, common.Hash{1}, bad)
+	err := g.Check(SigFromPeer, common.Hash{1}, 0, newSender(), bad)
 	if !errors.Is(err, ErrProofFailed) || !errors.Is(err, ghostpriv.ErrPreimageProof) || !ProofCharged(err) {
 		t.Fatalf("invalid proof: error %v, want a charged ErrProofFailed", err)
 	}
@@ -311,7 +331,7 @@ func TestProofGateFailedHashRefusedWithoutCheck(t *testing.T) {
 		t.Fatalf("invalid proof: %d verifications, remembered %v", calls, g.Rejected(bad.Hash()))
 	}
 	for _, origin := range []SigOrigin{SigFromPeer, SigFromRPC} {
-		err := g.Check(origin, common.Hash{2}, bad)
+		err := g.Check(origin, common.Hash{2}, 0, newSender(), bad)
 		if !errors.Is(err, ErrProofRejectedBefore) || !ProofCharged(err) {
 			t.Fatalf("again from %d: error %v, want ErrProofRejectedBefore", origin, err)
 		}
@@ -324,7 +344,7 @@ func TestProofGateFailedHashRefusedWithoutCheck(t *testing.T) {
 	input := gateInput(t, gatePolicy, true)
 	wrong := append([]byte{0x05}, input[1:]...)
 	wrongTx := gateTx(2, &to, nil, wrong)
-	if err := g.Check(SigFromPeer, common.Hash{2}, wrongTx); !errors.Is(err, ErrProofFailed) || !errors.Is(err, ghostpriv.ErrPreimageInput) {
+	if err := g.Check(SigFromPeer, common.Hash{2}, 0, newSender(), wrongTx); !errors.Is(err, ErrProofFailed) || !errors.Is(err, ghostpriv.ErrPreimageInput) {
 		t.Fatalf("statement 0x05: error %v", err)
 	}
 	if calls, _, _ := v.stats(); calls != 1 || !g.Rejected(wrongTx.Hash()) {
@@ -334,7 +354,7 @@ func TestProofGateFailedHashRefusedWithoutCheck(t *testing.T) {
 	// A valid proof passes once and is taken again without a check.
 	good := gateTx(3, &to, nil, input)
 	for i := 0; i < 3; i++ {
-		if err := g.Check(SigFromPeer, common.Hash{byte(10 + i)}, good); err != nil {
+		if err := g.Check(SigFromPeer, common.Hash{byte(10 + i)}, 0, newSender(), good); err != nil {
 			t.Fatalf("valid proof, check %d: %v", i, err)
 		}
 	}
@@ -343,13 +363,13 @@ func TestProofGateFailedHashRefusedWithoutCheck(t *testing.T) {
 	}
 	// The same statement for another policy, as to, does not verify.
 	other := common.Address{0x0e}
-	if err := g.Check(SigFromPeer, common.Hash{2}, gateTx(4, &other, nil, input)); !errors.Is(err, ErrProofFailed) {
+	if err := g.Check(SigFromPeer, common.Hash{2}, 0, newSender(), gateTx(4, &other, nil, input)); !errors.Is(err, ErrProofFailed) {
 		t.Fatalf("statement of another policy: error %v", err)
 	}
 
 	// A node that cannot verify the statement.
 	plain := NewProofGate(gateChainID, gateGenesis, plainVerifier{})
-	err = plain.Check(SigFromPeer, common.Hash{1}, good)
+	err = plain.Check(SigFromPeer, common.Hash{1}, 0, newSender(), good)
 	if !errors.Is(err, ErrProofUnsupported) || ProofCharged(err) || plain.Rejected(good.Hash()) || plain.Passed(good.Hash()) {
 		t.Fatalf("unsupported statement: error %v", err)
 	}
@@ -394,7 +414,7 @@ func TestProofGateFloodStaysInCheckSlots(t *testing.T) {
 		wg.Add(1)
 		go func(i int, origin SigOrigin, tx *types.Transaction) {
 			defer wg.Done()
-			results[i] = g.Check(origin, head, tx)
+			results[i] = g.Check(origin, head, 0, newSender(), tx)
 		}(i, origin, tx)
 	}
 	// Every check but the two in the slots returns at once.
@@ -422,17 +442,35 @@ func TestProofGateFloodStaysInCheckSlots(t *testing.T) {
 		t.Fatalf("flood: %d passed, %d verifications, peak %d", passed, calls, peak)
 	}
 
-	// Checks go on one after another until the head's sixteen are used.
+	// Checks go on one after another until the head's sixteen are used:
+	// peers stop at the twelve open to them, the rest are RPC's.
+	peerChecks := 0
+	for i, err := range results {
+		if err == nil && (i%4 != 3) {
+			peerChecks++
+		}
+	}
 	for calls < ghost.ProofChecksPerHead {
+		origin := SigFromPeer
+		if peerChecks >= ghost.ProofChecksPerHead-ghost.ProofRPCChecksPerHead {
+			nonce++
+			if err := g.Check(SigFromPeer, head, 0, newSender(), gateTx(nonce, &to, nil, input)); !errors.Is(err, ErrProofBusy) || ProofCharged(err) {
+				t.Fatalf("peer check past the peers' share: error %v, want an uncharged busy error", err)
+			}
+			origin = SigFromRPC
+		}
 		nonce++
-		if err := g.Check(SigFromPeer, head, gateTx(nonce, &to, nil, input)); err != nil {
-			t.Fatalf("check %d at the head: %v", calls+1, err)
+		if err := g.Check(origin, head, 0, newSender(), gateTx(nonce, &to, nil, input)); err != nil {
+			t.Fatalf("check %d at the head from %d: %v", calls+1, origin, err)
+		}
+		if origin == SigFromPeer {
+			peerChecks++
 		}
 		calls, _, _ = v.stats()
 	}
 	for _, origin := range []SigOrigin{SigFromPeer, SigFromRPC} {
 		nonce++
-		if err := g.Check(origin, head, gateTx(nonce, &to, nil, input)); !errors.Is(err, ErrProofBusy) || ProofCharged(err) {
+		if err := g.Check(origin, head, 0, newSender(), gateTx(nonce, &to, nil, input)); !errors.Is(err, ErrProofBusy) || ProofCharged(err) {
 			t.Fatalf("past the head's checks from %d: error %v, want an uncharged busy error", origin, err)
 		}
 	}
@@ -441,7 +479,91 @@ func TestProofGateFloodStaysInCheckSlots(t *testing.T) {
 	}
 	// A new head opens the checks again.
 	nonce++
-	if err := g.Check(SigFromPeer, common.Hash{0xff}, gateTx(nonce, &to, nil, input)); err != nil {
+	if err := g.Check(SigFromPeer, common.Hash{0xff}, 0, newSender(), gateTx(nonce, &to, nil, input)); err != nil {
 		t.Fatalf("check at a new head: %v", err)
 	}
+}
+
+// TestProofGateSharesOfSendersAndPeers checks that no one sender and no one
+// origin can use up the checks of a head: a sender takes at most two checks
+// a head, a sender whose proof failed gets none for the next 32 blocks, even
+// for a valid proof, so that a flood of garbage proofs from one funded
+// account costs one verification, and the peers together stop at twelve of
+// the sixteen, leaving four to local RPC. None of these refusals is charged
+// to a peer.
+func TestProofGateSharesOfSendersAndPeers(t *testing.T) {
+	v := newGateVerifier(true)
+	g := NewProofGate(gateChainID, gateGenesis, v)
+	to := gatePolicy
+	good, bad := gateInput(t, gatePolicy, true), gateInput(t, gatePolicy, false)
+	var nonce uint64
+	tx := func(input []byte) *types.Transaction {
+		nonce++
+		return gateTx(nonce, &to, nil, input)
+	}
+	uncharged := func(err error, want error, what string) {
+		t.Helper()
+		if !errors.Is(err, want) || ProofCharged(err) {
+			t.Fatalf("%s: error %v, want an uncharged %v", what, err, want)
+		}
+	}
+
+	// One sender: two checks a head, the third dropped unverified.
+	alice := newSender()
+	h1 := common.Hash{0x01}
+	for i := 0; i < ghost.ProofSenderChecksPerHead; i++ {
+		if err := g.Check(SigFromPeer, h1, 10, alice, tx(good)); err != nil {
+			t.Fatalf("check %d of one sender: %v", i, err)
+		}
+	}
+	for _, origin := range []SigOrigin{SigFromPeer, SigFromRPC} {
+		uncharged(g.Check(origin, h1, 10, alice, tx(good)), ErrProofSenderBusy, "past the sender's checks")
+	}
+	if calls, _, _ := v.stats(); calls != ghost.ProofSenderChecksPerHead {
+		t.Fatalf("%d verifications for one sender at one head", calls)
+	}
+	if err := g.Check(SigFromPeer, common.Hash{0x02}, 11, alice, tx(good)); err != nil {
+		t.Fatalf("the sender's checks are not refilled at a new head: %v", err)
+	}
+
+	// A flood of garbage proofs from one funded sender, at one head, costs
+	// one verification: the sender is barred after the first.
+	mallory := newSender()
+	h3 := common.Hash{0x03}
+	before, _, _ := v.stats()
+	if err := g.Check(SigFromPeer, h3, 20, mallory, tx(bad)); !errors.Is(err, ErrProofFailed) || !ProofCharged(err) {
+		t.Fatalf("garbage proof: error %v, want a charged ErrProofFailed", err)
+	}
+	for i := 0; i < ghost.ProofChecksPerHead; i++ {
+		uncharged(g.Check(SigFromPeer, h3, 20, mallory, tx(bad)), ErrProofSenderBarred, "garbage flood of a barred sender")
+	}
+	if calls, _, _ := v.stats(); calls != before+1 {
+		t.Fatalf("a garbage flood of one sender ran %d verifications, want 1", calls-before)
+	}
+	// An honest sender is checked at the same head.
+	if err := g.Check(SigFromPeer, h3, 20, newSender(), tx(good)); err != nil {
+		t.Fatalf("honest sender beside a garbage flood: %v", err)
+	}
+	// The bar holds for 32 blocks, at every head and for a valid proof too,
+	// then lifts.
+	last := 20 + ghost.ProofSenderBarBlocks - 1
+	uncharged(g.Check(SigFromRPC, common.Hash{0x04}, last, mallory, tx(good)), ErrProofSenderBarred, "barred sender at the bar's last block")
+	if err := g.Check(SigFromPeer, common.Hash{0x05}, last+1, mallory, tx(good)); err != nil {
+		t.Fatalf("sender after the bar: %v", err)
+	}
+
+	// The peers together stop at twelve checks of a head, RPC keeps four.
+	h6 := common.Hash{0x06}
+	for i := 0; i < ghost.ProofChecksPerHead-ghost.ProofRPCChecksPerHead; i++ {
+		if err := g.Check(SigFromPeer, h6, 40, newSender(), tx(good)); err != nil {
+			t.Fatalf("peer check %d: %v", i, err)
+		}
+	}
+	uncharged(g.Check(SigFromPeer, h6, 40, newSender(), tx(good)), ErrProofBusy, "peer check past the peers' share")
+	for i := 0; i < ghost.ProofRPCChecksPerHead; i++ {
+		if err := g.Check(SigFromRPC, h6, 40, newSender(), tx(good)); err != nil {
+			t.Fatalf("RPC check %d past the peers' share: %v", i, err)
+		}
+	}
+	uncharged(g.Check(SigFromRPC, h6, 40, newSender(), tx(good)), ErrProofBusy, "RPC check past the head's checks")
 }

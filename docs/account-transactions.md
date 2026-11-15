@@ -407,6 +407,11 @@ Every other account transaction keeps the cap of 128 KiB unchanged.
    `ProofTxMaxHeld` (4) proof-carrying transactions, at most one per sender
    account (a replacement at the same nonce takes the place of the one it
    replaces); past it a transaction is refused with `txpool.ErrProofHeldCap`.
+   A held one with a nonce gap gives way to one that can be mined: the
+   sender's own gapped one to its executable one at another nonce, and at
+   the cap the oldest gapped one of another sender, removed once the new one
+   is added. A gapped newcomer never takes a place, so four gapped
+   transactions cannot keep the class shut.
 3. The **signature**, on the pool's `SigVerifier`, as for any account
    transaction: it is the cheaper check, so it goes first.
 4. The **checker input** (`txpool.ProofGate`): its statement code must be
@@ -433,22 +438,31 @@ checker answers 0 to every proof on such a node.
 
 The gate (`core/txpool/proofcheck.go`) runs at most `ProofCheckSlots` (2)
 verifications at once, one slot open to peers and one kept for local RPC,
-and `ProofChecksPerHead` (16) in all per chain head. A transaction that
-finds its slot taken or the head's checks used up is dropped unverified with
-the busy error `statement proof checks busy` (JSON-RPC code `-32005`), no
-fault of the peer. It remembers `ProofRejectedMemory` (4,096) hashes of
-failed proofs, the oldest forgotten first.
+and `ProofChecksPerHead` (16) in all per chain head, of which
+`ProofRPCChecksPerHead` (4) are kept for local RPC: the peers together start
+at most 12. One sender account takes at most `ProofSenderChecksPerHead` (2)
+of a head, and a sender whose proof failed gets no check for the next
+`ProofSenderBarBlocks` (32) blocks, even for a valid proof. A flood of
+garbage proofs so costs one verification per funded account, and no one
+sender, peer or origin can use up a head's checks. A transaction that
+finds its slot taken or the checks open to it used up is dropped unverified
+with a busy error (`statement proof checks busy`, `sender statement proof
+checks used up` or `sender statement proof checks barred after a failed
+proof`, JSON-RPC code `-32005`), no fault of the peer. It remembers
+`ProofRejectedMemory` (4,096) hashes of failed proofs, the oldest forgotten
+first, and as many senders.
 
 Each peer may deliver `ProofPeerBudget` (4) proof-carrying transactions per
 head, refilled when the head moves (`eth/handler.go`); past it they are
 dropped unverified with `peer statement proof budget used up`. Each also
 takes one check of the peer's signature budget. A peer whose proof checks
-fail `ProofFailLimit` (3) times at one head, an oversized delivery and a
+fail `ProofFailLimit` (3) times, at any heads, an oversized delivery and a
 proof refused before counting as one each, is disconnected, as for a failed
-signature. A state failure, a busy check, a used-up budget and a node that
-cannot verify the statement are not held against it. A peer's record
-outlives a disconnect, so a peer that reconnects at the same head has
-neither its budget nor its failures back.
+signature: failures are not forgiven when the head moves. A state failure,
+a busy check, a used-up budget, a barred sender and a node that cannot
+verify the statement are not held against it. A peer's record outlives a
+disconnect, so a peer that reconnects has neither its failures back nor, at
+the same head, its budget.
 
 The bounds are node settings in `params/ghost/proofadmit.go`:
 
@@ -458,9 +472,12 @@ The bounds are node settings in `params/ghost/proofadmit.go`:
 | `ProofTxMaxBytes` | 1,048,576 | the checker input and 130,975 bytes for the key, the signature, the selector and other calldata |
 | `ProofTxMaxHeld` | 4 | at most 4 MiB of proof-carrying transactions held, one per sender |
 | `ProofPeerBudget` | 4 per head | as the reveal pool's `PeerRevealsPerBlock` |
-| `ProofFailLimit` | 3 per head | as the reveal pool's `PeerMaxFailedProofs` |
+| `ProofFailLimit` | 3, kept across heads | as the reveal pool's `PeerMaxFailedProofs` |
 | `ProofCheckSlots` | 2 | one for peers, one for RPC |
 | `ProofChecksPerHead` | 16 | about 43 ms a verification at the 430,000 gas of `PREIMAGE_VERIFY_GAS`, so under 0.7 s a head whatever the flood |
+| `ProofRPCChecksPerHead` | 4 | the checks of a head peers cannot take |
+| `ProofSenderChecksPerHead` | 2 | a transaction and one replacement per sender and head |
+| `ProofSenderBarBlocks` | 32 | a garbage proof costs its sender's checks for 32 blocks |
 | `ProofRejectedMemory` | 4,096 | as the reveal pool's memory of refused hashes; 32-byte hashes with their first refusal |
 
 A proof-carrying transaction is announced, never broadcast whole, as any
@@ -469,8 +486,9 @@ of them follow just under 2 MiB of others, some 3 MiB, well under the
 message cap of 10 MiB.
 
 `TestProofTxClassAndSizeBounds`, `TestProofGateBudgetAndSlots`,
-`TestProofGateFailedHashRefusedWithoutCheck` and
-`TestProofGateFloodStaysInCheckSlots` (`core/txpool`) check the class and
+`TestProofGateFailedHashRefusedWithoutCheck`,
+`TestProofGateFloodStaysInCheckSlots` and
+`TestProofGateSharesOfSendersAndPeers` (`core/txpool`) check the class and
 the gate; the `TestLegacyPool...ProofTx...` tests (`core/txpool/legacypool`)
 the pool, and `TestHandlerDropsPeerAtProofFailLimit` (`eth`) the peers.
 

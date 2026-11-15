@@ -42,8 +42,8 @@ const (
 	ProofPeerBudget = 4
 
 	// ProofFailLimit is the number of failed proof checks, oversized
-	// deliveries included, of one peer at one head at which the peer is
-	// disconnected.
+	// deliveries included, of one peer at which the peer is disconnected.
+	// They are counted across heads, not forgiven when the head moves.
 	ProofFailLimit = 3
 
 	// ProofCheckSlots is the number of proof verifications that run at
@@ -54,6 +54,21 @@ const (
 	// per chain head. Past it, proof-carrying transactions are dropped
 	// unverified with a busy error, which is no fault of the peer.
 	ProofChecksPerHead = 16
+
+	// ProofRPCChecksPerHead is the number of the ProofChecksPerHead
+	// verifications of a head kept for local RPC submissions: peers, all of
+	// them together, start at most ProofChecksPerHead-ProofRPCChecksPerHead.
+	ProofRPCChecksPerHead = 4
+
+	// ProofSenderChecksPerHead is the number of proof verifications one
+	// sender account may take per chain head, from peers and RPC together:
+	// one for its transaction and one for a replacement.
+	ProofSenderChecksPerHead = 2
+
+	// ProofSenderBarBlocks is the number of blocks for which a sender whose
+	// proof failed gets no proof verification. A flood of garbage proofs so
+	// needs a new funded account for every check it takes.
+	ProofSenderBarBlocks uint64 = 32
 
 	// ProofRejectedMemory is the number of hashes of transactions whose
 	// proof failed that the pool remembers and refuses again without a

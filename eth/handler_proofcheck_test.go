@@ -44,7 +44,7 @@ import (
 var handlerProofPolicy = common.HexToAddress("0x00000000000000000000000000000000c0ffee30")
 
 // handlerProofSeeds are the funded accounts of the proof test chain.
-var handlerProofSeeds = []byte{0x21, 0x22, 0x23, 0x24}
+var handlerProofSeeds = []byte{0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27}
 
 // countingStub is the stub verifier, counting the proofs it verifies.
 type countingStub struct {
@@ -179,10 +179,11 @@ func TestHandlerDropsPeerAtProofFailLimit(t *testing.T) {
 		t.Fatalf("valid proof-carrying transaction: in the pool %v, %d verifications", s.pool.Has(good.Hash()), stub.count())
 	}
 
-	// Two failed proofs: the peer stays.
+	// Two failed proofs: the peer stays. Each is of its own sender, as the
+	// sender of a failed proof gets no check for a while.
 	bad := make([]*types.Transaction, 4)
-	for i := range bad {
-		bad[i] = s.proofTx(t, 0x22, 0, handlerProofPolicy, byte(1+i), false, 0)
+	for i, seed := range []byte{0x22, 0x25, 0x26, 0x27} {
+		bad[i] = s.proofTx(t, seed, 0, handlerProofPolicy, byte(1+i), false, 0)
 	}
 	for i := 0; i < 2; i++ {
 		errs := s.handler.addTxsFromPeer(liar.ID(), bad[i:i+1])

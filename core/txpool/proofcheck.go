@@ -61,6 +61,18 @@ var (
 	// of the head are used up. It is no fault of the peer.
 	ErrProofBusy error = &busyError{"statement proof checks busy"}
 
+	// ErrProofSenderBusy is returned for a proof-carrying transaction
+	// dropped unverified because its sender used its
+	// ghost.ProofSenderChecksPerHead checks of the head. It is no fault of
+	// the peer.
+	ErrProofSenderBusy error = &busyError{"sender statement proof checks used up"}
+
+	// ErrProofSenderBarred is returned for a proof-carrying transaction
+	// dropped unverified because a proof of its sender failed within the
+	// last ghost.ProofSenderBarBlocks blocks. It is no fault of the peer,
+	// which may relay a valid transaction of that sender.
+	ErrProofSenderBarred error = &busyError{"sender statement proof checks barred after a failed proof"}
+
 	// ErrProofPeerBudget is returned for a proof-carrying transaction
 	// dropped unverified because its peer used its budget of the head.
 	ErrProofPeerBudget error = &busyError{"peer statement proof budget used up"}
@@ -145,12 +157,17 @@ func ProofCharged(err error) bool {
 // ProofGate runs the proof checks of proof-carrying transactions within the
 // node's bounds: ghost.ProofCheckSlots verifications at once, one slot open
 // to peers and one kept for local RPC, and ghost.ProofChecksPerHead
-// verifications per chain head, past which a transaction is dropped
-// unverified with ErrProofBusy. It remembers the last
-// ghost.ProofRejectedMemory hashes whose proof failed, refused again
-// without a check, and the hashes whose proof passed, which are never
-// verified again: their public inputs (the chain, the genesis, the policy
-// to, y and the context) do not depend on the state.
+// verifications per chain head, of which ghost.ProofRPCChecksPerHead are
+// kept for local RPC and ghost.ProofSenderChecksPerHead may be one sender
+// account's. A sender whose proof failed gets no check for the next
+// ghost.ProofSenderBarBlocks blocks. Past any of these a transaction is
+// dropped unverified with a busy error, no fault of the peer, so that no
+// one sender and no one origin can use up the checks of a head: a flood of
+// garbage proofs needs a new funded account for each check it takes. The
+// gate remembers the last ghost.ProofRejectedMemory hashes whose proof
+// failed, refused again without a check, and the hashes whose proof passed,
+// which are never verified again: their public inputs (the chain, the
+// genesis, the policy to, y and the context) do not depend on the state.
 type ProofGate struct {
 	chainID  uint64
 	genesis  common.Hash
@@ -158,13 +175,22 @@ type ProofGate struct {
 
 	slots [2]chan struct{} // the check slots taken, by origin
 
-	mu       sync.Mutex
-	head     common.Hash // the head the checks are counted at
-	checks   int         // verifications started at head
-	rejected lru.BasicLRU[common.Hash, error]
-	passed   lru.BasicLRU[common.Hash, struct{}]
+	mu         sync.Mutex
+	head       common.Hash // the head the checks are counted at
+	checks     int         // verifications started at head
+	peerChecks int         // verifications started at head for peers
+	senders    lru.BasicLRU[common.Address, *proofSender]
+	rejected   lru.BasicLRU[common.Hash, error]
+	passed     lru.BasicLRU[common.Hash, struct{}]
 
 	verified atomic.Uint64 // verifications run, for the tests
+}
+
+// proofSender is what one sender account used of the checks.
+type proofSender struct {
+	head   common.Hash // the head checks is counted at
+	checks int         // verifications started at head
+	barred uint64      // the first block number at which it is checked again
 }
 
 // NewProofGate returns a gate for the chain of chainID and genesis that
@@ -174,6 +200,7 @@ func NewProofGate(chainID uint64, genesis common.Hash, verifier ghostpriv.Verifi
 		chainID:  chainID,
 		genesis:  genesis,
 		verifier: verifier,
+		senders:  lru.NewBasicLRU[common.Address, *proofSender](ghost.ProofRejectedMemory),
 		rejected: lru.NewBasicLRU[common.Hash, error](ghost.ProofRejectedMemory),
 		passed:   lru.NewBasicLRU[common.Hash, struct{}](ghost.ProofRejectedMemory),
 	}
@@ -184,17 +211,20 @@ func NewProofGate(chainID uint64, genesis common.Hash, verifier ghostpriv.Verifi
 }
 
 // Check checks the checker input and the proof of tx, a proof-carrying
-// transaction from origin, at the chain head head, and returns nil only for
-// a proof that verifies. The binding is the node's: the chain id and genesis
-// of the gate and tx's to as the policy. A hash whose proof passed before is
-// taken without a check, one whose proof failed before is refused with
-// ErrProofRejectedBefore. Otherwise a statement code other than 0x06 is
-// ErrProofFailed without taking a check; the proof is verified in a check
-// slot of origin, or dropped with ErrProofBusy when the slot is taken or the
-// head's checks are used up; a proof the verifier rejects is ErrProofFailed
-// and remembered, and a statement the node cannot verify
+// transaction of the sender from, from origin, at the chain head head of
+// block number number, and returns nil only for a proof that verifies. The
+// binding is the node's: the chain id and genesis of the gate and tx's to as
+// the policy. A hash whose proof passed before is taken without a check, one
+// whose proof failed before is refused with ErrProofRejectedBefore.
+// Otherwise a statement code other than 0x06 is ErrProofFailed without
+// taking a check. A sender barred after a failed proof is ErrProofSenderBarred
+// and one that used its checks of the head ErrProofSenderBusy. The proof is
+// verified in a check slot of origin, or dropped with ErrProofBusy when the
+// slot is taken or the head's checks open to origin are used up. A proof the
+// verifier rejects is ErrProofFailed, remembered, and bars from for
+// ghost.ProofSenderBarBlocks blocks; a statement the node cannot verify is
 // ErrProofUnsupported.
-func (g *ProofGate) Check(origin SigOrigin, head common.Hash, tx *types.Transaction) error {
+func (g *ProofGate) Check(origin SigOrigin, head common.Hash, number uint64, from common.Address, tx *types.Transaction) error {
 	if origin != SigFromPeer && origin != SigFromRPC {
 		return fmt.Errorf("%w: unknown origin %d", ErrProofBusy, origin)
 	}
@@ -220,11 +250,30 @@ func (g *ProofGate) Check(origin SigOrigin, head common.Hash, tx *types.Transact
 
 	g.mu.Lock()
 	if head != g.head {
-		g.head, g.checks = head, 0
+		g.head, g.checks, g.peerChecks = head, 0, 0
 	}
-	if g.checks >= ghost.ProofChecksPerHead {
+	s, ok := g.senders.Get(from)
+	if !ok {
+		s = &proofSender{head: head}
+		g.senders.Add(from, s)
+	}
+	if s.head != head {
+		s.head, s.checks = head, 0
+	}
+	var refused error
+	switch {
+	case number < s.barred:
+		refused = fmt.Errorf("%w: sender %v until block %d", ErrProofSenderBarred, from, s.barred)
+	case s.checks >= ghost.ProofSenderChecksPerHead:
+		refused = fmt.Errorf("%w: sender %v, %d checks at this head", ErrProofSenderBusy, from, s.checks)
+	case g.checks >= ghost.ProofChecksPerHead:
+		refused = fmt.Errorf("%w: %d checks at this head", ErrProofBusy, ghost.ProofChecksPerHead)
+	case origin == SigFromPeer && g.peerChecks >= ghost.ProofChecksPerHead-ghost.ProofRPCChecksPerHead:
+		refused = fmt.Errorf("%w: %d peer checks at this head", ErrProofBusy, g.peerChecks)
+	}
+	if refused != nil {
 		g.mu.Unlock()
-		return fmt.Errorf("%w: %d checks at this head", ErrProofBusy, ghost.ProofChecksPerHead)
+		return refused
 	}
 	select {
 	case g.slots[origin] <- struct{}{}:
@@ -233,6 +282,10 @@ func (g *ProofGate) Check(origin SigOrigin, head common.Hash, tx *types.Transact
 		return ErrProofBusy
 	}
 	g.checks++
+	if origin == SigFromPeer {
+		g.peerChecks++
+	}
+	s.checks++
 	g.mu.Unlock()
 
 	err := ghostpriv.VerifyPreimage(g.verifier, g.chainID, g.genesis, *tx.To(), input)
@@ -248,6 +301,11 @@ func (g *ProofGate) Check(origin SigOrigin, head common.Hash, tx *types.Transact
 	case errors.Is(err, ghostpriv.ErrNoVerifier), errors.Is(err, ghostpriv.ErrStatementUnsupported), errors.Is(err, ghostpriv.ErrPreimageDomain):
 		return fmt.Errorf("%w: %w", ErrProofUnsupported, err)
 	}
+	g.mu.Lock()
+	if bar := number + ghost.ProofSenderBarBlocks; bar > s.barred {
+		s.barred = bar
+	}
+	g.mu.Unlock()
 	return g.reject(hash, err)
 }
 
@@ -287,12 +345,14 @@ func (g *ProofGate) Slots(origin SigOrigin) int { return cap(g.slots[origin]) }
 func (g *ProofGate) InFlight(origin SigOrigin) int { return len(g.slots[origin]) }
 
 // ProofPeers holds, for a bounded number of peers, the budget of
-// proof-carrying deliveries and the failed checks of the current head:
-// ghost.ProofPeerBudget deliveries, and the peer is to be dropped at its
-// ghost.ProofFailLimit-th failure. Both start again when the head moves. The
-// record outlives a disconnect, so that a peer that reconnects at the same
-// head has neither its budget nor its failures back; a peer not seen
-// recently, forgotten past the bound, starts afresh.
+// proof-carrying deliveries of the current head and the failed checks:
+// ghost.ProofPeerBudget deliveries, refilled when the head moves, and the
+// peer is to be dropped at its ghost.ProofFailLimit-th failure. Failures are
+// not forgiven when the head moves, so a peer cannot send a few garbage
+// proofs at every head and stay connected. The record outlives a
+// disconnect, so that a peer that reconnects has neither its failures back
+// nor, at the same head, its budget; a peer not seen recently, forgotten
+// past the bound, starts afresh.
 type ProofPeers struct {
 	mu    sync.Mutex
 	peers lru.BasicLRU[string, *proofPeer]
@@ -312,8 +372,8 @@ func NewProofPeers(size int) *ProofPeers {
 	return &ProofPeers{peers: lru.NewBasicLRU[string, *proofPeer](size)}
 }
 
-// at returns the record of peer at head, refilled when the head moved. The
-// caller holds the lock.
+// at returns the record of peer at head, its budget refilled when the head
+// moved. The caller holds the lock.
 func (p *ProofPeers) at(peer string, head common.Hash) *proofPeer {
 	b, ok := p.peers.Get(peer)
 	if !ok {
@@ -321,7 +381,7 @@ func (p *ProofPeers) at(peer string, head common.Hash) *proofPeer {
 		p.peers.Add(peer, b)
 	}
 	if b.head != head {
-		b.head, b.tokens, b.failed = head, ghost.ProofPeerBudget, 0
+		b.head, b.tokens = head, ghost.ProofPeerBudget
 	}
 	return b
 }
@@ -346,7 +406,7 @@ func (p *ProofPeers) Available(peer string, head common.Hash) int {
 	return p.at(peer, head).tokens
 }
 
-// Fail counts one failed proof check of the peer at head, and reports
+// Fail counts one failed proof check of the peer, at any head, and reports
 // whether the peer reached ghost.ProofFailLimit and is to be dropped.
 func (p *ProofPeers) Fail(peer string, head common.Hash) bool {
 	p.mu.Lock()

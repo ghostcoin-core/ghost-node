@@ -98,9 +98,9 @@ func bundleEnvelopeTx(t *testing.T, env []byte) *types.Transaction {
 // proof check, is refused, is remembered and refused again unverified, and
 // counts as a failed proof of the peer under the limit it shares with the
 // reveals; that what a bundle's bytes decide is refused before any
-// verification; that a bundle whose every marker is spent, a full bundle cap
-// or a node that does not verify roots costs no verification and no failed
-// proof; that a valid bundle is held after one verification and not
+// verification; that a bundle over the block gas limit, one whose every
+// marker is spent, a full bundle cap or a node that does not verify roots
+// costs no verification and no failed proof; that a valid bundle is held after one verification and not
 // verified again; and that the pool takes no account transaction, which
 // keeps to the legacy pool's raw-signature bounds, nor a direct reveal.
 func TestGhostPoolBundleRootAdmission(t *testing.T) {
@@ -129,7 +129,7 @@ func TestGhostPoolBundleRootAdmission(t *testing.T) {
 	// but whose proof is zeros. One native verification, no reveal proof,
 	// refused, charged to the peer and counted as its failed proof.
 	invalid := bundleTx(t, &ghostpriv.Bundle{Version: ghostpriv.BundleVersion, ChainID: chainID,
-		Reveals: []*ghostpriv.Reveal{f.bundledReveal(testMarker(1), fee), f.bundledReveal(testMarker(2), fee)}})
+		Reveals: []*ghostpriv.Reveal{f.bundledReveal(testMarker(1), fee)}})
 	err := addOne(p, "peer-a", invalid)
 	requireErr(t, err, ghostpriv.ErrBundleProof, "invalid root")
 	if errors.Is(err, ErrPeerFailLimit) {
@@ -158,14 +158,28 @@ func TestGhostPoolBundleRootAdmission(t *testing.T) {
 		t.Fatalf("invalid root again: peer has %d tokens left, want %d", tokens, PeerRevealsPerBlock-1)
 	}
 
-	// The root binds the bodies the node reads: a valid root of the same
-	// reveals in the other order is refused, after one verification.
+	// A bundle takes count times G_PRIV, so one of two reveals is over the
+	// block gas limit of 30,000,000 and no block can include it: refused
+	// before its root is verified, charged to the peer but no failed proof
+	// of it, and not remembered, as a higher limit would take it.
 	r3, r4 := f.bundledReveal(testMarker(3), fee), f.bundledReveal(testMarker(4), fee)
-	swapped := f.bundleOf(r3, r4)
-	swapped.Reveals = []*ghostpriv.Reveal{r4, r3}
-	requireErr(t, addOne(p, "peer-b", bundleTx(t, swapped)), ghostpriv.ErrBundleProof, "root of the reveals in another order")
-	expect("root of the reveals in another order", 0, 1)
-	failedOf("root of the reveals in another order", "peer-b", 1)
+	two := bundleTx(t, f.bundleOf(r3, r4))
+	if two.Gas() <= f.chain.CurrentBlock().GasLimit {
+		t.Fatalf("a bundle of two reveals takes %d gas, within the block gas limit %d", two.Gas(), f.chain.CurrentBlock().GasLimit)
+	}
+	requireErr(t, addOne(p, "peer-b", two), txpool.ErrGasLimit, "bundle over the block gas limit")
+	expect("bundle over the block gas limit", 0, 0)
+	failedOf("bundle over the block gas limit", "peer-b", 0)
+	if tokens := peerState(p, "peer-b").tokens; tokens != PeerRevealsPerBlock-2 {
+		t.Fatalf("bundle over the block gas limit: peer has %d tokens left, want %d", tokens, PeerRevealsPerBlock-2)
+	}
+	if err := addOne(p, "peer-b", two); errors.Is(err, ErrRejectedBefore) || !errors.Is(err, txpool.ErrGasLimit) {
+		t.Fatalf("bundle over the block gas limit again: error %v, want ErrGasLimit and not remembered", err)
+	}
+	// A bundle of one reveal fits.
+	if gas := types.GhostBundleGas(1); gas > f.chain.CurrentBlock().GasLimit {
+		t.Fatalf("a bundle of one reveal takes %d gas, above the block gas limit", gas)
+	}
 
 	// The failed proof limit is shared with the reveals, in either order:
 	// a failed reveal proof and two invalid roots, or two invalid roots and a
@@ -238,7 +252,7 @@ func TestGhostPoolBundleRootAdmission(t *testing.T) {
 	// A bundle every one of whose markers is spent on the head would change
 	// nothing: refused without its root verified, and not remembered.
 	m30, m31 := testMarker(30), testMarker(31)
-	spent := bundleTx(t, f.bundleOf(f.bundledReveal(m30, fee), f.bundledReveal(m31, fee)))
+	spent := bundleTx(t, f.bundleOf(f.bundledReveal(m30, fee)))
 	p.mu.Lock()
 	unspent := p.state
 	st := unspent.Copy()
@@ -317,14 +331,15 @@ func TestGhostPoolBundleRootAdmission(t *testing.T) {
 	p.mu.Unlock()
 
 	// An announced bundle is charged like the pool's other types: one of the
-	// size of a count is fetched, one of no count's size is not.
+	// size of a count is fetched, one of no count's size is not, nor one of
+	// a count whose gas is over the block gas limit.
 	sized := uint32(invalid.Size())
 	keep := p.FilterAnnounced("peer-i",
-		[]byte{types.GhostBundleTxType, types.GhostBundleTxType, types.GhostBundleTxType},
-		[]uint32{sized, sized + 1, uint32(1 + types.GhostBundleFixedSize)},
-		[]common.Hash{{0x55, 1}, {0x55, 2}, {0x55, 3}})
-	if !keep[0] || keep[1] || keep[2] {
-		t.Fatalf("announced bundles kept %v, want only the one of a count's size", keep)
+		[]byte{types.GhostBundleTxType, types.GhostBundleTxType, types.GhostBundleTxType, types.GhostBundleTxType},
+		[]uint32{sized, sized + 1, uint32(1 + types.GhostBundleFixedSize), uint32(two.Size())},
+		[]common.Hash{{0x55, 1}, {0x55, 2}, {0x55, 3}, {0x55, 4}})
+	if !keep[0] || keep[1] || keep[2] || keep[3] {
+		t.Fatalf("announced bundles kept %v, want only the one of a count's size within the gas limit", keep)
 	}
 	if tokens := peerState(p, "peer-i").tokens; tokens != PeerRevealsPerBlock-1 {
 		t.Fatalf("announced bundle: peer has %d tokens left, want %d", tokens, PeerRevealsPerBlock-1)
