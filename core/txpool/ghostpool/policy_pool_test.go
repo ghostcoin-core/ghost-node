@@ -1211,8 +1211,9 @@ func TestGhostPoolActionRecheckOnNewHead(t *testing.T) {
 // peer on one head, of any of the pool's types, is refused with
 // ErrPeerFailLimit, and so is every transaction of the peer after it on that
 // head, without a check; that refusals before the proof, a second action for
-// a held key and the node's own failures do not count; that the count starts
-// again on a new head; and that a failed proof's hash is refused again
+// a held key and the node's own failures do not count; that the count is
+// kept when the head moves, so a peer at the limit stays there and two
+// failures on one head and one on the next reach it; and that a failed proof's hash is refused again
 // without a check, and not as the limit of the peer that resends it.
 func TestGhostPoolFailedProofLimit(t *testing.T) {
 	pf := newPolicyFixture(t, 1, 1, nil)
@@ -1305,28 +1306,19 @@ func TestGhostPoolFailedProofLimit(t *testing.T) {
 		t.Fatalf("a remembered failed proof counted %d failed proofs", b.failed)
 	}
 
-	// Two failures on this head and two on the next stay under the limit.
+	// The count is kept when the head moves: two failures on this head and
+	// one on the next reach the limit, and a peer at the limit stays there.
 	for i := 0; i < 2; i++ {
 		requireErr(t, addOne(p, "peer-v", pf.unprovenCoin(30+i)), ghostpriv.ErrRevealProof, "failure on the first head")
 	}
 	old := pf.chain.CurrentBlock()
 	pf.insert(3)
 	pf.reset(p, old)
-	for _, peer := range []string{"peer-x", "peer-z"} {
-		if b := peerState(p, peer); b.failed != 0 {
-			t.Fatalf("peer %s has %d failed proofs on the new head, want none", peer, b.failed)
-		}
+	if b := peerState(p, "peer-v"); b.failed != 2 {
+		t.Fatalf("peer peer-v has %d failed proofs on the new head, want the 2 of the old one", b.failed)
 	}
-	if err := addOne(p, "peer-x", pf.nextCoinReveal(40)); err != nil {
-		t.Fatalf("valid reveal of the peer at the old head's limit, on the new head: %v", err)
-	}
-	for i, tx := range []*types.Transaction{pf.unprovenCoin(41), pf.unprovenPolicy(42)} {
-		err := addOne(p, "peer-v", tx)
-		if !proofRefused(err) || errors.Is(err, ErrPeerFailLimit) {
-			t.Fatalf("failure %d on the new head: %v, want a failed proof under the limit", i, err)
-		}
-	}
-	requireErr(t, addOne(p, "peer-v", pf.unprovenCoin(43)), ErrPeerFailLimit, "third failure on the new head")
+	requireErr(t, addOne(p, "peer-x", pf.nextCoinReveal(40)), ErrPeerFailLimit, "valid reveal of a peer at the limit, on a new head")
+	requireErr(t, addOne(p, "peer-v", pf.unprovenCoin(41)), ErrPeerFailLimit, "third failure, on the new head")
 }
 
 // TestGhostPoolManyPeerFloodStaysInCheckSlots floods the pool from many

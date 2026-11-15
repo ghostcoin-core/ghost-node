@@ -273,8 +273,12 @@ remainder is appended with its note and the policy reveal receipt; when
 and the rest to the coinbase; `out + fee` is added to `total_out` and `out`
 to `total_escrow`. No balance is credited but the tip, and no code runs. The
 linked proof verifier does not verify the policy statement yet, so a release
-node refuses every policy reveal at the proof; the reveal pool does not take
-type `0x53` yet.
+node refuses every policy reveal at the proof. The reveal pool takes type
+`0x53`, and policy actions (`0x54`), under its own caps and peer budgets.
+Both are larger than the 4 KiB the network broadcasts whole, so a node only
+announces them; its peers fetch them from the announcement, as they fetch
+reveals (`txpool.TxPool.FilterType`,
+`TestPolicyTransactionsFetchedFromAnnouncements`).
 
 ### Escrow slots
 
@@ -392,7 +396,14 @@ skipped reveals included; a block whose pool holds less is invalid. At the
 consensus maximum block gas limit of 30,000,000
 ([account transactions](account-transactions.md#block-gas-limit-and-message-size))
 a block holds a bundle of one reveal, 21,371,656 gas; a bundle of two takes
-42,743,312 gas and fits no block. The bundle has no gas price of its own:
+42,743,312 gas and fits no block. This is the rule of record: a bundle is
+charged as the reveals it carries, so a block's gas still bounds the reveals
+it applies and the state it writes, whatever proof stands in for theirs.
+A cheaper gas for bundled reveals would change consensus and needs measured
+costs first. Until then only a bundle of one reveal can be mined, and the
+reveal pool refuses, with `txpool.ErrGasLimit` and before any verification,
+a bundle whose gas is above the head's block gas limit, and never fetches
+one announced with such a count. The bundle has no gas price of its own:
 each applied reveal pays its window fee as a lone reveal does, and a skipped
 reveal pays none. The receipt is one typed receipt of type `0x55`, status 1,
 with the bundle's whole gas and the reveal logs of the applied reveals in
@@ -400,9 +411,12 @@ order, each the version 2 reveal log of [Receipts](#receipts).
 
 ### Bundle admission
 
-No pool takes a bundle: the transaction pool and the reveal pool refuse type
-`0x55` with `core.ErrTxTypeNotSupported`, so neither an RPC submission nor a
-peer brings one in, and the miner builds none. `types.CheckTxType` takes the
+The reveal pool takes a bundle, from RPC and from peers, under its bundle
+cap and the peer budgets it shares with the reveals; a bundle from a peer
+reaches it with that peer, and peers fetch one from an announcement as they
+fetch reveals. Its structure is checked first, then its gas against the
+head's block gas limit, then that some marker is unspent, and last its root
+proof, once. `types.CheckTxType` takes the
 type, so a block that carries a bundle is processed: the state processor and
 the chain maker of the tests (`core/chain_makers.go`) apply it.
 

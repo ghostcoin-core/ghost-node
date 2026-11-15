@@ -180,8 +180,9 @@ func (h *ethHandler) filterAccountAnnounces(peer string, kinds []byte, sizes []u
 	return fkinds, fsizes, fhashes
 }
 
-// addRevealsFromPeer hands the reveals and policy actions of a delivery to
-// the reveal pool with the peer they came from, so that its budgets apply.
+// addRevealsFromPeer hands the reveals, policy actions and private bundles
+// of a delivery to the reveal pool with the peer they came from, so that its
+// budgets apply.
 // The whole delivery still goes to the fetcher afterwards, which sees each
 // of these transactions as already known or refused. A peer the pool
 // reports at its failed proof limit (ghostpool.ErrPeerFailLimit) is
@@ -192,7 +193,7 @@ func (h *ethHandler) addRevealsFromPeer(peer *eth.Peer, txs []*types.Transaction
 	}
 	var reveals []*types.Transaction
 	for _, tx := range txs {
-		if tx.IsGhostReveal() {
+		if tx.IsGhostReveal() || tx.Type() == types.GhostBundleTxType {
 			reveals = append(reveals, tx)
 		}
 	}

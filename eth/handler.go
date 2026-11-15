@@ -161,9 +161,9 @@ type handler struct {
 	sigDropPeer func(id string)
 
 	// proofPeers holds each peer's budget of proof-carrying account
-	// transactions and its failed proof checks per head; a peer that
-	// reaches ghost.ProofFailLimit at one head is disconnected through
-	// sigDropPeer.
+	// transactions per head and its failed proof checks, counted across
+	// heads; a peer that reaches ghost.ProofFailLimit is disconnected
+	// through sigDropPeer.
 	proofPeers *txpool.ProofPeers
 
 	// channels for fetcher, syncer, txsyncLoop
@@ -356,8 +356,8 @@ func newHandler(config *handlerConfig) (*handler, error) {
 // unread, and the others take one of the peer's ghost.ProofPeerBudget
 // deliveries of the head as well, past which they are dropped unverified.
 // An oversized delivery, and a transaction whose statement proof fails, is a
-// failed proof check of the peer; at ghost.ProofFailLimit of them at one
-// head the peer is disconnected.
+// failed proof check of the peer; at ghost.ProofFailLimit of them, counted
+// across heads, the peer is disconnected.
 func (h *handler) addTxsFromPeer(peer string, txs []*types.Transaction) []error {
 	var (
 		errs   = make([]error, len(txs))

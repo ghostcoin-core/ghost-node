@@ -18,6 +18,7 @@
 package legacypool
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"math"
@@ -737,7 +738,7 @@ func (pool *LegacyPool) validateTxState(tx *types.Transaction, verifySignature b
 	if pool.proofGate == nil {
 		return fmt.Errorf("%w: transaction size %v, limit %v", txpool.ErrOversizedData, tx.Size(), txMaxSize)
 	}
-	if err := pool.checkProofHeld(tx); err != nil {
+	if _, err := pool.checkProofHeld(tx); err != nil {
 		return err
 	}
 	if verifySignature && !pool.proofGate.Passed(tx.Hash()) {
@@ -749,15 +750,26 @@ func (pool *LegacyPool) validateTxState(tx *types.Transaction, verifySignature b
 // checkProofHeld refuses a proof-carrying transaction with ErrProofHeldCap
 // when the pool holds ghost.ProofTxMaxHeld others, or one of the same sender
 // at another nonce. One of the same sender and nonce, which tx would
-// replace, does not count.
+// replace, does not count. A held one that cannot be mined, because of a
+// nonce gap, gives way to a tx that can: then tx is not refused, and the
+// hash of the held one returned, which add removes once tx is added. Of the
+// sender's own held one only that one gives way; otherwise the oldest gapped
+// one does. Places held by transactions with a nonce gap so cannot keep out
+// one that a block can include.
 //
 // Note, this method assumes the pool lock is held!
-func (pool *LegacyPool) checkProofHeld(tx *types.Transaction) error {
+func (pool *LegacyPool) checkProofHeld(tx *types.Transaction) (common.Hash, error) {
 	from, err := types.GhostAccountAddress(pool.signer, tx)
 	if err != nil {
-		return fmt.Errorf("%w: %w", txpool.ErrInvalidSender, err)
+		return common.Hash{}, fmt.Errorf("%w: %w", txpool.ErrInvalidSender, err)
 	}
-	hash, held := tx.Hash(), 0
+	var (
+		hash     = tx.Hash()
+		held     = 0
+		own      common.Hash // the sender's held one at another nonce
+		gapped   common.Hash // the oldest held one of another sender with a nonce gap
+		gappedAt time.Time
+	)
 	for h, sender := range pool.proofHeld {
 		old := pool.all.Get(h)
 		if old == nil {
@@ -771,14 +783,30 @@ func (pool *LegacyPool) checkProofHeld(tx *types.Transaction) error {
 			if old.Nonce() == tx.Nonce() {
 				continue
 			}
-			return fmt.Errorf("%w: sender %v holds one", txpool.ErrProofHeldCap, from)
+			own = h
+			continue
 		}
 		held++
+		if pool.isGapped(sender, old) {
+			if at := old.Time(); gapped == (common.Hash{}) || at.Before(gappedAt) || (at.Equal(gappedAt) && bytes.Compare(h[:], gapped[:]) < 0) {
+				gapped, gappedAt = h, at
+			}
+		}
+	}
+	mineable := !pool.isGapped(from, tx)
+	if own != (common.Hash{}) {
+		if old := pool.all.Get(own); mineable && pool.isGapped(from, old) {
+			return own, nil
+		}
+		return common.Hash{}, fmt.Errorf("%w: sender %v holds one", txpool.ErrProofHeldCap, from)
 	}
 	if held >= ghost.ProofTxMaxHeld {
-		return fmt.Errorf("%w: %d held", txpool.ErrProofHeldCap, held)
+		if mineable && gapped != (common.Hash{}) {
+			return gapped, nil
+		}
+		return common.Hash{}, fmt.Errorf("%w: %d held", txpool.ErrProofHeldCap, held)
 	}
-	return nil
+	return common.Hash{}, nil
 }
 
 // dropUncallableProofTxs removes every held proof-carrying transaction whose
@@ -876,8 +904,18 @@ func (pool *LegacyPool) add(tx *types.Transaction, local bool) (replaced bool, e
 
 	// Count a proof-carrying transaction against the pool's cap of them. If
 	// it is not added after all, the entry is pruned the next time the cap
-	// is read.
+	// is read. A held one with a nonce gap that gives way to it is removed
+	// only once it is added.
 	if txpool.IsProofTxClass(tx) {
+		if giveWay, _ := pool.checkProofHeld(tx); giveWay != (common.Hash{}) {
+			defer func() {
+				if err == nil {
+					log.Trace("Proof-carrying transaction with a nonce gap gives way", "hash", giveWay, "to", hash)
+					pool.removeTx(giveWay, true, true)
+					delete(pool.proofHeld, giveWay)
+				}
+			}()
+		}
 		pool.proofHeld[hash] = from
 	}
 
@@ -1291,15 +1329,23 @@ func (pool *LegacyPool) verifyAccountTxs(origin txpool.SigOrigin, txs []*types.T
 	if pool.proofGate == nil {
 		return
 	}
-	var head common.Hash
+	var (
+		head   common.Hash
+		number uint64
+	)
 	if h := pool.currentHead.Load(); h != nil {
-		head = h.Hash()
+		head, number = h.Hash(), h.Number.Uint64()
 	}
 	for j, tx := range batch {
 		if errs[index[j]] != nil || !txpool.IsProofTxClass(tx) {
 			continue
 		}
-		if err := pool.proofGate.Check(origin, head, tx); err != nil {
+		from, err := types.GhostAccountAddress(pool.signer, tx)
+		if err != nil {
+			errs[index[j]] = fmt.Errorf("%w: %w", txpool.ErrInvalidSender, err)
+			continue
+		}
+		if err := pool.proofGate.Check(origin, head, number, from, tx); err != nil {
 			errs[index[j]] = err
 			log.Trace("Discarding proof-carrying transaction", "hash", tx.Hash(), "err", err)
 			invalidTxMeter.Mark(1)
