@@ -14,6 +14,11 @@
 // You should have received a copy of the GNU General Public License
 // along with go-ethereum. If not, see <http://www.gnu.org/licenses/>.
 
+// Windows nodes are not published yet: a Windows build has no reveal proof
+// verifier (docs/windows-service.md), so ghost-setup refuses every install
+// and update, with nothing installed, and says why. What follows is what it
+// does once they are.
+//
 // ghost-setup installs a Ghost node on Windows for the current user and
 // starts it mining, with no administrator rights. install.ps1 and install.cmd,
 // the one-line installers, download it, check its SHA-256 against the one
@@ -78,6 +83,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -85,6 +91,13 @@ import (
 
 	"github.com/ethereum/go-ethereum/internal/winsvc"
 )
+
+// refuseWindowsNode makes ghost-setup refuse every install and update until
+// a Windows node can verify reveal proofs.
+const refuseWindowsNode = true
+
+// errNoWindowsNode is why ghost-setup refuses.
+var errNoWindowsNode = errors.New("there is no Windows release of the Ghost node yet: a Windows node cannot verify reveal proofs, so it would split off the network. Run the node on Linux or macOS instead")
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -104,6 +117,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		return 0
+	}
+	// Windows nodes are not published: a Windows build has no reveal proof
+	// verifier, so it would reject every block that holds a reveal and mine
+	// a fork of its own (docs/windows-service.md). An install and an update
+	// are refused before anything is downloaded or changed.
+	if refuseWindowsNode {
+		fmt.Fprintf(stderr, "ghost-node: %s; refusing to install. Nothing was installed.\n", errNoWindowsNode)
+		return 1
 	}
 	m, err := parseArgs(args)
 	if err != nil {

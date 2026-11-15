@@ -38,6 +38,12 @@ var (
 	ErrInvalidCode              = errors.New("invalid code: must not begin with 0xef")
 	ErrNonceUintOverflow        = errors.New("nonce uint64 overflow")
 
+	// ErrStatementUnverifiable is recorded when the statement checker is
+	// called on a node that cannot verify the statement. It is not an
+	// execution error: it makes the transaction invalid (see
+	// EVM.TakeUnverifiable).
+	ErrStatementUnverifiable = errors.New("statement checker: this node cannot verify the statement")
+
 	// errStopToken is an internal token indicating interpreter loop termination,
 	// never returned to outside callers.
 	errStopToken = errors.New("stop token")

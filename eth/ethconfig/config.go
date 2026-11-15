@@ -244,6 +244,18 @@ func consensusParams(chainID *big.Int) (ghostrules.Params, error) {
 	return ghostrules.Params{}, fmt.Errorf("no consensus parameters for chain ID %v: this node runs only the public test network (%d), the internal network (%d) and developer mode (%d)", chainID, ghost.TestNetChainID, ghost.InternalNetChainID, ghost.DeveloperChainID)
 }
 
+// PublicNetwork reports whether chainID names a public Ghost network: one with
+// consensus parameters other than the internal network and developer mode.
+// Today that is the public test network; the launch genesis's entry in
+// consensusParams makes it one too.
+func PublicNetwork(chainID *big.Int) bool {
+	if _, err := consensusParams(chainID); err != nil {
+		return false
+	}
+	id := chainID.Uint64()
+	return id != ghost.InternalNetChainID && id != ghost.DeveloperChainID
+}
+
 // CreateConsensusEngine creates a consensus engine for the given chain
 // configuration. A proof-of-work chain runs RandomX with the consensus
 // parameters of its chain ID, and a chain ID without parameters is an error.

@@ -18,6 +18,7 @@ package vm
 
 import (
 	"bytes"
+	"errors"
 	"math/big"
 	"testing"
 
@@ -150,9 +151,8 @@ func TestStatementCheckerValidProofReturnsOne(t *testing.T) {
 	}
 }
 
-// TestStatementCheckerInvalidProofReturnsZero checks that a proof that does
-// not verify, and any proof on a node whose verifier cannot verify the
-// statement, is answered with the word 0 and a successful call.
+// TestStatementCheckerInvalidProofReturnsZero checks that a proof the
+// verifier rejects is answered with the word 0 and a successful call.
 func TestStatementCheckerInvalidProofReturnsZero(t *testing.T) {
 	useStubVerifier(t)
 	env := newPolicyEnv(t)
@@ -184,12 +184,77 @@ func TestStatementCheckerInvalidProofReturnsZero(t *testing.T) {
 	if r := env.callChecker(t, policy, checkerGenesis, valid); r.word != 1 {
 		t.Fatalf("valid input: result %+v", r)
 	}
-	// A node whose verifier has no proof system for the statement, as the
-	// linked verifier, answers 0 to every proof, the valid one included.
-	restore := ghostpriv.SetVerifier(nil)
-	defer restore()
-	if r := env.callChecker(t, policy, checkerGenesis, valid); !r.ok || r.size != 32 || r.word != 0 {
-		t.Errorf("default verifier: result %+v, want success and the word 0", r)
+}
+
+// preimagelessVerifier verifies reveals but has no proof system for the
+// statement checker's statement.
+type preimagelessVerifier struct{ ghostprivtest.Verifier }
+
+func (preimagelessVerifier) VerifiesPreimage() bool { return false }
+
+// unlinkedVerifier answers every proof as a node without the proof verifier
+// does.
+type unlinkedVerifier struct{}
+
+func (unlinkedVerifier) VerifyReveal(*ghostpriv.VerifyInputs, []byte) error {
+	return ghostpriv.ErrNoVerifier
+}
+
+func (unlinkedVerifier) VerifiesPreimage() bool { return true }
+
+// TestStatementCheckerFailsClosedWhenUnverifiable checks that a node that
+// cannot verify the statement gives no answer, where a verifying node
+// answers 1 to the same valid proof: the call fails with no return data and
+// all its gas, and the EVM records ErrStatementUnverifiable, which
+// TakeUnverifiable returns once.
+func TestStatementCheckerFailsClosedWhenUnverifiable(t *testing.T) {
+	useStubVerifier(t)
+	env := newPolicyEnv(t)
+	chainID := checkerChainID(t)
+	policy := env.mustCreatePolicy(1, saltOf(210), checkerPolicyCode(STATICCALL))
+	valid := statementInput(t, chainID, checkerGenesis, policy, 3)
+	if r := env.callChecker(t, policy, checkerGenesis, valid); r.word != 1 {
+		t.Fatalf("verifying node: result %+v, want the word 1", r)
+	}
+	direct := common.HexToAddress("0x00000000000000000000000000000000c0ffee03")
+	directInput := statementInput(t, chainID, checkerGenesis, direct, 4)
+
+	for name, v := range map[string]ghostpriv.Verifier{
+		"no proof system for it": preimagelessVerifier{},
+		"no proof verifier":      unlinkedVerifier{},
+		"the build's default":    nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			restore := ghostpriv.SetVerifier(v)
+			defer restore()
+			if v == nil && ghostpriv.CanVerifyProofs() {
+				t.Skip("this build links the proof verifier")
+			}
+			// Through a policy: the call fails and the EVM records why.
+			evm := env.checkerEVM(2, checkerGenesis)
+			ret, _, err := evm.Call(AccountRef(policySender), policy, valid, policyTestGas, new(uint256.Int))
+			if err != nil || len(ret) != 96 {
+				t.Fatalf("the checker policy: ret %x, err %v", ret, err)
+			}
+			if ok := new(big.Int).SetBytes(ret[:32]).Sign() != 0; ok || new(big.Int).SetBytes(ret[64:96]).Sign() != 0 {
+				t.Errorf("policy result %x, want a failed call with no return data", ret)
+			}
+			if err := evm.TakeUnverifiable(); !errors.Is(err, ErrStatementUnverifiable) {
+				t.Errorf("recorded %v, want %v", err, ErrStatementUnverifiable)
+			}
+			if err := evm.TakeUnverifiable(); err != nil {
+				t.Errorf("recorded %v after it was taken", err)
+			}
+			// Directly, from a frozen frame: no return data, no gas left.
+			evm = env.checkerEVM(2, checkerGenesis)
+			ret, left, err := evm.StaticCall(frozenFrame(direct), ghost.StatementCheckerAddress, directInput, 1_000_000)
+			if err != ErrExecutionReverted || len(ret) != 0 || left != 0 {
+				t.Errorf("direct call: ret %x, gas left %d, err %v", ret, left, err)
+			}
+			if err := evm.TakeUnverifiable(); !errors.Is(err, ErrStatementUnverifiable) {
+				t.Errorf("direct call recorded %v, want %v", err, ErrStatementUnverifiable)
+			}
+		})
 	}
 }
 

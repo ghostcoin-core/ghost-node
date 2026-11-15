@@ -186,9 +186,13 @@ jobs:
           tar -C dist/stage -czf "dist/$archive" "$exe" "$dash"
           test "$(tar -tzf "dist/$archive" | sort | tr '\n' ' ')" = "$(printf '%s\n' "$dash" "$exe" | sort | tr '\n' ' ')"
           tar -tzf "dist/$archive"
+      # A Windows build has no reveal proof verifier, so it would reject every
+      # block holding a reveal and fork off the network: it is built and
+      # tested here but kept as an unpublished artifact, which the publish
+      # job's archive-* pattern does not download (docs/windows-service.md).
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: archive-${{ matrix.os }}-${{ matrix.arch }}
+          name: ${{ matrix.os == 'windows' && 'unpublished' || 'archive' }}-${{ matrix.os }}-${{ matrix.arch }}
           path: dist/ghost-node-${{ matrix.os }}-${{ matrix.arch }}.tar.gz
           if-no-files-found: error
 
@@ -363,7 +367,8 @@ jobs:
             openssl pkeyutl -verify -pubin -inkey install/release-key.pub -rawin -in "$archive" -sigfile "$archive.sig"
             count=$((count + 1))
           done
-          test "$count" -eq 6
+          # linux and darwin, amd64 and arm64: no Windows archive.
+          test "$count" -eq 4
           files=0
           for f in dist/ghost-setup-windows-amd64.exe dist/ghost-setup-windows-arm64.exe \
                    dist/ghost-verify-linux-amd64 dist/ghost-verify-linux-arm64 \

@@ -625,3 +625,37 @@ func checkOrder(t *testing.T, file string, code []string, order ...any) {
 		}
 	}
 }
+
+// TestWindowsInstallerScriptsRefuseWithoutVerifier checks that both Windows
+// scripts, while Windows nodes cannot verify reveal proofs, refuse to install
+// before they download or run anything, saying why.
+func TestWindowsInstallerScriptsRefuseWithoutVerifier(t *testing.T) {
+	const why = "there is no Windows release of the Ghost node yet: a Windows node cannot verify reveal proofs"
+	for _, ws := range windowsScripts {
+		code := ws.code(t)
+		at := find(t, ws.file, code, why)
+		if at < 0 {
+			continue
+		}
+		switch ws.file {
+		case "install.ps1":
+			if !strings.HasPrefix(code[at], "throw ") || !strings.Contains(code[at], "$Refusal") {
+				t.Errorf("%s: the refusal %q does not stop", ws.file, code[at])
+			}
+		case "install.cmd":
+			if !strings.Contains(code[at], "%REFUSAL%") || at+1 >= len(code) || code[at+1] != "exit /b 1" {
+				t.Errorf("%s: the refusal %q is not followed by exit /b 1", ws.file, code[at])
+			}
+		}
+		for _, later := range []string{ws.httpsCheck, ws.download} {
+			if i := find(t, ws.file, code, later); i >= 0 && i <= at {
+				t.Errorf("%s: %q comes before the refusal", ws.file, later)
+			}
+		}
+		for i, line := range code[:at] {
+			if line == ws.runLine {
+				t.Errorf("%s: line %d runs ghost-setup before the refusal", ws.file, i)
+			}
+		}
+	}
+}

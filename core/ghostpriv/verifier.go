@@ -126,6 +126,21 @@ type Verifier interface {
 // ghostproofs tag) and in verifier_nocgo.go, which rejects every reveal, for
 // all others, as is VerifyHold.
 
+// rejectAll is the default verifier of a build without the proof verifier
+// (verifier_nocgo.go): it rejects every reveal with ErrNoVerifier.
+type rejectAll struct{}
+
+func (rejectAll) VerifyReveal(*VerifyInputs, []byte) error { return ErrNoVerifier }
+
+// CanVerifyProofs reports whether the node has a proof verifier: false on a
+// build without the linked verifier whose default was not replaced with
+// SetVerifier. Such a node rejects every block that holds a reveal, so it
+// must not run a public network, whose other nodes accept them.
+func CanVerifyProofs() bool {
+	_, none := ActiveVerifier().(rejectAll)
+	return !none
+}
+
 type verifierBox struct{ v Verifier }
 
 var active atomic.Pointer[verifierBox]

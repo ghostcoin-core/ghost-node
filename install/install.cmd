@@ -76,6 +76,13 @@ set "SETUP_SHA256_arm64=00000000000000000000000000000000000000000000000000000000
 set "PLACEHOLDER=0000000000000000000000000000000000000000000000000000000000000000"
 set "REFUSAL=refusing to install. Nothing was installed."
 
+rem Windows nodes are not published: a Windows build has no reveal proof
+rem verifier, so it would reject every block that holds a reveal and mine a
+rem fork of its own (docs/windows-service.md). Everything below stays for
+rem when they are.
+echo ghost-node: there is no Windows release of the Ghost node yet: a Windows node cannot verify reveal proofs, so it would split off the network. Run the node on Linux or macOS instead; %REFUSAL% 1>&2
+exit /b 1
+
 set "RELEASE_URL=https://github.com/ghostcoin-core/ghost-node/releases/latest/download"
 if defined GHOST_RELEASE_URL set "RELEASE_URL=%GHOST_RELEASE_URL%"
 if "%RELEASE_URL:~-1%"=="/" set "RELEASE_URL=%RELEASE_URL:~0,-1%"
