@@ -72,6 +72,10 @@ func (r *RandomX) VerifyHeader(chain consensus.ChainHeaderReader, header *types.
 	if parent == nil {
 		return consensus.ErrUnknownAncestor
 	}
+	// The number is checked before the key lookup, which remembers keys.
+	if err := checkNumber(header, parent); err != nil {
+		return err
+	}
 	var key common.Hash
 	if seal {
 		var err error
@@ -93,7 +97,8 @@ func (r *RandomX) VerifyHeaders(chain consensus.ChainHeaderReader, headers []*ty
 	}
 	var (
 		now     = uint64(r.now().Unix())
-		lookup  = batchLookup(chain, headers)
+		batch   = batchByHash(headers)
+		lookup  = batch.lookup(chain)
 		parents = make([]*types.Header, len(headers))
 		keys    = make([]common.Hash, len(headers))
 		errs    = make([]error, len(headers))
@@ -104,8 +109,12 @@ func (r *RandomX) VerifyHeaders(chain consensus.ChainHeaderReader, headers []*ty
 			errs[i] = consensus.ErrUnknownAncestor
 			continue
 		}
-		if parents[i] = lookup(header.ParentHash, number-1); parents[i] == nil {
+		if parents[i] = batch.parent(chain, header); parents[i] == nil {
 			errs[i] = consensus.ErrUnknownAncestor
+			continue
+		}
+		// The number is checked before the key lookup, which remembers keys.
+		if errs[i] = checkNumber(header, parents[i]); errs[i] != nil {
 			continue
 		}
 		if seals[i] {
@@ -156,6 +165,14 @@ func (r *RandomX) VerifyHeaders(chain consensus.ChainHeaderReader, headers []*ty
 	return abort, results
 }
 
+// checkNumber checks that a header's number is its parent's plus one.
+func checkNumber(header, parent *types.Header) error {
+	if header.Number == nil || parent.Number == nil || header.Number.Cmp(new(big.Int).Add(parent.Number, common.Big1)) != 0 {
+		return consensus.ErrInvalidNumber
+	}
+	return nil
+}
+
 // VerifyUncles implements consensus.Engine: a block may not carry uncles.
 func (r *RandomX) VerifyUncles(chain consensus.ChainReader, block *types.Block) error {
 	if len(block.Uncles()) > 0 {
@@ -168,8 +185,8 @@ func (r *RandomX) VerifyUncles(chain consensus.ChainReader, block *types.Block) 
 // the RandomX hash last. now is the local clock in seconds.
 func (r *RandomX) verifyHeader(chain consensus.ChainHeaderReader, header, parent *types.Header, seal bool, key common.Hash, now uint64) error {
 	// Parent link.
-	if header.Number == nil || header.Number.Cmp(new(big.Int).Add(parent.Number, common.Big1)) != 0 {
-		return consensus.ErrInvalidNumber
+	if err := checkNumber(header, parent); err != nil {
+		return err
 	}
 	if header.ParentHash != parent.Hash() {
 		return consensus.ErrUnknownAncestor

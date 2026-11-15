@@ -157,3 +157,62 @@ func TestKeyLookupOnSideBranch(t *testing.T) {
 		t.Errorf("remembered key: got %x, %v; want %x", got, err, at(side, 8).Hash())
 	}
 }
+
+// TestFalseNumberLeavesNoWrongKey sends a header that names a real parent but
+// claims a number in a neighbouring key period, through every path that
+// looks keys up, and checks that the parent's real child still gets the key
+// of its own period. The reader answers by hash alone, as the chain's header
+// cache does, and the engine starts with nothing remembered, as after a
+// restart.
+func TestFalseNumberLeavesNoWrongKey(t *testing.T) {
+	genesis := &types.Header{Number: big.NewInt(0), Time: testGenesisAt, Difficulty: big.NewInt(16)}
+	main := branch(genesis, 20, "main")
+	reader := cacheReader{newTestReader(testConfig(), genesis, main...)}
+
+	for _, c := range []struct {
+		name    string
+		parent  uint64 // the real parent's height
+		claimed uint64 // the number the false header claims
+	}{
+		// Blocks 13..20 are keyed by block 8, 21..28 by block 16.
+		{"next key period", 19, 22},
+		{"previous key period", 15, 12},
+	} {
+		parent, child := main[c.parent-1], main[c.parent]
+		if SeedHeight(c.claimed, testEpoch, testLag) == SeedHeight(child.Number.Uint64(), testEpoch, testLag) {
+			t.Fatalf("%s: the claimed number shares the child's key; the test proves nothing", c.name)
+		}
+		want := main[SeedHeight(child.Number.Uint64(), testEpoch, testLag)-1].Hash()
+		forged := &types.Header{
+			ParentHash: parent.Hash(),
+			Number:     new(big.Int).SetUint64(c.claimed),
+			Time:       parent.Time + testBlockTime,
+			Difficulty: big.NewInt(16),
+			Extra:      []byte("forged"),
+		}
+
+		engine := newTestEngine(t, testParams())
+		if err := engine.VerifyHeader(reader, forged, true); !errors.Is(err, consensus.ErrInvalidNumber) {
+			t.Errorf("%s: single: error %v, want %v", c.name, err, consensus.ErrInvalidNumber)
+		}
+		_, results := engine.VerifyHeaders(reader, []*types.Header{forged}, []bool{true})
+		if err := <-results; !errors.Is(err, consensus.ErrInvalidNumber) {
+			t.Errorf("%s: batch: error %v, want %v", c.name, err, consensus.ErrInvalidNumber)
+		}
+		// The key lookup itself refuses the parent at the wrong number,
+		// through the chain and through a batch.
+		if _, err := engine.keyOf(chainLookup(reader), forged); !errors.Is(err, consensus.ErrUnknownAncestor) {
+			t.Errorf("%s: chain key lookup: error %v, want %v", c.name, err, consensus.ErrUnknownAncestor)
+		}
+		if _, err := engine.keyOf(batchLookup(reader, []*types.Header{parent, forged}), forged); !errors.Is(err, consensus.ErrUnknownAncestor) {
+			t.Errorf("%s: batch key lookup: error %v, want %v", c.name, err, consensus.ErrUnknownAncestor)
+		}
+		if key, ok := engine.keys.Get(parent.Hash()); ok {
+			t.Errorf("%s: a key %x is remembered for the real parent", c.name, key)
+		}
+		got, err := engine.keyOf(chainLookup(reader), child)
+		if err != nil || got != want {
+			t.Errorf("%s: the real child's key: got %x, %v; want %x", c.name, got, err, want)
+		}
+	}
+}

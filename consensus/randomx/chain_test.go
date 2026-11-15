@@ -428,3 +428,39 @@ func cacheRefs(s *cacheSet, key common.Hash) int {
 	}
 	return 0
 }
+
+// TestFalseNumberDoesNotBreakRealChild sends a header that names sealed block
+// 15 as its parent but claims number 12, under the genesis key, to an engine
+// with nothing remembered, then checks that block 16, the real child, still
+// verifies alone and in a batch. The reader answers by hash alone, as the
+// chain's header cache does.
+func TestFalseNumberDoesNotBreakRealChild(t *testing.T) {
+	f := sealedChain(t)
+	headers := f.headers()
+	parent, child := headers[14], headers[15]
+	if f.key(12) == f.key(16) {
+		t.Fatal("blocks 12 and 16 share a key; the test proves nothing")
+	}
+	forged := types.CopyHeader(child)
+	forged.Number = big.NewInt(12)
+
+	reader := cacheReader{newTestReader(testConfig(), f.genesis.Header(), headers[:15]...)}
+	engine := newTestEngine(t, testParams())
+	if err := engine.VerifyHeader(reader, forged, true); !errors.Is(err, consensus.ErrInvalidNumber) {
+		t.Errorf("forged header: error %v, want %v", err, consensus.ErrInvalidNumber)
+	}
+	_, results := engine.VerifyHeaders(reader, []*types.Header{forged}, []bool{true})
+	if err := <-results; !errors.Is(err, consensus.ErrInvalidNumber) {
+		t.Errorf("forged header in a batch: error %v, want %v", err, consensus.ErrInvalidNumber)
+	}
+	if _, ok := engine.keys.Get(parent.Hash()); ok {
+		t.Error("a key is remembered for block 15 from the forged header")
+	}
+	if err := engine.VerifyHeader(reader, child, true); err != nil {
+		t.Errorf("block 16 after the forged header: %v", err)
+	}
+	_, results = engine.VerifyHeaders(reader, []*types.Header{child}, []bool{true})
+	if err := <-results; err != nil {
+		t.Errorf("block 16 in a batch after the forged header: %v", err)
+	}
+}
