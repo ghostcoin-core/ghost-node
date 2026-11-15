@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -143,8 +144,10 @@ func TestPinVerifierHashesInstalls(t *testing.T) {
 	if changed != len(verifierPlatforms) {
 		t.Fatalf("pinning changed %d lines of install.sh, not one for each of the %d checkers", changed, len(verifierPlatforms))
 	}
-	if strings.Count(string(after), strings.Repeat("0", 64)) != 1 {
-		t.Fatal("the pinned install.sh still holds the placeholder outside placeholder_hash")
+	// Outside GitHub Actions the archives are not pinned: only
+	// placeholder_hash and the four archive lines hold the placeholder.
+	if strings.Count(string(after), strings.Repeat("0", 64)) != 1+len(verifierPlatforms) {
+		t.Fatal("the pinned install.sh still holds the placeholder outside placeholder_hash and the archive lines")
 	}
 
 	blob := release.tarGz(t)
@@ -260,11 +263,13 @@ func TestPinVerifierHashesRefuses(t *testing.T) {
 
 const (
 	latestURL = "https://github.com/ghostcoin-core/ghost-node/releases/latest/download"
-	// The commit and run a release in GitHub Actions is built from, and the
-	// download URL of the release the publish step makes of them.
-	testRunNumber = "21"
-	testSHA       = "478f05260a1bc2d3e4f5a6b7c8d9e0f1a2b3c4d5"
-	taggedURL     = "https://github.com/ghostcoin-core/ghost-node/releases/download/build-21-478f05260a1b"
+	// The tag a release in GitHub Actions is cut from, the download URL of the
+	// release the publish step makes of it, and its build number.
+	testTag    = "v1.20.3"
+	taggedURL  = "https://github.com/ghostcoin-core/ghost-node/releases/download/" + testTag
+	testBuild  = "1020003"
+	buildLine  = "release_build=0\n"
+	pinnedLine = "release_build=" + testBuild + "\n"
 )
 
 // The installers the release publishes, as they are in dist.
@@ -285,7 +290,7 @@ func defaultURLs(name string) int {
 const newestLine = "newest_url=${GHOST_LATEST_URL:-" + latestURL + "}\n"
 
 // actionsEnv is the environment GitHub Actions gives the release's steps.
-var actionsEnv = []string{"GITHUB_ACTIONS=true", "GITHUB_RUN_NUMBER=" + testRunNumber, "GITHUB_SHA=" + testSHA}
+var actionsEnv = []string{"GITHUB_ACTIONS=true", "GITHUB_REF_TYPE=tag", "GITHUB_REF_NAME=" + testTag}
 
 // distDir writes a release folder like the release's dist when it pins the
 // hashes: the ghost-verify files and copies of the repository's installers,
@@ -294,6 +299,12 @@ var actionsEnv = []string{"GITHUB_ACTIONS=true", "GITHUB_RUN_NUMBER=" + testRunN
 func distDir(t *testing.T, edit map[string]func(string) string) (string, map[string]string) {
 	t.Helper()
 	dir, _ := releaseDir(t, nil)
+	for _, platform := range verifierPlatforms {
+		blob := []byte("stand-in archive for " + platform + "\n")
+		if err := os.WriteFile(filepath.Join(dir, "ghost-node-"+platform+".tar.gz"), blob, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	content := make(map[string]string)
 	for _, name := range installerNames {
 		blob, err := os.ReadFile(name)
@@ -355,10 +366,13 @@ func TestPinReleaseURLRewrite(t *testing.T) {
 		if strings.Contains(rest, latestURL) || strings.Contains(rest, "releases/latest") {
 			t.Errorf("%s still downloads from the latest release", name)
 		}
-		// Apart from the URL, and install.sh's hashes, nothing changes.
+		// Apart from the URL, and install.sh's hashes and build number,
+		// nothing changes.
 		restored := strings.Replace(after[name], taggedURL, latestURL, 1)
 		if name == "install.sh" {
 			restored = hashLine.ReplaceAllString(restored, "${1}-${2} "+strings.Repeat("0", 64))
+			restored = strings.Replace(restored, pinnedLine, buildLine, 1)
+			restored = archiveLine.ReplaceAllString(restored, "${1} "+strings.Repeat("0", 64))
 		}
 		if restored != before[name] {
 			t.Errorf("pinning changed %s beyond its release URL", name)
@@ -380,6 +394,54 @@ func TestPinReleaseURLRewrite(t *testing.T) {
 			t.Errorf("install.sh still pins the placeholder for ghost-verify-%s", platform)
 		}
 	}
+	if !strings.Contains(out, "pinned build number "+testBuild+" of "+testTag) {
+		t.Errorf("pin-verifier-hashes.sh did not say it pinned build number %s", testBuild)
+	}
+	if strings.Count(after["install.sh"], pinnedLine) != 1 || strings.Contains(after["install.sh"], buildLine) {
+		t.Errorf("the pinned install.sh does not carry build number %s on its one release_build line", testBuild)
+	}
+	// Each archive line pins that archive's SHA-256, and no placeholder is
+	// left but placeholder_hash.
+	for _, platform := range verifierPlatforms {
+		name := "ghost-node-" + platform + ".tar.gz"
+		want := sha256Hex([]byte("stand-in archive for " + platform + "\n"))
+		if !strings.Contains(after["install.sh"], "\n"+name+" "+want+"\n") {
+			t.Errorf("the pinned install.sh does not pin %s to its SHA-256 %s", name, want)
+		}
+	}
+	if strings.Count(after["install.sh"], strings.Repeat("0", 64)) != 1 {
+		t.Error("the pinned install.sh still holds the placeholder outside placeholder_hash")
+	}
+}
+
+// archiveLine matches a line of the script's table of archive hashes.
+var archiveLine = regexp.MustCompile(`(?m)^(ghost-node-(?:linux|darwin)-(?:amd64|arm64)\.tar\.gz) ([0-9a-f]{64})$`)
+
+// TestPinBuildNumbers checks the build number each release tag pins: the
+// updater compares these, so a later tag must always give a larger number.
+func TestPinBuildNumbers(t *testing.T) {
+	for _, tc := range []struct{ tag, build string }{
+		{"v0.0.1", "1"},
+		{"v0.1.0", "1000"},
+		{"v1.0.0", "1000000"},
+		{"v1.2.3", "1002003"},
+		{"v999.999.999", "999999999"},
+	} {
+		t.Run(tc.tag, func(t *testing.T) {
+			dir, _ := distDir(t, nil)
+			env := []string{"GITHUB_ACTIONS=true", "GITHUB_REF_TYPE=tag", "GITHUB_REF_NAME=" + tc.tag}
+			if _, err := runPinEnv(t, filepath.Join(dir, "install.sh"), dir, env); err != nil {
+				t.Fatalf("pin-verifier-hashes.sh failed: %v", err)
+			}
+			after := readInstallers(t, dir)
+			if !strings.Contains(after["install.sh"], "\nrelease_build="+tc.build+"\n") {
+				t.Errorf("tag %s did not pin build number %s", tc.tag, tc.build)
+			}
+			if !strings.Contains(after["install.sh"], "/releases/download/"+tc.tag+"}\n") {
+				t.Errorf("tag %s did not pin its own release URL", tc.tag)
+			}
+		})
+	}
 }
 
 // TestPinReleaseURLNoRewriteOutsideActions checks that outside GitHub Actions
@@ -390,8 +452,8 @@ func TestPinReleaseURLNoRewriteOutsideActions(t *testing.T) {
 		env  []string
 	}{
 		{name: "no GITHUB_ACTIONS"},
-		{name: "GITHUB_ACTIONS not true", env: []string{"GITHUB_ACTIONS=false", "GITHUB_RUN_NUMBER=" + testRunNumber, "GITHUB_SHA=" + testSHA}},
-		{name: "only the run and commit", env: []string{"GITHUB_RUN_NUMBER=" + testRunNumber, "GITHUB_SHA=" + testSHA}},
+		{name: "GITHUB_ACTIONS not true", env: []string{"GITHUB_ACTIONS=false", "GITHUB_REF_TYPE=tag", "GITHUB_REF_NAME=" + testTag}},
+		{name: "only the tag", env: []string{"GITHUB_REF_TYPE=tag", "GITHUB_REF_NAME=" + testTag}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir, before := distDir(t, nil)
@@ -439,20 +501,54 @@ func TestPinReleaseURLRefuses(t *testing.T) {
 		return strings.Replace(s, latestURL, "https://github.com/ghostcoin-core/ghost-node/releases/download/build-1-000000000000", 1)
 	}
 	for _, tc := range []struct {
-		name string
-		env  []string
-		edit map[string]func(string) string
-		want string
+		name   string
+		env    []string
+		edit   map[string]func(string) string
+		folder func(t *testing.T, dir string)
+		want   string
 	}{
-		{name: "no run number", env: without("GITHUB_RUN_NUMBER"), want: "GITHUB_RUN_NUMBER is not a positive integer"},
-		{name: "an empty run number", env: with("GITHUB_RUN_NUMBER="), want: "GITHUB_RUN_NUMBER is not a positive integer"},
-		{name: "a run number of zero", env: with("GITHUB_RUN_NUMBER=0"), want: "GITHUB_RUN_NUMBER is not a positive integer"},
-		{name: "a run number not a number", env: with("GITHUB_RUN_NUMBER=21a"), want: "GITHUB_RUN_NUMBER is not a positive integer"},
-		{name: "a negative run number", env: with("GITHUB_RUN_NUMBER=-21"), want: "GITHUB_RUN_NUMBER is not a positive integer"},
-		{name: "no sha", env: without("GITHUB_SHA"), want: "GITHUB_SHA is not a hex commit hash"},
-		{name: "a sha not hex", env: with("GITHUB_SHA=478f0526zz1bc2d3e4f5a6b7c8d9e0f1a2b3c4d5"), want: "GITHUB_SHA is not a hex commit hash"},
-		{name: "a sha with a slash", env: with("GITHUB_SHA=478f05260a1b/c2d3e4f5"), want: "GITHUB_SHA is not a hex commit hash"},
-		{name: "a short sha", env: with("GITHUB_SHA=478f05260a1"), want: "GITHUB_SHA is shorter than 12 characters"},
+		{name: "not a tag", env: without("GITHUB_REF_TYPE"), want: "this run is not for a pushed tag"},
+		{name: "a branch", env: with("GITHUB_REF_TYPE=branch"), want: "this run is not for a pushed tag"},
+		{name: "no tag name", env: without("GITHUB_REF_NAME"), want: "is not vMAJOR.MINOR.PATCH"},
+		{name: "an empty tag", env: with("GITHUB_REF_NAME="), want: "is not vMAJOR.MINOR.PATCH"},
+		{name: "a tag without v", env: with("GITHUB_REF_NAME=1.2.3"), want: "is not vMAJOR.MINOR.PATCH"},
+		{name: "a tag with two parts", env: with("GITHUB_REF_NAME=v1.2"), want: "is not vMAJOR.MINOR.PATCH"},
+		{name: "a tag with a suffix", env: with("GITHUB_REF_NAME=v1.2.3-rc1"), want: "is not vMAJOR.MINOR.PATCH"},
+		{name: "a tag part of four digits", env: with("GITHUB_REF_NAME=v1.1000.0"), want: "is not vMAJOR.MINOR.PATCH"},
+		{name: "a tag part with a leading zero", env: with("GITHUB_REF_NAME=v1.02.3"), want: "is not vMAJOR.MINOR.PATCH"},
+		{name: "a tag with a slash", env: with("GITHUB_REF_NAME=v1.2.3/x"), want: "is not vMAJOR.MINOR.PATCH"},
+		{name: "a tag over two lines", env: with("GITHUB_REF_NAME=v1.2.3\nv1.2.4"), want: "is not vMAJOR.MINOR.PATCH"},
+		{name: "v0.0.0", env: with("GITHUB_REF_NAME=v0.0.0"), want: "gives build number 0"},
+		{
+			name:   "an archive missing",
+			env:    actionsEnv,
+			folder: func(t *testing.T, dir string) { os.Remove(filepath.Join(dir, "ghost-node-darwin-amd64.tar.gz")) },
+			want:   "there is no ghost-node-darwin-amd64.tar.gz in",
+		},
+		{
+			name: "an archive placeholder line missing",
+			env:  actionsEnv,
+			edit: map[string]func(string) string{"install.sh": func(s string) string {
+				return strings.Replace(s, "ghost-node-linux-arm64.tar.gz "+strings.Repeat("0", 64)+"\n", "", 1)
+			}},
+			want: "has 0 placeholder lines for ghost-node-linux-arm64.tar.gz, not one",
+		},
+		{
+			name: "install.sh without the build placeholder",
+			env:  actionsEnv,
+			edit: map[string]func(string) string{"install.sh": func(s string) string {
+				return strings.Replace(s, buildLine, "release_build=7\n", 1)
+			}},
+			want: "install.sh does not set release_build=0, the placeholder",
+		},
+		{
+			name: "install.sh with two build lines",
+			env:  actionsEnv,
+			edit: map[string]func(string) string{"install.sh": func(s string) string {
+				return strings.Replace(s, buildLine, buildLine+buildLine, 1)
+			}},
+			want: "install.sh has 2 release_build lines, not one",
+		},
 		{
 			name: "install.sh without the URL",
 			env:  actionsEnv,
@@ -498,6 +594,9 @@ func TestPinReleaseURLRefuses(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir, before := distDir(t, tc.edit)
+			if tc.folder != nil {
+				tc.folder(t, dir)
+			}
 			out, err := runPinEnv(t, filepath.Join(dir, "install.sh"), dir, tc.env)
 			var exit *exec.ExitError
 			if !errors.As(err, &exit) {

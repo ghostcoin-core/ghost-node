@@ -18,17 +18,25 @@
 # In GitHub Actions (GITHUB_ACTIONS=true) it also pins the release the
 # installers download from: the published install.sh pins this release's
 # ghost-verify hashes, so it must not follow releases/latest to the next
-# release, whose ghost-verify has other hashes. It computes the release tag as
-# the publish step does, build-$GITHUB_RUN_NUMBER- and the first 12 characters
-# of $GITHUB_SHA, and replaces the default releases/latest/download URL with
+# release, whose ghost-verify has other hashes. A release is cut from a pushed
+# tag vMAJOR.MINOR.PATCH (GITHUB_REF_TYPE=tag, GITHUB_REF_NAME the tag), each
+# part a number from 0 to 999 without leading zeros, and not v0.0.0. The
+# script replaces the default releases/latest/download URL with
 # releases/download/<tag> in the script's release_url and in dir's
 # install.ps1 and install.cmd. GHOST_RELEASE_URL still overrides it. The
 # script's newest_url keeps the default URL: its updater looks there for the
-# newest release's signed install.sh. It fails, changing none of the files,
-# when either variable is missing or malformed, when install.ps1 or
-# install.cmd does not hold the default URL exactly once, or when the script
-# does not hold it exactly twice, once as release_url's and once as
-# newest_url's default. Outside GitHub Actions the URL is left alone.
+# newest release's signed install.sh. It also replaces the script's one
+# release_build=0 line with the tag's build number, MAJOR*1000000 +
+# MINOR*1000 + PATCH, which the updater compares so that it never installs an
+# older release. It fails, changing none of the files, when the run is not for
+# such a tag, when dir lacks a ghost-node-<os>-<arch>.tar.gz archive or the
+# script does not hold exactly one placeholder line for it (each is pinned to
+# the archive's SHA-256, so the signed script names its own release's
+# archives), when install.ps1 or install.cmd does not hold the default URL
+# exactly once, when the script does not hold it exactly twice, once as
+# release_url's and once as newest_url's default, or when the script does not
+# hold exactly one release_build=0 line. Outside GitHub Actions the URL and
+# the build number are left alone.
 
 set -eu
 LC_ALL=C
@@ -53,16 +61,17 @@ dir=$2
 pin_url=false
 if [ "${GITHUB_ACTIONS:-}" = true ]; then
 	pin_url=true
-	run=${GITHUB_RUN_NUMBER:-}
-	sha=${GITHUB_SHA:-}
-	case "$run" in
-	'' | *[!0-9]* | 0*) fail "GITHUB_RUN_NUMBER is not a positive integer: '$run'" ;;
+	[ "${GITHUB_REF_TYPE:-}" = tag ] || fail "this run is not for a pushed tag (GITHUB_REF_TYPE is '${GITHUB_REF_TYPE:-}'); releases are cut from vMAJOR.MINOR.PATCH tags"
+	tag=${GITHUB_REF_NAME:-}
+	part='(0|[1-9][0-9]{0,2})'
+	case "$tag" in
+	*[!v0-9.]*) tag_ok=false ;;
+	*) tag_ok=true ;;
 	esac
-	case "$sha" in
-	'' | *[!0-9a-fA-F]*) fail "GITHUB_SHA is not a hex commit hash: '$sha'" ;;
-	esac
-	[ "${#sha}" -ge 12 ] || fail "GITHUB_SHA is shorter than 12 characters: '$sha'"
-	tag=build-$run-$(printf '%s\n' "$sha" | cut -c1-12)
+	[ "$tag_ok" = true ] && printf '%s\n' "$tag" | grep -Eqx "v$part\.$part\.$part" ||
+		fail "the tag '$tag' is not vMAJOR.MINOR.PATCH with each part a number from 0 to 999"
+	build=$(printf '%s\n' "$tag" | awk -F. '{ sub(/^v/, "", $1); print $1 * 1000000 + $2 * 1000 + $3 }')
+	[ "$build" -gt 0 ] || fail "the tag '$tag' gives build number $build; the first release is v0.0.1 or later"
 	release_url=https://github.com/ghostcoin-core/ghost-node/releases/download/$tag
 	for name in install.ps1 install.cmd; do
 		[ -f "$dir/$name" ] || fail "there is no $name in $dir"
@@ -100,12 +109,40 @@ for platform in $platforms; do
 	[ "$count" = 1 ] || fail "could not pin the hash of ghost-verify-$platform in $script"
 done
 
-# Only the installer's placeholder_hash constant may still hold the zeros.
+# In GitHub Actions, pin the release's archives too: the signed install.sh
+# then names the one archive of each platform it installs.
+if [ "$pin_url" = true ]; then
+	for platform in $platforms; do
+		name=ghost-node-$platform.tar.gz
+		file="$dir/$name"
+		[ -f "$file" ] && [ -s "$file" ] || fail "there is no $name in $dir, or it is empty"
+		hash=$(sha256 "$file") || fail "could not compute the SHA-256 of $file"
+		case "$hash" in
+		*[!0-9a-f]* | '' | "$zero") fail "$file has no usable SHA-256: $hash" ;;
+		esac
+		[ "${#hash}" = 64 ] || fail "$file has no usable SHA-256: $hash"
+		count=$(grep -cF "$name $zero" "$tmp" || :)
+		[ "$count" = 1 ] && [ "$(grep -cx "ghost-node-$platform\.tar\.gz $zero" "$tmp" || :)" = 1 ] ||
+			fail "$script has $count placeholder lines for $name, not one"
+		sed "s/^ghost-node-$platform\.tar\.gz $zero\$/$name $hash/" "$tmp" >"$tmp.new"
+		cat "$tmp.new" >"$tmp"
+		[ "$(grep -cx "ghost-node-$platform\.tar\.gz $hash" "$tmp" || :)" = 1 ] ||
+			fail "could not pin the hash of $name in $script"
+	done
+	archives_left=0
+else
+	archives_left=$(echo $platforms | wc -w | tr -d ' ')
+	[ "$(grep -cE "^ghost-node-[a-z0-9]+-[a-z0-9]+\.tar\.gz $zero\$" "$tmp" || :)" = "$archives_left" ] ||
+		fail "$script does not hold one archive placeholder line for each of $platforms"
+fi
+
+# Only the installer's placeholder_hash constant, and outside GitHub Actions
+# the archive placeholders, may still hold the zeros.
 if grep -Eq "^[a-z0-9]+-[a-z0-9]+[[:space:]]+$zero\$" "$tmp"; then
 	fail "$script still pins the placeholder for: $(grep -E "^[a-z0-9]+-[a-z0-9]+[[:space:]]+$zero\$" "$tmp" | cut -d' ' -f1 | tr '\n' ' ')"
 fi
 count=$(grep -c "$zero" "$tmp" || :)
-[ "$count" = 1 ] || fail "$script holds the placeholder $count times after pinning, not only in placeholder_hash"
+[ "$count" = $((archives_left + 1)) ] || fail "$script holds the placeholder $count times after pinning, not only in placeholder_hash"
 
 # occurrences prints how many times the text $1 is in the file $2.
 occurrences() {
@@ -142,8 +179,22 @@ pin_script_url() {
 		fail "could not pin the release URL in $3"
 }
 
+# pin_build writes the script $1 to $2 with its one release_build=0 line
+# holding this release's build number. It refuses a script $3 that does not
+# hold exactly one release_build line, and that line release_build=0.
+pin_build() {
+	count=$(grep -c '^release_build=' "$1" || :)
+	[ "$count" = 1 ] || fail "$3 has $count release_build lines, not one"
+	count=$(grep -cx 'release_build=0' "$1" || :)
+	[ "$count" = 1 ] || fail "$3 does not set release_build=0, the placeholder"
+	sed "s/^release_build=0\$/release_build=$build/" "$1" >"$2"
+	[ "$(grep -cx "release_build=$build" "$2" || :)" = 1 ] || fail "could not pin the build number in $3"
+}
+
 if [ "$pin_url" = true ]; then
 	pin_script_url "$tmp" "$tmp.new" "$script"
+	cat "$tmp.new" >"$tmp"
+	pin_build "$tmp" "$tmp.new" "$script"
 	cat "$tmp.new" >"$tmp"
 	pin_release_url "$dir/install.ps1" "$tmp.ps1" "$dir/install.ps1"
 	pin_release_url "$dir/install.cmd" "$tmp.cmd" "$dir/install.cmd"
@@ -155,4 +206,5 @@ if [ "$pin_url" = true ]; then
 	cat "$tmp.ps1" >"$dir/install.ps1"
 	cat "$tmp.cmd" >"$dir/install.cmd"
 	printf 'pin-verifier-hashes: pinned the release URL %s in %s, %s and %s\n' "$release_url" "$script" "$dir/install.ps1" "$dir/install.cmd"
+	printf 'pin-verifier-hashes: pinned build number %s of %s in %s\n' "$build" "$tag" "$script"
 fi

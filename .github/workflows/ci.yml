@@ -1,14 +1,17 @@
 name: CI
 
-# Required checks on main: typecheck, build, unit, fixtures, reproducible.
+# Required checks on main: typecheck, build, unit and fixtures. They are
+# GitHub Actions check runs, which a commit status set with a write token
+# cannot stand in for.
 #
 # This repository is public, so jobs run on GitHub-hosted runners: anyone can
 # open a pull request, and pull request code must never run on our own hosts.
 #
-# Pull requests run only typecheck: the full test suite runs as a gate before
-# merge (build/ci-gate.sh, the same commands these jobs call). Every other job
-# runs on push to main; on a pull request it does not run, and a job left out
-# that way still satisfies a required check.
+# Pull requests and pushes to main run typecheck, build, the unit shards and
+# the fixture parts, each in its own job under ten minutes; unit and fixtures
+# pass only when every shard or part did. The jobs call build/ci-gate.sh, which
+# runs the same commands on any host. reproducible, which builds every target
+# twice and takes longer, runs on push to main only.
 
 on:
   push:
@@ -45,7 +48,6 @@ jobs:
 
   build:
     name: build
-    if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -68,7 +70,6 @@ jobs:
 
   unit-shard:
     name: unit (${{ matrix.shard }})
-    if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
@@ -90,7 +91,7 @@ jobs:
   unit:
     name: unit
     needs: unit-shard
-    if: github.event_name == 'push' && always()
+    if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -101,7 +102,6 @@ jobs:
 
   fixtures-part:
     name: fixtures (${{ matrix.part }})
-    if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
@@ -124,7 +124,7 @@ jobs:
   fixtures:
     name: fixtures
     needs: fixtures-part
-    if: github.event_name == 'push' && always()
+    if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
