@@ -2067,14 +2067,14 @@ func (s *TransactionAPI) sign(ctx context.Context, addr common.Address, tx *type
 	return walletSignAccountTx(ctx, s.b, wallet, account, nil, tx)
 }
 
-// rpcSigConns bounds the number of RPC connections whose signature budgets
-// are kept. A connection not seen recently starts with a full budget; the
-// overall budget still holds.
+// rpcSigConns bounds the number of RPC sources whose signature budgets are
+// kept. A source not seen recently starts with a full budget; the overall
+// budget still holds.
 const rpcSigConns = 1024
 
 // sigBudgets are the RPC budgets of account transaction signature checks per
-// second: one for each connection, told apart by its remote address, and one
-// for all connections together.
+// second: one for each source, its client IP address (rpcSource), however
+// many connections it opens, and one for all sources together.
 type sigBudgets struct {
 	conns *txpool.SigBudgets
 	all   *txpool.SigBudget
@@ -2087,10 +2087,39 @@ func newSigBudgets(perConn, overall uint64, now func() time.Time) *sigBudgets {
 	}
 }
 
-// take spends a check of a connection's budget and of the overall budget,
-// and reports false when either is used up.
-func (s *sigBudgets) take(conn string) bool {
-	return s.conns.Get(conn).Take() && s.all.Take()
+// take spends a check of a source's budget and of the overall budget, and
+// reports false when either is used up. A source whose own budget is used up
+// takes nothing of the overall one, so no one source can use it up.
+func (s *sigBudgets) take(source string) bool {
+	return s.conns.Get(source).Take() && s.all.Take()
+}
+
+// accountTxPrecheck runs, before an account transaction takes a signature
+// check of the RPC budgets, checks the pool would refuse it by anyway that
+// need neither state nor its signature: the chain ID, a fee cap below the
+// tip, gas over the head's limit or below the least intrinsic gas an account
+// transaction of its scheme, key and signature has, and a commit's data and
+// value. Each check is no stricter than the pool's, so a transaction it
+// passes may still be refused there; one it refuses never takes a check of
+// the budgets.
+func accountTxPrecheck(b Backend, tx *types.Transaction) error {
+	if id := b.ChainConfig().GetChainID(); id != nil && tx.ChainId().Cmp(id) != 0 {
+		return fmt.Errorf("%w: have %d want %d", types.ErrInvalidChainId, tx.ChainId(), id)
+	}
+	if tx.GasFeeCapIntCmp(tx.GasTipCap()) < 0 {
+		return core.ErrTipAboveFeeCap
+	}
+	if head := b.CurrentBlock(); head != nil && head.GasLimit < tx.Gas() {
+		return txpool.ErrGasLimit
+	}
+	extra, err := core.GhostAccountExtraIntrinsicGas(tx)
+	if err != nil {
+		return err
+	}
+	if least := vars.TxGas + extra; extra > math.MaxUint64-vars.TxGas || tx.Gas() < least {
+		return fmt.Errorf("%w: gas %v, minimum needed at least %v", core.ErrIntrinsicGas, tx.Gas(), least)
+	}
+	return txpool.ValidateCommit(tx)
 }
 
 var rpcSigBudgets = newSigBudgets(ghost.SigRPCConnBudget, ghost.SigRPCBudget, nil)
@@ -2106,10 +2135,15 @@ func SubmitTransaction(ctx context.Context, b Backend, tx *types.Transaction) (c
 		// Ensure only eip155 signed transactions are submitted if EIP155Required is set.
 		return common.Hash{}, errors.New("only replay-protected (EIP-155) transactions allowed over RPC")
 	}
-	// An account transaction takes a signature check of the connection's
-	// budget and of the overall RPC budget.
-	if tx.Type() == types.GhostAccountTxType && !rpcSigBudgets.take(rpc.PeerInfoFromContext(ctx).RemoteAddr) {
-		return common.Hash{}, txpool.ErrSignatureBudget
+	// An account transaction that passes the cheap checks takes a signature
+	// check of its source's budget and of the overall RPC budget.
+	if tx.Type() == types.GhostAccountTxType {
+		if err := accountTxPrecheck(b, tx); err != nil {
+			return common.Hash{}, err
+		}
+		if !rpcSigBudgets.take(rpcSource(rpc.PeerInfoFromContext(ctx))) {
+			return common.Hash{}, txpool.ErrSignatureBudget
+		}
 	}
 	if err := b.SendTx(ctx, tx); err != nil {
 		// Keep the JSON-RPC code of a full signature queue.

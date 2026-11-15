@@ -17,6 +17,7 @@
 package ethapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,11 +34,13 @@ import (
 // of 8 pages), and nothing else.
 type GhostAPI struct {
 	history *ghosttree.History
+	limit   *ghostReadLimiter
 }
 
-// NewGhostAPI returns the ghost namespace over a tree history.
+// NewGhostAPI returns the ghost namespace over a tree history. Its reads
+// share the node's ghost read limits (ghostReads).
 func NewGhostAPI(history *ghosttree.History) *GhostAPI {
-	return &GhostAPI{history: history}
+	return &GhostAPI{history: history, limit: ghostReads}
 }
 
 // TreeKind is a kind in JSON: "coin" or "data" for a tree, "coin-markers" or
@@ -101,13 +104,18 @@ var (
 // out for a leaf without one), and their number (RPCTreePage); for a marker kind it is the markers spent at the
 // page's positions and their number (RPCMarkerPage). A page past the last
 // filled one is empty.
-func (api *GhostAPI) GetTreePage(kind TreeKind, treeIndex hexutil.Uint64, page hexutil.Uint64, anchorHash common.Hash) (interface{}, error) {
+func (api *GhostAPI) GetTreePage(ctx context.Context, kind TreeKind, treeIndex hexutil.Uint64, page hexutil.Uint64, anchorHash common.Hash) (interface{}, error) {
 	if api.history == nil {
 		return nil, errNoTreeHistory
 	}
 	if page > math.MaxUint32 {
 		return nil, fmt.Errorf("%w: page %d", ghosttree.ErrPageRange, uint64(page))
 	}
+	release, err := api.limit.acquire(ctx, 1)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	if ghosttree.Kind(kind).IsMarkers() {
 		p, err := api.history.MarkerPage(ghosttree.Kind(kind), uint64(treeIndex), uint32(page), anchorHash)
 		if err != nil {
@@ -144,20 +152,25 @@ func rpcTreePage(p *ghosttree.TreePage) *RPCTreePage {
 // as of the anchor block from page start to the last page with a leaf. start
 // must be a multiple of 65,536 pages below the pages of a full tree; a start
 // past the last page gives an empty list.
-func (api *GhostAPI) GetPageRootTail(kind TreeKind, treeIndex hexutil.Uint64, start hexutil.Uint64, anchorHash common.Hash) ([]common.Hash, error) {
+func (api *GhostAPI) GetPageRootTail(ctx context.Context, kind TreeKind, treeIndex hexutil.Uint64, start hexutil.Uint64, anchorHash common.Hash) ([]common.Hash, error) {
 	if api.history == nil {
 		return nil, errNoTreeHistory
 	}
 	if start > math.MaxUint32 {
 		return nil, fmt.Errorf("%w: page %d", ghosttree.ErrTailStart, uint64(start))
 	}
+	release, err := api.limit.acquire(ctx, 1)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	return api.history.PageRootTail(ghosttree.Kind(kind), uint64(treeIndex), uint32(start), anchorHash)
 }
 
 // GetPageSet returns whole pages of a tree (kind "coin" or "data") as of the
 // anchor block, as ghost_getTreePage returns one: exactly 8 distinct pages in
 // ascending order, or every page of a tree of 8 pages or fewer.
-func (api *GhostAPI) GetPageSet(kind TreeKind, treeIndex hexutil.Uint64, pages []hexutil.Uint64, anchorHash common.Hash) ([]*RPCTreePage, error) {
+func (api *GhostAPI) GetPageSet(ctx context.Context, kind TreeKind, treeIndex hexutil.Uint64, pages []hexutil.Uint64, anchorHash common.Hash) ([]*RPCTreePage, error) {
 	if api.history == nil {
 		return nil, errNoTreeHistory
 	}
@@ -171,6 +184,11 @@ func (api *GhostAPI) GetPageSet(kind TreeKind, treeIndex hexutil.Uint64, pages [
 		}
 		numbers[i] = uint32(p)
 	}
+	release, err := api.limit.acquire(ctx, int64(len(numbers)))
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	set, err := api.history.PageSet(ghosttree.Kind(kind), uint64(treeIndex), numbers, anchorHash)
 	if err != nil {
 		return nil, err
@@ -184,12 +202,17 @@ func (api *GhostAPI) GetPageSet(kind TreeKind, treeIndex hexutil.Uint64, pages [
 
 // GetPageRoots returns the page roots of a tree as of the anchor block, of
 // pages 0 to the last page with a leaf. A marker list has none.
-func (api *GhostAPI) GetPageRoots(kind TreeKind, treeIndex hexutil.Uint64, anchorHash common.Hash) ([]common.Hash, error) {
+func (api *GhostAPI) GetPageRoots(ctx context.Context, kind TreeKind, treeIndex hexutil.Uint64, anchorHash common.Hash) ([]common.Hash, error) {
 	if api.history == nil {
 		return nil, errNoTreeHistory
 	}
 	if ghosttree.Kind(kind).IsMarkers() {
 		return nil, fmt.Errorf("%w: %v", errNoMarkerRoots, ghosttree.Kind(kind))
 	}
+	release, err := api.limit.acquire(ctx, 1)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	return api.history.PageRoots(ghosttree.Kind(kind), uint64(treeIndex), anchorHash)
 }

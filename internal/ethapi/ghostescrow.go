@@ -37,12 +37,14 @@ type EscrowStateReader interface {
 // GhostEscrowAPI serves the escrow slots in the ghost namespace, from the
 // head state (spec 10, section 7).
 type GhostEscrowAPI struct {
-	b EscrowStateReader
+	b     EscrowStateReader
+	limit *ghostReadLimiter
 }
 
-// NewGhostEscrowAPI returns the escrow slot reads over a backend.
+// NewGhostEscrowAPI returns the escrow slot reads over a backend. Its reads
+// share the node's ghost read limits (ghostReads).
 func NewGhostEscrowAPI(b EscrowStateReader) *GhostEscrowAPI {
-	return &GhostEscrowAPI{b: b}
+	return &GhostEscrowAPI{b: b, limit: ghostReads}
 }
 
 var errNoEscrowState = errors.New("no head state")
@@ -59,6 +61,11 @@ func (api *GhostEscrowAPI) EscrowSlot(ctx context.Context, marker common.Hash) (
 	if api.b == nil {
 		return nil, errNoEscrowState
 	}
+	release, err := api.limit.acquire(ctx, 1)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	st, _, err := api.b.StateAndHeaderByNumber(ctx, rpc.LatestBlockNumber)
 	if err != nil {
 		return nil, err

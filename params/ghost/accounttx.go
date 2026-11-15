@@ -72,7 +72,8 @@ const (
 	SigPeerBudget = 50
 
 	// SigRPCConnBudget is the number of account transactions one RPC
-	// connection may submit per second.
+	// source (a client IP address, whatever its connections) may submit
+	// per second.
 	SigRPCConnBudget = 80
 
 	// SigRPCBudget is the number of account transactions all RPC connections

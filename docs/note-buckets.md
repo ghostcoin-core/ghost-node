@@ -13,7 +13,7 @@ code is `ghosttree.ReadNoteBucket` in `core/ghosttree/buckets.go` and the
 ## Request
 
 ```
-ghost_getNoteBucket(kind, treeIndex, bits, prefix, anchorHash)
+ghost_getNoteBucket(kind, treeIndex, bits, prefix, anchorHash[, start])
 ```
 
 | Argument | Content |
@@ -23,6 +23,7 @@ ghost_getNoteBucket(kind, treeIndex, bits, prefix, anchorHash)
 | `bits` | the bucket bits `m`, hex quantity |
 | `prefix` | the `m`-bit prefix, hex quantity, below `2^m` |
 | `anchorHash` | the canonical block the bucket is as of |
+| `start` | optional: the first position to return, hex quantity; 0 when left out |
 
 The tag of a note is its first 3 bytes read as a big-endian 24-bit number;
 the prefix of a tag at `m` bits is `tag >> (24 - m)`. For example the tag
@@ -51,13 +52,33 @@ leaves give `m = 8`, 3,650,000,000 give `m = 19`, 2^36 leaves or more give 24.
 |---|---|
 | `kind` | the kind asked for |
 | `treeIndex`, `bits`, `prefix` | as asked, hex quantities |
-| `count` | the number of entries, hex quantity |
-| `entries` | the filled positions whose note's tag starts with the prefix, in increasing position order |
+| `count` | the number of entries of this reply, hex quantity |
+| `entries` | the filled positions from `start` on whose note's tag starts with the prefix, in increasing position order, at most 8,192 |
+| `next` | only when the bucket holds more entries past the last one: the `start` to ask for next, hex quantity |
 
 Each entry is `{position, leaf, note, salt}`: the position as a hex quantity,
 the leaf `C`, the 380-byte note and the 16-byte salt of a salted commit.
 `salt` is left out for a leaf without one, as in a page entry. Only positions
 filled at or before the anchor are returned.
+
+## Pages
+
+A committer picks the tag of its note, so anyone can make one bucket far
+larger than the `m` rule's 4,096 to 8,192 notes by committing many notes
+with one tag. A reply therefore holds at most 8,192 entries
+(`ghosttree.MaxBucketEntries`, twice the rule's least, so an honest bucket
+nearly always comes in one reply). A bucket with more is read in pages: ask
+again with `start` set to the reply's `next`, at the same anchor, until a
+reply has no `next`. The pages of one anchor together are the whole bucket,
+each position once, in increasing order. A reply without `next` is the
+whole rest of the bucket, so a wallet that never sends `start` reads every
+bucket of the rule's size as before.
+
+A read visits every key of the bucket's range in the tag index, so a bucket
+whose range holds more than 262,144 keys (`ghosttree.MaxBucketScan`, in all
+levels read, positions past the anchor included) is refused with
+`ErrBucketTooLarge`; a wallet then reads the tree's pages, as it does for a
+node without buckets.
 
 The bucket is not checked against a header root: proving a returned leaf sits
 at its position is the authenticated read, a later change. Like a page
@@ -75,7 +96,10 @@ Each of these is an error, and the store is unchanged:
   (`ErrNotCanonical`);
 - an anchor the history has not applied, or a history built before the tag
   index (`ErrHistoryNotReady`);
-- a tree index other than 0 without a leaf at the anchor (`ErrNoTree`).
+- a tree index other than 0 without a leaf at the anchor (`ErrNoTree`);
+- a `start` above 2^32 - 1;
+- a bucket whose index range holds more than 262,144 keys
+  (`ErrBucketTooLarge`).
 
 ## The tag index
 

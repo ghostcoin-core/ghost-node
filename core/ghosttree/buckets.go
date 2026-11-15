@@ -44,6 +44,18 @@ const (
 	// MinBucketNotes is the number of notes a bucket holds at least once a
 	// tree has that many.
 	MinBucketNotes = 4096
+
+	// MaxBucketEntries is the most entries one read of a bucket returns
+	// (ReadNoteBucketPage): twice MinBucketNotes, the size below which a
+	// bucket of the m rule falls, so an honest bucket nearly always comes in
+	// one read. A larger bucket is read in pages of this many.
+	MaxBucketEntries = 2 * MinBucketNotes
+
+	// MaxBucketScan is the most keys of the tag index one read of a bucket
+	// visits, in every level together. A committer picks the tag of a note,
+	// so a bucket can be made far larger than the m rule's; one past this
+	// is refused (ErrBucketTooLarge) and a wallet reads the pages instead.
+	MaxBucketScan = 1 << 18
 )
 
 var (
@@ -53,7 +65,14 @@ var (
 
 	// ErrBucketPrefix is returned for a prefix wider than its bits.
 	ErrBucketPrefix = errors.New("bucket prefix beyond its bits")
+
+	// ErrBucketTooLarge is returned for a bucket whose tag index range holds
+	// more than MaxBucketScan keys.
+	ErrBucketTooLarge = errors.New("bucket too large to serve; read the pages")
 )
+
+// bucketScan is MaxBucketScan, lowered by tests.
+var bucketScan = MaxBucketScan
 
 // BucketBits returns the prefix bits of the buckets of a tree of count
 // leaves: floor(log2(count / 4096)), clamped to 0 to 24.
@@ -71,9 +90,13 @@ type BucketEntry struct {
 	PageEntry
 }
 
-// NoteBucket is the leaves of a bucket in increasing position order.
+// NoteBucket is the leaves of a bucket, or of one page of it, in increasing
+// position order. More reports leaves of the bucket past the last entry; the
+// next page starts at position Next.
 type NoteBucket struct {
 	Entries []BucketEntry
+	More    bool
+	Next    uint32
 }
 
 // tagLevel is the level of the tag index a position is kept in: the bucket
@@ -110,12 +133,25 @@ func tagRange(bits, prefix uint32) (first, last uint32) {
 
 // ReadNoteBucket returns the leaves of tree treeIndex of a kind (Coin or
 // Data) as of the anchor block whose note's tag starts with the bits-bit
-// prefix, each with its position, leaf, note and salt, in position order. It
-// refuses bits other than BucketBits of the tree's leaf count at the anchor
-// and a prefix of 2^bits or more. The anchor must be canonical and applied to
-// the history, and a tree index other than 0 must have a leaf at it. The
-// bucket is not checked against a header root.
+// prefix, each with its position, leaf, note and salt, in position order: the
+// whole bucket, as ReadNoteBucketPage with no limit on the entries. It is for
+// readers inside the node; the RPC reads a bucket in pages.
 func ReadNoteBucket(h *History, kind Kind, treeIndex uint64, bits uint32, prefix uint32, anchor common.Hash) (*NoteBucket, error) {
+	return ReadNoteBucketPage(h, kind, treeIndex, bits, prefix, anchor, 0, 0)
+}
+
+// ReadNoteBucketPage returns the leaves of tree treeIndex of a kind (Coin or
+// Data) as of the anchor block whose note's tag starts with the bits-bit
+// prefix and whose position is start or later, each with its position, leaf,
+// note and salt, in position order, at most limit of them (no limit for 0).
+// When the bucket holds more past the last one returned, More is set and
+// Next is the start of the next page. It refuses bits other than BucketBits
+// of the tree's leaf count at the anchor and a prefix of 2^bits or more, and
+// a bucket whose tag index range holds more than MaxBucketScan keys
+// (ErrBucketTooLarge). The anchor must be canonical and applied to the
+// history, and a tree index other than 0 must have a leaf at it. The bucket
+// is not checked against a header root.
+func ReadNoteBucketPage(h *History, kind Kind, treeIndex uint64, bits uint32, prefix uint32, anchor common.Hash, start uint32, limit int) (*NoteBucket, error) {
 	if !kind.valid() {
 		return nil, ErrUnknownKind
 	}
@@ -149,23 +185,36 @@ func ReadNoteBucket(h *History, kind Kind, treeIndex uint64, bits uint32, prefix
 		return nil, fmt.Errorf("%w: %d bits, %v tree %d of %d leaves at block %d has %d", ErrBucketBits, bits, kind, treeIndex, count, number, want)
 	}
 	out := &NoteBucket{Entries: []BucketEntry{}}
-	if count == 0 {
+	if count == 0 || uint64(start) >= count {
 		return out, nil
 	}
 	// The positions below count are in levels 0 to bits; no later level is
 	// read, and the positions past the anchor in level bits are passed over.
+	// Every key of the range is visited, at most MaxBucketScan in all, and
+	// only the positions from start on are kept.
 	first, last := tagRange(bits, prefix)
 	var positions []uint32
-	for level := uint32(0); level <= bits; level++ {
-		tagged, err := rawdb.ReadGhostTreeTagRange(h.db, uint8(kind), uint8(level), treeIndex, first, last, count)
-		if err != nil {
-			return nil, fmt.Errorf("%w: %w", ErrCorruptHistory, err)
-		}
-		for _, t := range tagged {
+	keep := func(t rawdb.GhostTreeTagged) {
+		if t.Position >= start {
 			positions = append(positions, t.Position)
 		}
 	}
+	scan := bucketScan
+	for level := uint32(0); level <= bits; level++ {
+		read, err := rawdb.ScanGhostTreeTagRange(h.db, uint8(kind), uint8(level), treeIndex, first, last, count, scan, keep)
+		if errors.Is(err, rawdb.ErrGhostTreeTagScan) {
+			return nil, fmt.Errorf("%w: %v tree %d bucket %#x of %d bits holds more than %d index keys", ErrBucketTooLarge, kind, treeIndex, prefix, bits, MaxBucketScan)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrCorruptHistory, err)
+		}
+		scan -= read
+	}
 	slices.Sort(positions)
+	if limit > 0 && len(positions) > limit {
+		out.More, out.Next = true, positions[limit-1]+1
+		positions = positions[:limit]
+	}
 
 	out.Entries = make([]BucketEntry, 0, len(positions))
 	for _, pos := range positions {

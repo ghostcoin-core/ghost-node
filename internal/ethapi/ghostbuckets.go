@@ -17,7 +17,10 @@
 package ethapi
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"math"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -29,11 +32,14 @@ import (
 // note's tag starts with a bit prefix.
 type GhostBucketAPI struct {
 	history *ghosttree.History
+	limit   *ghostReadLimiter
+	entries int // the most entries of one reply
 }
 
-// NewGhostBucketAPI returns the note bucket reads over a tree history.
+// NewGhostBucketAPI returns the note bucket reads over a tree history. Its
+// reads share the node's ghost read limits (ghostReads).
 func NewGhostBucketAPI(history *ghosttree.History) *GhostBucketAPI {
-	return &GhostBucketAPI{history: history}
+	return &GhostBucketAPI{history: history, limit: ghostReads, entries: ghosttree.MaxBucketEntries}
 }
 
 // RPCBucketEntry is one leaf of a bucket at its position. Salt is left out
@@ -45,8 +51,9 @@ type RPCBucketEntry struct {
 	Salt     hexutil.Bytes  `json:"salt,omitempty"`
 }
 
-// RPCNoteBucket is one bucket of a tree as of an anchor: its entries in
-// position order, and their number.
+// RPCNoteBucket is one bucket of a tree as of an anchor, or one page of it:
+// its entries in position order, and their number. Next is set only when the
+// bucket holds more entries past the last one: the start to ask for next.
 type RPCNoteBucket struct {
 	Kind      TreeKind         `json:"kind"`
 	TreeIndex hexutil.Uint64   `json:"treeIndex"`
@@ -54,15 +61,19 @@ type RPCNoteBucket struct {
 	Prefix    hexutil.Uint64   `json:"prefix"`
 	Count     hexutil.Uint64   `json:"count"`
 	Entries   []RPCBucketEntry `json:"entries"`
+	Next      *hexutil.Uint64  `json:"next,omitempty"`
 }
 
 // GetNoteBucket returns the leaves of a tree ("coin" or "data") as of the
 // anchor block whose note's tag starts with the bits-bit prefix, each as
 // position, leaf, note and salt, in position order. Bits must be those of
 // the tree's leaf count at the anchor and the prefix below 2^bits; anything
-// else, and a marker kind, is refused. The bucket is not checked against a
-// header root.
-func (api *GhostBucketAPI) GetNoteBucket(kind TreeKind, treeIndex hexutil.Uint64, bits hexutil.Uint64, prefix hexutil.Uint64, anchorHash common.Hash) (*RPCNoteBucket, error) {
+// else, and a marker kind, is refused. A reply holds at most
+// ghosttree.MaxBucketEntries entries, from position start on (0 when left
+// out); a bucket with more sets next, the start of its next page. A bucket
+// whose index holds more than ghosttree.MaxBucketScan keys is refused. The
+// bucket is not checked against a header root.
+func (api *GhostBucketAPI) GetNoteBucket(ctx context.Context, kind TreeKind, treeIndex hexutil.Uint64, bits hexutil.Uint64, prefix hexutil.Uint64, anchorHash common.Hash, start *hexutil.Uint64) (*RPCNoteBucket, error) {
 	if api.history == nil {
 		return nil, errNoTreeHistory
 	}
@@ -72,7 +83,19 @@ func (api *GhostBucketAPI) GetNoteBucket(kind TreeKind, treeIndex hexutil.Uint64
 	if prefix >= 1<<bits {
 		return nil, fmt.Errorf("%w: prefix %#x of %d bits", ghosttree.ErrBucketPrefix, uint64(prefix), uint64(bits))
 	}
-	b, err := ghosttree.ReadNoteBucket(api.history, ghosttree.Kind(kind), uint64(treeIndex), uint32(bits), uint32(prefix), anchorHash)
+	var from uint32
+	if start != nil {
+		if *start > math.MaxUint32 {
+			return nil, fmt.Errorf("%w: start %d", errBucketStart, uint64(*start))
+		}
+		from = uint32(*start)
+	}
+	release, err := api.limit.acquire(ctx, int64((api.entries+ghosttree.PageLeaves-1)/ghosttree.PageLeaves))
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	b, err := ghosttree.ReadNoteBucketPage(api.history, ghosttree.Kind(kind), uint64(treeIndex), uint32(bits), uint32(prefix), anchorHash, from, api.entries)
 	if err != nil {
 		return nil, err
 	}
@@ -84,6 +107,10 @@ func (api *GhostBucketAPI) GetNoteBucket(kind TreeKind, treeIndex hexutil.Uint64
 		Count:     hexutil.Uint64(len(b.Entries)),
 		Entries:   make([]RPCBucketEntry, len(b.Entries)),
 	}
+	if b.More {
+		next := hexutil.Uint64(b.Next)
+		out.Next = &next
+	}
 	for i, e := range b.Entries {
 		out.Entries[i] = RPCBucketEntry{Position: hexutil.Uint64(e.Position), Leaf: e.Leaf, Note: append(hexutil.Bytes(nil), e.Note[:]...)}
 		if e.Salt != nil {
@@ -92,3 +119,5 @@ func (api *GhostBucketAPI) GetNoteBucket(kind TreeKind, treeIndex hexutil.Uint64
 	}
 	return out, nil
 }
+
+var errBucketStart = errors.New("bucket start beyond the positions of a tree")
