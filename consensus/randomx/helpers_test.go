@@ -221,3 +221,11 @@ func mutateField(t *testing.T, h *types.Header, name string, variant int) {
 		t.Fatalf("header field %s has type %s, which the test does not know how to change", name, f.Type())
 	}
 }
+
+// cacheReader is a testReader that finds headers by hash alone, ignoring the
+// number asked for, as the chain's header cache does.
+type cacheReader struct{ *testReader }
+
+func (r cacheReader) GetHeader(hash common.Hash, number uint64) *types.Header {
+	return r.byHash[hash]
+}

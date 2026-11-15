@@ -37,32 +37,69 @@ func (r *RandomX) seedHeight(h uint64) uint64 {
 	return SeedHeight(h, r.epochLength, r.keyLag)
 }
 
-// headerLookup finds a header by hash and number.
+// headerLookup finds a header by hash and number. It returns nil unless the
+// header found carries that number.
 type headerLookup func(hash common.Hash, number uint64) *types.Header
 
-// chainLookup reads headers from the chain only.
+// numbered returns h if it carries number, else nil.
+func numbered(h *types.Header, number uint64) *types.Header {
+	if h == nil || h.Number == nil || !h.Number.IsUint64() || h.Number.Uint64() != number {
+		return nil
+	}
+	return h
+}
+
+// chainLookup reads headers from the chain only. The chain's header cache
+// answers by hash alone, so the number is checked here.
 func chainLookup(chain consensus.ChainHeaderReader) headerLookup {
-	return chain.GetHeader
+	return func(hash common.Hash, number uint64) *types.Header {
+		return numbered(chain.GetHeader(hash, number), number)
+	}
 }
 
 // batchLookup reads headers from a batch being verified, then from the chain.
 func batchLookup(chain consensus.ChainHeaderReader, headers []*types.Header) headerLookup {
-	byHash := make(map[common.Hash]*types.Header, len(headers))
+	return batchByHash(headers).lookup(chain)
+}
+
+// batchHeaders indexes a batch being verified by header hash.
+type batchHeaders map[common.Hash]*types.Header
+
+func batchByHash(headers []*types.Header) batchHeaders {
+	byHash := make(batchHeaders, len(headers))
 	for _, h := range headers {
 		byHash[h.Hash()] = h
 	}
+	return byHash
+}
+
+// parent returns the parent of header from the batch or the chain, found by
+// hash whatever number it carries, as VerifyHeader finds it, so the caller
+// can refuse a wrong number as an invalid number.
+func (byHash batchHeaders) parent(chain consensus.ChainHeaderReader, header *types.Header) *types.Header {
+	if h := byHash[header.ParentHash]; h != nil {
+		return h
+	}
+	return chain.GetHeader(header.ParentHash, header.Number.Uint64()-1)
+}
+
+// lookup reads headers from the batch, then from the chain, by hash and
+// number.
+func (byHash batchHeaders) lookup(chain consensus.ChainHeaderReader) headerLookup {
 	return func(hash common.Hash, number uint64) *types.Header {
-		if h := byHash[hash]; h != nil && h.Number.Uint64() == number {
+		if h := numbered(byHash[hash], number); h != nil {
 			return h
 		}
-		return chain.GetHeader(hash, number)
+		return numbered(chain.GetHeader(hash, number), number)
 	}
 }
 
 // keyOf returns the RandomX key of a header: the hash of its ancestor at the
 // seed height, found by following parent hashes on the header's own branch.
 // Results are remembered per header hash, for the header and for every
-// ancestor passed on the way that shares its seed height.
+// ancestor passed on the way that shares its seed height. Every ancestor is
+// found by hash and the number it must have, so a header claiming a false
+// number cannot leave a wrong key remembered for a real ancestor.
 func (r *RandomX) keyOf(lookup headerLookup, header *types.Header) (common.Hash, error) {
 	number := header.Number.Uint64()
 	seed := r.seedHeight(number)
@@ -90,7 +127,7 @@ func (r *RandomX) keyOf(lookup headerLookup, header *types.Header) (common.Hash,
 			key = known
 			break
 		}
-		parent := lookup(cur.ParentHash, parentNumber)
+		parent := numbered(lookup(cur.ParentHash, parentNumber), parentNumber)
 		if parent == nil {
 			return common.Hash{}, consensus.ErrUnknownAncestor
 		}
