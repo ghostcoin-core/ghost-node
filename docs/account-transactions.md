@@ -322,10 +322,22 @@ transaction already in the pool costs nothing. A transaction from a peer the
 node cannot identify is dropped before it takes a slot.
 
 RPC has two budgets, token buckets refilled every second as well
-(`internal/ethapi/api.go`): one for each connection, told apart by its remote
-address (`rpc.PeerInfoFromContext`), and one for all connections together.
-A submission beyond either fails with the error `signature budget exceeded`,
-JSON-RPC code `-32005`, before it reaches the pool.
+(`internal/ethapi/api.go`): one for each source, and one for all sources
+together. A source is the client's IP address without its port, so new
+connections from one address share one budget, and an IPv6 address counts
+by its /64 (`rpcSource` in `internal/ethapi/ghostlimit.go`). A request from
+a loopback address that carries `X-Forwarded-For` came through a proxy on
+the same computer, such as the Tailscale Funnel a public node is published
+with (which sets the header to the client's address), and its source is the
+header's last address; the header of any other caller is ignored. A
+transaction first passes the checks the pool would refuse it by that need
+neither state nor its signature (chain ID, fee cap against tip, gas against
+the head's limit and the least intrinsic gas, a commit's data and value),
+and only then takes a check of the budgets, so junk the pool would refuse
+spends none. A submission beyond either budget fails with the error
+`signature budget exceeded`, JSON-RPC code `-32005`, before it reaches the
+pool. A source whose own budget is used up takes nothing of the overall
+one, so one source cannot use it up.
 
 ### Peers
 
@@ -350,7 +362,7 @@ queue is paid at that cost:
 | `SigVerifyQueue` | 256 | the last check of a full queue waits 256 × 1.1932 ms / 4 = 76.4 ms at worst, 34.4 ms at the SLH-DSA median; 192 slots for peers, 64 for RPC |
 | `SigPeerBudget` | 50 per second | the peers' 3 quarters of the workers, 2,514 per second at worst, over the default 50 peers is 50.3, rounded down |
 | `SigRPCBudget` | 800 per second | the RPC quarter of the workers, 838 per second at worst, rounded down |
-| `SigRPCConnBudget` | 80 per second | a tenth of the RPC budget, so that one connection cannot take it all |
+| `SigRPCConnBudget` | 80 per second | a tenth of the RPC budget, so that one source cannot take it all |
 | `SigFailureCacheSize` | 4,096 | entries of 96 bytes, well under 1 MiB; a peer that sends a failure is disconnected, so the cache serves the same failure sent again by other peers |
 
 `TestSignatureLimitsAreSet` checks the peer and RPC budgets against the

@@ -306,6 +306,7 @@ func newWebsocketCodec(conn *websocket.Conn, host string, req http.Header, readL
 	wc.info.HTTP.Host = host
 	wc.info.HTTP.Origin = req.Get("Origin")
 	wc.info.HTTP.UserAgent = req.Get("User-Agent")
+	wc.info.HTTP.ForwardedFor = strings.Join(req.Values("X-Forwarded-For"), ",")
 	// Start pinger.
 	conn.SetPongHandler(func(appData string) error {
 		select {

@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -323,6 +324,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	connInfo.HTTP.Host = r.Host
 	connInfo.HTTP.Origin = r.Header.Get("Origin")
 	connInfo.HTTP.UserAgent = r.Header.Get("User-Agent")
+	connInfo.HTTP.ForwardedFor = strings.Join(r.Header.Values("X-Forwarded-For"), ",")
 	ctx := r.Context()
 	ctx = context.WithValue(ctx, peerInfoContextKey{}, connInfo)
 

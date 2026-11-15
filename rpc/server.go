@@ -246,6 +246,11 @@ type PeerInfo struct {
 		UserAgent string
 		Origin    string
 		Host      string
+		// ForwardedFor is the X-Forwarded-For header, its values joined by
+		// commas, as a reverse proxy in front of the node set it. It is
+		// whatever the sender wrote and is only to be believed of a proxy
+		// the node trusts.
+		ForwardedFor string
 	}
 }
 

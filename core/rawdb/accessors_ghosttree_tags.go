@@ -18,6 +18,7 @@ package rawdb
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 
 	"github.com/ethereum/go-ethereum/ethdb"
@@ -49,37 +50,59 @@ func DeleteGhostTreeTag(db ethdb.KeyValueWriter, kind, level uint8, treeIndex ui
 	return db.Delete(ghostTreeTagKey(kind, level, treeIndex, tag, position))
 }
 
+// ErrGhostTreeTagScan is returned by ScanGhostTreeTagRange when a range holds
+// more keys than the scan may read.
+var ErrGhostTreeTagScan = errors.New("tag range holds more keys than one read may scan")
+
 // ReadGhostTreeTagRange returns the stored positions below count of one
 // level of a tree whose tag lies in first to last, both included, in tag
 // order and, within a tag, in position order. Positions at or above count
 // are passed over and never kept.
 func ReadGhostTreeTagRange(db ethdb.Iteratee, kind, level uint8, treeIndex uint64, first, last uint32, count uint64) ([]GhostTreeTagged, error) {
+	var out []GhostTreeTagged
+	_, err := ScanGhostTreeTagRange(db, kind, level, treeIndex, first, last, count, -1, func(t GhostTreeTagged) {
+		out = append(out, t)
+	})
+	return out, err
+}
+
+// ScanGhostTreeTagRange calls keep, in the order of ReadGhostTreeTagRange,
+// for each stored position below count of one level of a tree whose tag
+// lies in first to last. It reads at most maxKeys keys of the range (no
+// limit when negative), counting the positions passed over, and returns
+// ErrGhostTreeTagScan once the range holds more. It returns the number of
+// keys read.
+func ScanGhostTreeTagRange(db ethdb.Iteratee, kind, level uint8, treeIndex uint64, first, last uint32, count uint64, maxKeys int, keep func(GhostTreeTagged)) (int, error) {
 	if first > last || last >= 1<<(8*GhostTreeTagBytes) {
-		return nil, fmt.Errorf("tag range %#x to %#x", first, last)
+		return 0, fmt.Errorf("tag range %#x to %#x", first, last)
 	}
 	if count == 0 {
-		return nil, nil
+		return 0, nil
 	}
 	prefix := ghostTreeTagTreeKey(kind, level, treeIndex)
 	start := []byte{byte(first >> 16), byte(first >> 8), byte(first)}
 	it := db.NewIterator(prefix, start)
 	defer it.Release()
 
-	var out []GhostTreeTagged
+	read := 0
 	for it.Next() {
 		rest := it.Key()[len(prefix):]
 		if len(rest) != GhostTreeTagBytes+4 {
-			return nil, fmt.Errorf("tag key of %d bytes", len(it.Key()))
+			return read, fmt.Errorf("tag key of %d bytes", len(it.Key()))
 		}
 		tag := uint32(rest[0])<<16 | uint32(rest[1])<<8 | uint32(rest[2])
 		if tag > last {
 			break
 		}
+		if maxKeys >= 0 && read >= maxKeys {
+			return read, ErrGhostTreeTagScan
+		}
+		read++
 		if position := binary.BigEndian.Uint32(rest[GhostTreeTagBytes:]); uint64(position) < count {
-			out = append(out, GhostTreeTagged{Tag: tag, Position: position})
+			keep(GhostTreeTagged{Tag: tag, Position: position})
 		}
 	}
-	return out, it.Error()
+	return read, it.Error()
 }
 
 // DeleteGhostTreeTags removes every tag key of every tree, writing to batch

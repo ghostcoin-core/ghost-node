@@ -74,6 +74,19 @@ before any page is read):
   the figure spec 05 section 8 gives for the whole page-root list, so it adds
   no cost beyond `ghost_getPageRoots`.
 
+Nor can it be made to by many requests. The ghost reads (`ghost_getTreePage`,
+`ghost_getPageSet`, `ghost_getPageRoots`, `ghost_getPageRootTail`,
+`ghost_getNoteBucket`, `ghost_escrowSlot`) share one limit
+(`internal/ethapi/ghostlimit.go`). Each read costs page units: one, one per
+page of a page set, two for a note bucket. The node works on at most 16
+units at once over every caller, and each source (a client IP address, as
+for the signature budget; see `docs/account-transactions.md`) may read 32
+units a second, 64 at once after a quiet spell. A read waits up to two
+seconds for its source's rate and then for units; past that it is refused
+with JSON-RPC code `-32005`, and the caller may try again. A wallet reading
+pages one after another is slowed, not refused. IPC and in-process callers
+are the node's own and are held only to the units.
+
 ## Spent-marker index
 
 The index serves the reorg and rebuild bookkeeping: it is written when a
