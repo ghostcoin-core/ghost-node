@@ -23,7 +23,7 @@ ghost_getNoteBucket(kind, treeIndex, bits, prefix, anchorHash[, start])
 | `bits` | the bucket bits `m`, hex quantity |
 | `prefix` | the `m`-bit prefix, hex quantity, below `2^m` |
 | `anchorHash` | the canonical block the bucket is as of |
-| `start` | optional: the first position to return, hex quantity; 0 when left out |
+| `start` | optional: the first position to return, hex quantity; asks for the bucket in pages |
 
 The tag of a note is its first 3 bytes read as a big-endian 24-bit number;
 the prefix of a tag at `m` bits is `tag >> (24 - m)`. For example the tag
@@ -71,8 +71,11 @@ nearly always comes in one reply). A bucket with more is read in pages: ask
 again with `start` set to the reply's `next`, at the same anchor, until a
 reply has no `next`. The pages of one anchor together are the whole bucket,
 each position once, in increasing order. A reply without `next` is the
-whole rest of the bucket, so a wallet that never sends `start` reads every
-bucket of the rule's size as before.
+whole rest of the bucket. A request without `start` is answered with the
+whole bucket, as before paging, or with an error when the bucket has more
+than 8,192 entries, never with a part of it: a wallet that does not page
+cannot take part of a bucket for all of it, and falls back to the pages as
+for any other refusal.
 
 A read visits every key of the bucket's range in the tag index, so a bucket
 whose range holds more than 262,144 keys (`ghosttree.MaxBucketScan`, in all

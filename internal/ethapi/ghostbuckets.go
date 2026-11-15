@@ -69,8 +69,11 @@ type RPCNoteBucket struct {
 // position, leaf, note and salt, in position order. Bits must be those of
 // the tree's leaf count at the anchor and the prefix below 2^bits; anything
 // else, and a marker kind, is refused. A reply holds at most
-// ghosttree.MaxBucketEntries entries, from position start on (0 when left
-// out); a bucket with more sets next, the start of its next page. A bucket
+// ghosttree.MaxBucketEntries entries, from position start on; when the
+// bucket has more it sets next, the start of its next page. A call without
+// start is answered with the whole bucket or, past that many entries, an
+// error, so a caller that does not page never takes part of a bucket for
+// all of it. A bucket
 // whose index holds more than ghosttree.MaxBucketScan keys is refused. The
 // bucket is not checked against a header root.
 func (api *GhostBucketAPI) GetNoteBucket(ctx context.Context, kind TreeKind, treeIndex hexutil.Uint64, bits hexutil.Uint64, prefix hexutil.Uint64, anchorHash common.Hash, start *hexutil.Uint64) (*RPCNoteBucket, error) {
@@ -108,6 +111,12 @@ func (api *GhostBucketAPI) GetNoteBucket(ctx context.Context, kind TreeKind, tre
 		Entries:   make([]RPCBucketEntry, len(b.Entries)),
 	}
 	if b.More {
+		// A caller that sent no start reads a bucket in one reply and does
+		// not know of next: it gets the whole bucket or an error, never a
+		// part it could take for the whole.
+		if start == nil {
+			return nil, fmt.Errorf("%w: more than %d entries; ask with a start to read it in pages", errBucketPaged, api.entries)
+		}
 		next := hexutil.Uint64(b.Next)
 		out.Next = &next
 	}
@@ -120,4 +129,7 @@ func (api *GhostBucketAPI) GetNoteBucket(ctx context.Context, kind TreeKind, tre
 	return out, nil
 }
 
-var errBucketStart = errors.New("bucket start beyond the positions of a tree")
+var (
+	errBucketStart = errors.New("bucket start beyond the positions of a tree")
+	errBucketPaged = errors.New("bucket served only in pages")
+)
