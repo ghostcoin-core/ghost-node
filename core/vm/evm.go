@@ -158,6 +158,10 @@ type EVM struct {
 	// action is the policy action whose policy call runs, nil outside one;
 	// actionMarker and actionSettle at 0x60 read it (escrow_natives.go).
 	action *ActionContext
+
+	// unverifiable is the ErrStatementUnverifiable the statement checker
+	// recorded, nil when none (statement_checker.go).
+	unverifiable error
 }
 
 // NewEVM returns a new EVM. The returned EVM is not thread safe and should
@@ -206,6 +210,7 @@ func NewEVM(blockCtx BlockContext, txCtx TxContext, statedb StateDB, chainConfig
 func (evm *EVM) Reset(txCtx TxContext, statedb StateDB) {
 	evm.TxContext = txCtx
 	evm.StateDB = statedb
+	evm.unverifiable = nil
 }
 
 // Cancel cancels any running EVM operation. This may be called concurrently and

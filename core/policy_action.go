@@ -51,6 +51,10 @@ import (
 //     or reverts undoes its own effects only, never the debit or the nonce;
 //  3. the action-result log is written, for a call that succeeded or failed.
 //
+// A policy call that reaches the statement checker with a statement this node
+// cannot verify (vm.ErrStatementUnverifiable) makes the block invalid and
+// changes nothing, as a failed check does.
+//
 // The receipt is a typed 0x54 receipt with status successful and gas used
 // G_ACTION whatever the call used: no gas is refunded.
 //
@@ -112,6 +116,13 @@ func ApplyPolicyAction(config ctypes.ChainConfigurator, chain ChainContext, gp *
 		left = ghostpriv.ActionCallGas
 	}
 	evm.SetActionContext(nil)
+	// A policy call that reached the statement checker with a statement this
+	// node cannot verify makes the action, and the block, invalid here.
+	if err := evm.TakeUnverifiable(); err != nil {
+		statedb.RevertToSnapshot(snap)
+		gp.AddGas(gas)
+		return nil, err
+	}
 	if callErr != nil && callErr != vm.ErrExecutionReverted {
 		ret = nil
 	}

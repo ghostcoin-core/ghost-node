@@ -134,3 +134,17 @@ func TestConsensusChainID(t *testing.T) {
 		t.Errorf("empty configuration resolves to chain ID %v, which has parameters", id)
 	}
 }
+
+// TestPublicNetwork checks that the public test network is a public network
+// and that the internal network, developer mode and chain IDs without
+// consensus parameters are not.
+func TestPublicNetwork(t *testing.T) {
+	if !PublicNetwork(new(big.Int).SetUint64(ghost.TestNetChainID)) {
+		t.Error("the public test network is not a public network")
+	}
+	for _, id := range []*big.Int{big.NewInt(ghost.InternalNetChainID), big.NewInt(ghost.DeveloperChainID), big.NewInt(1), new(big.Int).Lsh(big.NewInt(1), 70), nil} {
+		if PublicNetwork(id) {
+			t.Errorf("chain ID %v is a public network", id)
+		}
+	}
+}

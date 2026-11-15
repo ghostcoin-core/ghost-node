@@ -18,6 +18,7 @@ package vm
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"math/big"
 
@@ -35,7 +36,16 @@ import (
 // executing account of the frame that made the call), the chain id of the
 // EVM's chain configuration and the genesis hash of the block context, and
 // returns a 32-byte word: 1 when the active verifier accepts the proof, 0
-// otherwise.
+// when it rejects it.
+//
+// A node that cannot verify the statement (a build without the proof
+// verifier, or a verifier with no proof system for it) gives no answer: an
+// answer of 0 there would differ from a linked node's 1 for the same valid
+// proof, and the two would split with neither reporting an invalid proof.
+// The call fails with no return data and all its gas spent, and the EVM
+// records ErrStatementUnverifiable, which TakeUnverifiable hands to the
+// transaction's processing: the transaction, and with it the block, is
+// invalid on that node, as for a reveal it cannot verify.
 //
 // Every call is charged StatementCheckerGas of its input before anything is
 // checked, whatever the answer. A call fails revert-style, with empty return
@@ -104,9 +114,24 @@ func (evm *EVM) callStatementChecker(op OpCode, caller ContractRef, input []byte
 		return uintWord(1), gas, nil
 	case errors.Is(verr, ghostpriv.ErrPreimageInput), errors.Is(verr, ghostpriv.ErrPreimageDomain):
 		return nil, gas, ErrExecutionReverted
+	case errors.Is(verr, ghostpriv.ErrNoVerifier), errors.Is(verr, ghostpriv.ErrStatementUnsupported):
+		// Fail closed: no answer, and the transaction is invalid here.
+		if evm.unverifiable == nil {
+			evm.unverifiable = fmt.Errorf("%w: %w", ErrStatementUnverifiable, verr)
+		}
+		return nil, 0, ErrExecutionReverted
 	default:
-		// A proof the verifier rejects, and a statement the node cannot
-		// verify, are both answered 0.
+		// A proof the verifier rejects is answered 0.
 		return uintWord(0), gas, nil
 	}
+}
+
+// TakeUnverifiable returns the ErrStatementUnverifiable the statement checker
+// recorded since the last call, nil when it recorded none, and clears it.
+// Whatever runs a transaction or a policy call through the EVM calls it after
+// the call and treats an error as an invalid transaction.
+func (evm *EVM) TakeUnverifiable() error {
+	err := evm.unverifiable
+	evm.unverifiable = nil
+	return err
 }

@@ -170,7 +170,12 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	if err != nil {
 		return nil, err
 	}
-	engine, err := ethconfig.CreateConsensusEngine(stack, &ethashConfig, cliqueConfig, ethconfig.ConsensusChainID(chainConfig, config.NetworkId), config.Miner.Notify, config.Miner.Noverify, chainDb)
+	consensusID := ethconfig.ConsensusChainID(chainConfig, config.NetworkId)
+	if err := checkProofVerifier(consensusID); err != nil {
+		chainDb.Close()
+		return nil, err
+	}
+	engine, err := ethconfig.CreateConsensusEngine(stack, &ethashConfig, cliqueConfig, consensusID, config.Miner.Notify, config.Miner.Noverify, chainDb)
 	if err != nil {
 		return nil, err
 	}

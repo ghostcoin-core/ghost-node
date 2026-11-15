@@ -1,8 +1,10 @@
 # The node on Windows
 
-A Windows release is `geth.exe` for `windows-amd64` or `windows-arm64`. It
+A Windows build is `geth.exe` for `windows-amd64` or `windows-arm64`. It
 runs the node, with RandomX mining, and runs it as a per-user background
 service that starts at login. Nothing about it needs administrator rights.
+Windows builds are not published yet, and refuse to run a public network:
+see [Windows releases are not published](#windows-releases-are-not-published).
 
 ## The service
 
@@ -131,15 +133,33 @@ tar -C dist/stage -czf dist/ghost-node-windows-arm64.tar.gz geth.exe
 ```
 
 The archive names and contents are the ones `.github/workflows/release.yml`
-publishes and signs; that workflow builds both on Windows runners.
+builds on Windows runners; it does not publish them (see below).
 
-## Known gap: no reveal proof verifier
+## Windows releases are not published
 
-The reveal proof verifier is a Rust library built for Linux and macOS only.
-A Windows build is linked without it (`core/ghostpriv/verifier_nocgo.go`), and
-that build rejects every reveal proof. So a Windows node cannot validate a
-block that holds a reveal: it refuses the block rather than accepting it
-unchecked. Building the verifier for Windows is separate work.
+The reveal proof verifier (`ghostverifier/`, linked by
+`core/ghostpriv/verifier_cgo.go`) is built for Linux and macOS only, so a
+Windows build has no verifier (`core/ghostpriv/verifier_nocgo.go`). Such a
+node would refuse every block that holds a reveal and mine a fork of its own,
+so it is not shipped, and nothing runs it on a public network:
+
+- `.github/workflows/release.yml` still builds the Windows archives, which
+  keeps the Windows build and its RandomX tests running, but keeps them as
+  unpublished workflow artifacts: a release carries no
+  `ghost-node-windows-<arch>.tar.gz`.
+- `install.ps1`, `install.cmd` and `ghost-setup` refuse to install, with
+  nothing installed, and say why.
+- A node without the verifier refuses to start on a public network (the
+  public test network, and the launch network once it has consensus
+  parameters): `eth.New` fails with `eth.ErrNoProofVerifier`. The internal
+  network and developer mode still run.
+- The statement checker at 0x61 gives no answer on such a node: the
+  transaction or policy action that calls it is invalid there
+  ([ghost-evm-profile.md](ghost-evm-profile.md)).
+
+Windows releases come back once the verifier is built and linked for
+windows-amd64 and windows-arm64, with a test that imports a block holding a
+real reveal on a Windows build.
 
 ## What is tested where
 

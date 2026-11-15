@@ -696,6 +696,14 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 		ret, st.gasRemaining, vmerr = st.evm.Call(sender, st.to(), msg.Data, st.gasRemaining, value)
 	}
 
+	// A call to the statement checker that this node cannot verify makes the
+	// transaction invalid rather than giving an answer another node would not
+	// (core/vm/statement_checker.go).
+	if err := st.evm.TakeUnverifiable(); err != nil {
+		st.gp.AddGas(st.initialGas)
+		return nil, err
+	}
+
 	var gasRefund uint64
 	if !eip3529f {
 		// Before EIP-3529: refunds were capped to gasUsed / 2

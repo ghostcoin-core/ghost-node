@@ -76,6 +76,12 @@
 	$Placeholder = '0000000000000000000000000000000000000000000000000000000000000000'
 	$Refusal = 'refusing to install. Nothing was installed.'
 
+	# Windows nodes are not published: a Windows build has no reveal proof
+	# verifier, so it would reject every block that holds a reveal and mine a
+	# fork of its own (docs/windows-service.md). Everything below stays for
+	# when they are.
+	throw "ghost-node: there is no Windows release of the Ghost node yet: a Windows node cannot verify reveal proofs, so it would split off the network. Run the node on Linux or macOS instead; $Refusal"
+
 	$ReleaseUrl = 'https://github.com/ghostcoin-core/ghost-node/releases/latest/download'
 	if ($env:GHOST_RELEASE_URL) { $ReleaseUrl = $env:GHOST_RELEASE_URL }
 	$ReleaseUrl = $ReleaseUrl.TrimEnd('/')

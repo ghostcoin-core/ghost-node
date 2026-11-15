@@ -18,11 +18,6 @@
 
 package ghostpriv
 
-// rejectAll is the default verifier of a build without the proof verifier.
-type rejectAll struct{}
-
-func (rejectAll) VerifyReveal(*VerifyInputs, []byte) error { return ErrNoVerifier }
-
 // DefaultVerifier returns the verifier the node uses until another is set.
 // This build does not link the proof verifier of the ghost repository (see
 // verifier_cgo.go), so it rejects every reveal.

@@ -1506,3 +1506,21 @@ func TestWindowsDashboardUpdate(t *testing.T) {
 	}
 	e.requireNoTempLeft()
 }
+
+// TestWinSetupRefusesWithoutVerifier checks that ghost-setup, while Windows
+// nodes cannot verify reveal proofs, refuses an install and an update before
+// anything is downloaded or changed, and says why.
+func TestWinSetupRefusesWithoutVerifier(t *testing.T) {
+	for _, args := range [][]string{nil, {"--update"}, {"--update", "--daily"}} {
+		var stdout, stderr bytes.Buffer
+		if code := run(args, &stdout, &stderr); code != 1 {
+			t.Errorf("%q: exit code %d, want 1", args, code)
+		}
+		if !strings.Contains(stderr.String(), "cannot verify reveal proofs") || !strings.Contains(stderr.String(), "Nothing was installed.") {
+			t.Errorf("%q: stderr %q does not say why nothing was installed", args, stderr.String())
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("%q: stdout %q", args, stdout.String())
+		}
+	}
+}

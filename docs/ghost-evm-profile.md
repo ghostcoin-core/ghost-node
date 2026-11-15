@@ -332,10 +332,21 @@ policy that calls it: knowledge of a 32-byte `x` with
   and purpose differ from the policy action's (`0x05`, purpose `0x06`), so a
   digest made for one never verifies for the other.
 * **Output.** A 32-byte word: 1 when the active verifier accepts the proof,
-  0 otherwise. A node whose verifier has no proof system for the statement,
-  which is the linked verifier today, answers 0 to every proof.
+  0 when it rejects it. The linked verifier (`core/ghostpriv/verifier_cgo.go`)
+  has a proof system for the statement.
+* **A node that cannot verify the statement gives no answer.** On a build
+  without the proof verifier (`ghostpriv.ErrNoVerifier`), or with a verifier
+  that has no proof system for the statement
+  (`ghostpriv.ErrStatementUnsupported`), an answer of 0 would differ from a
+  verifying node's 1 for the same valid proof, and a policy that branches on
+  it would leave a different state with neither node reporting an invalid
+  proof. So the call fails with no return data and all its gas spent, and the
+  EVM records `vm.ErrStatementUnverifiable`. The transaction that made the
+  call (`core.ApplyMessage`) or the policy action whose policy call made it
+  (`core.ApplyPolicyAction`) is then invalid, and with it the block, on that
+  node, as for a reveal it cannot verify.
 * **Gas.** `PREIMAGE_VERIFY_GAS` = 430,000 plus 3 per 32-byte word of the
-  input, charged before anything is checked and whatever the answer: 196,028
+  input, charged before anything is checked and whatever the answer: 518,908
   for the input above.
 * **Failure.** The call fails revert-style, with no return data, its gas
   spent and the rest returned to the caller, when the caller is not a frame

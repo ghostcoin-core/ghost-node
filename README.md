@@ -138,7 +138,13 @@ the installer accepts no release yet. The real key replaces the `.pub` file in
 `install/` and the same lines in `install.sh`; a test keeps the two equal. The
 release fills in the checker's hashes.
 
-On Windows (amd64 or arm64), paste this into PowerShell:
+Windows nodes are not published yet: a Windows build has no reveal proof
+verifier, so it would reject every block that holds a reveal and split off the
+network. Until it has one, the Windows installers below refuse to install,
+with nothing installed, and a node built without the verifier refuses to start
+on a public network ([docs/windows-service.md](docs/windows-service.md)).
+
+On Windows (amd64 or arm64), the installers are these. In PowerShell:
 
 ```powershell
 irm https://get.ghostcoin.com/win | iex
