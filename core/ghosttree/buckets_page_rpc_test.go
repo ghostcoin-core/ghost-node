@@ -33,9 +33,10 @@ import (
 
 // TestGhostGetNoteBucketPagesAFloodedBucketOverRPC fills one bucket of a
 // tree of one bucket bit far past the reply cap, as a committer who picks
-// one tag for many notes can, and reads it over RPC: the first reply holds
-// the cap and points at the next page, and the pages together are the
-// bucket. The other bucket comes whole, with no next, as before paging.
+// one tag for many notes can, and reads it over RPC from start 0: the first
+// reply holds the cap and points at the next page, and the pages together
+// are the bucket. Asked without a start, as before paging, the flooded
+// bucket is refused, never served in part, and the other comes whole.
 func TestGhostGetNoteBucketPagesAFloodedBucketOverRPC(t *testing.T) {
 	const leaves = 12000 // 1 bucket bit
 	tagOf := func(i int) uint32 {
@@ -98,7 +99,7 @@ func TestGhostGetNoteBucketPagesAFloodedBucketOverRPC(t *testing.T) {
 		}
 		var got []uint64
 		var replies int
-		args := []interface{}{"coin", "0x0", "0x1", hexutil.Uint64(prefix), anchor}
+		args := []interface{}{"coin", "0x0", "0x1", hexutil.Uint64(prefix), anchor, "0x0"}
 		for {
 			var reply ethapi.RPCNoteBucket
 			if err := client.Call(&reply, "ghost_getNoteBucket", args...); err != nil {
@@ -131,6 +132,19 @@ func TestGhostGetNoteBucketPagesAFloodedBucketOverRPC(t *testing.T) {
 		}
 		if replies != wantReplies {
 			t.Errorf("bucket %d of %d entries in %d replies, want %d", prefix, len(want), replies, wantReplies)
+		}
+
+		// Without a start: the whole bucket, or an error past the cap.
+		var whole ethapi.RPCNoteBucket
+		err := client.Call(&whole, "ghost_getNoteBucket", "coin", "0x0", "0x1", hexutil.Uint64(prefix), anchor)
+		if len(want) > ghosttree.MaxBucketEntries {
+			if err == nil || len(whole.Entries) != 0 {
+				t.Fatalf("bucket %d of %d entries without a start: %d entries, %v; want an error", prefix, len(want), len(whole.Entries), err)
+			}
+			continue
+		}
+		if err != nil || whole.Next != nil || len(whole.Entries) != len(want) {
+			t.Fatalf("bucket %d without a start: %d entries, next %v, %v", prefix, len(whole.Entries), whole.Next, err)
 		}
 	}
 	if n := leaves - leaves/12; n <= ghosttree.MaxBucketEntries {
