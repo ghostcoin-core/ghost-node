@@ -41,7 +41,9 @@ import (
 // EXTCODECOPY and EXTCODEHASH of an address that is not a registered
 // policy, and its CALL and STATICCALL halt unless the target is on the
 // allowlist (ghost.IsFrozenCallTarget) or a policy created in an earlier
-// block. A policy never holds a balance: a CALL with value to it fails, a
+// block. A policy's constructor also halts on every opcode of
+// constructorOpcodes, so the code it registers depends only on its init
+// code. A policy never holds a balance: a CALL with value to it fails, a
 // SELFDESTRUCT that would credit it halts, and the factory burns a balance
 // sent to the address ahead of the creation.
 
@@ -103,6 +105,38 @@ var FrozenOpcodes = []OpCode{
 // frozenOpcodes is FrozenOpcodes as a lookup table for the interpreter.
 var frozenOpcodes = func() (table [256]bool) {
 	for _, op := range FrozenOpcodes {
+		table[op] = true
+	}
+	return table
+}()
+
+// ConstructorOpcodes lists the opcodes a policy's constructor may not run on
+// top of FrozenOpcodes (spec 10, section 6.2): every opcode that reads
+// something outside the init code. The address of a policy fixes only its
+// init code and salt, and anyone may send the factory call, so whatever the
+// constructor leaves (the code the registry records and the storage it
+// writes) must not depend on who sends the call, in which block or with how
+// much gas. The constructor therefore reads no transaction facts (ORIGIN,
+// GASPRICE), no remaining gas (GAS), no chain facts (BLOCKHASH, COINBASE,
+// TIMESTAMP, NUMBER, DIFFICULTY, GASLIMIT, CHAINID, BASEFEE), no other
+// account's code (EXTCODESIZE, EXTCODECOPY, EXTCODEHASH: whether a policy
+// exists yet changes over time) and calls nothing (CALL, STATICCALL: the
+// state of an older policy changes over time, and whether a call succeeds
+// can depend on the gas the sender gave). CALLER is always the factory and
+// CALLVALUE always zero, so both stay allowed, as do the frame's own storage
+// and transient storage, which are empty when the constructor starts. The
+// runtime code of a policy runs under FrozenOpcodes alone.
+var ConstructorOpcodes = []OpCode{
+	ORIGIN, GASPRICE, GAS,
+	BLOCKHASH, COINBASE, TIMESTAMP, NUMBER, DIFFICULTY, GASLIMIT, CHAINID, BASEFEE,
+	EXTCODESIZE, EXTCODECOPY, EXTCODEHASH,
+	CALL, STATICCALL,
+}
+
+// constructorOpcodes is ConstructorOpcodes as a lookup table for the
+// interpreter.
+var constructorOpcodes = func() (table [256]bool) {
+	for _, op := range ConstructorOpcodes {
 		table[op] = true
 	}
 	return table
@@ -267,6 +301,7 @@ func (evm *EVM) createPolicy(code *codeAndHash, gas uint64, address common.Addre
 	contract := NewContract(factory, AccountRef(address), new(uint256.Int), gas)
 	contract.SetCodeOptionalHash(&address, code)
 	contract.frozen = true
+	contract.constructing = true
 
 	if tracer := evm.Config.Tracer; tracer != nil {
 		tracer.CaptureEnter(CREATE2, factory.Address(), address, code.code, gas, nil)

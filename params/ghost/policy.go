@@ -102,7 +102,9 @@ func K(tag string, inputs ...[]byte) common.Hash {
 // PolicyAddress is the address the factory creates a policy at: the last 20
 // bytes of K(TagPolicyAddress, salt, keccak256(initCode)). The sender is not
 // an input, so the same code and salt give the same address whoever creates
-// the policy.
+// the policy. Because anyone may create it, the constructor may read nothing
+// outside its init code (vm.ConstructorOpcodes), so the address also fixes
+// the runtime code the registry records.
 func PolicyAddress(salt common.Hash, initCodeHash common.Hash) common.Address {
 	return common.BytesToAddress(K(TagPolicyAddress, salt[:], initCodeHash[:]).Bytes())
 }

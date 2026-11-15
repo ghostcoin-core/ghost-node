@@ -200,7 +200,13 @@ address = K("ghost/policy-address/v1", salt, keccak256(init_code))[12:]
 
 where `K` is the tagged hash of the trees: Keccak-256 over the tag's length
 as one byte, the tag, then the inputs. The sender is not an input, so the
-same code and salt give the same address whoever creates it. The factory
+same code and salt give the same address whoever creates it. Anyone can
+therefore send the creation, including someone who copies it from a pending
+transaction and gets it mined first. So that this cannot change what the
+address holds, a constructor may read nothing outside its own init code (see
+"The constructor" below): one init code and salt always leave the same
+runtime code, and so the same registered code hash, and the same storage, or
+fail for every sender. The factory
 refuses an address that is reserved (below), an address that already has a
 nonce or code, and, as `CREATE2` does, init code over 49,152 bytes, runtime
 code over 24,576 bytes and runtime code that begins with `0xef`. A balance
@@ -264,8 +270,9 @@ up all its gas, as `INVALID` does:
 | RETURN, REVERT, INVALID | Allowed |
 | Every opcode not listed | Invalid, as in the EVM profile |
 
-The check is made when the opcode runs, not when the code is deployed, so
-the constructor and the runtime code follow one rule. The per-opcode list is
+The check is made when the opcode runs, not when the code is deployed. The
+runtime code follows this table alone; a constructor follows it and the
+stricter list below. The per-opcode list is
 `vm.FrozenOpcodes`; the EXTCODE\* address check runs in the interpreter
 after the stack check and before any gas is charged. A frozen frame is never
 a `CALLCODE` or `DELEGATECALL` frame, so the storage it reaches is always its
@@ -278,6 +285,28 @@ precompiles, the factory, any contract that is not a policy and a policy
 created in the same block are refused. 0x60 is the escrow natives
 (`core/vm/escrow_natives.go`) and 0x61 the statement checker below; both
 fail a call whose input they do not take, an empty one included.
+
+### The constructor
+
+The constructor the factory runs is a frozen frame that may also not read
+its environment. On top of the table above, these opcodes are **forbidden**
+in it (`vm.ConstructorOpcodes`, checked before the stack check and before any
+gas is charged):
+
+| Opcodes | Why |
+|---|---|
+| ORIGIN, GASPRICE, GAS | They differ with the transaction that sends the creation |
+| BLOCKHASH, COINBASE, TIMESTAMP, NUMBER, DIFFICULTY, GASLIMIT, CHAINID, BASEFEE | They differ with the block the creation lands in |
+| EXTCODESIZE, EXTCODECOPY, EXTCODEHASH | Whether another policy exists yet changes over time |
+| CALL, STATICCALL | An older policy's state changes over time, and whether a call succeeds can depend on the gas the sender gave |
+
+CALLER is always the factory and CALLVALUE always zero, so both stay
+allowed. The frame's own storage and transient storage start empty, so
+SLOAD, SSTORE, TLOAD and TSTORE stay allowed. A constructor that needs none
+of these, such as one that copies fixed runtime code out of the init code
+(Ghost Guard's), is not affected. The rule is consensus: a constructor that
+runs one of these opcodes fails with `vm.ErrFrozenOpcode`, uses all its gas
+and leaves no policy, whoever sends it.
 
 ### The statement checker
 

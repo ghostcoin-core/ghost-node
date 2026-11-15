@@ -181,8 +181,9 @@ func (in *EVMInterpreter) Run(contract *Contract, input []byte, readOnly bool) (
 		// enough stack items available to perform the operation.
 		op = contract.GetOp(pc)
 		// A frozen context halts on the opcodes it forbids, before any gas
-		// or stack check. The flag was set once for the frame.
-		if contract.frozen && frozenOpcodes[op] {
+		// or stack check, and a policy's constructor also on the opcodes
+		// that read its environment. The flags were set once for the frame.
+		if contract.frozen && (frozenOpcodes[op] || contract.constructing && constructorOpcodes[op]) {
 			return nil, &ErrFrozenOpcode{opcode: op}
 		}
 		operation := in.table[op]

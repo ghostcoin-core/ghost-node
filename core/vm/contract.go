@@ -63,6 +63,12 @@ type Contract struct {
 	// is a registered policy, or it is a policy's constructor. It is read
 	// from the registry once, when the frame is set up.
 	frozen bool
+
+	// constructing is set on the constructor frame of a policy the factory
+	// is creating. Such a frame is also frozen, and it may read nothing
+	// outside its own init code (constructorOpcodes), so the code and
+	// storage it leaves depend only on the init code.
+	constructing bool
 }
 
 // NewContract returns a new contract environment for the execution of EVM.
