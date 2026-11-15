@@ -475,8 +475,21 @@ func TestFrozenPolicyOpcodes(t *testing.T) {
 			t.Errorf("opcode %v: checked per address %v, want %v", op, frozenExtcodeOpcodes[b], wantExt)
 		}
 	}
+	// A policy's constructor also refuses exactly ConstructorOpcodes.
+	wantCtor := map[OpCode]bool{
+		ORIGIN: true, GASPRICE: true, GAS: true,
+		BLOCKHASH: true, COINBASE: true, TIMESTAMP: true, NUMBER: true, DIFFICULTY: true, GASLIMIT: true, CHAINID: true, BASEFEE: true,
+		EXTCODESIZE: true, EXTCODECOPY: true, EXTCODEHASH: true,
+		CALL: true, STATICCALL: true,
+	}
+	for b := 0; b < 256; b++ {
+		if constructorOpcodes[b] != wantCtor[OpCode(b)] {
+			t.Errorf("opcode %v: refused in a constructor %v, want %v", OpCode(b), constructorOpcodes[b], wantCtor[OpCode(b)])
+		}
+	}
 	// The opcodes the node refused before spec 10, section 6.2 and that
-	// the spec allows.
+	// the spec allows. Those that read the environment are allowed in the
+	// runtime code but not in a constructor.
 	allowed := []OpCode{
 		ORIGIN, CALLER, GASPRICE, CALLVALUE, GAS,
 		BLOCKHASH, COINBASE, TIMESTAMP, NUMBER, DIFFICULTY, GASLIMIT, CHAINID, BASEFEE,
@@ -487,7 +500,13 @@ func TestFrozenPolicyOpcodes(t *testing.T) {
 		for i, op := range allowed {
 			env := newPolicyEnv(t)
 			initCode := deployCode(cat(zeros(7), []byte{byte(op)}), []byte{byte(STOP)})
-			if addr, _, _, err := env.construct(1, saltOf(i), initCode, new(frozenTracer)); err != nil || !ghost.IsRegisteredPolicy(env.state, addr) {
+			addr, _, left, err := env.construct(1, saltOf(i), initCode, new(frozenTracer))
+			if constructorOpcodes[op] {
+				var fe *ErrFrozenOpcode
+				if !errors.As(err, &fe) || fe.Opcode() != op || left != 0 || ghost.IsRegisteredPolicy(env.state, addr) {
+					t.Errorf("%v in the constructor: error %v, %d gas left, want a frozen opcode error and no policy", op, err, left)
+				}
+			} else if err != nil || !ghost.IsRegisteredPolicy(env.state, addr) {
 				t.Errorf("%v in the constructor: %v", op, err)
 			}
 			d := env.newDepth3(1000, false)
@@ -571,9 +590,10 @@ func checkWords(t *testing.T, what string, labels []string, out []byte, want []*
 }
 
 // TestFrozenPolicyChainFacts checks that BLOCKHASH, COINBASE, TIMESTAMP,
-// NUMBER, DIFFICULTY, GASLIMIT, CHAINID and BASEFEE run in a frozen frame,
-// in the constructor and at depth 3, and push the values an ordinary
-// contract gets in the same block.
+// NUMBER, DIFFICULTY, GASLIMIT, CHAINID and BASEFEE run in a frozen frame at
+// depth 3 and push the values an ordinary contract gets in the same block,
+// and that each of them halts a policy's constructor, which leaves no
+// policy.
 func TestFrozenPolicyChainFacts(t *testing.T) {
 	env := newPolicyEnv(t)
 	coinbase := common.HexToAddress("0xc014ba5e00000000000000000000000000000001")
@@ -603,18 +623,22 @@ func TestFrozenPolicyChainFacts(t *testing.T) {
 	base := env.plain(2, common.HexToAddress("0xba5e"), code, nil)
 	checkWords(t, "ordinary contract", labels, base, want)
 
-	// The constructor of a policy in block 2 returns the words as its code.
-	tracer := new(frozenTracer)
-	addr, out, _, err := env.construct(2, saltOf(1), code, tracer)
-	if err != nil || !ghost.IsRegisteredPolicy(env.state, addr) {
-		t.Fatalf("the constructor fails: %v (faults %v)", err, tracer.faults)
+	// A constructor that reads any one chain fact halts.
+	facts := append([][]byte{{byte(PUSH1), 1, byte(BLOCKHASH)}},
+		ops(COINBASE, TIMESTAMP, NUMBER, DIFFICULTY, GASLIMIT, CHAINID, BASEFEE)...)
+	for i, snippet := range facts {
+		op := OpCode(snippet[len(snippet)-1])
+		addr, _, left, err := env.construct(2, saltOf(50+i), valuesCode(snippet), new(frozenTracer))
+		var fe *ErrFrozenOpcode
+		if !errors.As(err, &fe) || fe.Opcode() != op || left != 0 || ghost.IsRegisteredPolicy(env.state, addr) {
+			t.Errorf("%s in the constructor: error %v, %d gas left, want a frozen opcode error and no policy", labels[i], err, left)
+		}
 	}
-	checkWords(t, "constructor", labels, out, want)
 
 	// A policy at depth 3 in block 2.
 	inner := env.mustCreatePolicy(1, saltOf(2), code)
 	d := env.newDepth3(1000, false)
-	tracer = new(frozenTracer)
+	tracer := new(frozenTracer)
 	ok, out := d.run(2, tracer, inner, nil)
 	if !ok {
 		t.Fatalf("the policy at depth 3 fails: %v", tracer.faults)
@@ -623,11 +647,12 @@ func TestFrozenPolicyChainFacts(t *testing.T) {
 }
 
 // TestFrozenPolicyCallerOriginGas checks that CALLER, ORIGIN, GASPRICE, GAS
-// and CALLVALUE run in a frozen frame. In the constructor CALLER is the
-// factory, at depth 3 it is the calling policy, and ORIGIN and GASPRICE are
-// the transaction's; in a policy action, called from ACTION_CALLER with the
-// transaction context core.ApplyPolicyAction gives it, ORIGIN is
-// ACTION_CALLER and GASPRICE is zero. CALLVALUE is zero throughout.
+// and CALLVALUE run in a frozen frame. At depth 3 CALLER is the calling
+// policy, and ORIGIN and GASPRICE are the transaction's; in a policy action,
+// called from ACTION_CALLER with the transaction context
+// core.ApplyPolicyAction gives it, ORIGIN is ACTION_CALLER and GASPRICE is
+// zero. CALLVALUE is zero throughout. In a constructor CALLER is the factory
+// and CALLVALUE zero, and ORIGIN, GASPRICE and GAS halt the frame.
 func TestFrozenPolicyCallerOriginGas(t *testing.T) {
 	env := newPolicyEnv(t)
 	env.tx = &TxContext{Origin: policySender, GasPrice: big.NewInt(9)}
@@ -656,11 +681,20 @@ func TestFrozenPolicyCallerOriginGas(t *testing.T) {
 	}
 
 	tracer := new(frozenTracer)
-	_, out, _, err := env.construct(2, saltOf(1), code, tracer)
+	_, out, _, err := env.construct(2, saltOf(1), valuesCode(ops(CALLER, CALLVALUE)...), tracer)
 	if err != nil {
 		t.Fatalf("the constructor fails: %v (faults %v)", err, tracer.faults)
 	}
-	check("constructor", out, ghost.PolicyFactoryAddress, policySender, 9, policyTestGas)
+	if w := words(out); len(w) != 2 || w[0].Cmp(addrBig(ghost.PolicyFactoryAddress)) != 0 || w[1].Sign() != 0 {
+		t.Errorf("constructor: CALLER and CALLVALUE are %x, want the factory and 0", out)
+	}
+	for i, op := range []OpCode{ORIGIN, GASPRICE, GAS} {
+		addr, _, left, err := env.construct(2, saltOf(60+i), valuesCode(ops(op)...), new(frozenTracer))
+		var fe *ErrFrozenOpcode
+		if !errors.As(err, &fe) || fe.Opcode() != op || left != 0 || ghost.IsRegisteredPolicy(env.state, addr) {
+			t.Errorf("%v in the constructor: error %v, %d gas left, want a frozen opcode error and no policy", op, err, left)
+		}
+	}
 
 	inner := env.mustCreatePolicy(1, saltOf(2), code)
 	d := env.newDepth3(1000, false)
@@ -915,7 +949,8 @@ func extcodeWant(op OpCode, code []byte) *big.Int {
 // another policy and of the frame's own policy, and that on any other
 // address (an ordinary contract, an empty account, a precompile, the natives
 // 0x60 and 0x61, the factory) they halt the frame with a frozen opcode error
-// that uses all its gas, in the constructor and at depth 3.
+// that uses all its gas at depth 3. In a constructor they halt the frame on
+// every address, another policy included.
 func TestFrozenPolicyExtcodeOnlyPolicies(t *testing.T) {
 	env := newPolicyEnv(t)
 	other := env.mustCreatePolicy(1, saltOf(1), returnOneCode)
@@ -964,15 +999,8 @@ func TestFrozenPolicyExtcodeOnlyPolicies(t *testing.T) {
 			}
 		}
 
-		// In the constructor.
-		tracer := new(frozenTracer)
-		_, out, _, err := env.construct(2, saltOf(20+i), valuesCode([]byte{byte(PUSH1), 0}, extcodeSnippet(op, pushAddr(other))), tracer)
-		if err != nil {
-			t.Errorf("%v of another policy in the constructor fails: %v", op, err)
-		} else if w := words(out); len(w) != 2 || w[1].Cmp(extcodeWant(op, returnOneCode)) != 0 {
-			t.Errorf("%v of another policy in the constructor: output %x", op, out)
-		}
-		for j, tg := range refused {
+		// In the constructor, on any address.
+		for j, tg := range append([]target{{"another policy", other}}, refused...) {
 			tracer := new(frozenTracer)
 			initCode := valuesCode([]byte{byte(PUSH1), 0}, extcodeSnippet(op, pushAddr(tg.addr)))
 			addr, _, left, err := env.construct(2, saltOf(100+10*i+j), initCode, tracer)
@@ -992,7 +1020,7 @@ func TestFrozenPolicyExtcodeOnlyPolicies(t *testing.T) {
 		}
 
 		// An ordinary contract reads any address.
-		out = env.plain(2, common.BytesToAddress([]byte{0x0b, 0xad, byte(op)}), runtime, addrWord(ordinary))
+		out := env.plain(2, common.BytesToAddress([]byte{0x0b, 0xad, byte(op)}), runtime, addrWord(ordinary))
 		if w := words(out); len(w) != 2 || w[1].Cmp(extcodeWant(op, returnOneCode)) != 0 {
 			t.Errorf("%v of an ordinary contract from an ordinary contract: output %x", op, out)
 		}
@@ -1062,7 +1090,9 @@ func TestFrozenPolicyStillForbidden(t *testing.T) {
 		}
 		initCode := deployCode(cat(zeros(4), pushAddr(target), []byte{byte(PUSH3), 0x0f, 0x42, 0x40, byte(STATICCALL), byte(POP)}), []byte{byte(STOP)})
 		addr, _, _, err := env.construct(2, saltOf(300+j), initCode, new(frozenTracer))
-		if !errors.Is(err, ErrFrozenCallTarget) || ghost.IsRegisteredPolicy(env.state, addr) {
+		// A constructor calls nothing at all.
+		var fe *ErrFrozenOpcode
+		if !errors.As(err, &fe) || fe.Opcode() != STATICCALL || ghost.IsRegisteredPolicy(env.state, addr) {
 			t.Errorf("STATICCALL to %v in the constructor: error %v", target, err)
 		}
 	}
@@ -1209,6 +1239,106 @@ func TestFrozenPolicyFactoryAddress(t *testing.T) {
 	}
 	if other, err := first.create(2, policySender, salt, deployCode(nil, []byte{byte(STOP)})); err != nil || other == want {
 		t.Errorf("other code: address %v, error %v", other, err)
+	}
+}
+
+// TestFrozenPolicyConstructorSenderIndependent checks that the code and
+// storage a policy address ends up with do not depend on who creates it, in
+// which block, under which transaction or with how much gas. One init code
+// and salt sent from two senders, in two blocks, with different origins,
+// gas prices and gas, register the same code hash and leave the same
+// storage; a front-runner who creates the policy first registers the code
+// the holder expected, and the holder's own creation then fails. An init
+// code that reads its environment or calls anything is refused whoever
+// sends it, so it registers nothing.
+func TestFrozenPolicyConstructorSenderIndependent(t *testing.T) {
+	// The runtime code may read its environment; the constructor writes a
+	// constant word to its storage and to its transient storage, reads them
+	// back, and returns the runtime code.
+	runtime := valuesCode(ops(ORIGIN, NUMBER, GAS)...)
+	prefix := []byte{
+		byte(PUSH1), 0x2a, byte(PUSH1), 0, byte(SSTORE),
+		byte(PUSH1), 0x2b, byte(PUSH1), 0, byte(TSTORE),
+		byte(PUSH1), 0, byte(SLOAD), byte(PUSH1), 0, byte(TLOAD), byte(ADD), byte(PUSH1), 1, byte(SSTORE),
+	}
+	initCode := deployCode(prefix, runtime)
+	salt := saltOf(41)
+	addr := ghost.PolicyAddress(salt, crypto.Keccak256Hash(initCode))
+	wantHash := crypto.Keccak256Hash(runtime)
+
+	type creation struct {
+		number   uint64
+		sender   common.Address
+		gasPrice int64
+		gas      uint64
+	}
+	run := func(env *policyEnv, c creation, code []byte) ([]byte, error) {
+		env.tx = &TxContext{Origin: c.sender, GasPrice: big.NewInt(c.gasPrice)}
+		ret, _, err := env.evm(c.number, nil).Call(AccountRef(c.sender), ghost.PolicyFactoryAddress, factoryInput(salt, code), c.gas, new(uint256.Int))
+		return ret, err
+	}
+	one := creation{number: 1, sender: policySender, gasPrice: 1, gas: policyTestGas}
+	two := creation{number: 7, sender: policySender2, gasPrice: 9, gas: 400_000}
+
+	// Two senders in two blocks, each on its own chain state.
+	for _, c := range []creation{one, two} {
+		env := newPolicyEnv(t)
+		ret, err := run(env, c, initCode)
+		if err != nil || common.BytesToAddress(ret) != addr {
+			t.Fatalf("block %d, sender %v: address %x, error %v, want %v", c.number, c.sender, ret, err, addr)
+		}
+		height, codeHash, ok := ghost.PolicyRegistryEntry(env.state, addr)
+		if !ok || height != c.number || codeHash != wantHash {
+			t.Errorf("block %d, sender %v: registered %v at height %d with code hash %x, want %x", c.number, c.sender, ok, height, codeHash, wantHash)
+		}
+		if got := env.slot(addr, 0); got.Cmp(big.NewInt(0x2a)) != 0 {
+			t.Errorf("block %d, sender %v: storage word 0 is %v, want 0x2a", c.number, c.sender, got)
+		}
+		if got := env.slot(addr, 1); got.Cmp(big.NewInt(0x2a+0x2b)) != 0 {
+			t.Errorf("block %d, sender %v: storage word 1 is %v, want 0x55", c.number, c.sender, got)
+		}
+	}
+
+	// A front-runner creates the policy first on the holder's chain: the
+	// registered code is the holder's, and the holder's creation then fails.
+	env := newPolicyEnv(t)
+	if _, err := run(env, creation{number: 3, sender: policySender2, gasPrice: 50, gas: 300_000}, initCode); err != nil {
+		t.Fatalf("the front-runner's creation fails: %v", err)
+	}
+	if _, err := run(env, creation{number: 4, sender: policySender, gasPrice: 1, gas: policyTestGas}, initCode); !errors.Is(err, ErrContractAddressCollision) {
+		t.Errorf("the holder's creation after the front-runner: error %v, want %v", err, ErrContractAddressCollision)
+	}
+	if _, codeHash, ok := ghost.PolicyRegistryEntry(env.state, addr); !ok || codeHash != wantHash {
+		t.Errorf("after the front-run: registered %v with code hash %x, want %x", ok, codeHash, wantHash)
+	}
+
+	// An init code whose returned code would depend on the environment is
+	// refused for every sender: it registers no code at all.
+	older := env.mustCreatePolicy(1, saltOf(42), returnOneCode)
+	reads := map[string][]byte{
+		"ORIGIN":                  valuesCode(ops(ORIGIN)...),
+		"GAS":                     valuesCode(ops(GAS)...),
+		"NUMBER":                  valuesCode(ops(NUMBER)...),
+		"EXTCODEHASH of a policy": valuesCode(extcodeSnippet(EXTCODEHASH, pushAddr(older))),
+		"STATICCALL of a policy":  deployCode(cat(zeros(4), pushAddr(older), []byte{byte(PUSH3), 0x0f, 0x42, 0x40, byte(STATICCALL), byte(POP)}), []byte{byte(STOP)}),
+		"CALL of a policy":        deployCode(cat(zeros(5), pushAddr(older), []byte{byte(PUSH3), 0x0f, 0x42, 0x40, byte(CALL), byte(POP)}), []byte{byte(STOP)}),
+		"STATICCALL of SHA256":    deployCode(cat(zeros(4), pushAddr(common.BytesToAddress([]byte{0x02})), []byte{byte(PUSH3), 0x0f, 0x42, 0x40, byte(STATICCALL), byte(POP)}), []byte{byte(STOP)}),
+	}
+	for name, code := range reads {
+		at := ghost.PolicyAddress(salt, crypto.Keccak256Hash(code))
+		for _, c := range []creation{one, two} {
+			env := newPolicyEnv(t)
+			env.mustCreatePolicy(1, saltOf(42), returnOneCode)
+			c.number += 1
+			_, err := run(env, c, code)
+			var fe *ErrFrozenOpcode
+			if !errors.As(err, &fe) {
+				t.Errorf("%s in the constructor, sender %v: error %v, want a frozen opcode error", name, c.sender, err)
+			}
+			if ghost.IsRegisteredPolicy(env.state, at) || len(env.state.GetCode(at)) != 0 {
+				t.Errorf("%s in the constructor, sender %v: the policy exists", name, c.sender)
+			}
+		}
 	}
 }
 
