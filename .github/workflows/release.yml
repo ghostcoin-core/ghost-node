@@ -1,9 +1,17 @@
 name: Release
 
-# Builds the node for linux, darwin and windows on amd64 and arm64 on every
-# push to main, signs each archive with the release key, and publishes a
-# GitHub release marked latest. install/install.sh downloads from
-# releases/latest/download, so the newest release is the stable pointer.
+# Builds the node for linux, darwin and windows on amd64 and arm64 when a
+# release tag vMAJOR.MINOR.PATCH is pushed, signs each archive with the release
+# key, and publishes a GitHub release of that tag marked latest.
+# install/install.sh downloads from releases/latest/download, so the newest
+# release is the stable pointer, and every installed node's daily update
+# installs it. A merge to main publishes nothing.
+#
+# Signing runs only in the `release` environment, which holds the key, takes
+# only runs for v* tags, and waits for a required reviewer to approve each run
+# in GitHub before the job starts. Before it signs anything the job checks that
+# the tag's commit is on main and that the tag's build number is higher than
+# the latest release's. How a release is cut is in docs/emergency-release.md.
 #
 # Each archive is ghost-node-<os>-<arch>.tar.gz and holds the geth executable
 # (geth.exe on windows) and next to it ghost-dash (ghost-dash.exe), the Ghost
@@ -18,12 +26,13 @@ name: Release
 # -trimpath, so it is static and reproducible; build/check-reproducible.sh
 # builds it twice too. To ship a newer dashboard, change that file.
 #
-# The private key is the Actions secret GHOST_RELEASE_SIGNING_KEY: the PEM
-# (PKCS#8) ed25519 private key, as `openssl genpkey -algorithm ed25519`
-# writes it. While the secret is not set, the archives are still built and
-# kept as workflow artifacts, and signing and publishing are skipped. A key
-# whose public half is not install/release-key.pub fails the run, since the
-# installer would refuse everything it signed.
+# The private key is the `release` environment's secret
+# GHOST_RELEASE_SIGNING_KEY: the PEM (PKCS#8) ed25519 private key, as
+# `openssl genpkey -algorithm ed25519` writes it. A tag pushed while the
+# secret is not set fails the run, with the archives kept as workflow
+# artifacts and nothing published. A key whose public half is not
+# install/release-key.pub fails the run, since the installer would refuse
+# everything it signed.
 #
 # The same release also carries the installers, each signed the same way:
 # install/install.sh, install/install.ps1 and install/install.cmd, and
@@ -35,32 +44,34 @@ name: Release
 # runs, for linux and darwin on amd64 and arm64, signed and listed in
 # SHA256SUMS the same way. The repository's install.sh pins all-zero
 # placeholder hashes for them; install/pin-verifier-hashes.sh writes in the
-# real SHA-256 of this release's checkers before install.sh is signed, and
-# fails the run if any placeholder is left. Anything that does
+# real SHA-256 of this release's checkers and the tag's build number before
+# install.sh is signed, and fails the run if any placeholder is left. Anything that does
 # not check out fails the run, and nothing is published.
 #
-# Pull requests that change this file or the pinned dashboard commit build
-# the archives only, on
+# Pull requests that change this file, the pinned dashboard commit or the
+# pinning script, and runs started by hand, build the archives only, on
 # GitHub-hosted runners, with no secret and no write access.
 
 on:
   push:
-    branches: [main]
+    tags: ['v*']
   pull_request:
     paths:
       - .github/workflows/release.yml
       - build/dashboard-commit
+      - install/pin-verifier-hashes.sh
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# Releases are published one at a time, in push order, so an older build never
-# replaces a newer one as latest. A running release is never cancelled; a push
-# that is still waiting when a newer one arrives is superseded by it, whose
-# release holds its changes too.
+# Each tag builds in its own group. The sign and publish job of every tag
+# shares one group, so releases are published one at a time, and that job
+# refuses a tag whose build number is not above the latest release's, so an
+# older tag approved later never replaces a newer one as latest. A running
+# release is never cancelled.
 concurrency:
-  group: release-${{ github.event.pull_request.number || 'main' }}
+  group: release-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -265,9 +276,15 @@ jobs:
   publish:
     name: sign and publish
     needs: [build, setup, verifier]
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    # The signing key is a secret of this environment only. It takes only runs
+    # for v* tags and holds each run until a required reviewer approves it.
+    environment: release
+    concurrency:
+      group: release-publish
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
@@ -276,12 +293,53 @@ jobs:
         env:
           HAS_KEY: ${{ secrets.GHOST_RELEASE_SIGNING_KEY != '' }}
         run: |
-          if [ "$HAS_KEY" = true ]; then
-            echo "present=true" >>"$GITHUB_OUTPUT"
-          else
-            echo "present=false" >>"$GITHUB_OUTPUT"
-            echo "::notice::The Actions secret GHOST_RELEASE_SIGNING_KEY is not set, so this build is not signed or published. The unsigned archives are kept as this run's artifacts."
+          if [ "$HAS_KEY" != true ]; then
+            echo "::error::The release environment's secret GHOST_RELEASE_SIGNING_KEY is not set, so this tag is not signed or published. The unsigned archives are kept as this run's artifacts."
+            exit 1
           fi
+          echo "present=true" >>"$GITHUB_OUTPUT"
+      # A release is cut only from a reviewed commit on main, and only forward:
+      # a tag that is not vMAJOR.MINOR.PATCH, whose commit is not on main, or
+      # whose build number is not above every published release's fails here,
+      # before the key is read. install/pin-verifier-hashes.sh checks the tag's
+      # form again and pins its build number.
+      - name: Check the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          part='(0|[1-9][0-9]{0,2})'
+          build_of() {
+            [[ $1 =~ ^v$part\.$part\.$part$ ]] || return 1
+            echo $(( BASH_REMATCH[1] * 1000000 + BASH_REMATCH[2] * 1000 + BASH_REMATCH[3] ))
+          }
+          if ! build=$(build_of "$TAG") || [ "$build" -eq 0 ]; then
+            echo "::error::The tag $TAG is not vMAJOR.MINOR.PATCH (each part 0 to 999, above v0.0.0)."
+            exit 1
+          fi
+          status=$(gh api "repos/$GH_REPO/compare/main...$SHA" --jq .status)
+          if [ "$status" != identical ] && [ "$status" != behind ]; then
+            echo "::error::The tag $TAG points at $SHA, which is not on main (compare status: $status). Releases are cut only from merged commits."
+            exit 1
+          fi
+          # Every published release's tag; a failed lookup fails the run.
+          tags=$(gh api --paginate "repos/$GH_REPO/releases?per_page=100" --jq '.[].tag_name')
+          latest=none
+          latest_build=0
+          while IFS= read -r t; do
+            if [ -n "$t" ] && b=$(build_of "$t") && [ "$b" -gt "$latest_build" ]; then
+              latest=$t
+              latest_build=$b
+            fi
+          done <<<"$tags"
+          if [ "$build" -le "$latest_build" ]; then
+            echo "::error::The tag $TAG is build $build, not above the highest release $latest (build $latest_build). The updater would refuse it."
+            exit 1
+          fi
+          echo "Releasing $TAG, build $build, from $SHA on main; the highest release so far is $latest (build $latest_build)."
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: steps.key.outputs.present == 'true'
         with:
@@ -389,10 +447,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           SHA: ${{ github.sha }}
-          RUN: ${{ github.run_number }}
+          TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          tag="build-$RUN-${SHA:0:12}"
+          tag="$TAG"
           gh release create "$tag" dist/ghost-node-*.tar.gz dist/ghost-node-*.tar.gz.sig \
             dist/ghost-setup-windows-amd64.exe dist/ghost-setup-windows-amd64.exe.sig \
             dist/ghost-setup-windows-arm64.exe dist/ghost-setup-windows-arm64.exe.sig \
@@ -402,5 +460,5 @@ jobs:
             dist/ghost-verify-darwin-arm64 dist/ghost-verify-darwin-arm64.sig \
             dist/install.sh dist/install.sh.sig dist/install.ps1 dist/install.ps1.sig \
             dist/install.cmd dist/install.cmd.sig dist/SHA256SUMS \
-            --target "$SHA" --title "Ghost node $tag" --latest \
+            --verify-tag --title "Ghost node $tag" --latest \
             --notes "Ghost node built from $SHA. Install with install.sh, or on Windows install.ps1 or install.cmd; each file's .sig is its ed25519 signature by the release key."

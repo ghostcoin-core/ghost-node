@@ -31,11 +31,14 @@
 # StartInterval) unless GHOST_NO_UPDATE=1 is set at install time. An update
 # first downloads the install.sh of the newest release, from newest_url below,
 # and its signature, install.sh.sig, and checks that signature against the
-# release key with this script's own pinned ghost-verify. Only then does it
-# run that install.sh with --update, which passes the same checks as an
-# install with the newest release's own pins, replaces the geth executable
-# atomically, keeps the previous one until the node has restarted, and keeps
-# the config and the mining address. A refused update changes nothing and
+# release key with this script's own pinned ghost-verify, and refuses it when
+# the build number it carries (release_build, below) is lower than the
+# installed one. Only then does it run that install.sh with --update, which
+# passes the same checks as an install with the newest release's own pins,
+# replaces the geth executable atomically, keeps the previous one until the
+# node has restarted, keeps the config and the mining address, records its
+# build number and writes itself out as the update script. A refused update
+# changes nothing and
 # leaves the running node alone. Run again, the installer installs its release
 # again and keeps the config and the mining address.
 #
@@ -188,7 +191,31 @@ darwin-arm64 0000000000000000000000000000000000000000000000000000000000000000
 HASHES
 }
 
+# The SHA-256 of the release's ghost-node-<os>-<arch>.tar.gz archives. The
+# release fills them in with the build number below, so this signed script
+# names the one archive of its own release it installs: a validly signed
+# archive of another release put in its place is refused. The repository's
+# copy, with build number 0, holds the placeholder and checks only the
+# archive's signature; a script with a build number refuses a placeholder.
+archive_hashes() {
+	cat <<'HASHES'
+ghost-node-linux-amd64.tar.gz 0000000000000000000000000000000000000000000000000000000000000000
+ghost-node-linux-arm64.tar.gz 0000000000000000000000000000000000000000000000000000000000000000
+ghost-node-darwin-amd64.tar.gz 0000000000000000000000000000000000000000000000000000000000000000
+ghost-node-darwin-arm64.tar.gz 0000000000000000000000000000000000000000000000000000000000000000
+HASHES
+}
+
 placeholder_hash=0000000000000000000000000000000000000000000000000000000000000000
+
+# The release's build number. The release writes in the number of its tag,
+# vMAJOR.MINOR.PATCH, as MAJOR*1000000 + MINOR*1000 + PATCH, before it signs
+# this script, so the number is covered by the signature; the repository's
+# copy holds 0. An install or update records it in ~/.ghost-node/release-build,
+# and an update refuses a newest release whose signed install.sh carries a
+# lower number than the one installed, so an older signed release put back as
+# the latest is never installed as a downgrade.
+release_build=0
 release_url=${GHOST_RELEASE_URL:-https://github.com/ghostcoin-core/ghost-node/releases/latest/download}
 newest_url=${GHOST_LATEST_URL:-https://github.com/ghostcoin-core/ghost-node/releases/latest/download}
 ca_file=${GHOST_INSTALL_CA_FILE:-}
@@ -307,7 +334,8 @@ verify() {
 }
 
 # run_newest downloads the newest release's install.sh and runs it with
-# --update once its signature is the release key's, so that the update moves
+# --update once its signature is the release key's and its build number is
+# not lower than the installed one (check_not_older), so that the update moves
 # to the newest release and checks it with that release's own pins. The
 # newest install.sh, told by GHOST_NEWEST_INSTALLER=1 that it is the newest,
 # updates from its own release instead of looking further. This script exits
@@ -322,9 +350,75 @@ run_newest() {
 	fetch "$newest_url/install.sh.sig" "$work/install.sh.sig"
 	verify "$work/install.sh"
 	say "the newest release's install.sh is signed by the release key"
+	check_not_older "$(script_build "$work/install.sh")"
 	n_status=0
 	GHOST_NEWEST_INSTALLER=1 sh "$work/install.sh" --update </dev/null || n_status=$?
 	exit "$n_status"
+}
+
+# script_build prints the build number the install.sh $1 carries: its one
+# release_build line, or 0 for a script from before build numbers, which has
+# none. A script with more than one such line, or a malformed one, prints
+# nothing, and check_not_older refuses it.
+script_build() {
+	s_lines=$(grep -c '^release_build=' "$1" || :)
+	case "$s_lines" in
+	0) printf '0\n' ;;
+	1) sed -n 's/^release_build=\([0-9]\{1,9\}\)$/\1/p' "$1" ;;
+	esac
+}
+
+# installed_build prints the build number recorded by the last install or
+# update, or 0 when there is none or the record is not a number.
+installed_build() {
+	i_build=
+	if [ -f "$base/release-build" ]; then
+		i_build=$(head -n 1 "$base/release-build")
+	fi
+	case "$i_build" in
+	'' | *[!0-9]* | ??????????*) i_build=0 ;;
+	esac
+	i_build=$(printf '%s\n' "$i_build" | sed 's/^0*\([0-9]\)/\1/')
+	printf '%s\n' "$i_build"
+}
+
+# check_not_older refuses to update to the release whose build number is $1
+# when it is missing or lower than the installed build number, or than this
+# script's own.
+check_not_older() {
+	c_new=$1
+	case "$c_new" in
+	'' | *[!0-9]*) refuse "the newest release's install.sh does not carry one well-formed build number" ;;
+	esac
+	c_have=$(installed_build)
+	[ "$release_build" -le "$c_have" ] || c_have=$release_build
+	[ "$c_new" -ge "$c_have" ] ||
+		refuse "the newest release is build $c_new, older than the installed build $c_have"
+}
+
+# record_build records this script's build number as the installed one.
+record_build() {
+	printf '%s\n' "$release_build" >"$base/release-build.new" &&
+		mv -f "$base/release-build.new" "$base/release-build" ||
+		die "could not record the installed build number in $base/release-build"
+}
+
+# check_archive refuses the archive $1, named $2, unless its SHA-256 is the
+# one archive_hashes pins for it. A script with build number 0, the
+# repository's copy, may still hold the placeholder, and then checks nothing
+# more than the signature.
+check_archive() {
+	a_pinned=$(archive_hashes | sed -n "s/^$2 \([0-9a-f]\{64\}\)\$/\1/p")
+	case "$a_pinned" in
+	'') refuse "this installer pins no hash for $2" ;;
+	"$placeholder_hash")
+		[ "$release_build" = 0 ] || refuse "this installer has no hash of $2 pinned, only the placeholder"
+		return 0
+		;;
+	esac
+	a_hash=$(sha256 "$1") || refuse "could not compute the SHA-256 of $2"
+	[ "$a_hash" = "$a_pinned" ] ||
+		refuse "the downloaded $2 has the SHA-256 $a_hash, not the $a_pinned this release's installer pins"
 }
 
 # unpack unpacks the verified archive $1 into $work/release.
@@ -1491,11 +1585,15 @@ main() {
 	if [ "$mode" = update ] && [ "${GHOST_NEWEST_INSTALLER:-}" != 1 ]; then
 		run_newest
 	fi
+	if [ "$mode" = update ]; then
+		check_not_older "$release_build"
+	fi
 	asset="ghost-node-$os-$arch.tar.gz"
 	say "downloading $asset"
 	fetch "$release_url/$asset" "$work/$asset"
 	fetch "$release_url/$asset.sig" "$work/$asset.sig"
 	verify "$work/$asset"
+	check_archive "$work/$asset" "$asset"
 	say "the release signature is valid"
 	unpack "$work/$asset"
 
@@ -1514,6 +1612,8 @@ main() {
 			rewritten=1
 		fi
 		update
+		record_build
+		write_updater
 		if [ "$rewritten" = 1 ] && [ "$restarted" != 1 ]; then
 			mark_start
 			{ restart_node && wait_started; } ||
@@ -1533,6 +1633,7 @@ main() {
 	chmod 700 "$geth.new"
 	mv -f "$geth.new" "$geth"
 	write_updater
+	record_build
 	configure
 	keep_threads
 	keep_p2p_port

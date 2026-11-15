@@ -324,6 +324,74 @@ func (rs *releaseServer) setFile(name string, content []byte) {
 	rs.releases[rs.latest][name] = content
 }
 
+// file returns the latest release's file name.
+func (rs *releaseServer) file(t *testing.T, name string) string {
+	t.Helper()
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	content, ok := rs.releases[rs.latest][name]
+	if !ok {
+		t.Fatalf("the latest release %s has no %s", rs.latest, name)
+	}
+	return string(content)
+}
+
+var (
+	releaseURLLine = regexp.MustCompile(`(?m)^release_url=\$\{GHOST_RELEASE_URL:-([^}]*)\}$`)
+	buildNumLine   = regexp.MustCompile(`(?m)^release_build=([0-9]+)$`)
+)
+
+// releaseURLOf returns the default release URL the install.sh script pins.
+func releaseURLOf(t *testing.T, script string) string {
+	t.Helper()
+	m := releaseURLLine.FindAllStringSubmatch(script, -1)
+	if len(m) != 1 {
+		t.Fatalf("install.sh has %d release_url lines, not one", len(m))
+	}
+	return m[0][1]
+}
+
+// scriptBuild returns the build number the install.sh script carries.
+func scriptBuild(t *testing.T, script string) string {
+	t.Helper()
+	m := buildNumLine.FindAllStringSubmatch(script, -1)
+	if len(m) != 1 {
+		t.Fatalf("install.sh has %d release_build lines, not one", len(m))
+	}
+	return m[0][1]
+}
+
+// setBuild makes the script at path carry the build number build, as the
+// release does to the copy it publishes, or with build empty no build number,
+// as a script from before build numbers.
+func setBuild(t *testing.T, path, build string) {
+	t.Helper()
+	editScript(t, path, func(s string) string {
+		if strings.Count(s, "\nrelease_build=0\n") != 1 {
+			t.Fatal("install.sh has no line release_build=0")
+		}
+		line := ""
+		if build != "" {
+			line = "release_build=" + build + "\n"
+		}
+		return strings.Replace(s, "\nrelease_build=0\n", "\n"+line, 1)
+	})
+}
+
+// pinArchive makes the script at path pin blob as the SHA-256 of the archive
+// for os on this computer's architecture, as the release does to the copy it
+// publishes.
+func pinArchive(t *testing.T, path, os_ string, blob []byte) {
+	t.Helper()
+	editScript(t, path, func(s string) string {
+		line := assetName(os_) + " " + strings.Repeat("0", 64) + "\n"
+		if strings.Count(s, line) != 1 {
+			t.Fatalf("install.sh has no line %q", line)
+		}
+		return strings.Replace(s, line, assetName(os_)+" "+sha256Hex(blob)+"\n", 1)
+	})
+}
+
 func (rs *releaseServer) setRelease(archive, sig []byte) {
 	rs.setFile(assetName(rs.os), archive)
 	rs.setFile(assetName(rs.os)+".sig", sig)
@@ -1417,9 +1485,10 @@ func checkUpdateApplied(t *testing.T, env *installEnv, rs *releaseServer, key *s
 // checkUpdatedTo runs the update script with extraEnv, a release with the geth
 // newGeth being the newest, and checks that it downloaded the files of an
 // update from the release tag pinned and the newest release tag newest, that
-// the node runs the new geth with the old config, keys, update script and
-// chain, and that a second update finds nothing to do. restart is the service
-// manager's restart call.
+// the node runs the new geth with the old config, keys and chain, that the
+// update script is now the newest release's installer and the installed build
+// number its build number, and that a second update finds nothing to do.
+// restart is the service manager's restart call.
 func checkUpdatedTo(t *testing.T, env *installEnv, rs *releaseServer, newGeth []byte, pinned, newest, restart string, extraEnv ...string) {
 	t.Helper()
 	base := filepath.Join(env.home, ".ghost-node")
@@ -1445,10 +1514,20 @@ func checkUpdatedTo(t *testing.T, env *installEnv, rs *releaseServer, newGeth []
 		t.Fatal("the installed geth is not the new release's")
 	}
 	after := baseFiles(t, env)
-	delete(before, filepath.Join("bin", "geth"))
-	delete(after, filepath.Join("bin", "geth"))
+	for _, name := range []string{filepath.Join("bin", "geth"), "update", "release-build"} {
+		delete(before, name)
+		delete(after, name)
+	}
 	if !sameFiles(before, after) {
-		t.Fatalf("the update changed more than geth: had %v, has %v", before, after)
+		t.Fatalf("the update changed more than geth, the update script and the build number: had %v, has %v", before, after)
+	}
+	newestScript := rs.file(t, "install.sh")
+	updater := readFile(t, filepath.Join(base, "update"))
+	if !strings.Contains(updater, "release_url=${GHOST_RELEASE_URL:-"+releaseURLOf(t, newestScript)+"}\n") {
+		t.Fatal("the update script is not the newest release's installer after the update")
+	}
+	if got, want := readFile(t, filepath.Join(base, "release-build")), scriptBuild(t, newestScript)+"\n"; got != want {
+		t.Fatalf("the update recorded build number %q, not the newest release's %q", got, want)
 	}
 	if configAddress(t, env) != address {
 		t.Fatal("the update changed the mining address")
@@ -1568,6 +1647,114 @@ func TestInstallScriptUpdatesToNewerRelease(t *testing.T) {
 	newArchive := archive{"geth": newGeth}.tarGz(t)
 	publishNewer(t, rs, key, newer, newArchive, key.sign(newArchive), nil)
 	checkUpdatedTo(t, env, rs, newGeth, firstTag, newer, "systemctl --user restart ghost-node.service\n", "GHOST_RELEASE_URL=")
+}
+
+// TestInstallScriptRefusesOlderRelease installs a release carrying build
+// number 5, then publishes newest releases as an attacker holding the release
+// key, or a release put back as the latest, would: a lower build number, or
+// none at all, as a signed install.sh from before build numbers has. Each is
+// refused and changes nothing. A newest release with the same or a higher
+// number is installed, records its number, and from then on a release below
+// it is refused even by the updater written before it.
+func TestInstallScriptRefusesOlderRelease(t *testing.T) {
+	release, geth := internalNetRelease(t)
+	verifier := builtVerifier(t)
+	key := newSigner(t)
+	blob := release.tarGz(t)
+	rs := serveRelease(t, "linux", blob, key.sign(blob), verifier)
+	script := writeScript(t, key, sha256Hex(verifier))
+	setBuild(t, script, "5")
+	pinArchive(t, script, "linux", blob)
+	env := newInstallEnv(t, envOptions{systemctl: stubSystemctl})
+	installPinned(t, env, rs, script, firstTag, geth)
+	base := filepath.Join(env.home, ".ghost-node")
+	if got := readFile(t, filepath.Join(base, "release-build")); got != "5\n" {
+		t.Fatalf("the install recorded build number %q, not 5", got)
+	}
+	restart := "systemctl --user restart ghost-node.service\n"
+
+	// publish publishes tag as the newest release, its install.sh carrying the
+	// build number build (none when empty) and pinning a geth of its own.
+	publish := func(t *testing.T, tag, build string) []byte {
+		t.Helper()
+		newGeth := append(append([]byte(nil), release["geth"]...), []byte("\nghost test release "+tag+"\n")...)
+		newArchive := archive{"geth": newGeth}.tarGz(t)
+		pinned := append(append([]byte(nil), verifier...), []byte("\nghost-verify of "+tag+"\n")...)
+		newest := writeScript(t, key, sha256Hex(pinned))
+		pinRelease(t, newest, rs.downloadURL(tag))
+		setBuild(t, newest, build)
+		if build != "" {
+			pinArchive(t, newest, "linux", newArchive)
+		}
+		rs.publish(tag)
+		serveInstaller(t, rs, key, newest)
+		rs.setRelease(newArchive, key.sign(newArchive))
+		rs.setVerifier(pinned)
+		return newGeth
+	}
+	refused := func(t *testing.T, tag, build, want string) {
+		t.Helper()
+		publish(t, tag, build)
+		state := snapshot(t, env)
+		served := len(rs.servedPaths())
+		out, err := env.update(t, rs, "GHOST_RELEASE_URL=")
+		checkUpdateRefused(t, env, state, out, err, want)
+		for _, path := range rs.servedPaths()[served:] {
+			if !strings.HasSuffix(path, "/install.sh") && !strings.HasSuffix(path, "/install.sh.sig") && !strings.HasSuffix(path, "/"+verifierName(rs.os)) {
+				t.Fatalf("the refused update downloaded %s from the older release", path)
+			}
+		}
+	}
+
+	t.Run("lower", func(t *testing.T) {
+		refused(t, "v0.0.4-test", "4", "the newest release is build 4, older than the installed build 5")
+	})
+	t.Run("none", func(t *testing.T) {
+		refused(t, "build-old-test", "", "the newest release is build 0, older than the installed build 5")
+	})
+	t.Run("two build lines", func(t *testing.T) {
+		publish(t, "v0.0.9-test", "9")
+		newest := rs.file(t, "install.sh") + "release_build=9\n"
+		rs.setInstaller([]byte(newest), key.sign([]byte(newest)))
+		state := snapshot(t, env)
+		out, err := env.update(t, rs, "GHOST_RELEASE_URL=")
+		checkUpdateRefused(t, env, state, out, err, "does not carry one well-formed build number")
+	})
+	t.Run("an older signed archive in a newer release", func(t *testing.T) {
+		// The newest release's own install.sh is genuine and newer, but its
+		// archive and signature were swapped for the installed release's,
+		// which the release key also signed.
+		publish(t, "v0.0.8-test", "8")
+		rs.setRelease(blob, key.sign(blob))
+		state := snapshot(t, env)
+		out, err := env.update(t, rs, "GHOST_RELEASE_URL=")
+		checkUpdateRefused(t, env, state, out, err, "not the ")
+		if !strings.Contains(out, "this release's installer pins") {
+			t.Fatal("the update did not say the archive is not the one its installer pins")
+		}
+	})
+	t.Run("a placeholder archive hash with a build number", func(t *testing.T) {
+		publish(t, "v0.0.9-test", "9")
+		pinnedLine := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(assetName("linux")) + ` [0-9a-f]{64}$`)
+		newest := pinnedLine.ReplaceAllString(rs.file(t, "install.sh"), assetName("linux")+" "+strings.Repeat("0", 64))
+		rs.setInstaller([]byte(newest), key.sign([]byte(newest)))
+		state := snapshot(t, env)
+		out, err := env.update(t, rs, "GHOST_RELEASE_URL=")
+		checkUpdateRefused(t, env, state, out, err, "has no hash of "+assetName("linux")+" pinned, only the placeholder")
+	})
+	t.Run("same", func(t *testing.T) {
+		newGeth := publish(t, "v0.0.5-test", "5")
+		checkUpdatedTo(t, env, rs, newGeth, firstTag, "v0.0.5-test", restart, "GHOST_RELEASE_URL=")
+	})
+	t.Run("higher", func(t *testing.T) {
+		newGeth := publish(t, "v0.0.7-test", "7")
+		checkUpdatedTo(t, env, rs, newGeth, "v0.0.5-test", "v0.0.7-test", restart, "GHOST_RELEASE_URL=")
+	})
+	t.Run("lower than the recorded build", func(t *testing.T) {
+		// The release at 6 is above the build the first updater was written
+		// with, but below the recorded 7.
+		refused(t, "v0.0.6-test", "6", "the newest release is build 6, older than the installed build 7")
+	})
 }
 
 // untrustedServer serves a release's install.sh over TLS with a certificate of
