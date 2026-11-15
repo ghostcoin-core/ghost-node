@@ -56,6 +56,8 @@ var (
 	errStarted        = errors.New("qsdisc: verification started")
 	errTooSoon        = errors.New("qsdisc: node verified at this endpoint less than a minute ago")
 	errTooManyStarts  = errors.New("qsdisc: too many verifications started in the last minute")
+	errSourceStarts   = errors.New("qsdisc: too many verifications started at this source in the last minute")
+	errSourceBusy     = errors.New("qsdisc: too many verifications running at this source")
 	errFailedBefore   = errors.New("qsdisc: node failed verification at this endpoint before")
 	errSelf           = errors.New("qsdisc: own node ID")
 	errWrongID        = errors.New("qsdisc: endpoint answered with another node ID")
@@ -107,13 +109,15 @@ type UDP struct {
 	sources     lru.BasicLRU[netip.Addr, *tokenBucket]
 	endpoints   lru.BasicLRU[netip.AddrPort, *endpoint]
 	verifying   map[nodeAddr]*verification
+	running     map[netip.Prefix]int // verifications of each source, running or waiting for a slot
 	starts      map[nodeAddr]time.Time
-	startList   *list.List // of verifyStart, oldest first
+	startList   *list.List           // of verifyStart, oldest first
+	srcStarts   map[netip.Prefix]int // starts in startList of each source
+	rmtStarts   int                  // starts in startList a remote peer triggered
 	retries     map[nodeAddr]*list.Element
 	retryList   *list.List // of nodeAddr, oldest first
-	failed      map[nodeAddr]struct{}
-	failRing    []nodeAddr
-	failNext    int
+	failed      map[nodeAddr]time.Time
+	failList    *list.List // of failure, oldest first
 
 	challengePings int // pending pings proving again a table node's endpoint
 
@@ -150,7 +154,9 @@ type endpoint struct {
 }
 
 type verification struct {
-	remote bool
+	remote bool // triggered by a remote peer
+	boot   bool // a bootstrap's own, held to no budget
+	source netip.Prefix
 	done   chan struct{}
 	node   Node
 	err    error
@@ -166,8 +172,31 @@ type nodeAddr struct {
 }
 
 type verifyStart struct {
+	key    nodeAddr
+	at     time.Time
+	source netip.Prefix
+	remote bool
+}
+
+type failure struct {
 	key nodeAddr
 	at  time.Time
+}
+
+// sourceOf returns the source an endpoint's verifications are charged to:
+// its IPv4 /24 or IPv6 /48, or the address itself on a LAN.
+func sourceOf(addr netip.AddrPort) netip.Prefix {
+	ip := addr.Addr().Unmap()
+	bits := ip.BitLen()
+	switch {
+	case netutil.AddrIsLAN(ip):
+	case ip.Is4():
+		bits = VerifySubnet
+	default:
+		bits = VerifySubnet6
+	}
+	p, _ := ip.Prefix(bits)
+	return p
 }
 
 type tokenBucket struct {
@@ -220,12 +249,14 @@ func newUDP(conn *net.UDPConn, cfg Config) *UDP {
 		sources:   lru.NewBasicLRU[netip.Addr, *tokenBucket](MaxSources),
 		endpoints: lru.NewBasicLRU[netip.AddrPort, *endpoint](MaxSources),
 		verifying: make(map[nodeAddr]*verification),
+		running:   make(map[netip.Prefix]int),
 		starts:    make(map[nodeAddr]time.Time),
 		startList: list.New(),
+		srcStarts: make(map[netip.Prefix]int),
 		retries:   make(map[nodeAddr]*list.Element),
 		retryList: list.New(),
-		failed:    make(map[nodeAddr]struct{}),
-		failRing:  make([]nodeAddr, MaxFailed),
+		failed:    make(map[nodeAddr]time.Time),
+		failList:  list.New(),
 		closing:   make(chan struct{}),
 	}
 }
@@ -762,7 +793,7 @@ func (u *UDP) verifyAs(id enode.ID, addr netip.AddrPort, blocking, boot bool) (N
 		u.mu.Unlock()
 		return Node{}, errClosed
 	}
-	if _, ok := u.failed[key]; ok {
+	if u.failedLocked(key, now) {
 		u.mu.Unlock()
 		return Node{}, errFailedBefore
 	}
@@ -778,6 +809,19 @@ func (u *UDP) verifyAs(id enode.ID, addr netip.AddrPort, blocking, boot bool) (N
 			return Node{}, errClosed
 		}
 	}
+	v := &verification{remote: !blocking, boot: boot, source: sourceOf(addr), done: make(chan struct{})}
+	if !boot {
+		// The start is charged only when the record fetch begins; check
+		// now that it could be, so that a refused one takes no slot.
+		if err := u.mayStartLocked(key, v.source, v.remote, now); err != nil {
+			u.mu.Unlock()
+			return Node{}, err
+		}
+		if u.running[v.source] >= MaxSourceVerifications {
+			u.mu.Unlock()
+			return Node{}, errSourceBusy
+		}
+	}
 	if !blocking {
 		select {
 		case u.sem <- struct{}{}:
@@ -787,15 +831,8 @@ func (u *UDP) verifyAs(id enode.ID, addr netip.AddrPort, blocking, boot bool) (N
 		}
 	}
 	if !boot {
-		if err := u.mayStartLocked(key, now); err != nil {
-			u.mu.Unlock()
-			if !blocking {
-				<-u.sem
-			}
-			return Node{}, err
-		}
+		u.running[v.source]++
 	}
-	v := &verification{remote: !blocking, done: make(chan struct{})}
 	u.verifying[key] = v
 	u.wg.Add(1)
 	u.mu.Unlock()
@@ -815,10 +852,12 @@ func (u *UDP) verifyAs(id enode.ID, addr netip.AddrPort, blocking, boot bool) (N
 }
 
 // mayStartLocked checks whether a verification of a node at an endpoint
-// may start now, and records the start. One starts for an ID at one
-// endpoint at most every VerifyInterval, and at most MaxVerifyStarts start
-// in a VerifyInterval over all IDs and endpoints.
-func (u *UDP) mayStartLocked(key nodeAddr, now time.Time) error {
+// of source may start now. One starts for an ID at one endpoint at most
+// every VerifyInterval. In a VerifyInterval at most MaxVerifyStarts start
+// over all IDs and endpoints, of them at most MaxSourceVerifyStarts at
+// endpoints of one source and at most MaxRemoteVerifyStarts that remote
+// peers triggered.
+func (u *UDP) mayStartLocked(key nodeAddr, source netip.Prefix, remote bool, now time.Time) error {
 	for e := u.startList.Front(); e != nil; e = u.startList.Front() {
 		s := e.Value.(verifyStart)
 		if now.Sub(s.at) < VerifyInterval {
@@ -828,6 +867,12 @@ func (u *UDP) mayStartLocked(key nodeAddr, now time.Time) error {
 		if u.starts[s.key] == s.at {
 			delete(u.starts, s.key)
 		}
+		if u.srcStarts[s.source]--; u.srcStarts[s.source] <= 0 {
+			delete(u.srcStarts, s.source)
+		}
+		if s.remote {
+			u.rmtStarts--
+		}
 	}
 	if at, ok := u.starts[key]; ok && now.Sub(at) < VerifyInterval {
 		return errTooSoon
@@ -835,14 +880,32 @@ func (u *UDP) mayStartLocked(key nodeAddr, now time.Time) error {
 	if u.startList.Len() >= MaxVerifyStarts {
 		return errTooManyStarts
 	}
+	if remote && u.rmtStarts >= MaxRemoteVerifyStarts {
+		return errTooManyStarts
+	}
+	if u.srcStarts[source] >= MaxSourceVerifyStarts {
+		return errSourceStarts
+	}
+	return nil
+}
+
+// chargeStartLocked checks as mayStartLocked does and records the start.
+func (u *UDP) chargeStartLocked(key nodeAddr, source netip.Prefix, remote bool, now time.Time) error {
+	if err := u.mayStartLocked(key, source, remote, now); err != nil {
+		return err
+	}
 	u.starts[key] = now
-	u.startList.PushBack(verifyStart{key, now})
+	u.startList.PushBack(verifyStart{key, now, source, remote})
+	u.srcStarts[source]++
+	if remote {
+		u.rmtStarts++
+	}
 	return nil
 }
 
 // runVerify runs a verification holding a slot of u.sem.
 func (u *UDP) runVerify(v *verification, key nodeAddr) {
-	n, refused, err := u.fetchAndCheck(key.id, key.addr, v.remote)
+	n, refused, err := u.fetchAndCheck(v, key)
 	<-u.sem
 	if err == nil && u.tab.add(n, time.Now()) {
 		var c [CookieSize]byte
@@ -863,8 +926,13 @@ func (u *UDP) runVerify(v *verification, key nodeAddr) {
 func (u *UDP) finishVerify(v *verification, key nodeAddr, n Node, refused bool, err error) {
 	u.mu.Lock()
 	delete(u.verifying, key)
+	if !v.boot {
+		if u.running[v.source]--; u.running[v.source] <= 0 {
+			delete(u.running, v.source)
+		}
+	}
 	if refused {
-		u.addFailureLocked(key)
+		u.addFailureLocked(key, time.Now())
 	}
 	v.node, v.err = n, err
 	u.mu.Unlock()
@@ -877,18 +945,29 @@ func (u *UDP) finishVerify(v *verification, key nodeAddr, n Node, refused bool, 
 
 // fetchAndCheck proves the endpoint for id, then has the verifier fetch and
 // verify the record, and accepts it only when it is of id and names addr.
-// refused is true when the endpoint answered but the node was refused.
-func (u *UDP) fetchAndCheck(id enode.ID, addr netip.AddrPort, remote bool) (n Node, refused bool, err error) {
+// refused is true when the endpoint answered but the node was refused. The
+// start is charged to the budgets only once the endpoint has answered and
+// the record fetch, which opens a connection to it, begins.
+func (u *UDP) fetchAndCheck(v *verification, key nodeAddr) (n Node, refused bool, err error) {
+	id, addr := key.id, key.addr
 	u.mu.Lock()
 	proven := u.provenLocked(addr, qsconn.NodeID(id), time.Now())
 	u.mu.Unlock()
 	if !proven {
-		got, err := u.ping(addr, id, remote)
+		got, err := u.ping(addr, id, v.remote)
 		if err != nil {
 			return Node{}, false, err
 		}
 		if enode.ID(got) != id {
 			return Node{}, true, errWrongID
+		}
+	}
+	if !v.boot {
+		u.mu.Lock()
+		err := u.chargeStartLocked(key, v.source, v.remote, time.Now())
+		u.mu.Unlock()
+		if err != nil {
+			return Node{}, false, err
 		}
 	}
 	rec, err := u.verifier.VerifyRecord(id, addr)
@@ -917,22 +996,39 @@ func checkRecord(rec *enode.QSRecord, id enode.ID, addr netip.AddrPort) error {
 	return nil
 }
 
-// addFailureLocked remembers a failed verification. A bootnode at its
-// configured endpoint is never remembered: a fetch that failed once, while
-// it was busy or our network was not up, must not keep the node from it.
-func (u *UDP) addFailureLocked(k nodeAddr) {
-	if u.bootKeys[k] {
+// addFailureLocked remembers a failed verification for FailedTime. A
+// bootnode at its configured endpoint is never remembered: a fetch that
+// failed once, while it was busy or our network was not up, must not keep
+// the node from it.
+func (u *UDP) addFailureLocked(k nodeAddr, now time.Time) {
+	if u.bootKeys[k] || u.failedLocked(k, now) {
 		return
 	}
-	if _, ok := u.failed[k]; ok {
-		return
+	if u.failList.Len() >= MaxFailed {
+		u.dropFailureLocked(u.failList.Front())
 	}
-	if len(u.failed) >= MaxFailed {
-		delete(u.failed, u.failRing[u.failNext])
+	u.failed[k] = now
+	u.failList.PushBack(failure{k, now})
+}
+
+// failedLocked reports whether k failed verification less than FailedTime
+// ago, and forgets the failures older than that.
+func (u *UDP) failedLocked(k nodeAddr, now time.Time) bool {
+	for e := u.failList.Front(); e != nil; e = u.failList.Front() {
+		if now.Sub(e.Value.(failure).at) < FailedTime {
+			break
+		}
+		u.dropFailureLocked(e)
 	}
-	u.failRing[u.failNext] = k
-	u.failNext = (u.failNext + 1) % MaxFailed
-	u.failed[k] = struct{}{}
+	_, ok := u.failed[k]
+	return ok
+}
+
+func (u *UDP) dropFailureLocked(e *list.Element) {
+	f := u.failList.Remove(e).(failure)
+	if u.failed[f.key] == f.at {
+		delete(u.failed, f.key)
+	}
 }
 
 // queueRetry remembers a remote-triggered verification refused for want of

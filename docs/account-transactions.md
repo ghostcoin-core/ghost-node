@@ -831,7 +831,21 @@ signature, so nothing in them is trusted on its own:
   widen the budget: each start still takes one of the at most 8 running
   verifications and one of the at most 1,024 starts a minute, over all IDs
   and endpoints, and the record cache still verifies at most 100
-  signatures a second.
+  signatures a second. A failed verification is remembered for 10 minutes,
+  so a fetch that failed for a passing reason does not keep an honest peer
+  out for longer.
+- The verification budgets are also kept per source, an IPv4 /24, an IPv6
+  /48 or one LAN address, so that a few hosts cannot use them up. A start
+  is charged only once the endpoint has answered our ping and the record
+  fetch opens its connection. At most 64 of the 1,024 starts a minute are
+  at endpoints of one source, and at most 768 are ones that remote peers
+  triggered, so the other 256 stay for the node's own lookups. At most 2 of
+  the 8 running verifications are at endpoints of one source, so hosts that
+  never finish the connection need four sources to hold every slot. One
+  address pinging with a fresh random ID each time and answering the ping
+  back makes the node start at most 64 verifications a minute for it and
+  does not stop the node's own lookups (`TestVerifyStartBudgets`,
+  `TestVerifySlotsPerSource`, `TestRandomIDPingsKeepLookups`).
 - A verification a peer triggers while all 8 slots are busy is queued, at
   most 64 queued with the oldest dropped first, and started once a slot is
   free under the same budgets.
@@ -873,10 +887,14 @@ settings in `p2p/qsdisc/limits.go` (`TestQSDiscoveryLimitsAreSet`):
 | `MaxRemotePings` | 448 | of those, pings a peer can trigger |
 | `MaxChallengePings` | 32 | of those, challenge pings that prove again the endpoint of a table node whose proof was pushed out; the other 32 stay for the node's own live checks and lookups |
 | `MaxVerifications` | 8 | record verifications running at once; one a peer triggers beyond it is queued for a retry |
+| `MaxSourceVerifications` | 2 | of those, verifications running or waiting for a slot at endpoints of one source, so that hosts that never finish the connection need four sources to hold every slot; one beyond it is refused |
+| `VerifySubnet`, `VerifySubnet6` | /24, /48 | one source of verifications; a LAN address is a source of its own |
 | `VerifyInterval` | 1 minute | the least time between two verifications started for one ID at one endpoint |
-| `MaxVerifyStarts` | 1,024 | starts remembered, and so the most that start in a minute over all IDs and endpoints |
+| `MaxVerifyStarts` | 1,024 | starts remembered, and so the most that start in a minute over all IDs and endpoints. A start is charged only once the endpoint has answered our ping and the record fetch opens its connection |
+| `MaxSourceVerifyStarts` | 64 | of those, starts in a minute at endpoints of one source, so that one source pinging with fresh IDs cannot use the whole budget |
+| `MaxRemoteVerifyStarts` | 768 | of those, starts in a minute that remote peers trigger; the other 256 stay for the node's own lookups |
 | `MaxVerifyRetries` | 64 | verifications a peer triggered queued for a free slot, the oldest dropped first |
-| `MaxFailed` | 1,024 | the memory of failed verifications, the oldest dropped first |
+| `MaxFailed`, `FailedTime` | 1,024, 10 minutes | the memory of failed verifications, the oldest dropped first; a failure is forgotten after 10 minutes, so that one for a passing reason does not keep an honest peer out |
 | `SourceRate`, `SourceBurst` | 10 packets a second, burst 20 | pings and findnodes from one source IP, a token bucket; a packet over it is dropped without an answer. Every request of the source IP, with or without the cookie and from any port, is charged to that one bucket. A findnode without that cookie is dropped and charges nothing. A packet that does not decode is dropped and charges nothing, and a pong or neighbors packet is handled only when it answers a request we sent to that endpoint with its token, and charges nothing, so packets forged from a peer's address can neither stop its answers to our live checks and lookups nor its own live checks and lookups of us |
 | `CookieReserve` | 10 packets | the last packets of a source's bucket, taken only by requests carrying the cookie the node gave their endpoint and ID, so that packets forged from the address leave the peer's own live checks of the node an allowance |
 | `MaxRevalidateFails` | 3 | live checks in a row a table node may leave unanswered before it is removed |
@@ -885,10 +903,10 @@ settings in `p2p/qsdisc/limits.go` (`TestQSDiscoveryLimitsAreSet`):
 
 Measured on the linux/arm64 machine of 16 CPUs used for the bounds above:
 
-- `BenchmarkTableMemory`: 3,084,248 bytes of heap (3.08 MB) for a node with
+- `BenchmarkTableMemory`: 3,361,352 bytes of heap (3.36 MB) for a node with
   every bucket and replacement list full (442 nodes), each holding a record
   of full size that nothing else references, 1,024 token buckets, 1,024
-  proven endpoints, 1,024 failures, 1,024 remembered starts, 64 queued
+  proven endpoints, 1,024 failures, 1,024 remembered starts at 1,024 sources, 64 queued
   retries and 512 pending pings. A table node's record is the one the record cache holds, so in a
   running node most of it is shared with the 18.0 MB of the cache.
 - `BenchmarkPacketDecode`: the largest packet, 921 bytes, decodes in

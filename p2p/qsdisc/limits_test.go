@@ -220,10 +220,10 @@ func BenchmarkTableMemory(b *testing.B) {
 			ep.cookie[0] = 1
 		}
 		for i := range MaxFailed {
-			u.addFailureLocked(nodeAddr{idAtDistance(self, 200, uint32(i)), publicAddr(i)})
+			u.addFailureLocked(nodeAddr{idAtDistance(self, 200, uint32(i)), publicAddr(i)}, now)
 		}
 		for i := range MaxVerifyStarts {
-			if err := u.mayStartLocked(nodeAddr{idAtDistance(self, 201, uint32(i)), publicAddr(i)}, now); err != nil {
+			if err := u.chargeStartLocked(nodeAddr{idAtDistance(self, 201, uint32(i)), publicAddr(i)}, sourceOf(publicAddr(i)), false, now); err != nil {
 				b.Fatal(err)
 			}
 		}
