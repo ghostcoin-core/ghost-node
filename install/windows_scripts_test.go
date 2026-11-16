@@ -217,8 +217,8 @@ func TestWindowsInstallerScripts(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, line := range []string{
-		"irm https://get.ghostcoin.com/win | iex",
-		`curl -fsSL https://get.ghostcoin.com/win.cmd -o "%TEMP%\ghost-install.cmd" && "%TEMP%\ghost-install.cmd" && del "%TEMP%\ghost-install.cmd"`,
+		"irm https://get.specter.cash/win | iex",
+		`curl -fsSL https://get.specter.cash/win.cmd -o "%TEMP%\ghost-install.cmd" && "%TEMP%\ghost-install.cmd" && del "%TEMP%\ghost-install.cmd"`,
 	} {
 		if !strings.Contains(string(readme), line) {
 			t.Errorf("README.md does not give the line %s", line)
@@ -228,8 +228,8 @@ func TestWindowsInstallerScripts(t *testing.T) {
 
 // The one-line examples of GHOST_MINE_TO that each installer's header gives.
 var mineToExamples = []string{
-	"curl -fsSL https://get.ghostcoin.com | GHOST_MINE_TO=0x... sh",
-	"$env:GHOST_MINE_TO='0x...'; irm https://get.ghostcoin.com/win | iex",
+	"curl -fsSL https://get.specter.cash | GHOST_MINE_TO=0x... sh",
+	"$env:GHOST_MINE_TO='0x...'; irm https://get.specter.cash/win | iex",
 }
 
 // mineToConfig is the config a Windows script writes for GHOST_MINE_TO.
@@ -387,8 +387,8 @@ func TestWindowsInstallerScriptsMineTo(t *testing.T) {
 // The one-line examples of GHOST_MINE_THREADS that each installer's header
 // gives.
 var mineThreadsExamples = []string{
-	"curl -fsSL https://get.ghostcoin.com | GHOST_MINE_THREADS=2 sh",
-	"$env:GHOST_MINE_THREADS='2'; irm https://get.ghostcoin.com/win | iex",
+	"curl -fsSL https://get.specter.cash | GHOST_MINE_THREADS=2 sh",
+	"$env:GHOST_MINE_THREADS='2'; irm https://get.specter.cash/win | iex",
 }
 
 // TestMinerThreadsWindowsScripts checks that the Windows scripts read
@@ -496,7 +496,7 @@ func TestMinerThreadsWindowsScripts(t *testing.T) {
 
 // noDashboardExample is the one-line example of GHOST_NO_DASHBOARD that each
 // Windows installer's header gives.
-const noDashboardExample = "$env:GHOST_NO_DASHBOARD='1'; irm https://get.ghostcoin.com/win | iex"
+const noDashboardExample = "$env:GHOST_NO_DASHBOARD='1'; irm https://get.specter.cash/win | iex"
 
 // TestWindowsDashboardScripts checks that the Windows scripts read
 // GHOST_DASH_PORT: they refuse what is not a port number before they

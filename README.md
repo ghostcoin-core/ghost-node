@@ -55,7 +55,7 @@ private internal test network with one command, `scripts/internal-net.sh`
 On Linux or macOS (amd64 or arm64), paste this into a terminal:
 
 ```sh
-curl -fsSL https://get.ghostcoin.com | sh
+curl -fsSL https://get.specter.cash | sh
 ```
 
 It runs [install/install.sh](install/install.sh), which asks nothing and needs
@@ -81,7 +81,7 @@ On Linux, the same line with `--public` also publishes the node as a public
 node for the Ghost Wallet, with an HTTPS address of its own:
 
 ```sh
-curl -fsSL https://get.ghostcoin.com | sh -s -- --public
+curl -fsSL https://get.specter.cash | sh -s -- --public
 ```
 
 After the plain install it keeps the node running at boot and after logout
@@ -147,13 +147,13 @@ on a public network ([docs/windows-service.md](docs/windows-service.md)).
 On Windows (amd64 or arm64), the installers are these. In PowerShell:
 
 ```powershell
-irm https://get.ghostcoin.com/win | iex
+irm https://get.specter.cash/win | iex
 ```
 
 or this into CMD:
 
 ```bat
-curl -fsSL https://get.ghostcoin.com/win.cmd -o "%TEMP%\ghost-install.cmd" && "%TEMP%\ghost-install.cmd" && del "%TEMP%\ghost-install.cmd"
+curl -fsSL https://get.specter.cash/win.cmd -o "%TEMP%\ghost-install.cmd" && "%TEMP%\ghost-install.cmd" && del "%TEMP%\ghost-install.cmd"
 ```
 
 They run [install/install.ps1](install/install.ps1) and
@@ -217,11 +217,11 @@ the installer cannot use is refused with nothing installed.
   To change it, run the install line again with the setting:
 
   ```sh
-  curl -fsSL https://get.ghostcoin.com | GHOST_MINE_THREADS=2 sh
+  curl -fsSL https://get.specter.cash | GHOST_MINE_THREADS=2 sh
   ```
 
   ```powershell
-  $env:GHOST_MINE_THREADS='2'; irm https://get.ghostcoin.com/win | iex
+  $env:GHOST_MINE_THREADS='2'; irm https://get.specter.cash/win | iex
   ```
 
   In CMD, run `set "GHOST_MINE_THREADS=2"` before the line above. On Linux and
@@ -235,7 +235,7 @@ the installer cannot use is refused with nothing installed.
   one installed before:
 
   ```powershell
-  $env:GHOST_NO_DASHBOARD='1'; irm https://get.ghostcoin.com/win | iex
+  $env:GHOST_NO_DASHBOARD='1'; irm https://get.specter.cash/win | iex
   ```
 
 ## Building

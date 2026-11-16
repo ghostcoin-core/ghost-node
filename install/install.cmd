@@ -3,7 +3,7 @@ rem Installs a Ghost node on Windows for the current user and starts it
 rem mining, with no administrator rights. It asks nothing: paste the one line
 rem from the README into CMD,
 rem
-rem   curl -fsSL https://get.ghostcoin.com/win.cmd -o "%TEMP%\ghost-install.cmd" && "%TEMP%\ghost-install.cmd" && del "%TEMP%\ghost-install.cmd"
+rem   curl -fsSL https://get.specter.cash/win.cmd -o "%TEMP%\ghost-install.cmd" && "%TEMP%\ghost-install.cmd" && del "%TEMP%\ghost-install.cmd"
 rem
 rem and when it finishes the node is installed, on the network, syncing and
 rem mining, and it prints the mining address and how to check on the node.
@@ -27,8 +27,8 @@ rem Ghost pop-up wallet's, instead of a newly generated mining key. In CMD,
 rem run  set "GHOST_MINE_TO=0x..."  before the line above. The same in
 rem PowerShell and on a Mac or Linux:
 rem
-rem   $env:GHOST_MINE_TO='0x...'; irm https://get.ghostcoin.com/win | iex
-rem   curl -fsSL https://get.ghostcoin.com | GHOST_MINE_TO=0x... sh
+rem   $env:GHOST_MINE_TO='0x...'; irm https://get.specter.cash/win | iex
+rem   curl -fsSL https://get.specter.cash | GHOST_MINE_TO=0x... sh
 rem
 rem It must be 0x followed by exactly 40 hex characters; anything else is
 rem refused with nothing installed. This script then writes the config with
@@ -43,8 +43,8 @@ rem least 1. GHOST_MINE_THREADS chooses the number of cores instead. In CMD,
 rem run  set "GHOST_MINE_THREADS=2"  before the line above. The same in
 rem PowerShell and on a Mac or Linux:
 rem
-rem   $env:GHOST_MINE_THREADS='2'; irm https://get.ghostcoin.com/win | iex
-rem   curl -fsSL https://get.ghostcoin.com | GHOST_MINE_THREADS=2 sh
+rem   $env:GHOST_MINE_THREADS='2'; irm https://get.specter.cash/win | iex
+rem   curl -fsSL https://get.specter.cash | GHOST_MINE_THREADS=2 sh
 rem
 rem It must be a whole number from 1 to 9999; anything else is refused with
 rem nothing installed. ghost-setup keeps it as GETH_MINER_THREADS, which geth
@@ -62,7 +62,7 @@ rem anything else is refused with nothing installed, and so is a port another
 rem program holds. GHOST_NO_DASHBOARD=1 leaves it out. In CMD, run
 rem set "GHOST_NO_DASHBOARD=1"  before the line above. The same in PowerShell:
 rem
-rem   $env:GHOST_NO_DASHBOARD='1'; irm https://get.ghostcoin.com/win | iex
+rem   $env:GHOST_NO_DASHBOARD='1'; irm https://get.specter.cash/win | iex
 rem
 rem It uses no labels, so it runs the same whatever its line endings.
 

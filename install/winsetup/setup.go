@@ -76,7 +76,7 @@ const (
 	// count as started.
 	startCheck = 5 * time.Second
 
-	installLine = "irm https://get.ghostcoin.com/win | iex"
+	installLine = "irm https://get.specter.cash/win | iex"
 
 	// minerThreadsVar is the environment variable geth reads as
 	// --miner.threads. The Run key starts the node with its config and --mine

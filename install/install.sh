@@ -3,7 +3,7 @@
 # Installs a Ghost node for the current user and starts it mining. It asks
 # nothing: paste the one line from the README,
 #
-#	curl -fsSL https://get.ghostcoin.com | sh
+#	curl -fsSL https://get.specter.cash | sh
 #
 # and when it finishes the node is installed, on the network, syncing and
 # mining, and it prints the mining address and how to check on the node.
@@ -71,9 +71,9 @@
 # GHOST_MINE_TO mines straight to a wallet address of your own, such as the
 # Ghost pop-up wallet's, instead of a newly generated mining key:
 #
-#	curl -fsSL https://get.ghostcoin.com | GHOST_MINE_TO=0x... sh
+#	curl -fsSL https://get.specter.cash | GHOST_MINE_TO=0x... sh
 #
-# (on Windows, in PowerShell: $env:GHOST_MINE_TO='0x...'; irm https://get.ghostcoin.com/win | iex)
+# (on Windows, in PowerShell: $env:GHOST_MINE_TO='0x...'; irm https://get.specter.cash/win | iex)
 #
 # It must be 0x followed by exactly 40 hex characters; anything else is
 # refused with nothing installed. The config's Etherbase is then that address,
@@ -85,9 +85,9 @@
 # rounded down and at least 1, so the computer stays cool and quiet.
 # GHOST_MINE_THREADS chooses the number of cores instead:
 #
-#	curl -fsSL https://get.ghostcoin.com | GHOST_MINE_THREADS=2 sh
+#	curl -fsSL https://get.specter.cash | GHOST_MINE_THREADS=2 sh
 #
-# (on Windows, in PowerShell: $env:GHOST_MINE_THREADS='2'; irm https://get.ghostcoin.com/win | iex)
+# (on Windows, in PowerShell: $env:GHOST_MINE_THREADS='2'; irm https://get.specter.cash/win | iex)
 #
 # It must be a whole number from 1 to 9999; anything else is refused with
 # nothing installed. The number is kept in ~/.ghost-node/miner-threads, and a
@@ -99,7 +99,7 @@
 # GHOST_P2P_PORT chooses another, for a computer where something else holds
 # 30303:
 #
-#	curl -fsSL https://get.ghostcoin.com | GHOST_P2P_PORT=30304 sh
+#	curl -fsSL https://get.specter.cash | GHOST_P2P_PORT=30304 sh
 #
 # It must be a whole number from 1 to 65535; anything else is refused with
 # nothing installed. The number is kept in ~/.ghost-node/p2p-port, and a re-run
@@ -139,7 +139,7 @@
 # With --public, on Linux only, the installer also publishes the node as a
 # public node for the Ghost Wallet, with an HTTPS address of its own:
 #
-#	curl -fsSL https://get.ghostcoin.com | sh -s -- --public
+#	curl -fsSL https://get.specter.cash | sh -s -- --public
 #
 # The plain install runs first and completes on its own; then the public steps
 # run. They make sure lingering is on (loginctl enable-linger, through sudo
@@ -230,7 +230,7 @@ dash_service=ghost-dashboard
 dash_label=com.ghostcoin.dashboard
 dash_default_port=8580
 tailscale_install_url=${GHOST_TAILSCALE_INSTALL_URL:-https://tailscale.com/install.sh}
-public_line='curl -fsSL https://get.ghostcoin.com | sh -s -- --public'
+public_line='curl -fsSL https://get.specter.cash | sh -s -- --public'
 
 say() {
 	printf 'ghost-node: %s\n' "$*"
@@ -1599,7 +1599,7 @@ main() {
 	update_hint=
 	restarted=0
 	if [ "$mode" = update ] && { [ ! -x "$geth" ] || [ ! -f "$config" ]; }; then
-		die "there is no Ghost node installed in $base to update; install one with: curl -fsSL https://get.ghostcoin.com | sh"
+		die "there is no Ghost node installed in $base to update; install one with: curl -fsSL https://get.specter.cash | sh"
 	fi
 	check_port
 	check_dash_port
@@ -1683,7 +1683,7 @@ main() {
 		say "the node is installed in $base, running, syncing and mining"
 	fi
 	say "mining to: $address"
-	say "mining on $(threads_summary); to change that, run the install line again with GHOST_MINE_THREADS set to the number of cores, such as: curl -fsSL https://get.ghostcoin.com | GHOST_MINE_THREADS=2 sh"
+	say "mining on $(threads_summary); to change that, run the install line again with GHOST_MINE_THREADS set to the number of cores, such as: curl -fsSL https://get.specter.cash | GHOST_MINE_THREADS=2 sh"
 	say "check its status with: $status_hint"
 	say "follow its log with: $log_hint"
 	say "ask it for the chain head with: $geth attach --exec eth.blockNumber $data/geth.ipc"
