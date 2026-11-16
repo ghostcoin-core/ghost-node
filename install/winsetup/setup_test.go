@@ -534,7 +534,7 @@ func TestWinSetupCleanInstall(t *testing.T) {
 		"HTTPHost = \"127.0.0.1\"\n",
 		"HTTPPort = 8545\n",
 		"HTTPModules = [\"eth\", \"net\", \"web3\", \"ghost\"]\n",
-		"HTTPCors = [\"https://ghost-webapp-alpha.vercel.app\", \"https://ghost-wallet-nine.vercel.app\"]\n",
+		"HTTPCors = [\"https://app.specter.cash\", \"https://wallet.specter.cash\", \"https://ghost-webapp-alpha.vercel.app\", \"https://ghost-wallet-nine.vercel.app\"]\n",
 	} {
 		if !strings.Contains(string(config), want) {
 			t.Errorf("the config lacks %q:\n%s", want, config)
@@ -736,6 +736,61 @@ func TestWinSetupUpdate(t *testing.T) {
 		t.Errorf("the output does not say the node was updated:\n%s", out)
 	}
 	e.requireNoTempLeft()
+}
+
+// TestWinSetupMovesWebOrigins gives an installed node's config the HTTPCors
+// line older installers wrote, with Windows line endings, as a node installed
+// before the web apps moved has. An update rewrites that line, and only it, to
+// the current one and restarts the node; a config that already has the
+// current line is left alone and the node keeps running. A re-run of the
+// install moves the line the same way.
+func TestWinSetupMovesWebOrigins(t *testing.T) {
+	const oldLine = `HTTPCors = ["https://ghost-webapp-alpha.vercel.app", "https://ghost-wallet-nine.vercel.app"]`
+	rs := newReleaseServer(t)
+	s := newSigner(t)
+	e := installed(t, rs, s)
+	configFile := filepath.Join(e.home, "config.toml")
+	blob, err := os.ReadFile(configFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := strings.ReplaceAll(string(blob), "\n", "\r\n")
+	if !strings.Contains(current, "\r\n"+corsLine()+"\r\n") {
+		t.Fatalf("the config lacks the line %s:\n%s", corsLine(), current)
+	}
+	old := strings.Replace(current, corsLine(), oldLine, 1)
+
+	for _, args := range [][]string{{"--update"}, nil} {
+		if err := os.WriteFile(configFile, []byte(old), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		before := e.procs.running()[0]
+		out, err := e.run(args...)
+		if err != nil {
+			t.Fatalf("ghost-setup %q failed: %v\n%s", args, err, out)
+		}
+		if got, _ := os.ReadFile(configFile); string(got) != current {
+			t.Fatalf("ghost-setup %q did not rewrite only the HTTPCors line; the config went from\n%s\nto\n%s", args, old, got)
+		}
+		if !strings.Contains(out, "now lets the Ghost web apps reach the node from their current addresses") {
+			t.Errorf("ghost-setup %q did not say it moved the web app origins:\n%s", args, out)
+		}
+		if live := e.procs.running(); len(live) != 1 || live[0] == before {
+			t.Errorf("ghost-setup %q did not restart the node on the moved origins", args)
+		}
+	}
+
+	before := e.procs.running()[0]
+	out, err := e.run("--update")
+	if err != nil {
+		t.Fatalf("an update to the same release: %v\n%s", err, out)
+	}
+	if got, _ := os.ReadFile(configFile); string(got) != current {
+		t.Fatalf("an update changed a config that already had the line; it went from\n%s\nto\n%s", current, got)
+	}
+	if live := e.procs.running(); len(live) != 1 || live[0] != before {
+		t.Error("an update with nothing to move restarted the node")
+	}
 }
 
 func TestWinSetupRefusesTamperedUpdate(t *testing.T) {

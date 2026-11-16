@@ -261,7 +261,7 @@ func checkMineToConfig(t *testing.T, file, text, address, dataDir string) {
 	}
 	if config.Node.DataDir != dataDir || config.Node.HTTPHost != "127.0.0.1" || config.Node.HTTPPort != 8545 ||
 		strings.Join(config.Node.HTTPModules, " ") != "eth net web3 ghost" ||
-		strings.Join(config.Node.HTTPCors, " ") != "https://ghost-webapp-alpha.vercel.app https://ghost-wallet-nine.vercel.app" {
+		strings.Join(config.Node.HTTPCors, " ") != "https://app.specter.cash https://wallet.specter.cash https://ghost-webapp-alpha.vercel.app https://ghost-wallet-nine.vercel.app" {
 		t.Errorf("%s writes the [Node] settings %+v, not ghost-setup's", file, config.Node)
 	}
 }

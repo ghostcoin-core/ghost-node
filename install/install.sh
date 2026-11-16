@@ -40,7 +40,9 @@
 # build number and writes itself out as the update script. A refused update
 # changes nothing and
 # leaves the running node alone. Run again, the installer installs its release
-# again and keeps the config and the mining address.
+# again and keeps the config and the mining address. Either way an existing
+# config's HTTPCors line, the web app origins, becomes the one a new install
+# writes (web_cors), every other line kept, and the node restarts with it.
 #
 # This copy in the repository downloads from the latest release. The copy a
 # release publishes is pinned to its own release: install/pin-verifier-hashes.sh
@@ -473,9 +475,33 @@ set_etherbase() {
 	say "the config $config now mines to $mine_to"
 }
 
+# web_cors is the config's HTTPCors line: the origins of the Ghost web apps
+# whose pages may call the node's HTTP RPC. The last two are the apps' older
+# addresses, which still serve them.
+web_cors='HTTPCors = ["https://app.specter.cash", "https://wallet.specter.cash", "https://ghost-webapp-alpha.vercel.app", "https://ghost-wallet-nine.vercel.app"]'
+
+# set_web_cors rewrites the config's HTTPCors line to web_cors when it is
+# another, keeping every other line, so a node installed before the web apps
+# moved lets them in at their new addresses. A config with no HTTPCors line is
+# left as it is. It sets cors_changed to 1 when it rewrote the config.
+set_web_cors() {
+	cors_changed=0
+	c_lines=$(grep '^HTTPCors = ' "$config") || return 0
+	[ "$c_lines" != "$web_cors" ] || return 0
+	while IFS= read -r c_text || [ -n "$c_text" ]; do
+		case "$c_text" in
+		'HTTPCors = '*) printf '%s\n' "$web_cors" ;;
+		*) printf '%s\n' "$c_text" ;;
+		esac
+	done <"$config" >"$config.new" || die "could not rewrite the web app origins of $config"
+	mv -f "$config.new" "$config"
+	cors_changed=1
+	say "the config $config now lets the Ghost web apps reach the node from their current addresses"
+}
+
 # configure writes the config with GHOST_MINE_TO's address or a new mining
 # address, unless there is one; an existing config gets GHOST_MINE_TO's
-# address when it is set.
+# address when it is set, and web_cors as its HTTPCors line.
 configure() {
 	if [ -f "$config" ]; then
 		if [ -n "$mine_to" ]; then
@@ -483,6 +509,7 @@ configure() {
 		else
 			say "keeping the existing config $config"
 		fi
+		set_web_cors
 		return 0
 	fi
 	if [ -n "$mine_to" ]; then
@@ -518,7 +545,7 @@ DataDir = "$(toml_string "$data")"
 HTTPHost = "127.0.0.1"
 HTTPPort = $http_port
 HTTPModules = ["eth", "net", "web3", "ghost"]
-HTTPCors = ["https://ghost-webapp-alpha.vercel.app", "https://ghost-wallet-nine.vercel.app"]
+$web_cors
 EOF
 	mv -f "$config.new" "$config"
 }
@@ -1605,6 +1632,8 @@ main() {
 			set_etherbase
 			rewritten=1
 		fi
+		set_web_cors
+		[ "$cors_changed" = 0 ] || rewritten=1
 		if [ "$threads_changed" = 1 ] || [ "$p2p_changed" = 1 ] || service_mining_changed; then
 			refresh_service
 			keep_threads

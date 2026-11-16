@@ -88,8 +88,21 @@ const (
 // minerThreadsPattern is a number of cores GHOST_MINE_THREADS may give.
 var minerThreadsPattern = regexp.MustCompile(`^[1-9][0-9]{0,3}$`)
 
-// webOrigins are the Ghost web apps the node's HTTP RPC allows.
-var webOrigins = []string{"https://ghost-webapp-alpha.vercel.app", "https://ghost-wallet-nine.vercel.app"}
+// webOrigins are the Ghost web apps the node's HTTP RPC allows: their current
+// addresses, then their older ones, which still serve them.
+var webOrigins = []string{"https://app.specter.cash", "https://wallet.specter.cash", "https://ghost-webapp-alpha.vercel.app", "https://ghost-wallet-nine.vercel.app"}
+
+// configCors matches the config's HTTPCors line, without its line ending.
+var configCors = regexp.MustCompile(`(?m)^HTTPCors = [^\r\n]*`)
+
+// corsLine is the config's HTTPCors line, which allows webOrigins.
+func corsLine() string {
+	origins := make([]string, len(webOrigins))
+	for i, o := range webOrigins {
+		origins[i] = strconv.Quote(o)
+	}
+	return "HTTPCors = [" + strings.Join(origins, ", ") + "]"
+}
 
 // mode is what ghost-setup was asked to do.
 type mode int
@@ -685,11 +698,15 @@ var (
 )
 
 // configure writes the config with a new mining address, unless there is
-// one, and returns the mining address.
+// one, and returns the mining address. An existing config gets corsLine as its
+// HTTPCors line.
 func (s *setup) configure() (string, error) {
 	config := s.configPath()
 	if blob, err := os.ReadFile(config); err == nil {
 		s.say("keeping the existing config %s", config)
+		if _, err := s.setWebOrigins(); err != nil {
+			return "", err
+		}
 		if m := configAddress.FindSubmatch(blob); m != nil {
 			return string(m[1]), nil
 		}
@@ -723,16 +740,34 @@ func (s *setup) configure() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	origins := make([]string, len(webOrigins))
-	for i, o := range webOrigins {
-		origins[i] = strconv.Quote(o)
-	}
 	fmt.Fprintf(&b, "[Node]\nDataDir = %s\nHTTPHost = \"127.0.0.1\"\nHTTPPort = %d\n", dataDir, s.httpPort)
-	fmt.Fprintf(&b, "HTTPModules = [\"eth\", \"net\", \"web3\", \"ghost\"]\nHTTPCors = [%s]\n", strings.Join(origins, ", "))
+	fmt.Fprintf(&b, "HTTPModules = [\"eth\", \"net\", \"web3\", \"ghost\"]\n%s\n", corsLine())
 	if err := writeFileAtomic(config, []byte(b.String())); err != nil {
 		return "", fmt.Errorf("could not write the config: %w", err)
 	}
 	return address, nil
+}
+
+// setWebOrigins rewrites the config's HTTPCors line to corsLine when it is
+// another, keeping every other line and the line endings, so a node installed
+// before the web apps moved lets them in at their current addresses. A config
+// with no HTTPCors line is left as it is. It reports whether it rewrote the
+// config.
+func (s *setup) setWebOrigins() (bool, error) {
+	config := s.configPath()
+	blob, err := os.ReadFile(config)
+	if err != nil {
+		return false, fmt.Errorf("could not read the config: %w", err)
+	}
+	moved := configCors.ReplaceAllLiteral(blob, []byte(corsLine()))
+	if bytes.Equal(moved, blob) {
+		return false, nil
+	}
+	if err := writeFileAtomic(config, moved); err != nil {
+		return false, fmt.Errorf("could not rewrite the web app origins of the config: %w", err)
+	}
+	s.say("the config %s now lets the Ghost web apps reach the node from their current addresses", config)
+	return true, nil
 }
 
 // initialise writes the genesis of the release's network into a new data
@@ -786,12 +821,17 @@ func (s *setup) update(daily bool) error {
 	if err := s.applyThreads(threads, threadsChanged); err != nil {
 		return err
 	}
+	corsChanged, err := s.setWebOrigins()
+	if err != nil {
+		return err
+	}
 	svc := s.service()
 	if have == rel.sum {
 		s.say("the node is up to date")
-		if threadsChanged {
+		if threadsChanged || corsChanged {
 			// A node installed before the number of cores was set mines
-			// on them all until it starts again.
+			// on them all, and one whose web app origins moved allows the
+			// old ones only, until it starts again.
 			if _, err := svc.Stop(); err != nil {
 				return fmt.Errorf("could not stop the node to restart it on %s: %w", s.threadsSummary(threads), err)
 			}
