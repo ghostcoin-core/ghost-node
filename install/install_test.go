@@ -73,7 +73,7 @@ const (
 )
 
 // The web app origins the node's HTTP RPC must allow.
-var webOrigins = []string{"https://ghost-webapp-alpha.vercel.app", "https://ghost-wallet-nine.vercel.app"}
+var webOrigins = []string{"https://app.specter.cash", "https://wallet.specter.cash", "https://ghost-webapp-alpha.vercel.app", "https://ghost-wallet-nine.vercel.app"}
 
 // assetName and verifierName are the release's archive and checker for os on
 // this computer's processor.
@@ -1044,7 +1044,7 @@ func checkInstalledAndMiningTo(t *testing.T, env *installEnv, geth string, out s
 		"HTTPHost = \"127.0.0.1\"\n",
 		fmt.Sprintf("HTTPPort = %d\n", env.httpPort),
 		"HTTPModules = [\"eth\", \"net\", \"web3\", \"ghost\"]\n",
-		fmt.Sprintf("HTTPCors = [%q, %q]\n", webOrigins[0], webOrigins[1]),
+		fmt.Sprintf("HTTPCors = [%q, %q, %q, %q]\n", webOrigins[0], webOrigins[1], webOrigins[2], webOrigins[3]),
 	} {
 		if !strings.Contains(string(config), want) {
 			t.Fatalf("the config has no line %q:\n%s", want, config)
@@ -2307,6 +2307,125 @@ func TestInstallScriptMineTo(t *testing.T) {
 	state := snapshot(t, env)
 	out, err = env.update(t, rs, "GHOST_MINE_TO=0x1234")
 	checkUpdateRefused(t, env, state, out, err, mineToRefusal)
+}
+
+// oldCorsLine is the HTTPCors line installers wrote before the web apps moved
+// to their current addresses.
+const oldCorsLine = `HTTPCors = ["https://ghost-webapp-alpha.vercel.app", "https://ghost-wallet-nine.vercel.app"]`
+
+// corsLine is the HTTPCors line the installer writes now.
+func corsLine() string {
+	quoted := make([]string, len(webOrigins))
+	for i, o := range webOrigins {
+		quoted[i] = strconv.Quote(o)
+	}
+	return "HTTPCors = [" + strings.Join(quoted, ", ") + "]"
+}
+
+// writeConfig replaces the installed node's config with text.
+func writeConfig(t *testing.T, env *installEnv, text string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(env.home, ".ghost-node", "config.toml"), []byte(text), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// waitAllowsOrigin waits for the running node's HTTP RPC to allow a page of
+// origin.
+func waitAllowsOrigin(t *testing.T, env *installEnv, origin string) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		req, err := http.NewRequest("POST", fmt.Sprintf("http://127.0.0.1:%d", env.httpPort), strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Origin", origin)
+		allowed := ""
+		if resp, err := http.DefaultClient.Do(req); err == nil {
+			allowed = resp.Header.Get("Access-Control-Allow-Origin")
+			resp.Body.Close()
+		}
+		if allowed == origin {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the node's HTTP RPC does not allow the origin %s (it allows %q)", origin, allowed)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// TestInstallScriptMovesWebOrigins installs a node, then gives its config the
+// HTTPCors line older installers wrote, as a node installed before the web
+// apps moved has. An update rewrites that line, and only it, to the one a new
+// install writes, and restarts the node, which then lets the web apps in at
+// their current addresses; a config that already has the line, as a node
+// edited by hand to it does, is left alone and the node keeps running. A
+// re-run of the installer moves the line the same way.
+func TestInstallScriptMovesWebOrigins(t *testing.T) {
+	release, geth := internalNetRelease(t)
+	verifier := builtVerifier(t)
+	key := newSigner(t)
+	blob := release.tarGz(t)
+	rs := serveRelease(t, "linux", blob, key.sign(blob), verifier)
+	script := writeScript(t, key, sha256Hex(verifier))
+	env := newInstallEnv(t, envOptions{systemctl: stubSystemctl})
+	installRunning(t, env, script, rs, geth)
+	serveInstaller(t, rs, key, script)
+	const restart = "systemctl --user restart ghost-node.service\n"
+
+	current := readConfig(t, env)
+	if !strings.Contains(current, "\n"+corsLine()+"\n") {
+		t.Fatalf("a new install does not write the line %s:\n%s", corsLine(), current)
+	}
+	old := strings.Replace(current, corsLine(), oldCorsLine, 1)
+	// A line of its own, which the rewrite must keep.
+	old += "# kept by the update\n"
+	want := current + "# kept by the update\n"
+
+	for _, step := range []struct {
+		name string
+		run  func() (string, error)
+	}{
+		{"an update", func() (string, error) { return env.update(t, rs) }},
+		{"a re-run of install.sh", func() (string, error) { return env.run(t, script, rs, true) }},
+	} {
+		writeConfig(t, env, old)
+		oldPID, restarts := env.servicePID(t), strings.Count(env.calls(t), restart)
+		out, err := step.run()
+		if err != nil {
+			t.Fatalf("%s failed: %v", step.name, err)
+		}
+		if got := readConfig(t, env); got != want {
+			t.Fatalf("%s did not rewrite only the HTTPCors line; the config went from\n%s\nto\n%s", step.name, old, got)
+		}
+		if !strings.Contains(out, "now lets the Ghost web apps reach the node from their current addresses") {
+			t.Fatalf("%s did not say it moved the web app origins:\n%s", step.name, out)
+		}
+		checkRestarted(t, env, oldPID, restarts, restart)
+		for _, origin := range webOrigins {
+			waitAllowsOrigin(t, env, origin)
+		}
+	}
+
+	// The config already has the line: an update changes nothing and leaves
+	// the node running.
+	pid, restarts := env.servicePID(t), strings.Count(env.calls(t), restart)
+	out, err := env.update(t, rs)
+	if err != nil {
+		t.Fatalf("the update failed: %v", err)
+	}
+	if got := readConfig(t, env); got != want {
+		t.Fatalf("an update changed a config that already had the line; it went from\n%s\nto\n%s", want, got)
+	}
+	if strings.Contains(out, "now lets the Ghost web apps") {
+		t.Fatalf("an update with nothing to move said it moved the web app origins:\n%s", out)
+	}
+	if strings.Count(env.calls(t), restart) != restarts || env.servicePID(t) != pid || !running(pid) {
+		t.Fatal("an update with nothing to move restarted the node")
+	}
 }
 
 // TestInstallScriptMineToRefusesMalformed sets GHOST_MINE_TO to what is not

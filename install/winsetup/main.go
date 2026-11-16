@@ -48,7 +48,9 @@
 // passes the same checks as an install, keeps the previous geth.exe until the
 // node has restarted on the new one, and keeps the config and the mining
 // address; a refused update changes nothing and leaves the running node
-// alone. GHOST_NO_UPDATE=1 at install time leaves the update out.
+// alone. An install over an existing config, or an update, rewrites only the
+// config's HTTPCors line when it is not the current list of web app origins,
+// and the node restarts with it. GHOST_NO_UPDATE=1 at install time leaves the update out.
 //
 // GHOST_RELEASE_URL sets where the release is downloaded from, over https
 // only, and GHOST_INSTALL_CA_FILE names a certificate file to trust for that
