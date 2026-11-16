@@ -108,7 +108,7 @@ chmod 700 "$STUB_DIR/tailscale"
 	publicName  = "box.tail1234.ts.net"
 	publicName2 = "node2.tail1234.ts.net"
 	loginStep   = "This is the one step the installer cannot do for you: Tailscale prints a login link below; open it in a browser, sign in to your own free Tailscale account, and allow Funnel when it asks."
-	rerunLine   = "run the line again, which is safe: curl -fsSL https://get.ghostcoin.com | sh -s -- --public"
+	rerunLine   = "run the line again, which is safe: curl -fsSL https://get.specter.cash | sh -s -- --public"
 	// modulesLine is the only module list a public node serves: ghost holds
 	// the wallet's read-only coin tree lookups. oldModulesLine is the list
 	// installers wrote before, which --public moves to modulesLine.

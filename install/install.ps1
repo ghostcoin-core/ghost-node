@@ -2,7 +2,7 @@
 # with no administrator rights. It asks nothing: paste the one line from the
 # README into PowerShell,
 #
-#	irm https://get.ghostcoin.com/win | iex
+#	irm https://get.specter.cash/win | iex
 #
 # and when it finishes the node is installed, on the network, syncing and
 # mining, and it prints the mining address and how to check on the node.
@@ -24,9 +24,9 @@
 # GHOST_MINE_TO mines straight to a wallet address of your own, such as the
 # Ghost pop-up wallet's, instead of a newly generated mining key:
 #
-#	$env:GHOST_MINE_TO='0x...'; irm https://get.ghostcoin.com/win | iex
+#	$env:GHOST_MINE_TO='0x...'; irm https://get.specter.cash/win | iex
 #
-# (on a Mac or Linux: curl -fsSL https://get.ghostcoin.com | GHOST_MINE_TO=0x... sh)
+# (on a Mac or Linux: curl -fsSL https://get.specter.cash | GHOST_MINE_TO=0x... sh)
 #
 # It must be 0x followed by exactly 40 hex characters; anything else is
 # refused with nothing installed. This script then writes the config with
@@ -39,9 +39,9 @@
 # The node mines on half this computer's logical cores, rounded down and at
 # least 1. GHOST_MINE_THREADS chooses the number of cores instead:
 #
-#	$env:GHOST_MINE_THREADS='2'; irm https://get.ghostcoin.com/win | iex
+#	$env:GHOST_MINE_THREADS='2'; irm https://get.specter.cash/win | iex
 #
-# (on a Mac or Linux: curl -fsSL https://get.ghostcoin.com | GHOST_MINE_THREADS=2 sh)
+# (on a Mac or Linux: curl -fsSL https://get.specter.cash | GHOST_MINE_THREADS=2 sh)
 #
 # It must be a whole number from 1 to 9999; anything else is refused with
 # nothing installed. ghost-setup keeps it as GETH_MINER_THREADS, which geth
@@ -58,7 +58,7 @@
 # with nothing installed, and so is a port another program holds.
 # GHOST_NO_DASHBOARD=1 leaves it out:
 #
-#	$env:GHOST_NO_DASHBOARD='1'; irm https://get.ghostcoin.com/win | iex
+#	$env:GHOST_NO_DASHBOARD='1'; irm https://get.specter.cash/win | iex
 #
 # The whole script is one script block that runs at its last line, so a
 # download cut short runs nothing.
