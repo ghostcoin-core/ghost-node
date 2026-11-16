@@ -152,7 +152,7 @@ func logRows(t *testing.T, doc string) [][]string {
 func TestSecurityPolicy(t *testing.T) {
 	doc := readDoc(t, policyFile)
 	for _, want := range []string{
-		"hello@ghostcoin.com",
+		"info@specter.cash",
 		"until a dedicated security address exists",
 		"**Primary maintainer:** GhostcoinHQ",
 		"**Backup maintainer:** to be named by the founder",
