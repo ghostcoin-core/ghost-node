@@ -6,7 +6,7 @@ security problem, and we treat reports privately until a fix is ready.
 
 ## Reporting a vulnerability
 
-Send reports privately to **[hello@ghostcoin.com](mailto:hello@ghostcoin.com)**,
+Send reports privately to **[info@specter.cash](mailto:info@specter.cash)**,
 the project's official address, until a dedicated security address exists.
 Please do not open a public issue or pull request for a vulnerability.
 
