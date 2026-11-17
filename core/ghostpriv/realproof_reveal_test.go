@@ -131,6 +131,7 @@ func testRealProofRevealRoundTrip(t *testing.T, ka knownAnswer) {
 		v2 := *dec
 		v2.Version = ghostpriv.RevealVersion
 		v2.Note[ghostpriv.NoteSize-1] = 0x5a
+		v2.RemainderTag[0] = 0x5a
 		env2, err := v2.MarshalBinary()
 		if err != nil {
 			t.Fatal(err)

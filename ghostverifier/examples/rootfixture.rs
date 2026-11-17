@@ -43,7 +43,7 @@ use ghost_proofs::*;
 pub const CHAIN_ID: u64 = 6_777_971;
 
 /// The genesis hash of the node test chain, the reveal's domain.
-pub const GENESIS_HEX: &str = "c36a650b5cd43a737f37d8d187dfc0ee36198a4d6e94c7c1b8a2a3f06c322022";
+pub const GENESIS_HEX: &str = "731893ce144ca68ec6a45beb6a17ce3694acd853a4b4907777727661452cacec";
 
 /// The value of the spent coin, one GHOST in wei.
 pub const COIN_VALUE: u128 = 1_000_000_000_000_000_000;

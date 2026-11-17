@@ -34,7 +34,7 @@ import (
 // proofs/keys/public-root-key.sha256 at the pinned revision, written here
 // apart from the release build's own constants.
 const (
-	committedBundleRootKeyDigest = "5a230c8f019c3f9b707ebea174149cef74488bd17aee21214ef77c0b689ddec0"
+	committedBundleRootKeyDigest = "b6c6f3118c1c1d601f4d4d37b070dabfcb2bfec05c5665608ae71f128fc146cf"
 	committedPublicRootKeyDigest = "d00492b05e4513aed78b20a4291d2696bc8e112792490c3f423f398f2a5a93f5"
 )
 

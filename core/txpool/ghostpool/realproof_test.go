@@ -345,6 +345,7 @@ func (rp *realProof) releaseVerifierVersions(t *testing.T, p *Pool) {
 	v2.Version = ghostpriv.RevealVersion
 	v2.Fee = feeV2.Total
 	v2.Note[ghostpriv.NoteSize-1] = 0x5a
+	v2.RemainderTag[0] = 0x5a
 	v2tx := rp.revealTx(v2)
 	if v2tx.Size() != types.GhostRevealEnvelopeSize || v2tx.Gas() != ghostpriv.GasPriv {
 		t.Fatalf("version 2 reveal of %d bytes and %d gas", v2tx.Size(), v2tx.Gas())
