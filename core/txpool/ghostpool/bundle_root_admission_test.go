@@ -257,7 +257,7 @@ func TestGhostPoolBundleRootAdmission(t *testing.T) {
 	unspent := p.state
 	st := unspent.Copy()
 	for _, m := range []common.Hash{m30, m31} {
-		if err := ghosttree.MarkSpent(st, ghosttree.Coin, m); err != nil {
+		if err := ghosttree.MarkSpent(st, ghosttree.Coin, 1, m, ghosttree.NoGlobalPosition); err != nil {
 			p.mu.Unlock()
 			t.Fatal(err)
 		}
