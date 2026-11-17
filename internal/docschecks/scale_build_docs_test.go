@@ -187,7 +187,7 @@ func checkBundle(t *testing.T, doc string) {
 		fmt.Sprintf("The envelope is %s + %d * count bytes", comma(envelope), types.GhostBundleBodySize),
 		comma(uint64(1+types.GhostBundlePayloadSize(1)))+" for one reveal",
 		comma(uint64(1+types.GhostBundlePayloadSize(types.GhostBundleMaxReveals)))+" for "+comma(types.GhostBundleMaxReveals),
-		fmt.Sprintf("its first %d bytes", types.GhostBundleBodySize-ghostpriv.NoteSize),
+		fmt.Sprintf("its first %d bytes", types.GhostBundleBodySize-ghostpriv.NoteSize-ghostpriv.LookupTagSize),
 		fmt.Sprintf("its %d-byte note", ghostpriv.NoteSize),
 		"`types.ErrNoSender`",
 		`K("`+ghostpriv.TagBundleContents+`", b_1 || ... || b_n)`,
