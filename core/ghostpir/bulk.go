@@ -117,12 +117,18 @@ type BlockTags struct {
 	Hash    common.Hash
 	Tags    []TagEntry    // coin leaves, then data leaves, each in position order
 	Markers []MarkerEntry // coin markers, then data markers, each in the order spent
+
+	// Lookup is the block's lookup lists of decision 0004 (its lookup tags
+	// and markers), whose digest is the block header's lookupDigest; nil
+	// for a server without the state.
+	Lookup *ghosttree.BlockLookup
 }
 
 // Encode is the block on the wire: its number (8 bytes) and hash, the tag
 // count (4) and the tags (kind, tree index, position, tag), the marker count
-// (4) and the markers (kind, list index, position, marker), integers
-// big-endian.
+// (4) and the markers (kind, list index, position, marker), then the length
+// (4) and the encoding of the lookup lists (ghosttree.BlockLookup.Encode,
+// none when the server has no state), integers big-endian.
 func (b *BlockTags) Encode() []byte {
 	out := make([]byte, 0, 8+common.HashLength+4+len(b.Tags)*TagEntryBytes+4+len(b.Markers)*MarkerEntryBytes)
 	out = binary.BigEndian.AppendUint64(out, b.Number)
@@ -141,7 +147,12 @@ func (b *BlockTags) Encode() []byte {
 		out = binary.BigEndian.AppendUint64(out, e.Position)
 		out = append(out, e.Marker[:]...)
 	}
-	return out
+	var lookup []byte
+	if b.Lookup != nil {
+		lookup = b.Lookup.Encode()
+	}
+	out = binary.BigEndian.AppendUint32(out, uint32(len(lookup)))
+	return append(out, lookup...)
 }
 
 // bulkState is everything a restore server answers from as of one head.
@@ -160,11 +171,12 @@ type bulkState struct {
 // opaque label of the requester (its address, say) used for its budget and
 // the log only.
 type BulkServer struct {
-	db     ethdb.Reader
-	h      *ghosttree.History
-	snaps  *Snapshotter
-	budget *budgeter
-	log    log.Logger
+	db      ethdb.Reader
+	h       *ghosttree.History
+	snaps   *Snapshotter
+	stateAt StateSource
+	budget  *budgeter
+	log     log.Logger
 
 	mu  sync.Mutex // serialises Update
 	cur atomic.Pointer[bulkState]
@@ -183,6 +195,16 @@ func NewBulkServer(db ethdb.Reader, h *ghosttree.History, budget Budget, logger 
 		logger = log.Root()
 	}
 	return &BulkServer{db: db, h: h, snaps: NewSnapshotter(db, h, logger), budget: g, log: logger}, nil
+}
+
+// SetState makes the server serve the indexed trees of decision 0004 in its
+// snapshots and the lookup lists of the blocks after them, read from the
+// state after each block. Call it before the first Update.
+func (s *BulkServer) SetState(src StateSource) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stateAt = src
+	s.snaps.SetState(src)
 }
 
 // Snapshot is the snapshot served, nil when there is none. It is for the
@@ -332,9 +354,35 @@ func (s *BulkServer) blocksAfter(snap *Snapshot, head *types.Header) ([]BlockTag
 				return nil, fmt.Errorf("block %d: %w", b.Number, err)
 			}
 		}
+		if s.stateAt != nil {
+			var err error
+			if b.Lookup, err = s.blockLookup(header); err != nil {
+				return nil, fmt.Errorf("block %d: %w", b.Number, err)
+			}
+		}
 		out = append(out, b)
 	}
 	return out, nil
+}
+
+// blockLookup reads the lookup lists of a block from the state after it and
+// checks them against the header's lookupDigest.
+func (s *BulkServer) blockLookup(header *types.Header) (*ghosttree.BlockLookup, error) {
+	if header.LookupDigest == nil {
+		return nil, fmt.Errorf("%w: block %d has no lookup digest", ErrSnapshotAnchor, header.Number)
+	}
+	st, err := s.stateAt(header)
+	if err != nil {
+		return nil, err
+	}
+	l, err := ghosttree.ReadBlockLookup(st, header.Number.Uint64())
+	if err != nil {
+		return nil, err
+	}
+	if got := l.Digest(); got != *header.LookupDigest {
+		return nil, fmt.Errorf("%w: lookup lists hash to %x, header %x", ErrSnapshotRoots, got, *header.LookupDigest)
+	}
+	return l, nil
 }
 
 // readTags appends to b the tag of every leaf of a kind past the cursor as
@@ -460,6 +508,10 @@ func (s *BulkServer) Blocks(client string, after uint64) ([]BlockTags, error) {
 	for _, b := range st.blocks {
 		if b.Number > after {
 			b.Tags, b.Markers = slices.Clone(b.Tags), slices.Clone(b.Markers)
+			if b.Lookup != nil {
+				l := *b.Lookup
+				b.Lookup = &l
+			}
 			out = append(out, b)
 		}
 	}

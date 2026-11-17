@@ -102,6 +102,10 @@
 // its marker list. The rest is read through PIR over the snapshot's
 // databases: a hint bucket and the overflow entries past its 16 slots at
 // their public indexes, a note, its witness or lookup record, a marker.
+// Given the node's state (SetState), a snapshot also holds the indexed trees
+// of decision 0004, the lookup indices and marker sets, as witnesses in key
+// order with a bucket table (index.go), and the bulk data of every later
+// block carries its lookup lists.
 //
 // Every request, bulk or PIR, is charged to a Budget before any work: at most
 // PerClient requests from one client and Total from all clients together in

@@ -58,6 +58,8 @@ const (
 	MarkerTable                        // the leaves of a marker list
 	HintBucketTable                    // the buckets of a tree's hint table
 	HintOverflowTable                  // the overflow entries of a tree's hint table
+	IndexTable                         // the witnesses of an indexed tree of decision 0004, by key
+	IndexBucketTable                   // the bucket table of an indexed tree's witnesses
 )
 
 func (t Table) String() string {
@@ -74,6 +76,10 @@ func (t Table) String() string {
 		return "hint-buckets"
 	case HintOverflowTable:
 		return "hint-overflow"
+	case IndexTable:
+		return "index"
+	case IndexBucketTable:
+		return "index-buckets"
 	}
 	return fmt.Sprintf("table-%d", uint8(t))
 }
@@ -85,7 +91,7 @@ type SnapshotEntry struct {
 	TreeIndex  uint64         // the tree's or marker list's index
 	RecordSize int
 	Records    int
-	Root       common.Hash // the tree or list root the records are under; zero for a hint table
+	Root       common.Hash // the tree, list or indexed-tree root the records are under; zero for a hint table
 	Digest     common.Hash // SHA-256 of the domain label and the records, in order
 }
 
@@ -212,6 +218,18 @@ func (s *Snapshot) Elapsed() time.Duration { return s.elapsed }
 // history. The root of the last tree of each kind must be the anchor
 // header's root of that kind, or the build fails with ErrSnapshotRoots.
 func BuildSnapshot(h *ghosttree.History, anchor *types.Header) (*Snapshot, error) {
+	return BuildSnapshotAt(h, anchor, nil)
+}
+
+// BuildSnapshotAt builds the snapshot as BuildSnapshot does and, given the
+// state after the anchor block, adds the indexed trees of decision 0004:
+// for each of the coin and data lookup indices and the coin and data marker
+// sets, the witness of every used leaf in key order (IndexTable) and its
+// bucket table (IndexBucketTable). Each set must fold to the anchor
+// header's root of it (coinLookupRoot, dataLookupRoot, coinMarkerRoot,
+// dataMarkerRoot), or the build fails with ErrSnapshotRoots. With a nil
+// state it is BuildSnapshot.
+func BuildSnapshotAt(h *ghosttree.History, anchor *types.Header, st ghosttree.StateDB) (*Snapshot, error) {
 	start := time.Now()
 	if anchor == nil || anchor.Number == nil || !anchor.Number.IsUint64() {
 		return nil, fmt.Errorf("%w: no anchor header", ErrSnapshotAnchor)
@@ -277,6 +295,16 @@ func BuildSnapshot(h *ghosttree.History, anchor *types.Header) (*Snapshot, error
 		add(HintBucketTable, t.Kind, t.TreeIndex, HintBucketRecordSize, common.Hash{}, t.BucketRecords())
 		add(HintOverflowTable, t.Kind, t.TreeIndex, HintOverflowRecordSize, common.Hash{}, t.OverflowRecords())
 	}
+	if st != nil {
+		sets, err := BuildIndexSets(st, anchor)
+		if err != nil {
+			return nil, err
+		}
+		for _, set := range sets {
+			add(IndexTable, set.Kind, 0, set.Set.WitnessSize(), set.Root, set.Witnesses)
+			add(IndexBucketTable, set.Kind, 0, IndexBucketRecordSize, set.Root, set.BucketRecords())
+		}
+	}
 	snap.Header = header
 	snap.ID = header.ID()
 
@@ -301,9 +329,10 @@ func BuildSnapshot(h *ghosttree.History, anchor *types.Header) (*Snapshot, error
 // when a reorganisation replaces the anchor block, so that the snapshot it
 // holds is always that of the head's own chain.
 type Snapshotter struct {
-	db  ethdb.Reader
-	h   *ghosttree.History
-	log log.Logger
+	db    ethdb.Reader
+	h     *ghosttree.History
+	log   log.Logger
+	state StateSource // nil: snapshots without the indexed trees
 
 	mu       sync.Mutex // serialises Update
 	cur      atomic.Pointer[Snapshot]
@@ -318,6 +347,18 @@ func NewSnapshotter(db ethdb.Reader, h *ghosttree.History, logger log.Logger) *S
 		logger = log.Root()
 	}
 	return &Snapshotter{db: db, h: h, log: logger}
+}
+
+// StateSource opens the state after a block, as the node keeps it.
+type StateSource func(header *types.Header) (ghosttree.StateDB, error)
+
+// SetState makes every snapshot built from now on carry the indexed trees of
+// decision 0004, read from the state after its anchor (see
+// BuildSnapshotAt). Call it before the first Update.
+func (s *Snapshotter) SetState(src StateSource) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.state = src
 }
 
 // Current is the snapshot held, nil before the first successful Update.
@@ -347,7 +388,16 @@ func (s *Snapshotter) Update(head *types.Header) (*Snapshot, bool, error) {
 	if old != nil && old.Header.Anchor == anchor.Hash() {
 		return old, false, nil
 	}
-	snap, err := BuildSnapshot(s.h, anchor)
+	var st ghosttree.StateDB
+	if s.state != nil {
+		if st, err = s.state(anchor); err != nil {
+			err = fmt.Errorf("state of anchor %d: %w", anchor.Number, err)
+		}
+	}
+	var snap *Snapshot
+	if err == nil {
+		snap, err = BuildSnapshotAt(s.h, anchor, st)
+	}
 	if err != nil {
 		if old != nil {
 			if a, aerr := s.ancestor(anchor, old.Header.Number); aerr != nil || a.Hash() != old.Header.Anchor {
