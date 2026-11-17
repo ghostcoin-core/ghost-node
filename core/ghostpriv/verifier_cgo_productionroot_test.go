@@ -128,14 +128,15 @@ func TestProductionRootVerifier(t *testing.T) {
 
 	genesis := common.Hash{0x0d}
 	reveal := &Reveal{
-		Version:   RevealVersion,
-		ChainID:   1337,
-		Root:      common.Hash{0x01},
-		Marker:    common.Hash{0x02},
-		Remainder: common.Hash{0x03},
-		Recipient: common.Address{0x04},
-		Out:       uint256.NewInt(5),
-		Fee:       uint256.NewInt(1),
+		Version:      RevealVersion,
+		RemainderTag: [16]byte{0x7a, 0x01},
+		ChainID:      1337,
+		Root:         common.Hash{0x01},
+		Marker:       common.Hash{0x02},
+		Remainder:    common.Hash{0x03},
+		Recipient:    common.Address{0x04},
+		Out:          uint256.NewInt(5),
+		Fee:          uint256.NewInt(1),
 	}
 	bundle := NewBundleInputs(reveal.ChainID, genesis, []*Reveal{reveal})
 	public := NewPublicRootInputs(reveal.ChainID, genesis, []types.GhostBinding{{0x05}})

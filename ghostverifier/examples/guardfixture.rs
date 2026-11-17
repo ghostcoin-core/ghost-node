@@ -27,7 +27,7 @@
 //!   policy address of 20 bytes, then its code hash, the parameters hash, the
 //!   override hash, the action tag and the action salt), the override secret
 //!   (32), the remainder (144: s, r, b, the salt and the value), the
-//!   remainder's rule (32) and the statement (560) in the layout of
+//!   remainder's rule (32) and the statement (576) in the layout of
 //!   ghost_proofs.h;
 //! - kind 2, a policy reveal: the opening (1,172), the rule's override hash
 //!   (32), the remainder (144) and the statement (720) in the layout of
@@ -165,6 +165,7 @@ fn reveal_job(r: &mut Reader, params: &ChainParams, job: u32, zk: [u8; 32]) -> P
         out: word(&statement[note_end + 20..note_end + 52]),
         fee: word(&statement[note_end + 52..note_end + 84]),
         remainder_note: statement[96..note_end].try_into().expect("note"),
+        remainder_tag: statement[note_end + 84..].try_into().expect("remainder tag"),
     };
     let (tx, proof) = prove_coin_reveal_v2(params, &opening, &input, &remainder, &remainder_rule, &request, zk)
         .unwrap_or_else(|err| fail(format!("job {job}: ordinary reveal not proved: {err:?}")));

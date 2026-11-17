@@ -34,7 +34,8 @@ import (
 // coin reveal with version 3 and the larger proof field.
 //
 //	version (2, 0x0003) | chain id (8) | marker (32) | root (32) | remainder (32) |
-//	recipient (20) | out (32) | fee (32) | proof (2,331,648) | note (380)
+//	recipient (20) | out (32) | fee (32) | proof (2,331,648) | note (380) |
+//	remainder tag (16)
 //
 // Like the other reveals it has no sender, nonce or signature. Its envelope
 // decodes and encodes, but no consensus rule takes it yet: CheckTxType
@@ -68,9 +69,13 @@ const (
 	// the version 2 coin reveal.
 	GhostDirectRevealNoteSize = 380
 
+	// GhostDirectRevealTagSize is the length of the remainder's lookup tag
+	// after the note, that of the version 2 coin reveal.
+	GhostDirectRevealTagSize = 16
+
 	// GhostDirectRevealPayloadSize is the length of a direct reveal's
 	// payload.
-	GhostDirectRevealPayloadSize = GhostDirectRevealHeadSize + GhostDirectRevealProofSize + GhostDirectRevealNoteSize
+	GhostDirectRevealPayloadSize = GhostDirectRevealHeadSize + GhostDirectRevealProofSize + GhostDirectRevealNoteSize + GhostDirectRevealTagSize
 
 	// GhostDirectRevealEnvelopeSize is the length of a direct reveal's
 	// envelope, the type byte and the payload.

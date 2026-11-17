@@ -36,8 +36,9 @@ const (
 	GhostRevealTxType = 0x50
 
 	// GhostRevealPayloadSize is the length of a reveal's payload, version 2
-	// with its 380-byte remainder note (spec 10, section 4.1).
-	GhostRevealPayloadSize = 1_311_290
+	// with its 380-byte remainder note and 16-byte remainder tag (spec 10,
+	// section 4.1).
+	GhostRevealPayloadSize = 1_311_306
 
 	// GhostRevealEnvelopeSize is the length of a reveal's envelope, the type
 	// byte and the payload.
@@ -46,7 +47,7 @@ const (
 	// GhostRevealGas is G_PRIV, the gas every version 2 ordinary reveal takes
 	// from the block gas pool: 16 per envelope byte, 21,000 and the
 	// verification charge of 370,000 (spec 10, section 10).
-	GhostRevealGas = 21_371_656
+	GhostRevealGas = 21_371_912
 
 	// GhostRevealV1PayloadSize is the length of a version 1 reveal's payload,
 	// with its 156-byte remainder note. The version 1 reveal is still

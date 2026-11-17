@@ -161,7 +161,7 @@ Which leaves carry a tag:
 | Leaf | Tag |
 |---|---|
 | commit, data commit | the 16 bytes after the note in the commit data, 446 bytes in all; 16 zero bytes are refused with `ErrCommitLookupTag`, any other length with `ErrCommitData` |
-| reveal remainder | none yet: the reveal does not carry `remainder_tag` (see below) |
+| reveal remainder | the version 2 reveal's `remainder_tag`, the 16 bytes after its note, bound by its proof; a zero tag is refused with `ErrRevealTag`. A version 1 reveal has none |
 | policy reveal remainder, escrow recommit | none |
 
 `ghostpriv.LookupCommitData(f, salt, note, tag)` builds the commit data;
@@ -170,9 +170,10 @@ Which leaves carry a tag:
 are unchanged.
 
 Decision 0004 also adds `remainder_tag` to the coin reveal and its binding.
-The node does not carry it yet: the binding is a public input of the proof,
-and the reveal's envelope length is fixed with its gas (spec 10) and its
-proof's statement, so the change comes with the prover in its own change.
+The version 2 reveal carries it after its note (spec 10, sections 4.1 and
+4.2), and the node appends the remainder with `ghosttree.AppendTagged`, so
+the remainder has its entry in the coin lookup index and its tag is listed in
+the block lookup digest.
 
 ## The block lookup digest
 

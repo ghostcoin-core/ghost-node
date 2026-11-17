@@ -36,11 +36,11 @@ import (
 //
 // The payload, after the type byte:
 //
-//	version (2, 0x0001) | chain id (8) | count (2) | root proof (1,310,720) | count bodies of 570 bytes
+//	version (2, 0x0001) | chain id (8) | count (2) | root proof (1,310,720) | count bodies of 586 bytes
 //
 // A body is a version 2 reveal payload without its proof field: the payload's
 // bytes 0 to 190 (version, chain id, marker, root, remainder, recipient, out
-// and fee) followed by its 380-byte note.
+// and fee) followed by its 380-byte note and its 16-byte remainder tag.
 const (
 	// BundleVersion is the only version of the bundle payload.
 	BundleVersion uint16 = 0x0001
@@ -97,7 +97,7 @@ const (
 // invalid, before any change of the bundle's; a reveal of the bundle that
 // fails a state-dependent check is skipped instead (BundleSkip).
 var (
-	ErrBundleLength      = errors.New("bundle is not a 0x55 envelope of 1,310,733 + 570 * count bytes")
+	ErrBundleLength      = errors.New("bundle is not a 0x55 envelope of 1,310,733 + 586 * count bytes")
 	ErrBundleCount       = errors.New("bundle count is not 1 to 1,408")
 	ErrBundleVersion     = errors.New("bundle version is not 1")
 	ErrBundleChainID     = errors.New("bundle chain id is not this chain's")
@@ -112,7 +112,7 @@ var (
 // bundled reveals in order, each the Binding of Reveal.VerifyInputs of that
 // reveal on this chain; Binding is K(TagBundleBinding, BindingInput()).
 // Reveals are the ordered items a root proof's verifier takes: for each
-// bundled reveal in order, its public values on this chain, the 607 bytes of
+// bundled reveal in order, its public values on this chain, the 623 bytes of
 // its BindingInput followed by its binding digest, BundleRevealPublicSize
 // bytes, concatenated. They are held as a string, immutable, so that inputs
 // stay comparable with ==.
@@ -235,8 +235,8 @@ func (b *Bundle) MarshalBinary() ([]byte, error) {
 }
 
 // BundleBody returns the body of a version 2 reveal in a bundle: its payload
-// without the proof field, the payload's first 190 bytes and its 380-byte
-// note.
+// without the proof field, the payload's first 190 bytes, its 380-byte note
+// and its remainder tag.
 func BundleBody(r *Reveal) ([]byte, error) {
 	if r.Version != RevealVersion {
 		return nil, fmt.Errorf("%w: version %d", ErrBundleBody, r.Version)
@@ -255,13 +255,14 @@ func BundleBody(r *Reveal) ([]byte, error) {
 		copy(body[offFee:offProof], amountWord(r.Fee))
 	}
 	copy(body[offProof:], r.Note[:])
+	copy(body[offProof+NoteSize:], r.RemainderTag[:])
 	return body, nil
 }
 
 // DecodeBundleBody decodes one bundled reveal as a version 2 reveal whose
 // proof field is zero, left nil (Reveal.MarshalBinary pads it with zeros): a
-// body of BundleBodySize bytes, version 2, with out and fee below 2^96.
-// Anything else is ErrBundleBody.
+// body of BundleBodySize bytes, version 2, with a remainder tag that is not
+// zero and out and fee below 2^96. Anything else is ErrBundleBody.
 func DecodeBundleBody(body []byte) (*Reveal, error) {
 	if len(body) != BundleBodySize {
 		return nil, fmt.Errorf("%w: %d bytes", ErrBundleBody, len(body))
@@ -274,9 +275,13 @@ func DecodeBundleBody(body []byte) (*Reveal, error) {
 		Remainder: common.BytesToHash(body[offRemainder:offRecipient]),
 		Recipient: common.BytesToAddress(body[offRecipient:offOut]),
 	}
-	copy(r.Note[:], body[offProof:])
+	copy(r.Note[:], body[offProof:offProof+NoteSize])
+	copy(r.RemainderTag[:], body[offProof+NoteSize:])
 	if r.Version != RevealVersion {
 		return nil, fmt.Errorf("%w: %w: %d", ErrBundleBody, ErrRevealVersion, r.Version)
+	}
+	if r.RemainderTag.IsZero() {
+		return nil, fmt.Errorf("%w: %w", ErrBundleBody, ErrRevealTag)
 	}
 	var err error
 	if r.Out, err = readAmount(body[offOut:offFee]); err != nil {

@@ -139,14 +139,15 @@ func (c coin) note() [ghostpriv.NoteSize]byte { return c.owner.note(c.index, c.v
 // wallet the real proof (realwallet_test.go).
 func newReveal(n *node, spend, rest coin, root common.Hash, recipient common.Address, out, fee *uint256.Int) *ghostpriv.Reveal {
 	r := &ghostpriv.Reveal{
-		Version:   ghostpriv.RevealVersion,
-		ChainID:   n.chain.Config().GetChainID().Uint64(),
-		Marker:    spend.marker(),
-		Root:      root,
-		Remainder: rest.leaf(),
-		Recipient: recipient,
-		Out:       new(uint256.Int).Set(out),
-		Fee:       new(uint256.Int).Set(fee),
+		Version:      ghostpriv.RevealVersion,
+		RemainderTag: ghostpriv.FallbackLookupTag(rest.owner.fingerprint(rest.index)),
+		ChainID:      n.chain.Config().GetChainID().Uint64(),
+		Marker:       spend.marker(),
+		Root:         root,
+		Remainder:    rest.leaf(),
+		Recipient:    recipient,
+		Out:          new(uint256.Int).Set(out),
+		Fee:          new(uint256.Int).Set(fee),
 	}
 	note := rest.note()
 	copy(r.Note[:], note[:]) // the version 2 reveal's 380-byte note

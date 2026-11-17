@@ -356,14 +356,15 @@ func TestSupplyChangesOnlyByRewardAndReveal(t *testing.T) {
 	rest := new(uint256.Int).Sub(uint256.MustFromBig(commitValue), out)
 	rest.Sub(rest, fee.Total)
 	r := &ghostpriv.Reveal{
-		Version:   ghostpriv.RevealVersion,
-		ChainID:   c.chain.Config().GetChainID().Uint64(),
-		Marker:    ghosttree.K("ghost/test-supply/marker"),
-		Root:      *c.head().CoinTreeRoot,
-		Remainder: ghostpriv.CommitmentVersion(ghostpriv.SaltedCommitVersion, ghosttree.K("ghost/test-supply/rest"), rest),
-		Recipient: recipient,
-		Out:       out,
-		Fee:       new(uint256.Int).Set(fee.Total),
+		Version:      ghostpriv.RevealVersion,
+		RemainderTag: [16]byte{0x7a, 0x01},
+		ChainID:      c.chain.Config().GetChainID().Uint64(),
+		Marker:       ghosttree.K("ghost/test-supply/marker"),
+		Root:         *c.head().CoinTreeRoot,
+		Remainder:    ghostpriv.CommitmentVersion(ghostpriv.SaltedCommitVersion, ghosttree.K("ghost/test-supply/rest"), rest),
+		Recipient:    recipient,
+		Out:          out,
+		Fee:          new(uint256.Int).Set(fee.Total),
 	}
 	r.Proof = ghostprivtest.Proof(r.BindingDigest(r.ChainID, genesis.Hash()))
 	envelope, err := r.MarshalBinary()

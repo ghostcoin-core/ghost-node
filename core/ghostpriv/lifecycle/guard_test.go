@@ -112,6 +112,7 @@ func guardOverrideSpend(t *testing.T, s *scenario) {
 			t.Fatalf("a reveal of version %d and purpose %#x names a policy", r.Version, in.Purpose)
 		}
 		r.Marker, r.Root, r.Remainder, r.Recipient, r.Note, r.Proof = common.Hash{}, common.Hash{}, common.Hash{}, common.Address{}, [ghostpriv.NoteSize]byte{}, nil
+		r.RemainderTag = [ghostpriv.LookupTagSize]byte{} // the remainder's own lookup tag
 		return envelope(t, r)
 	}
 	if !bytes.Equal(shape(envG), shape(envP)) {

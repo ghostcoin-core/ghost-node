@@ -7,7 +7,7 @@
 //!     cargo run --release --locked --example v2fixture -- coin_reveal_v2.bin policy_reveal.bin
 //!     gzip -n -9 coin_reveal_v2.bin policy_reveal.bin
 //!
-//! Each file is the chain parameters (42 bytes), the statement (560 bytes in
+//! Each file is the chain parameters (42 bytes), the statement (576 bytes in
 //! the layout of ghost_proofs.h, or 720 in that of ghost_policy.h) and then
 //! the proof, as the pinned prover makes it. The chain parameters carry the
 //! reveal's version, as the node's binding does: 2 for the ordinary reveal,
@@ -113,6 +113,7 @@ fn main() {
         out: amount_word(600_000),
         fee: amount_word(21),
         remainder_note: [0x33; NOTE_V3_BYTES],
+        remainder_tag: [0x5a; REMAINDER_TAG_BYTES],
     };
     let (tx, proof) = prove_coin_reveal_v2(
         &p2,

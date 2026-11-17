@@ -289,7 +289,7 @@ func checkDataEnvelopeLayout(t *testing.T) {
 		Cf:       filled(0xcf),
 	}
 	env := dataEnvelope(t, r)
-	if types.GhostDataRevealEnvelopeSize != ghostpriv.EnvelopeSize-(ghostpriv.NoteSize-ghostpriv.DataNoteSlot) {
+	if types.GhostDataRevealEnvelopeSize != ghostpriv.EnvelopeSize-(ghostpriv.NoteSize-ghostpriv.DataNoteSlot)-ghostpriv.LookupTagSize {
 		t.Fatalf("data reveal envelope size %d, coin reveal %d", types.GhostDataRevealEnvelopeSize, ghostpriv.EnvelopeSize)
 	}
 	if len(env) != types.GhostDataRevealEnvelopeSize || env[0] != 0x51 {

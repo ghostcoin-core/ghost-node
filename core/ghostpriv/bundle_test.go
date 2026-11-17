@@ -34,14 +34,15 @@ import (
 // chain of chainID, with a stub proof over genesis, for the layout tests.
 func bundleLayoutReveal(chainID uint64, genesis common.Hash, seed byte) *ghostpriv.Reveal {
 	r := &ghostpriv.Reveal{
-		Version:   ghostpriv.RevealVersion,
-		ChainID:   chainID,
-		Marker:    common.Hash{0x11, seed},
-		Root:      common.Hash{0x22, seed},
-		Remainder: common.Hash{0x33, seed},
-		Recipient: common.Address{0x44, seed},
-		Out:       uint256.NewInt(1_000 + uint64(seed)),
-		Fee:       uint256.NewInt(7 + uint64(seed)),
+		Version:      ghostpriv.RevealVersion,
+		RemainderTag: [16]byte{0x7a, 0x01},
+		ChainID:      chainID,
+		Marker:       common.Hash{0x11, seed},
+		Root:         common.Hash{0x22, seed},
+		Remainder:    common.Hash{0x33, seed},
+		Recipient:    common.Address{0x44, seed},
+		Out:          uint256.NewInt(1_000 + uint64(seed)),
+		Fee:          uint256.NewInt(7 + uint64(seed)),
 	}
 	copy(r.Note[:], testNote(seed))
 	r.Proof = ghostprivtest.Proof(r.BindingDigest(chainID, genesis))
@@ -54,7 +55,7 @@ func bundleLayoutReveal(chainID uint64, genesis common.Hash, seed byte) *ghostpr
 // bundle binding tag, which is no reveal's tag. The stub root proof of the
 // binding verifies, and no reveal's stub proof stands in for it.
 func TestBundleInputsLayout(t *testing.T) {
-	if ghostpriv.BundleVersion != 0x0001 || ghostpriv.BundleMaxReveals != 1_408 || ghostpriv.BundleBodySize != 570 ||
+	if ghostpriv.BundleVersion != 0x0001 || ghostpriv.BundleMaxReveals != 1_408 || ghostpriv.BundleBodySize != 586 ||
 		ghostpriv.BundleBindingSize != 79 || ghostpriv.PurposeBundle != 0x08 {
 		t.Fatalf("version %d, max %d, body %d, binding %d, purpose %#x", ghostpriv.BundleVersion, ghostpriv.BundleMaxReveals,
 			ghostpriv.BundleBodySize, ghostpriv.BundleBindingSize, ghostpriv.PurposeBundle)
@@ -170,7 +171,8 @@ func TestBundleInputsLayout(t *testing.T) {
 
 // TestBundleBodyIsRevealWithoutProof checks that a bundled reveal is a
 // version 2 reveal payload without its 1,310,720-byte proof field: its
-// payload's bytes 0 to 190 and its 380-byte note, 570 bytes. It decodes to
+// payload's bytes 0 to 190, its 380-byte note and its 16-byte remainder
+// tag, 586 bytes. It decodes to
 // the same reveal with a zero proof field, which binds as the lone reveal
 // does; anything but a version 2 reveal with amount words below 2^96 is no
 // body. It also pins the bundle envelope layout.
@@ -187,12 +189,18 @@ func TestBundleBodyIsRevealWithoutProof(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := append(common.CopyBytes(payload[0:190]), payload[1_310_910:1_311_290]...)
-	if len(body) != 570 || !bytes.Equal(body, want) {
+	want := append(common.CopyBytes(payload[0:190]), payload[1_310_910:1_311_306]...)
+	if len(body) != 586 || !bytes.Equal(body, want) {
 		t.Fatalf("body of %d bytes is not the payload without its proof field", len(body))
 	}
-	if !bytes.Equal(body[190:], r.Note[:]) {
-		t.Fatal("the body does not end with the note")
+	if !bytes.Equal(body[190:570], r.Note[:]) || !bytes.Equal(body[570:], r.RemainderTag[:]) {
+		t.Fatal("the body does not end with the note and the remainder tag")
+	}
+	// A body whose remainder tag is zero is no body.
+	zeroTag := common.CopyBytes(body)
+	clear(zeroTag[570:])
+	if _, err := ghostpriv.DecodeBundleBody(zeroTag); !errors.Is(err, ghostpriv.ErrBundleBody) || !errors.Is(err, ghostpriv.ErrRevealTag) {
+		t.Fatalf("zero remainder tag in a body: %v", err)
 	}
 
 	// The body decodes to the reveal with its proof field zero, which binds
@@ -266,7 +274,7 @@ func TestBundleBodyIsRevealWithoutProof(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(benv) != 1+1_310_732+2*570 || benv[0] != 0x55 {
+	if len(benv) != 1+1_310_732+2*586 || benv[0] != 0x55 {
 		t.Fatalf("bundle envelope of %d bytes, type %#x", len(benv), benv[0])
 	}
 	p := benv[1:]
@@ -277,7 +285,7 @@ func TestBundleBodyIsRevealWithoutProof(t *testing.T) {
 		t.Fatal("root proof field")
 	}
 	secondBody, _ := ghostpriv.BundleBody(second)
-	if !bytes.Equal(p[1_310_732:1_310_732+570], body) || !bytes.Equal(p[1_310_732+570:], secondBody) {
+	if !bytes.Equal(p[1_310_732:1_310_732+586], body) || !bytes.Equal(p[1_310_732+586:], secondBody) {
 		t.Fatal("bodies are not in order after the root proof")
 	}
 	tx, err := types.NewGhostBundleTx(benv)
@@ -321,7 +329,7 @@ func TestBundleBodyIsRevealWithoutProof(t *testing.T) {
 		{"one byte short", benv[:len(benv)-1], ghostpriv.ErrBundleLength},
 		{"version 0", withBytes(1, 0, 0), ghostpriv.ErrBundleVersion},
 		{"version 2", withBytes(1, 0, 2), ghostpriv.ErrBundleVersion},
-		{"second body version 1", withBytes(1+1_310_732+570+1, 1), ghostpriv.ErrBundleBody},
+		{"second body version 1", withBytes(1+1_310_732+586+1, 1), ghostpriv.ErrBundleBody},
 	} {
 		if _, err := ghostpriv.DecodeBundle(c.env); !errors.Is(err, c.want) {
 			t.Errorf("%s: %v, want %v", c.name, err, c.want)

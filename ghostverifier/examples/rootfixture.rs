@@ -7,7 +7,7 @@
 //! `bundle_root.bin` is a bundle of one version 2 ordinary reveal: the bundle
 //! root key (124 bytes), the chain parameters (42), the spent coin's
 //! fingerprint F (32) and value (32, an amount word), the reveal's statement
-//! (560, in the layout of ghost_proofs.h) and then the shrink proof, unpadded.
+//! (576, in the layout of ghost_proofs.h) and then the shrink proof, unpadded.
 //! The coin is the only leaf of the coin tree, at position 0, so a node test
 //! chain that commits F and the value in its block 1 has the reveal's root as
 //! its block 1 coin root, and the reveal applies in a bundle of its block 2.
@@ -52,7 +52,7 @@ pub const COIN_VALUE: u128 = 1_000_000_000_000_000_000;
 pub const OUT: u128 = 500_000_000_000_000_000;
 
 /// The window fee of an ordinary reveal in block 2 of the node test chain.
-pub const FEE: u128 = 26_448_599_764_588_822;
+pub const FEE: u128 = 26_448_916_578_669_104;
 
 /// The recipient of the reveal.
 pub const RECIPIENT: [u8; 20] = [0x11; 20];
@@ -178,6 +178,7 @@ pub fn prove_bundle() -> BundleRoot {
         out: amount_word(OUT),
         fee: amount_word(FEE),
         remainder_note: [0x33; NOTE_V3_BYTES],
+        remainder_tag: [0x5a; REMAINDER_TAG_BYTES],
     };
     let (tx, reveal) = prove_coin_reveal_v2_scale_shaped(
         &params,

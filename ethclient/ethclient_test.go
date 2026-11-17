@@ -1400,14 +1400,15 @@ func TestCommitAndRevealOverRPCAreMined(t *testing.T) {
 			t.Fatal(err)
 		}
 		r := &ghostpriv.Reveal{
-			Version:   ghostpriv.RevealVersion,
-			ChainID:   chainID.Uint64(),
-			Marker:    marker,
-			Root:      *genesis.Header().CoinTreeRoot,
-			Remainder: ghosttree.K("ghost/test-remainder", to[:]),
-			Recipient: to,
-			Out:       out,
-			Fee:       fee.Total,
+			Version:      ghostpriv.RevealVersion,
+			RemainderTag: [16]byte{0x7a, 0x01},
+			ChainID:      chainID.Uint64(),
+			Marker:       marker,
+			Root:         *genesis.Header().CoinTreeRoot,
+			Remainder:    ghosttree.K("ghost/test-remainder", to[:]),
+			Recipient:    to,
+			Out:          out,
+			Fee:          fee.Total,
 		}
 		r.Proof = ghostprivtest.Proof(r.BindingDigest(chainID.Uint64(), genesis.Hash()))
 		envelope, err := r.MarshalBinary()

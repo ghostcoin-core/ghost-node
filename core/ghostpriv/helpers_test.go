@@ -241,14 +241,15 @@ func (f *fixture) commitTx(key *mldsa44.PrivateKey, nonce uint64, c coin) *types
 // binding digest on this chain.
 func (f *fixture) newReveal(root, marker common.Hash, remainder coin, recipient common.Address, out, fee *uint256.Int) *ghostpriv.Reveal {
 	r := &ghostpriv.Reveal{
-		Version:   ghostpriv.RevealVersion,
-		ChainID:   f.chainID,
-		Marker:    marker,
-		Root:      root,
-		Remainder: remainder.commitment(),
-		Recipient: recipient,
-		Out:       new(uint256.Int).Set(out),
-		Fee:       new(uint256.Int).Set(fee),
+		Version:      ghostpriv.RevealVersion,
+		RemainderTag: [16]byte{0x7a, 0x01},
+		ChainID:      f.chainID,
+		Marker:       marker,
+		Root:         root,
+		Remainder:    remainder.commitment(),
+		Recipient:    recipient,
+		Out:          new(uint256.Int).Set(out),
+		Fee:          new(uint256.Int).Set(fee),
 	}
 	copy(r.Note[:], remainder.note)
 	f.prove(r)

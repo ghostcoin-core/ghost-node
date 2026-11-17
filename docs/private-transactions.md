@@ -85,8 +85,8 @@ any other way, such as a `SELFDESTRUCT` beneficiary, is not intercepted.
 ## Reveal
 
 A reveal, the ordinary class, is the typed transaction `0x50 || payload`,
-version 2, 1,311,291 bytes, with hash `keccak256(0x50 || payload)`. The
-payload, 1,311,290 bytes, is a fixed layout, not RLP (spec 10, section 4.1):
+version 2, 1,311,307 bytes, with hash `keccak256(0x50 || payload)`. The
+payload, 1,311,306 bytes, is a fixed layout, not RLP (spec 10, section 4.1):
 
 | Offset | Length | Field |
 |---|---|---|
@@ -100,10 +100,14 @@ payload, 1,311,290 bytes, is a fixed layout, not RLP (spec 10, section 4.1):
 | 158 | 32 | fee (amount word) |
 | 190 | 1,310,720 | proof, then zeros |
 | 1,310,910 | 380 | note of the remainder |
+| 1,311,290 | 16 | remainder tag, the remainder's lookup tag |
 
 The proof field is 1,310,720 bytes (1.25 MiB), chosen to hold every proof of
 the pinned prover without ever growing. The note is the 380-byte note of
-every commitment.
+every commitment. The remainder tag (decision 0004) is never zero: a reveal
+whose tag is 16 zero bytes is refused at decoding with `ErrRevealTag`. The
+node files the remainder under it in the coin lookup index, so a wallet finds
+its change coin by a private lookup.
 
 The version 1 reveal is still accepted beside version 2, exactly as before
 version 2: the same layout up to the note, then a 156-byte remainder note
@@ -119,7 +123,7 @@ the verifier of the version 2 proof is linked.
 A reveal has no sender, nonce or signature: `types.Sender` returns
 `types.ErrNoSender` for it under every signer, and no signer signs it. No
 ordinary account can authorise one. Every version 2 reveal takes exactly
-`G_PRIV = 21,371,656` gas (16 x 1,311,291 + 21,000 + 370,000,
+`G_PRIV = 21,371,912` gas (16 x 1,311,307 + 21,000 + 370,000,
 `types.GhostRevealGas`, `ghostpriv.GasPriv`) from the block gas pool, and a
 version 1 reveal its own 21,090,372; a block whose pool holds less is
 invalid. Each native type takes its own class's gas (spec 10, section 10):
@@ -131,7 +135,7 @@ cumulative gas and one log.
 The checks run in this order and stop at the first failure; any failure makes
 the block invalid:
 
-1. type `0x50` and an envelope of exactly 1,311,291 or 1,311,067 bytes
+1. type `0x50` and an envelope of exactly 1,311,307 or 1,311,067 bytes
    (`ErrRevealLength`);
 2. the version of that length, 2 or 1 (`ErrRevealVersion`);
 3. out and fee have their 20 leading bytes zero (`ErrRevealAmount`);
@@ -169,11 +173,12 @@ roots is left for later.
 
 ### Binding digest
 
-`K("ghost/coin-reveal-binding/v2", fields)` over 607 bytes (spec 10, section
+`K("ghost/coin-reveal-binding/v2", fields)` over 623 bytes (spec 10, section
 4.2): chain id (8), version `0x0002` (2), domain (32, the genesis block hash),
 statement `0x01`, statement version `0x02`, type COIN version 2 `0x02 0x01`
 (2), purpose `0x01`, root, marker and remainder (32 each), recipient (20), out
-and fee (32 each) and the remainder's note (380). There is no rule field. The
+and fee (32 each), the remainder's note (380) and the remainder tag (16).
+There is no rule field. The
 node fills in the chain id, version, domain, statement, type and purpose
 itself; the proof field is not covered. The remainder is the commitment the
 proof opens: a remainder is always version 2 (spec 03),
@@ -334,13 +339,14 @@ the typed transaction `0x55 || payload`, with hash
 | 2 | 8 | chain id |
 | 10 | 2 | count, 1 to 1,408 |
 | 12 | 1,310,720 | root proof, then zeros |
-| 1,310,732 | 570 * count | the bodies, in order |
+| 1,310,732 | 586 * count | the bodies, in order |
 
-The envelope is 1,310,733 + 570 * count bytes: 1,311,303 for one reveal and
-2,113,293 for 1,408 (`types.GhostBundlePayloadSize`). A body is a version 2
+The envelope is 1,310,733 + 586 * count bytes: 1,311,319 for one reveal and
+2,135,821 for 1,408 (`types.GhostBundlePayloadSize`). A body is a version 2
 reveal payload without its proof field: its first 190 bytes (version 2,
 chain id, marker, root, remainder, recipient, out and fee, at the offsets of
-the reveal) followed by its 380-byte note. Like the reveals, a bundle has no
+the reveal) followed by its 380-byte note and its remainder tag; a zero tag
+is no body. Like the reveals, a bundle has no
 sender, nonce or signature: `types.Sender` returns `types.ErrNoSender` for
 it.
 
@@ -395,8 +401,8 @@ A bundle takes `count x G_PRIV` gas from the block gas pool
 skipped reveals included; a block whose pool holds less is invalid. At the
 consensus maximum block gas limit of 30,000,000
 ([account transactions](account-transactions.md#block-gas-limit-and-message-size))
-a block holds a bundle of one reveal, 21,371,656 gas; a bundle of two takes
-42,743,312 gas and fits no block. This is the rule of record: a bundle is
+a block holds a bundle of one reveal, 21,371,912 gas; a bundle of two takes
+42,743,824 gas and fits no block. This is the rule of record: a bundle is
 charged as the reveals it carries, so a block's gas still bounds the reveals
 it applies and the state it writes, whatever proof stands in for theirs.
 A cheaper gas for bundled reveals would change consensus and needs measured
@@ -502,7 +508,7 @@ the root inputs and the 1,310,720-byte root proof field. The node builds the
 root inputs itself: an 11-byte binding, the chain id (8, big endian), a
 protocol version (2) and a statement version (1), then the ordered items. A
 bundle's binding names the reveal version, 2, as both versions, and its items
-are its reveals' public values in order, each the reveal's 607-byte binding
+are its reveals' public values in order, each the reveal's 623-byte binding
 input ([Binding digest](#binding-digest)) followed by its binding digest
 (`BundleInputs.Reveals`, concatenated, and `BundleInputs.RootInputs`). A public root's binding
 names protocol version 2 and statement version 2

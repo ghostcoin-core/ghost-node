@@ -281,7 +281,8 @@ func TestDataRevealNoteSlot(t *testing.T) {
 
 // TestRevealKeepsNoteSlot checks that the version 2 coin reveal carries a
 // 380-byte remainder note: the payload field, the verifier's input and the
-// end of the binding digest input, and the envelope is 1,311,291 bytes.
+// binding digest input before the remainder tag, and the envelope is
+// 1,311,307 bytes.
 func TestRevealKeepsNoteSlot(t *testing.T) {
 	var (
 		r  ghostpriv.Reveal
@@ -290,29 +291,30 @@ func TestRevealKeepsNoteSlot(t *testing.T) {
 	if len(r.Note) != 380 || len(in.Note) != 380 {
 		t.Fatalf("reveal note of %d bytes, verifier note of %d", len(r.Note), len(in.Note))
 	}
-	if ghostpriv.EnvelopeSize != 1_311_291 || ghostpriv.PayloadSize != 1_311_290 || 190+ghostpriv.ProofSize+ghostpriv.NoteSize != 1_311_290 {
+	if ghostpriv.EnvelopeSize != 1_311_307 || ghostpriv.PayloadSize != 1_311_306 || 190+ghostpriv.ProofSize+ghostpriv.NoteSize+ghostpriv.LookupTagSize != 1_311_306 {
 		t.Fatalf("reveal envelope %d, payload %d", ghostpriv.EnvelopeSize, ghostpriv.PayloadSize)
 	}
 	note := testNote(0x41)
 	r = ghostpriv.Reveal{
-		Version: ghostpriv.RevealVersion,
-		ChainID: 7,
-		Out:     uint256.NewInt(1),
-		Fee:     uint256.NewInt(2),
-		Proof:   []byte{0x03},
+		Version:      ghostpriv.RevealVersion,
+		RemainderTag: [16]byte{0x7a, 0x01},
+		ChainID:      7,
+		Out:          uint256.NewInt(1),
+		Fee:          uint256.NewInt(2),
+		Proof:        []byte{0x03},
 	}
 	copy(r.Note[:], note)
 	env, err := r.MarshalBinary()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(env) != 1_311_291 || !bytes.Equal(env[len(env)-380:], note) {
-		t.Fatalf("reveal envelope of %d bytes ends %x", len(env), env[len(env)-380:])
+	if len(env) != 1_311_307 || !bytes.Equal(env[len(env)-16-380:len(env)-16], note) || !bytes.Equal(env[len(env)-16:], r.RemainderTag[:]) {
+		t.Fatalf("reveal envelope of %d bytes ends %x", len(env), env[len(env)-16-380:])
 	}
-	if ghostpriv.BindingSize != 607 {
-		t.Fatalf("BindingSize %d, want 607", ghostpriv.BindingSize)
+	if ghostpriv.BindingSize != 623 {
+		t.Fatalf("BindingSize %d, want 623", ghostpriv.BindingSize)
 	}
-	if b := r.BindingInput(7, common.Hash{0x01}); len(b) != 607 || !bytes.Equal(b[len(b)-380:], note) {
+	if b := r.BindingInput(7, common.Hash{0x01}); len(b) != 623 || !bytes.Equal(b[len(b)-16-380:len(b)-16], note) || !bytes.Equal(b[len(b)-16:], r.RemainderTag[:]) {
 		t.Fatalf("binding input of %d bytes", len(b))
 	}
 	dec, err := ghostpriv.DecodeReveal(env)

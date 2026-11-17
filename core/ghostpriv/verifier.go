@@ -80,6 +80,8 @@ type VerifyInputs struct {
 	Note      [NoteSize]byte
 	Cf        common.Hash // the content fingerprint, data reveals only
 
+	RemainderTag ghosttree.LookupTag // the remainder's lookup tag, version 2 coin reveals only
+
 	Policy         common.Address // the policy address
 	PolicyCodeHash common.Hash    // the policy's code hash
 	ParamsHash     common.Hash

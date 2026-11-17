@@ -42,6 +42,9 @@ const (
 	offFee       = 158
 	offProof     = 190
 	offNote      = offProof + ProofSize
+	// offRemainderTag is where a version 2 reveal's remainder tag starts,
+	// after its NoteSize note; a version 1 reveal has no tag.
+	offRemainderTag = offNote + NoteSize
 
 	// ProofSize is the length of the proof field: the serialized proof
 	// followed by zeros.
@@ -57,8 +60,9 @@ const (
 	PayloadSizeV1  = types.GhostRevealV1PayloadSize
 	EnvelopeSizeV1 = types.GhostRevealV1EnvelopeSize
 
-	// BindingSize is the length of the binding digest's input, version 2.
-	BindingSize = 607
+	// BindingSize is the length of the binding digest's input, version 2:
+	// the 607 bytes before decision 0004 and the remainder tag.
+	BindingSize = 607 + LookupTagSize
 
 	// BindingSizeV1 is the length of the version 1 binding digest's input.
 	BindingSizeV1 = 415
@@ -88,8 +92,9 @@ const (
 // check that needed it. ErrRevealRecipient runs between the fee and the
 // binding (spec 10, section 4.5).
 var (
-	ErrRevealLength    = errors.New("reveal is not a 0x50 envelope of 1,311,291 or 1,311,067 bytes")
+	ErrRevealLength    = errors.New("reveal is not a 0x50 envelope of 1,311,307 or 1,311,067 bytes")
 	ErrRevealVersion   = errors.New("reveal version is not that of its layout, 2 or 1")
+	ErrRevealTag       = errors.New("reveal remainder tag is zero")
 	ErrRevealAmount    = errors.New("reveal out or fee not below 2^96")
 	ErrRevealChainID   = errors.New("reveal chain id is not this chain's")
 	ErrRevealFee       = errors.New("reveal fee is not the window fee")
@@ -117,6 +122,11 @@ type Reveal struct {
 	Fee       *uint256.Int
 	Proof     []byte // ProofSize bytes, or fewer to be padded with zeros
 	Note      [NoteSize]byte
+	// RemainderTag is the remainder's lookup tag (decision 0004), the last
+	// LookupTagSize bytes of a version 2 payload, after the note. It is never
+	// zero, and the node files the remainder under it in the coin lookup
+	// index. A version 1 reveal has none: it stays zero.
+	RemainderTag ghosttree.LookupTag
 }
 
 // IsV1 reports whether the reveal is a version 1 reveal, of the layout with
@@ -145,7 +155,8 @@ func (r *Reveal) noteBytes() []byte {
 // payload, of EnvelopeSizeV1 - 1 bytes for a version 1 reveal and of
 // EnvelopeSize - 1 bytes for any other version. A shorter proof is padded
 // with zeros; a longer one is an error, as is a version 1 note with a
-// non-zero byte past RevealNoteSize, which the layout cannot hold.
+// non-zero byte past RevealNoteSize, or a version 1 reveal with a remainder
+// tag, neither of which the layout can hold.
 func (r *Reveal) MarshalBinary() ([]byte, error) {
 	if len(r.Proof) > ProofSize {
 		return nil, fmt.Errorf("proof of %d bytes, the field holds %d", len(r.Proof), ProofSize)
@@ -156,6 +167,9 @@ func (r *Reveal) MarshalBinary() ([]byte, error) {
 			if b != 0 {
 				return nil, fmt.Errorf("version 1 reveal note longer than %d bytes", RevealNoteSize)
 			}
+		}
+		if !r.RemainderTag.IsZero() {
+			return nil, errors.New("version 1 reveal with a remainder tag")
 		}
 		size = EnvelopeSizeV1
 	}
@@ -176,14 +190,17 @@ func (r *Reveal) MarshalBinary() ([]byte, error) {
 	}
 	copy(p[offProof:offNote], r.Proof)
 	copy(p[offNote:], r.noteBytes())
+	if !r.IsV1() {
+		copy(p[offRemainderTag:], r.RemainderTag[:])
+	}
 	return env, nil
 }
 
 // DecodeReveal decodes a reveal envelope and runs the first three checks:
 // the type byte and exact length (ErrRevealLength), the version of the
 // layout, 2 for an envelope of EnvelopeSize bytes and 1 for one of
-// EnvelopeSizeV1 bytes (ErrRevealVersion), and out and fee below 2^96
-// (ErrRevealAmount).
+// EnvelopeSizeV1 bytes (ErrRevealVersion), a version 2 remainder tag that is
+// not zero (ErrRevealTag), and out and fee below 2^96 (ErrRevealAmount).
 func DecodeReveal(envelope []byte) (*Reveal, error) {
 	want := RevealVersion
 	switch {
@@ -205,9 +222,17 @@ func DecodeReveal(envelope []byte) (*Reveal, error) {
 		Recipient: common.BytesToAddress(p[offRecipient:offOut]),
 		Proof:     common.CopyBytes(p[offProof:offNote]),
 	}
-	copy(r.Note[:], p[offNote:])
+	if want == RevealVersionV1 {
+		copy(r.Note[:], p[offNote:])
+	} else {
+		copy(r.Note[:], p[offNote:offRemainderTag])
+		copy(r.RemainderTag[:], p[offRemainderTag:])
+	}
 	if r.Version != want {
 		return nil, fmt.Errorf("%w: %d in an envelope of %d bytes", ErrRevealVersion, r.Version, len(envelope))
+	}
+	if !r.IsV1() && r.RemainderTag.IsZero() {
+		return nil, ErrRevealTag
 	}
 	var err error
 	if r.Out, err = readAmount(p[offOut:offFee]); err != nil {
@@ -221,7 +246,7 @@ func DecodeReveal(envelope []byte) (*Reveal, error) {
 
 // BindingDigest returns the binding digest the proof must commit to. For a
 // version 2 reveal it is K("ghost/coin-reveal-binding/v2", fields) over the
-// 607 bytes of BindingInput (spec 10, section 4.2); for a version 1 reveal
+// 623 bytes of BindingInput (spec 10, section 4.2); for a version 1 reveal
 // it is K("ghost/coin-reveal-binding/v1", fields) over the 415 bytes of the
 // version 1 BindingInput, of type COIN version 1.
 func (r *Reveal) BindingDigest(chainID uint64, genesis common.Hash) common.Hash {
@@ -247,11 +272,11 @@ func (r *Reveal) SaltedBindingDigest(chainID uint64, genesis common.Hash) common
 
 // BindingInput returns the bytes the binding digest hashes.
 //
-// For a version 2 reveal they are 607: the chain id (8), the version 2 (2),
+// For a version 2 reveal they are 623: the chain id (8), the version 2 (2),
 // the domain, which is the genesis hash (32), the statement 0x01 and its
 // version 0x02 (1 each), the type COIN version 2 (2), the purpose (1), the
 // root, marker and remainder (32 each), the recipient (20), out and fee (32
-// each) and the remainder note (380). The node supplies the version,
+// each), the remainder note (380) and the remainder tag (16). The node supplies the version,
 // statement, type and purpose; there is no rule field, and the proof is not
 // covered.
 //
@@ -285,6 +310,7 @@ func (r *Reveal) BindingInput(chainID uint64, genesis common.Hash) []byte {
 	b = append(b, amountWord(out)...)
 	b = append(b, amountWord(fee)...)
 	b = append(b, r.Note[:]...)
+	b = append(b, r.RemainderTag[:]...)
 	return b
 }
 
@@ -330,19 +356,20 @@ func (r *Reveal) VerifyInputs(chainID uint64, genesis common.Hash) *VerifyInputs
 		fee.Set(r.Fee)
 	}
 	return &VerifyInputs{
-		Kind:      ghosttree.Coin,
-		Purpose:   purposeReveal,
-		Version:   r.Version,
-		Binding:   r.BindingDigest(chainID, genesis),
-		ChainID:   chainID,
-		Domain:    genesis,
-		Root:      r.Root,
-		Marker:    r.Marker,
-		Remainder: r.Remainder,
-		Recipient: r.Recipient,
-		Out:       out,
-		Fee:       fee,
-		Note:      r.Note,
+		Kind:         ghosttree.Coin,
+		Purpose:      purposeReveal,
+		Version:      r.Version,
+		Binding:      r.BindingDigest(chainID, genesis),
+		ChainID:      chainID,
+		Domain:       genesis,
+		Root:         r.Root,
+		Marker:       r.Marker,
+		Remainder:    r.Remainder,
+		Recipient:    r.Recipient,
+		Out:          out,
+		Fee:          fee,
+		Note:         r.Note,
+		RemainderTag: r.RemainderTag,
 	}
 }
 
@@ -631,8 +658,10 @@ func applyCheckedReveal(st StateDB, env *BlockEnv, r *Reveal, fee Fee) error {
 	// Check 12: the coin tree takes the remainder, or nothing is written. The
 	// remainder is the commitment the proof opens: a remainder is always
 	// version 2 (spec 03), K(TagCommitment, CoinV2, F, v), and the node
-	// appends it as given.
-	res, err := ghosttree.Append(st, ghosttree.Coin, height, r.Remainder)
+	// appends it as given. A version 2 reveal's remainder goes into the coin
+	// lookup index under its remainder tag (decision 0004); a version 1
+	// reveal has no tag, and its remainder has no lookup entry.
+	res, err := ghosttree.AppendTagged(st, ghosttree.Coin, height, r.Remainder, r.RemainderTag)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrRevealTree, err)
 	}

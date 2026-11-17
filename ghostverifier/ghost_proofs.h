@@ -21,7 +21,7 @@
  * Statement of ghost_verify_coin_reveal_v2 (statement S1 version 2, the
  * ordinary class), GHOST_PROOFS_COIN_REVEAL_V2_BYTES bytes:
  *   root 32, marker 32, remainder 32, remainder_note 380, recipient 20,
- *   out 32, fee 32, in that order. There is no rule.
+ *   out 32, fee 32, remainder_tag 16, in that order. There is no rule.
  *
  * Proof, 1 to GHOST_PROOFS_PROOF_MAX_BYTES bytes: one serialized proof,
  * optionally followed by zero bytes, so a zero-padded proof field can be
@@ -47,7 +47,7 @@
  *   chain_id 8, protocol_version 2, statement_version 1, then the items in
  *   block order, one byte a public value. A bundle's item is a version 2
  *   coin reveal's public values, GHOST_PROOFS_REVEAL_PUBLIC_BYTES bytes (its
- *   607 binding field bytes, then its 32-byte binding digest); a public
+ *   623 binding field bytes, then its 32-byte binding digest); a public
  *   transaction's is its account 20, key identity 32 and transaction hash 32,
  *   GHOST_PROOFS_PUBLIC_TX_BYTES bytes.
  *
@@ -69,14 +69,14 @@
 
 #define GHOST_PROOFS_CHAIN_PARAMS_BYTES 42
 #define GHOST_PROOFS_COIN_REVEAL_BYTES 368
-#define GHOST_PROOFS_COIN_REVEAL_V2_BYTES 560
+#define GHOST_PROOFS_COIN_REVEAL_V2_BYTES 576
 #define GHOST_PROOFS_PROOF_MAX_BYTES 2097152
 
 #define GHOST_PROOFS_ROOT_KEY_BUNDLE 1
 #define GHOST_PROOFS_ROOT_KEY_PUBLIC 2
 #define GHOST_PROOFS_ROOT_KEY_BYTES 124
 #define GHOST_PROOFS_ROOT_BINDING_BYTES 11
-#define GHOST_PROOFS_REVEAL_PUBLIC_BYTES 639
+#define GHOST_PROOFS_REVEAL_PUBLIC_BYTES 655
 #define GHOST_PROOFS_PUBLIC_TX_BYTES 84
 #define GHOST_PROOFS_PROOF_FIELD_BYTES 1310720
 
