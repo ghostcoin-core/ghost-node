@@ -19,6 +19,7 @@ package legacypool
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"math/big"
 	"strings"
 	"testing"
@@ -110,6 +111,11 @@ func TestCommitDataRejectedAtSubmission(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// notSalted is the reason the node gives for commit data of n bytes
+	// that is not salted commit data.
+	notSalted := func(n int) string {
+		return fmt.Sprintf("commit data is not %d bytes of version 3: %d bytes", ghostpriv.SaltedCommitDataSize, n)
+	}
 	for _, tc := range []struct {
 		name   string
 		to     common.Address
@@ -118,13 +124,13 @@ func TestCommitDataRejectedAtSubmission(t *testing.T) {
 		want   error
 		reason string
 	}{
-		{"206-byte version 2 commit data", ghost.CommitEntryAddress, oneGhost, v2, ghostpriv.ErrCommitData, "commit data is not 430 bytes of version 3: 206 bytes"},
-		{"430 bytes of version 2", ghost.CommitEntryAddress, oneGhost, retagged, ghostpriv.ErrCommitData, "commit data is not 430 bytes of version 3: 430 bytes"},
-		{"valid data one byte short", ghost.CommitEntryAddress, oneGhost, valid[:len(valid)-1], ghostpriv.ErrCommitData, "commit data is not 430 bytes of version 3: 429 bytes"},
-		{"no commit data", ghost.CommitEntryAddress, oneGhost, nil, ghostpriv.ErrCommitData, "commit data is not 430 bytes of version 3: 0 bytes"},
+		{"206-byte version 2 commit data", ghost.CommitEntryAddress, oneGhost, v2, ghostpriv.ErrCommitData, notSalted(206)},
+		{"full-size data of version 2", ghost.CommitEntryAddress, oneGhost, retagged, ghostpriv.ErrCommitData, notSalted(ghostpriv.SaltedCommitDataSize)},
+		{"valid data one byte short", ghost.CommitEntryAddress, oneGhost, valid[:len(valid)-1], ghostpriv.ErrCommitData, notSalted(ghostpriv.SaltedCommitDataSize - 1)},
+		{"no commit data", ghost.CommitEntryAddress, oneGhost, nil, ghostpriv.ErrCommitData, notSalted(0)},
 		{"zero F", ghost.CommitEntryAddress, oneGhost, zeroF, ghostpriv.ErrCommitZeroF, ghostpriv.ErrCommitZeroF.Error()},
 		{"commit value zero", ghost.CommitEntryAddress, new(big.Int), valid, ghostpriv.ErrCommitAmount, ghostpriv.ErrCommitAmount.Error()},
-		{"206-byte data commit", ghost.DataCommitEntryAddress, ghostpriv.DataReserve.ToBig(), v2, ghostpriv.ErrCommitData, "commit data is not 430 bytes of version 3: 206 bytes"},
+		{"206-byte data commit", ghost.DataCommitEntryAddress, ghostpriv.DataReserve.ToBig(), v2, ghostpriv.ErrCommitData, notSalted(206)},
 		{"data commit value not the reserve", ghost.DataCommitEntryAddress, oneGhost, valid, ghostpriv.ErrDataCommitValue, ghostpriv.ErrDataCommitValue.Error()},
 	} {
 		tx := sign(key, 0, tc.to, tc.value, tc.data)
