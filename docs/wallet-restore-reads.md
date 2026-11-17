@@ -117,9 +117,58 @@ stale history and builds the history again from genesis on its first call
 after the upgrade, as it does for any stale store; a reset deletes the
 marker with the head.
 
+## Private restore
+
+A node that serves the `ghost` namespace also runs a PIR restore server
+(`core/ghostpir`, `eth/ghostrestore.go`). It keeps a snapshot of its
+canonical head, anchored at the last block whose number is a multiple of 20,
+rebuilt when the head enters the next interval or a reorganisation replaces
+the anchor. Nothing in it is keyed by a tag, a marker, a position or a note:
+what every wallet reads whole says nothing about the wallet, and every other
+read is a PIR query, which hides the record it fetches. The methods are those
+of `GhostRestoreAPI` in `internal/ethapi/ghostrestore.go`.
+
+| Method | Result |
+|---|---|
+| `ghost_restoreHeader()` | the snapshot header: anchor number and hash, roots, and every database (table, kind, tree index, record size and count, root, digest, PIR rows and columns), with its canonical encoding and identity |
+| `ghost_restoreTops()` | the level-20 nodes of every coin and data tree, which fold to the anchor's tree roots |
+| `ghost_restoreBlocks(after)` | every block after the anchor and after `after`, up to the head: its leaves and markers, and its lookup lists, which hash to the block's `lookupDigest` |
+| `ghost_restoreQuery(entry, query)` | the PIR answer to a query to database `entry` of the snapshot |
+
+Beside the notes, coin-tree witness records, marker lists and hint tables,
+the snapshot holds the four indexed trees of decision 0004: the coin and
+data lookup indices and the coin and data marker sets. Each has an `index`
+database, the witness of every used leaf in key order (1,332 bytes for a
+lookup index, 1,359 for the coin marker set, 1,354 for the data marker set,
+the sentinel at record 0), and an `index-buckets` database of 2^b records,
+record k giving the ranks of the leaves whose key starts with the b bits of
+k. Both list the anchor header's root of the tree (`coinLookupRoot`,
+`dataLookupRoot`, `coinMarkerRoot`, `dataMarkerRoot`), and a build whose
+leaves do not fold to it fails.
+
+A wallet finds the low leaf of its tag (the key `tag || 0^5`) or of its
+marker with one bucket query and a search of the bucket's ranks, padded to a
+fixed number of index queries. The witness it ends on proves the tag's first
+entry (`VerifyLookupFirst`) or its absence, and the marker's membership,
+with the position its reveal appended (`VerifyCoinMarker`), or its absence.
+It then reads the coin's note and coin-tree witness at that position. Every
+record is checked against the anchor header on the wallet's own chain; the
+bucket table is not believed, a wrong one only costing queries.
+
+A restore of one coin makes the same 20 queries whatever the chain. A PIR
+answer grows with the square root of its database: the test
+`TestGhostRestoreOverRPC` measures 1.9 MB for a restore at 64 coin leaves
+and 67 MB at 100,000.
+
+Every call is charged to the restore server's budget (`DefaultBudget`: 256
+requests a minute a client, 4,096 from all clients) and to the ghost read
+limits above, a PIR answer at half the node's read units. A request past the
+budget is refused with code `-32005` and does no work.
+
 ## Not served
 
-- a witness, or any part of one computed by the node;
+- a witness computed for a named leaf, tag or marker: witnesses are served
+  only as records of the restore snapshot, read by PIR;
 - a read keyed by a single leaf, position or marker;
 - any read that names a marker, alone or among others: the marker is public
   once its coin is spent and a decoy never is, so such a read links the

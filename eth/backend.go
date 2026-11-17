@@ -106,6 +106,7 @@ type Ethereum struct {
 
 	treeHistory *ghosttree.History // Leaves and notes of the commitment trees, served in pages
 	ghostAPI    bool               // Whether the HTTP or WebSocket module list names the ghost namespace
+	restore     *restoreService    // The PIR restore server, kept at the head; nil without the ghost namespace
 }
 
 // New creates a new Ethereum object (including the
@@ -260,6 +261,15 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	}
 	eth.bloomIndexer.Start(eth.blockchain)
 
+	// A node that serves the ghost namespace also serves the private
+	// restore: a PIR snapshot of its head, rebuilt every 20 blocks.
+	if eth.ghostAPI {
+		if eth.restore, err = newRestoreService(chainDb, eth.blockchain, eth.treeHistory); err != nil {
+			eth.blockchain.Stop()
+			return nil, err
+		}
+	}
+
 	if config.TxPool.Journal != "" {
 		config.TxPool.Journal = stack.ResolvePath(config.TxPool.Journal)
 	}
@@ -362,6 +372,7 @@ func (s *Ethereum) APIs() []rpc.API {
 			rpc.API{Namespace: "ghost", Service: ethapi.NewGhostAPI(s.treeHistory)},
 			rpc.API{Namespace: "ghost", Service: ethapi.NewGhostBucketAPI(s.treeHistory)},
 			rpc.API{Namespace: "ghost", Service: ethapi.NewGhostEscrowAPI(s.APIBackend)},
+			rpc.API{Namespace: "ghost", Service: ethapi.NewGhostRestoreAPI(s.restore.server)},
 		)
 	}
 
@@ -580,6 +591,10 @@ func (s *Ethereum) Start() error {
 	// Regularly update shutdown marker
 	s.shutdownTracker.Start()
 
+	if s.restore != nil {
+		s.restore.start()
+	}
+
 	// Figure out a max peers count based on the server limits
 	maxPeers := s.p2pServer.MaxPeers
 	if s.config.LightServ > 0 {
@@ -602,6 +617,9 @@ func (s *Ethereum) Stop() error {
 	s.handler.Stop()
 
 	// Then stop everything else.
+	if s.restore != nil {
+		s.restore.stop()
+	}
 	s.bloomIndexer.Close()
 	close(s.closeBloomHandler)
 	s.txPool.Close()
