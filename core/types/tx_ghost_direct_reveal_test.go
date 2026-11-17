@@ -82,22 +82,22 @@ func TestGhostDirectRevealTxRoundTrip(t *testing.T) {
 		t.Fatalf("proof field of %d bytes is no larger than today's %d", GhostDirectRevealProofSize, GhostBundleProofSize)
 	}
 	// The fields around the proof are those of the version 2 coin reveal.
-	around := GhostDirectRevealHeadSize + GhostDirectRevealNoteSize
+	around := GhostDirectRevealHeadSize + GhostDirectRevealNoteSize + GhostDirectRevealTagSize
 	if around != GhostRevealPayloadSize-GhostBundleProofSize {
-		t.Fatalf("head %d and note %d are not the version 2 reveal's", GhostDirectRevealHeadSize, GhostDirectRevealNoteSize)
+		t.Fatalf("head %d, note %d and tag %d are not the version 2 reveal's", GhostDirectRevealHeadSize, GhostDirectRevealNoteSize, GhostDirectRevealTagSize)
 	}
 	if around != GhostBundleBodySize {
-		t.Fatalf("head %d and note %d are not a bundle body", GhostDirectRevealHeadSize, GhostDirectRevealNoteSize)
+		t.Fatalf("head %d, note %d and tag %d are not a bundle body", GhostDirectRevealHeadSize, GhostDirectRevealNoteSize, GhostDirectRevealTagSize)
 	}
-	if GhostDirectRevealPayloadSize != 2_332_218 || GhostDirectRevealEnvelopeSize != 2_332_219 {
+	if GhostDirectRevealPayloadSize != 2_332_234 || GhostDirectRevealEnvelopeSize != 2_332_235 {
 		t.Fatalf("payload %d, envelope %d", GhostDirectRevealPayloadSize, GhostDirectRevealEnvelopeSize)
 	}
 	// G_PRIV's rule for the larger envelope: 16 per byte, 21,000 and 370,000.
 	if GhostRevealGas != 16*GhostRevealEnvelopeSize+21_000+370_000 {
 		t.Fatal("the rule does not give G_PRIV for the version 2 reveal")
 	}
-	if GhostDirectRevealGas != 37_706_504 {
-		t.Fatalf("gas %d, want 37,706,504", GhostDirectRevealGas)
+	if GhostDirectRevealGas != 37_706_760 {
+		t.Fatalf("gas %d, want 37,706,760", GhostDirectRevealGas)
 	}
 
 	env := testDirectRevealEnvelope()
@@ -258,7 +258,7 @@ func TestGhostDirectRevealTxRoundTrip(t *testing.T) {
 		{"the version 2 reveal's length", v2Length, ErrGhostDirectRevealLength},
 		{"one byte short", env[:len(env)-1], ErrGhostDirectRevealLength},
 		{"one byte long", append(common.CopyBytes(env), 0), ErrGhostDirectRevealLength},
-		{"the floor's length", env[:1+GhostDirectRevealHeadSize+GhostDirectRevealProofFloor+GhostDirectRevealNoteSize], ErrGhostDirectRevealLength},
+		{"the floor's length", env[:1+GhostDirectRevealHeadSize+GhostDirectRevealProofFloor+GhostDirectRevealNoteSize+GhostDirectRevealTagSize], ErrGhostDirectRevealLength},
 		{"version 2", withVersion(2), ErrGhostDirectRevealVersion},
 		{"version 4", withVersion(4), ErrGhostDirectRevealVersion},
 	}

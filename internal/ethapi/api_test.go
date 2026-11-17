@@ -1995,14 +1995,15 @@ func TestSendRawRevealTransaction(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := &ghostpriv.Reveal{
-		Version:   ghostpriv.RevealVersion,
-		ChainID:   chainID.Uint64(),
-		Marker:    ghosttree.K("ghost/test-marker", []byte("synthetic rpc marker")),
-		Root:      *genesis.Header().CoinTreeRoot,
-		Remainder: ghosttree.K("ghost/test-remainder", []byte("synthetic rpc remainder")),
-		Recipient: common.Address{0x52},
-		Out:       uint256.NewInt(1000),
-		Fee:       fee.Total,
+		Version:      ghostpriv.RevealVersion,
+		RemainderTag: [16]byte{0x7a, 0x01},
+		ChainID:      chainID.Uint64(),
+		Marker:       ghosttree.K("ghost/test-marker", []byte("synthetic rpc marker")),
+		Root:         *genesis.Header().CoinTreeRoot,
+		Remainder:    ghosttree.K("ghost/test-remainder", []byte("synthetic rpc remainder")),
+		Recipient:    common.Address{0x52},
+		Out:          uint256.NewInt(1000),
+		Fee:          fee.Total,
 	}
 	r.Proof = ghostprivtest.Proof(r.BindingDigest(chainID.Uint64(), genesis.Hash()))
 	envelope, err := r.MarshalBinary()

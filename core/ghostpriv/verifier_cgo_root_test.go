@@ -46,7 +46,7 @@ const rootFixtureEnv = "GHOST_ROOT_FIXTURE_DIR"
 // ghost_proofs.h.
 const (
 	rootFixtureParams    = 42
-	rootFixtureStatement = 560
+	rootFixtureStatement = 576
 	bundleFixtureHead    = ghostpriv.RootKeySize + rootFixtureParams + 32 + 32 + rootFixtureStatement
 	publicFixtureHead    = ghostpriv.RootKeySize + 8 + ghostpriv.PublicBindingSize
 )
@@ -107,14 +107,15 @@ func loadBundleRoot(t *testing.T) *bundleRootFixture {
 	}
 	s := rest[64 : 64+rootFixtureStatement]
 	r := &ghostpriv.Reveal{
-		Version:   ghostpriv.RevealVersion,
-		ChainID:   fx.chainID,
-		Root:      common.BytesToHash(s[0:32]),
-		Marker:    common.BytesToHash(s[32:64]),
-		Remainder: common.BytesToHash(s[64:96]),
-		Recipient: common.BytesToAddress(s[476:496]),
-		Out:       new(uint256.Int).SetBytes(s[496:528]),
-		Fee:       new(uint256.Int).SetBytes(s[528:560]),
+		Version:      ghostpriv.RevealVersion,
+		RemainderTag: ghosttree.LookupTag(s[560:576]),
+		ChainID:      fx.chainID,
+		Root:         common.BytesToHash(s[0:32]),
+		Marker:       common.BytesToHash(s[32:64]),
+		Remainder:    common.BytesToHash(s[64:96]),
+		Recipient:    common.BytesToAddress(s[476:496]),
+		Out:          new(uint256.Int).SetBytes(s[496:528]),
+		Fee:          new(uint256.Int).SetBytes(s[528:560]),
 	}
 	copy(r.Note[:], s[96:476])
 	fx.reveal = r

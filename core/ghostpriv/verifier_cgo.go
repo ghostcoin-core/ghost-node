@@ -289,8 +289,9 @@ func ghostPreimageStatementBytes(in *VerifyInputs) []byte {
 
 // ghostCoinStatementV2 returns the version 2 coin reveal statement of
 // ghost_proofs.h, of GHOST_PROOFS_COIN_REVEAL_V2_BYTES: the root, marker and
-// remainder (32 each), the remainder's note (380), the recipient (20) and out
-// and fee as 32-byte amount words. There is no rule. A nil amount is zero.
+// remainder (32 each), the remainder's note (380), the recipient (20), out
+// and fee as 32-byte amount words and the remainder tag (16). There is no
+// rule. A nil amount is zero.
 func ghostCoinStatementV2(in *VerifyInputs) []byte {
 	b := make([]byte, 0, ghostCoinRevealV2)
 	b = append(b, in.Root[:]...)
@@ -299,7 +300,8 @@ func ghostCoinStatementV2(in *VerifyInputs) []byte {
 	b = append(b, in.Note[:]...)
 	b = append(b, in.Recipient[:]...)
 	b = append(b, amountWord(amountOrZero(in.Out))...)
-	return append(b, amountWord(amountOrZero(in.Fee))...)
+	b = append(b, amountWord(amountOrZero(in.Fee))...)
+	return append(b, in.RemainderTag[:]...)
 }
 
 // ghostPolicyStatement returns the policy reveal statement of ghost_policy.h,

@@ -25,6 +25,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/ghostpriv"
+	"github.com/ethereum/go-ethereum/core/ghostpriv/ghostprivtest"
 	"github.com/ethereum/go-ethereum/core/ghosttree"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/params/ghost"
@@ -162,11 +163,13 @@ func TestLookupTagPayload(t *testing.T) {
 		t.Errorf("block lists %+v", b)
 	}
 
-	// The coin reveal: its remainder takes the next position and no entry,
-	// and the marker's leaf names the remainder.
+	// The coin reveal: its remainder takes the next position and its
+	// remainder tag's entry in the coin lookup index (decision 0004), and the
+	// marker's leaf names the remainder.
 	useStub(t)
 	marker := testMarker("lookup tag")
 	out := u256(ghostAmount(1, 4))
+	remTag := lookupTestTag(3)
 	var revealAt int
 	blocks, _ := f.generate(3, func(i int, b *core.BlockGen) {
 		switch i {
@@ -176,7 +179,10 @@ func TestLookupTagPayload(t *testing.T) {
 			fee := genWindowFee(t, b).Total
 			rest := new(uint256.Int).Sub(c.value, out)
 			rest.Sub(rest, fee)
-			b.AddTx(revealTx(t, f.newReveal(genParentRoot(b), marker, testCoin("lookup tag rest", rest.ToBig()), common.Address{0x9e}, out, fee)))
+			r := f.newReveal(genParentRoot(b), marker, testCoin("lookup tag rest", rest.ToBig()), common.Address{0x9e}, out, fee)
+			r.RemainderTag = remTag
+			f.prove(r)
+			b.AddTx(revealTx(t, r))
 			revealAt = i + 1
 		}
 	})
@@ -192,8 +198,22 @@ func TestLookupTagPayload(t *testing.T) {
 	if got, ok, err := ghosttree.LookupEntry(head, ghosttree.Coin, 0); err != nil || !ok || got != tag {
 		t.Errorf("commit entry %x %v %v", got, ok, err)
 	}
-	if _, ok, err := ghosttree.LookupEntry(head, ghosttree.Coin, 1); ok || err != nil {
-		t.Errorf("the remainder has an entry (%v)", err)
+	// A wallet finds its change coin by its tag: the remainder's entry is at
+	// its position, and its membership verifies against the coin lookup
+	// root, the root a header carries as coinLookupRoot.
+	if got, ok, err := ghosttree.LookupEntry(head, ghosttree.Coin, 1); err != nil || !ok || got != remTag {
+		t.Errorf("remainder entry %x %v %v, want %x", got, ok, err, remTag)
+	}
+	lr, err := ghosttree.LookupRoot(head, ghosttree.Coin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rw, err := ghosttree.LookupMembershipWitness(head, ghosttree.Coin, 1)
+	if err != nil || !ghosttree.VerifyLookupMembership(ghosttree.Coin, lr, remTag, 1, rw) {
+		t.Errorf("membership of the remainder's tag (%v)", err)
+	}
+	if ghosttree.VerifyLookupMembership(ghosttree.Coin, lr, lookupTestTag(4), 1, rw) {
+		t.Error("the remainder's witness verifies another tag")
 	}
 	if n := ghosttree.CoinMarkerSetCount(head); n != 2 {
 		t.Fatalf("coin marker set count %d, want 2", n)
@@ -205,7 +225,7 @@ func TestLookupTagPayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rb.CoinStart != 1 || len(rb.CoinTags) != 1 || !rb.CoinTags[0].IsZero() || len(rb.CoinMarkers) != 1 || rb.CoinMarkers[0] != marker {
+	if rb.CoinStart != 1 || len(rb.CoinTags) != 1 || rb.CoinTags[0] != remTag || len(rb.CoinMarkers) != 1 || rb.CoinMarkers[0] != marker {
 		t.Errorf("reveal block lists %+v", rb)
 	}
 	// The zero coin marker, the coin marker set's sentinel, is refused.
@@ -214,5 +234,30 @@ func TestLookupTagPayload(t *testing.T) {
 	zr := f.newReveal(*fresh.CurrentBlock().CoinTreeRoot, common.Hash{}, testCoin("lookup zero marker", oneGhost), common.Address{0x9f}, out, fee)
 	if _, _, err := ghostpriv.CheckReveal(rst, renv, nil, envelope(t, zr)); !errors.Is(err, ghostpriv.ErrRevealMarker) || !errors.Is(err, ghosttree.ErrZeroMarker) {
 		t.Errorf("zero coin marker: %v, want %v", err, ghosttree.ErrZeroMarker)
+	}
+	// A reveal whose remainder tag is zero is refused at decoding, before
+	// anything else, and one whose tag was changed after proving fails the
+	// proof: the binding covers the tag, so a relay cannot hide the
+	// remainder from a lookup.
+	good := f.newReveal(*fresh.CurrentBlock().CoinTreeRoot, testMarker("lookup tag 2"), testCoin("lookup tag 2 rest", oneGhost), common.Address{0x9f}, out, fee)
+	if _, _, err := ghostpriv.CheckReveal(rst, renv, ghostprivtest.Verifier{}, envelope(t, good)); err != nil {
+		t.Fatalf("the honest reveal: %v", err)
+	}
+	zeroTag := envelope(t, good)
+	clear(zeroTag[len(zeroTag)-ghostpriv.LookupTagSize:])
+	if _, err := ghostpriv.DecodeReveal(zeroTag); !errors.Is(err, ghostpriv.ErrRevealTag) {
+		t.Errorf("zero remainder tag decodes: %v, want %v", err, ghostpriv.ErrRevealTag)
+	}
+	if _, _, err := ghostpriv.CheckReveal(rst, renv, ghostprivtest.Verifier{}, zeroTag); !errors.Is(err, ghostpriv.ErrRevealTag) {
+		t.Errorf("zero remainder tag: %v, want %v", err, ghostpriv.ErrRevealTag)
+	}
+	changed := envelope(t, good)
+	changed[len(changed)-1] ^= 0x01
+	if _, _, err := ghostpriv.CheckReveal(rst, renv, ghostprivtest.Verifier{}, changed); !errors.Is(err, ghostpriv.ErrRevealProof) {
+		t.Errorf("changed remainder tag: %v, want %v", err, ghostpriv.ErrRevealProof)
+	}
+	// Neither changes the state: the refused reveals append nothing.
+	if n := coinLeafCount(rst); n != 2 {
+		t.Errorf("coin leaves %d after the refused reveals, want 2", n)
 	}
 }

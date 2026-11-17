@@ -31,13 +31,14 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/ghostpriv"
+	"github.com/ethereum/go-ethereum/core/ghosttree"
 	"github.com/holiman/uint256"
 )
 
 // Lengths of the version 2 statements, as ghost_proofs.h and ghost_policy.h
 // give them.
 const (
-	coinRevealV2Bytes = 560
+	coinRevealV2Bytes = 576
 	policyRevealBytes = 720
 )
 
@@ -94,15 +95,16 @@ func ordinaryV2(t testing.TB, fx v2Fixture) *ghostpriv.Reveal {
 	}
 	s := fx.statement
 	r := &ghostpriv.Reveal{
-		Version:   ghostpriv.RevealVersion,
-		ChainID:   fx.chainID,
-		Root:      common.BytesToHash(s[0:32]),
-		Marker:    common.BytesToHash(s[32:64]),
-		Remainder: common.BytesToHash(s[64:96]),
-		Recipient: common.BytesToAddress(s[476:496]),
-		Out:       new(uint256.Int).SetBytes(s[496:528]),
-		Fee:       new(uint256.Int).SetBytes(s[528:560]),
-		Proof:     common.CopyBytes(fx.proof),
+		Version:      ghostpriv.RevealVersion,
+		RemainderTag: ghosttree.LookupTag(s[560:576]),
+		ChainID:      fx.chainID,
+		Root:         common.BytesToHash(s[0:32]),
+		Marker:       common.BytesToHash(s[32:64]),
+		Remainder:    common.BytesToHash(s[64:96]),
+		Recipient:    common.BytesToAddress(s[476:496]),
+		Out:          new(uint256.Int).SetBytes(s[496:528]),
+		Fee:          new(uint256.Int).SetBytes(s[528:560]),
+		Proof:        common.CopyBytes(fx.proof),
 	}
 	copy(r.Note[:], s[96:476])
 	env, err := r.MarshalBinary()

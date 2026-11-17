@@ -35,14 +35,15 @@ const bindingTypeOffset = 8 + 2 + 32 + 2
 // fixedReveal is a version 2 coin reveal with every field set.
 func fixedReveal() *ghostpriv.Reveal {
 	r := &ghostpriv.Reveal{
-		Version:   ghostpriv.RevealVersion,
-		ChainID:   7,
-		Marker:    common.HexToHash("0x11"),
-		Root:      common.HexToHash("0x22"),
-		Remainder: common.HexToHash("0x33"),
-		Recipient: common.HexToAddress("0x44"),
-		Out:       uint256.NewInt(5000),
-		Fee:       uint256.NewInt(21),
+		Version:      ghostpriv.RevealVersion,
+		RemainderTag: [16]byte{0x7a, 0x01},
+		ChainID:      7,
+		Marker:       common.HexToHash("0x11"),
+		Root:         common.HexToHash("0x22"),
+		Remainder:    common.HexToHash("0x33"),
+		Recipient:    common.HexToAddress("0x44"),
+		Out:          uint256.NewInt(5000),
+		Fee:          uint256.NewInt(21),
 	}
 	r.Note[0], r.Note[ghostpriv.NoteSize-1] = 0x55, 0x66
 	return r

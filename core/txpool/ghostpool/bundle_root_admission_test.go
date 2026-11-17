@@ -54,14 +54,15 @@ func (v *rootCounter) VerifyBundle(in *ghostpriv.BundleInputs, proof []byte) err
 // root and the fee, as a bundle carries it: without a proof.
 func (f *fixture) bundledReveal(marker common.Hash, fee *uint256.Int) *ghostpriv.Reveal {
 	return &ghostpriv.Reveal{
-		Version:   ghostpriv.RevealVersion,
-		ChainID:   f.gspec.Config.GetChainID().Uint64(),
-		Marker:    marker,
-		Root:      *f.genesis.Header().CoinTreeRoot,
-		Remainder: ghosttree.K("ghost/test-remainder", marker[:]),
-		Recipient: recipient(int(marker[0])),
-		Out:       uint256.NewInt(1000),
-		Fee:       new(uint256.Int).Set(fee),
+		Version:      ghostpriv.RevealVersion,
+		RemainderTag: [16]byte{0x7a, 0x01},
+		ChainID:      f.gspec.Config.GetChainID().Uint64(),
+		Marker:       marker,
+		Root:         *f.genesis.Header().CoinTreeRoot,
+		Remainder:    ghosttree.K("ghost/test-remainder", marker[:]),
+		Recipient:    recipient(int(marker[0])),
+		Out:          uint256.NewInt(1000),
+		Fee:          new(uint256.Int).Set(fee),
 	}
 }
 

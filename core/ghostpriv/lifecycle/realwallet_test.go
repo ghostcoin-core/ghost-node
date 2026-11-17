@@ -170,7 +170,7 @@ const (
 	realOpeningBytes         = 3*32 + ghostpriv.SaltSize + 32 + 4 + 32*32
 	realRemainderBytes       = 3*32 + ghostpriv.SaltSize + 32
 	realRuleBytes            = common.AddressLength + 5*32
-	realRevealStatementBytes = 3*32 + ghostpriv.NoteSize + common.AddressLength + 2*32
+	realRevealStatementBytes = 3*32 + ghostpriv.NoteSize + common.AddressLength + 2*32 + ghostpriv.LookupTagSize
 	realPolicyStatementBytes = 5*32 + common.AddressLength + 5*32 + ghostpriv.NoteSize
 	realActionStatementBytes = common.AddressLength + 32 + 8 + 4*32 + 8 + 32
 )
@@ -206,7 +206,8 @@ func realRevealStatement(in *ghostpriv.VerifyInputs) []byte {
 	b = append(b, in.Note[:]...)
 	b = append(b, in.Recipient[:]...)
 	b = append(b, amountBytes(in.Out)...)
-	return append(b, amountBytes(in.Fee)...)
+	b = append(b, amountBytes(in.Fee)...)
+	return append(b, in.RemainderTag[:]...)
 }
 
 // realPolicyStatement is statement S4 in the layout of ghost_policy.h.

@@ -412,14 +412,15 @@ func buildFixture(t *testing.T) *fixture {
 
 	reveal := func(spend, rest coin, recipient common.Address, out *uint256.Int, fee ghostpriv.Fee) *types.Transaction {
 		r := &ghostpriv.Reveal{
-			Version:   ghostpriv.RevealVersion,
-			ChainID:   chainID,
-			Marker:    spend.marker(),
-			Root:      *c.head().CoinTreeRoot,
-			Remainder: rest.leaf(),
-			Recipient: recipient,
-			Out:       out,
-			Fee:       fee.Total,
+			Version:      ghostpriv.RevealVersion,
+			RemainderTag: [16]byte{0x7a, 0x01},
+			ChainID:      chainID,
+			Marker:       spend.marker(),
+			Root:         *c.head().CoinTreeRoot,
+			Remainder:    rest.leaf(),
+			Recipient:    recipient,
+			Out:          out,
+			Fee:          fee.Total,
 		}
 		note := rest.note()
 		copy(r.Note[:], note[:]) // the version 1 reveal's note slot

@@ -91,7 +91,7 @@ fn assert_changed_key_refused(f: RootFn, key: &[u8], inputs: &[u8], field: &[u8]
 }
 
 fn check_bundle(b: &BundleRoot) -> Vec<u8> {
-    // The item is the node's: the 607-byte binding input of the reveal on the
+    // The item is the node's: the 623-byte binding input of the reveal on the
     // chain, then its binding digest.
     let item = &b.item;
     assert_eq!(item.len(), REVEAL_PUBLIC_BYTES);
@@ -107,7 +107,8 @@ fn check_bundle(b: &BundleRoot) -> Vec<u8> {
     assert_eq!(item[163..195], b.tx.out);
     assert_eq!(item[195..227], b.tx.fee);
     assert_eq!(item[227..607], b.tx.remainder_note);
-    assert_eq!(item[607..], coin_reveal_v2_binding(&b.params, &b.tx));
+    assert_eq!(item[607..623], b.tx.remainder_tag);
+    assert_eq!(item[623..], coin_reveal_v2_binding(&b.params, &b.tx));
 
     let key = &b.key[..];
     let inputs = node_inputs(CHAIN_ID, std::slice::from_ref(item));

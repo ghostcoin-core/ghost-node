@@ -50,19 +50,19 @@ func testDataRevealEnvelope() []byte {
 }
 
 // TestRevealSizesAndGas pins the ordinary reveal's version 2 payload, with
-// its 380-byte note, and its gas G_PRIV, and the data reveal's own payload,
+// its 380-byte note and 16-byte remainder tag, and its gas G_PRIV, and the data reveal's own payload,
 // which keeps its 156-byte note slot, and its own gas G_DATA.
 func TestRevealSizesAndGas(t *testing.T) {
-	if GhostRevealPayloadSize != 1_311_290 || GhostRevealEnvelopeSize != 1_311_291 {
+	if GhostRevealPayloadSize != 1_311_306 || GhostRevealEnvelopeSize != 1_311_307 {
 		t.Errorf("coin reveal payload %d, envelope %d", GhostRevealPayloadSize, GhostRevealEnvelopeSize)
 	}
 	if GhostDataRevealPayloadSize != 1_311_066 || GhostDataRevealEnvelopeSize != 1_311_067 {
 		t.Errorf("data reveal payload %d, envelope %d", GhostDataRevealPayloadSize, GhostDataRevealEnvelopeSize)
 	}
-	if GhostRevealGas != 21_371_656 {
+	if GhostRevealGas != 21_371_912 {
 		t.Errorf("G_PRIV %d", GhostRevealGas)
 	}
-	if 16*GhostRevealEnvelopeSize+21_000+370_000 != 21_371_656 {
+	if 16*GhostRevealEnvelopeSize+21_000+370_000 != 21_371_912 {
 		t.Errorf("G_PRIV is not 16 per envelope byte, 21,000 and 370,000")
 	}
 	if GhostDataRevealGas != 21_090_372 {

@@ -877,16 +877,17 @@ func TestOrdinaryRevealV2Recipient(t *testing.T) {
 }
 
 // TestOrdinaryRevealV2Decode checks the version 2 ordinary reveal: a payload
-// of 1,311,290 bytes, the 380-byte note at its end round-tripping through
+// of 1,311,306 bytes, the 380-byte note and the 16-byte remainder tag at its
+// end round-tripping through
 // MarshalBinary and DecodeReveal, version 2 at its length only (version 1
-// has a length of its own, and no third length is a reveal), the 607-byte
+// has a length of its own, and no third length is a reveal), the 623-byte
 // binding under the version 2 tag with the type COIN version 2, and the
 // 380-byte note in the verifier's inputs and the receipt log.
 func TestOrdinaryRevealV2Decode(t *testing.T) {
-	if types.GhostRevealPayloadSize != 1_311_290 || ghostpriv.PayloadSize != 1_311_290 || ghostpriv.EnvelopeSize != 1_311_291 {
+	if types.GhostRevealPayloadSize != 1_311_306 || ghostpriv.PayloadSize != 1_311_306 || ghostpriv.EnvelopeSize != 1_311_307 {
 		t.Fatalf("payload %d, envelope %d", ghostpriv.PayloadSize, ghostpriv.EnvelopeSize)
 	}
-	if ghostpriv.RevealVersion != 2 || ghostpriv.NoteSize != 380 || ghostpriv.BindingSize != 607 {
+	if ghostpriv.RevealVersion != 2 || ghostpriv.NoteSize != 380 || ghostpriv.BindingSize != 623 {
 		t.Fatalf("version %d, note %d, binding %d", ghostpriv.RevealVersion, ghostpriv.NoteSize, ghostpriv.BindingSize)
 	}
 	r := layoutReveal()
@@ -897,17 +898,17 @@ func TestOrdinaryRevealV2Decode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(env) != 1_311_291 || binary.BigEndian.Uint16(env[1:3]) != 2 || !bytes.Equal(env[len(env)-380:], r.Note[:]) {
+	if len(env) != 1_311_307 || binary.BigEndian.Uint16(env[1:3]) != 2 || !bytes.Equal(env[len(env)-16-380:len(env)-16], r.Note[:]) || !bytes.Equal(env[len(env)-16:], r.RemainderTag[:]) {
 		t.Fatalf("envelope of %d bytes", len(env))
 	}
 	dec, err := ghostpriv.DecodeReveal(env)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if dec.Version != 2 || dec.Note != r.Note {
-		t.Fatal("decode does not give back the version and the note")
+	if dec.Version != 2 || dec.Note != r.Note || dec.RemainderTag != r.RemainderTag {
+		t.Fatal("decode does not give back the version, the note and the remainder tag")
 	}
-	if tx, err := types.NewGhostRevealTx(env); err != nil || tx.Size() != 1_311_291 || tx.Gas() != 21_371_656 {
+	if tx, err := types.NewGhostRevealTx(env); err != nil || tx.Size() != 1_311_307 || tx.Gas() != 21_371_912 {
 		t.Fatalf("transaction: %v", err)
 	}
 
@@ -922,7 +923,7 @@ func TestOrdinaryRevealV2Decode(t *testing.T) {
 	if _, err := ghostpriv.DecodeReveal(env[:1+1_311_066]); !errors.Is(err, ghostpriv.ErrRevealVersion) {
 		t.Errorf("version 2 at the version 1 length: %v", err)
 	}
-	for _, n := range []int{1 + 1_311_065, 1 + 1_311_067, 1 + 1_311_289, 1 + 1_311_291} {
+	for _, n := range []int{1 + 1_311_065, 1 + 1_311_067, 1 + 1_311_290, 1 + 1_311_305, 1 + 1_311_307} {
 		e := make([]byte, n)
 		copy(e, env)
 		if _, err := ghostpriv.DecodeReveal(e); !errors.Is(err, ghostpriv.ErrRevealLength) {
@@ -933,12 +934,12 @@ func TestOrdinaryRevealV2Decode(t *testing.T) {
 		}
 	}
 
-	// The binding: 607 bytes under the version 2 tag, type COIN version 2,
-	// the whole note at its end.
+	// The binding: 623 bytes under the version 2 tag, type COIN version 2,
+	// the whole note and then the remainder tag at its end.
 	const chainID = 6_777_971
 	genesis := filled(0x88)
 	in := r.BindingInput(chainID, genesis)
-	if len(in) != 607 || !bytes.Equal(in[44:46], []byte{0x02, 0x01}) || !bytes.Equal(in[42:44], []byte{0x01, 0x02}) || !bytes.Equal(in[607-380:], r.Note[:]) {
+	if len(in) != 623 || !bytes.Equal(in[44:46], []byte{0x02, 0x01}) || !bytes.Equal(in[42:44], []byte{0x01, 0x02}) || !bytes.Equal(in[607-380:607], r.Note[:]) || !bytes.Equal(in[607:], r.RemainderTag[:]) {
 		t.Fatalf("binding input of %d bytes", len(in))
 	}
 	if r.BindingDigest(chainID, genesis) != ghosttree.K("ghost/coin-reveal-binding/v2", in) {
@@ -969,6 +970,7 @@ func TestOrdinaryRevealV2Decode(t *testing.T) {
 // binding.
 func asV1(f *fixture, r *ghostpriv.Reveal) *ghostpriv.Reveal {
 	r.Version = ghostpriv.RevealVersionV1
+	r.RemainderTag = ghosttree.LookupTag{} // a version 1 reveal has no remainder tag
 	for i := ghostpriv.RevealNoteSize; i < ghostpriv.NoteSize; i++ {
 		r.Note[i] = 0
 	}
@@ -994,6 +996,7 @@ func TestOrdinaryRevealV2KeepsVersion1(t *testing.T) {
 	t.Run("layout and binding", func(t *testing.T) {
 		r := layoutReveal()
 		r.Version = ghostpriv.RevealVersionV1
+		r.RemainderTag = ghosttree.LookupTag{}
 		r.Note = [ghostpriv.NoteSize]byte{}
 		for i := 0; i < ghostpriv.RevealNoteSize; i++ {
 			r.Note[i] = byte(i) | 0x40

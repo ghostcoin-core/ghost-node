@@ -42,15 +42,16 @@ func filled(b byte) common.Hash {
 // layoutReveal is a reveal with a distinct byte in every field.
 func layoutReveal() *ghostpriv.Reveal {
 	r := &ghostpriv.Reveal{
-		Version:   ghostpriv.RevealVersion,
-		ChainID:   0x0102030405060708,
-		Marker:    filled(0x11),
-		Root:      filled(0x22),
-		Remainder: filled(0x33),
-		Recipient: common.BytesToAddress(bytes.Repeat([]byte{0x44}, 20)),
-		Out:       uint256.NewInt(0x5555),
-		Fee:       uint256.NewInt(0x6666),
-		Proof:     bytes.Repeat([]byte{0x99}, 100),
+		Version:      ghostpriv.RevealVersion,
+		RemainderTag: [16]byte{0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88},
+		ChainID:      0x0102030405060708,
+		Marker:       filled(0x11),
+		Root:         filled(0x22),
+		Remainder:    filled(0x33),
+		Recipient:    common.BytesToAddress(bytes.Repeat([]byte{0x44}, 20)),
+		Out:          uint256.NewInt(0x5555),
+		Fee:          uint256.NewInt(0x6666),
+		Proof:        bytes.Repeat([]byte{0x99}, 100),
 	}
 	copy(r.Note[:], bytes.Repeat([]byte{0x77}, ghostpriv.NoteSize))
 	return r
@@ -61,7 +62,7 @@ func word(v uint64) []byte {
 	return w[:]
 }
 
-// TestBindingDigestLayout checks the 607 bytes of the version 2 binding
+// TestBindingDigestLayout checks the 623 bytes of the version 2 binding
 // digest field by field (spec 10, section 4.2), the tag, that the node
 // supplies the chain id, version, domain, statement, type and purpose, that
 // there is no rule field, and that every field the digest covers changes it.
@@ -70,7 +71,7 @@ func TestBindingDigestLayout(t *testing.T) {
 	const chainID = 6_777_971
 	genesis := filled(0x88)
 	in := r.BindingInput(chainID, genesis)
-	if len(in) != 607 || ghostpriv.BindingSize != 607 {
+	if len(in) != 623 || ghostpriv.BindingSize != 623 {
 		t.Fatalf("binding input of %d bytes", len(in))
 	}
 	// chain_id, version 2, domain, statement 0x01 and statement_version
@@ -89,6 +90,7 @@ func TestBindingDigestLayout(t *testing.T) {
 	want = append(want, word(0x5555)...)
 	want = append(want, word(0x6666)...)
 	want = append(want, r.Note[:]...)
+	want = append(want, r.RemainderTag[:]...)
 	if !bytes.Equal(in, want) {
 		t.Fatalf("binding input\n%x\nwant\n%x", in, want)
 	}
@@ -99,7 +101,7 @@ func TestBindingDigestLayout(t *testing.T) {
 		{"chain_id", 0, 8}, {"version", 8, 10}, {"domain", 10, 42}, {"statement", 42, 43},
 		{"statement_version", 43, 44}, {"type", 44, 46}, {"purpose", 46, 47}, {"root", 47, 79},
 		{"marker", 79, 111}, {"remainder", 111, 143}, {"recipient", 143, 163}, {"out", 163, 195},
-		{"fee", 195, 227}, {"remainder_note", 227, 607},
+		{"fee", 195, 227}, {"remainder_note", 227, 607}, {"remainder_tag", 607, 623},
 	} {
 		if !bytes.Equal(in[f.from:f.to], want[f.from:f.to]) {
 			t.Errorf("field %s at %d to %d", f.name, f.from, f.to)
@@ -134,6 +136,8 @@ func TestBindingDigestLayout(t *testing.T) {
 		"fee":       func(r *ghostpriv.Reveal) { r.Fee.AddUint64(r.Fee, 1) },
 		"note":      func(r *ghostpriv.Reveal) { r.Note[155] ^= 1 },
 		"note end":  func(r *ghostpriv.Reveal) { r.Note[379] ^= 1 },
+		"tag":       func(r *ghostpriv.Reveal) { r.RemainderTag[0] ^= 1 },
+		"tag end":   func(r *ghostpriv.Reveal) { r.RemainderTag[15] ^= 1 },
 	} {
 		m := layoutReveal()
 		change(m)
@@ -157,16 +161,16 @@ func TestBindingDigestLayout(t *testing.T) {
 // words must have their 20 leading bytes zero, and that the proof field's
 // padding must be zero.
 func TestEnvelopeSizeAndPadding(t *testing.T) {
-	if ghostpriv.EnvelopeSize != 1_311_291 || ghostpriv.PayloadSize != 1_311_290 || ghostpriv.ProofSize != 1_310_720 {
+	if ghostpriv.EnvelopeSize != 1_311_307 || ghostpriv.PayloadSize != 1_311_306 || ghostpriv.ProofSize != 1_310_720 {
 		t.Fatalf("sizes %d %d %d", ghostpriv.EnvelopeSize, ghostpriv.PayloadSize, ghostpriv.ProofSize)
 	}
 	// The data reveal keeps its envelope and its 156-byte note slot.
 	if types.GhostDataRevealEnvelopeSize != 1_311_067 || types.GhostDataRevealPayloadSize != 1_311_066 {
 		t.Fatalf("data reveal sizes %d %d", types.GhostDataRevealEnvelopeSize, types.GhostDataRevealPayloadSize)
 	}
-	// G_PRIV = 16 x 1,311,291 + 21,000 + 370,000 = 21,371,656; G_DATA = 16 x
+	// G_PRIV = 16 x 1,311,307 + 21,000 + 370,000 = 21,371,912; G_DATA = 16 x
 	// 1,311,067 + 21,000 + 92,300 = 21,090,372.
-	if ghostpriv.GasPriv != 16*1_311_291+21_000+370_000 || types.GhostRevealGas != ghostpriv.GasPriv {
+	if ghostpriv.GasPriv != 16*1_311_307+21_000+370_000 || types.GhostRevealGas != ghostpriv.GasPriv {
 		t.Fatalf("G_PRIV %d", ghostpriv.GasPriv)
 	}
 	if ghostpriv.GasData != 16*1_311_067+21_000+92_300 || types.GhostDataRevealGas != ghostpriv.GasData {
@@ -177,7 +181,7 @@ func TestEnvelopeSizeAndPadding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(env) != 1_311_291 || env[0] != 0x50 {
+	if len(env) != 1_311_307 || env[0] != 0x50 {
 		t.Fatalf("envelope of %d bytes, type %#x", len(env), env[0])
 	}
 	p := env[1:]
@@ -197,6 +201,7 @@ func TestEnvelopeSizeAndPadding(t *testing.T) {
 		{"proof", 190, 290, r.Proof},
 		{"proof padding", 290, 1_310_910, make([]byte, 1_310_910-290)},
 		{"note", 1_310_910, 1_311_290, r.Note[:]},
+		{"remainder tag", 1_311_290, 1_311_306, r.RemainderTag[:]},
 	} {
 		if !bytes.Equal(p[f.from:f.to], f.want) {
 			t.Errorf("payload field %s at %d to %d", f.name, f.from, f.to)
@@ -207,7 +212,7 @@ func TestEnvelopeSizeAndPadding(t *testing.T) {
 		t.Fatal(err)
 	}
 	if dec.ChainID != r.ChainID || dec.Marker != r.Marker || dec.Root != r.Root || dec.Remainder != r.Remainder ||
-		dec.Recipient != r.Recipient || !dec.Out.Eq(r.Out) || !dec.Fee.Eq(r.Fee) || dec.Note != r.Note ||
+		dec.Recipient != r.Recipient || !dec.Out.Eq(r.Out) || !dec.Fee.Eq(r.Fee) || dec.Note != r.Note || dec.RemainderTag != r.RemainderTag ||
 		!bytes.Equal(dec.Proof[:100], r.Proof) || len(dec.Proof) != ghostpriv.ProofSize {
 		t.Fatal("decode does not give back the fields")
 	}

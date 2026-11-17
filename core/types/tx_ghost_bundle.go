@@ -32,7 +32,7 @@ import (
 // carried without its proof field. A type of its own, 0x55, of fixed layout
 // that is not RLP:
 //
-//	version (2) | chain id (8) | count (2) | root proof (1,310,720) | count bodies of 570 bytes
+//	version (2) | chain id (8) | count (2) | root proof (1,310,720) | count bodies of 586 bytes
 //
 // Like the reveals it has no sender, nonce or signature, and its consensus
 // checks are in core/ghostpriv. It is not a member of IsGhostReveal: no pool,
@@ -51,21 +51,21 @@ const (
 	GhostBundleProofSize = 1_310_720
 
 	// GhostBundleBodySize is the length of one bundled reveal: a version 2
-	// reveal payload without its proof field, its first 190 bytes and its
-	// 380-byte note.
-	GhostBundleBodySize = 570
+	// reveal payload without its proof field, its first 190 bytes, its
+	// 380-byte note and its 16-byte remainder tag.
+	GhostBundleBodySize = 586
 
 	// GhostBundleMaxReveals is the largest count of a bundle, 44 batches of
 	// 32 reveals.
 	GhostBundleMaxReveals = 44 * 32
 
 	// GhostBundleFixedSize is the length of a bundle's payload without its
-	// bodies; the payload is GhostBundleFixedSize + 570 * count bytes.
+	// bodies; the payload is GhostBundleFixedSize + 586 * count bytes.
 	GhostBundleFixedSize = GhostBundleHeaderSize + GhostBundleProofSize
 )
 
 // ErrGhostBundleLength is returned for a bundle whose payload is not
-// GhostBundleFixedSize + 570 * count bytes for a count from 1 to
+// GhostBundleFixedSize + 586 * count bytes for a count from 1 to
 // GhostBundleMaxReveals.
 var ErrGhostBundleLength = errors.New("bundle payload length does not match a count of 1 to 1,408 reveals")
 

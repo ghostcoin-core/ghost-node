@@ -200,14 +200,15 @@ func (f *fixture) revealWithRoot(marker common.Hash, recipient common.Address, f
 	genesis := f.genesis
 	chainID := f.gspec.Config.GetChainID().Uint64()
 	r := &ghostpriv.Reveal{
-		Version:   ghostpriv.RevealVersion,
-		ChainID:   chainID,
-		Marker:    marker,
-		Root:      root,
-		Remainder: ghosttree.K("ghost/test-remainder", marker[:], recipient[:]),
-		Recipient: recipient,
-		Out:       uint256.NewInt(1000),
-		Fee:       new(uint256.Int).Set(fee),
+		Version:      ghostpriv.RevealVersion,
+		RemainderTag: [16]byte{0x7a, 0x01},
+		ChainID:      chainID,
+		Marker:       marker,
+		Root:         root,
+		Remainder:    ghosttree.K("ghost/test-remainder", marker[:], recipient[:]),
+		Recipient:    recipient,
+		Out:          uint256.NewInt(1000),
+		Fee:          new(uint256.Int).Set(fee),
 	}
 	r.Proof = ghostprivtest.Proof(r.BindingDigest(chainID, genesis.Hash()))
 	env, err := r.MarshalBinary()
@@ -226,12 +227,13 @@ func (f *fixture) revealWithRoot(marker common.Hash, recipient common.Address, f
 func (f *fixture) unproven(marker common.Hash, fee *uint256.Int, root common.Hash) *types.Transaction {
 	f.t.Helper()
 	r := &ghostpriv.Reveal{
-		Version: ghostpriv.RevealVersion,
-		ChainID: f.gspec.Config.GetChainID().Uint64(),
-		Marker:  marker,
-		Root:    root,
-		Out:     new(uint256.Int),
-		Fee:     new(uint256.Int).Set(fee),
+		Version:      ghostpriv.RevealVersion,
+		RemainderTag: [16]byte{0x7a, 0x01},
+		ChainID:      f.gspec.Config.GetChainID().Uint64(),
+		Marker:       marker,
+		Root:         root,
+		Out:          new(uint256.Int),
+		Fee:          new(uint256.Int).Set(fee),
 	}
 	env, err := r.MarshalBinary()
 	if err != nil {
@@ -997,7 +999,7 @@ func TestGhostPoolFloodOfSlowChecksLeavesLocalSlot(t *testing.T) {
 	chainID := f.gspec.Config.GetChainID().Uint64()
 	badVersion := encode(&ghostpriv.Reveal{Version: ghostpriv.RevealVersion + 1, ChainID: chainID, Marker: testMarker(201), Fee: fee})
 	requireErr(t, p.AddFromPeer("peer-x", []*types.Transaction{badVersion})[0], ghostpriv.ErrRevealVersion, "reveal of another version")
-	badChain := encode(&ghostpriv.Reveal{Version: ghostpriv.RevealVersion, ChainID: chainID + 1, Marker: testMarker(202), Fee: fee})
+	badChain := encode(&ghostpriv.Reveal{Version: ghostpriv.RevealVersion, RemainderTag: [16]byte{0x7a, 0x01}, ChainID: chainID + 1, Marker: testMarker(202), Fee: fee})
 	requireErr(t, p.AddFromPeer("peer-x", []*types.Transaction{badChain})[0], ghostpriv.ErrRevealChainID, "reveal of another chain")
 	p.mu.RLock()
 	tokens := p.peers["peer-x"].tokens
@@ -1301,12 +1303,13 @@ func TestGhostPoolRefusesBadRootBeforeProof(t *testing.T) {
 
 	// The backstop runs before the proof too.
 	overdraw := encodeReveal(t, &ghostpriv.Reveal{
-		Version: ghostpriv.RevealVersion,
-		ChainID: f.gspec.Config.GetChainID().Uint64(),
-		Marker:  testMarker(5),
-		Root:    genesisRoot,
-		Out:     uint256.MustFromBig(new(big.Int).Mul(oneGhost, big.NewInt(2))),
-		Fee:     new(uint256.Int).Set(fee),
+		Version:      ghostpriv.RevealVersion,
+		RemainderTag: [16]byte{0x7a, 0x01},
+		ChainID:      f.gspec.Config.GetChainID().Uint64(),
+		Marker:       testMarker(5),
+		Root:         genesisRoot,
+		Out:          uint256.MustFromBig(new(big.Int).Mul(oneGhost, big.NewInt(2))),
+		Fee:          new(uint256.Int).Set(fee),
 	})
 	verifier.checks.Store(0)
 	requireErr(t, addOne(p, "peer-c", overdraw), ghostpriv.ErrRevealBackstop, "reveal taking more than is hidden")
