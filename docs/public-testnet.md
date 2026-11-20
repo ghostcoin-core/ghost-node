@@ -8,6 +8,112 @@ be given.
 It is a test network, not the launch network. Its coins have no value, it may
 be reset, and none of its values are launch values.
 
+## Join it
+
+These steps install a node on Linux or macOS (amd64 or arm64), sync it to the
+network the public test nodes run, and then start it mining. You need a
+terminal, an internet connection and about 1 GB of free disk. The node
+listens for peers on TCP and UDP port 30303; it syncs without an open port,
+but opening it helps the network.
+
+### 1. Install with mining paused
+
+```sh
+mkdir -p ~/.ghost-node && touch ~/.ghost-node/mining-paused
+curl -fsSL https://get.specter.cash | sh
+```
+
+The first line makes the node start without mining. The second is the one-line
+installer: it checks the release's signature, installs the node in
+`~/.ghost-node` with a new mining address, and starts it as a user service.
+It ends by printing the mining address and the commands below.
+
+Why pause first: a node that starts with mining on gives up the fast sync
+(snap sync) and instead replays every block from block 0. The current
+release (build 79) cannot replay the test network's early blocks, because
+block 1394 holds a commit in an older format that the release now refuses, so
+a node installed with mining on stops at block 1393 and never reaches the
+network. Starting without mining keeps snap sync, which takes the recent state
+from peers and does not replay old blocks.
+
+### 2. Wait until it has synced
+
+Ask the node for its head block, its peer count and whether it is still
+syncing:
+
+```sh
+~/.ghost-node/bin/geth attach --exec '[eth.blockNumber, net.peerCount, eth.syncing !== false]' ~/.ghost-node/data/geth.ipc
+```
+
+It prints three values: the head block, the number of peers, and `true` while
+it is syncing. For the first minute it may print `[0, 0, true]` while it finds
+peers. The head stays at 0 while snap sync downloads headers, blocks and
+state, then jumps to the network's head. On a computer with a few cores this
+took about 10 minutes at block 68,000. The node has synced when the last value
+is `false`, the head is above 0 and, run again a minute later, the head has
+risen.
+
+### 3. Check that it is on the same chain
+
+The Ghost web app publishes a recent block of the network the public test
+nodes run, its height and its hash:
+
+```sh
+curl -fsSL https://app.specter.cash/pin.json
+```
+
+Look at the `height` and `hash` at the start of the reply. Ask your node for
+its hash at that height, replacing `HEIGHT` with the number:
+
+```sh
+~/.ghost-node/bin/geth attach --exec 'eth.getBlock(HEIGHT).hash' ~/.ghost-node/data/geth.ipc
+```
+
+The two hashes must be the same. Your node's first block must also be this
+network's genesis, `0xdfe4271fd12d302e15c68e381ade8076207f70d3778eebd69604566fb6979436`:
+
+```sh
+~/.ghost-node/bin/geth attach --exec 'eth.getBlock(0).hash' ~/.ghost-node/data/geth.ipc
+```
+
+### 4. Start mining
+
+```sh
+rm ~/.ghost-node/mining-paused
+curl -fsSL https://get.specter.cash | sh
+```
+
+Running the line again keeps the node, its chain, its config and its mining
+address, and restarts it with mining on. The node then mines on half the
+computer's cores (`GHOST_MINE_THREADS` changes that; see the README). On Linux,
+`journalctl --user -u ghost-node -f` shows its log, with a
+`Successfully sealed new block` line for each block it finds. The Ghost Node
+Dashboard link the installer printed shows the same in a browser.
+
+On Linux, the node stops when you log out unless lingering is on. To keep it
+running, run `loginctl enable-linger` (some systems need
+`sudo loginctl enable-linger $USER`).
+
+### If it is stuck at block 1393
+
+A node installed without step 1 stops at block 1393, and its log
+(`journalctl --user -u ghost-node` on Linux) shows `BAD BLOCK` for block 1394
+with `commit data is not 430 bytes of version 3`. While stuck it still mines
+blocks of its own on top of block 1393, which no other node takes, and its
+rewards count for nothing. Remove its chain and sync it again; this keeps the
+mining address, its key and the config:
+
+```sh
+systemctl --user stop ghost-node
+rm -rf ~/.ghost-node/data/geth/chaindata
+touch ~/.ghost-node/mining-paused
+curl -fsSL https://get.specter.cash | sh
+```
+
+(On macOS, stop the node with
+`launchctl bootout gui/$(id -u)/com.ghostcoin.node` instead of the first
+line.) Then carry on from step 2.
+
 ## The chain
 
 | | |
@@ -16,7 +122,7 @@ be reset, and none of its values are launch values.
 | Genesis time | 1793124000, 2026-10-27 18:00:00 UTC |
 | Genesis difficulty | 16384 (2^14), the start difficulty |
 | Genesis extra data | `ghost public test network`: a header carries no chain ID, and this keeps the first block apart from the internal network's |
-| Genesis hash | `0xdfe4271fd12d302e15c68e381ade8076207f70d3778eebd69604566fb6979436` |
+| Genesis hash | `0xdfe4271fd12d302e15c68e381ade8076207f70d3778eebd69604566fb6979436` for the network the public test nodes run now (release build 79); the code on main gives `0x1beeb3088d741bdde1f5285fec7fea05b2d598237657e37741099d3e82867176`, because its headers carry the lookup fields, so the next release resets the network (see "Stored chains are kept") |
 | Allocation | none: coins come only from mined rewards |
 | EVM | the Ghost EVM profile from block 0, as on the internal network |
 | Consensus constants | its own (`ghost.TestNetParams`), below |
