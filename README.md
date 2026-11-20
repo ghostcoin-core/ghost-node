@@ -132,11 +132,15 @@ copy and restart it. While `~/.ghost-node/mining-paused` exists, which the
 dashboard's pause control writes, the node's service starts it without
 `--mine`, so the pause holds across re-runs, updates and their restarts.
 
-The key pinned today is a test key that nobody holds the private half of, and
-the `ghost-verify` hashes pinned in the script are all-zero placeholders, so
-the installer accepts no release yet. The real key replaces the `.pub` file in
-`install/` and the same lines in `install.sh`; a test keeps the two equal. The
-release fills in the checker's hashes.
+The release key is `install/release-key.pub`, and `install.sh` pins the same
+key; a test keeps the two equal. The `ghost-verify` hashes in the
+repository's `install.sh` are all-zero placeholders, so that copy accepts no
+release: run the one line above, which fetches the copy a release publishes
+with its own checker hashes written in.
+
+To join the public test network from a new computer, follow
+[docs/public-testnet.md](docs/public-testnet.md#join-it): it adds one step
+before the one line so the node's first sync works.
 
 Windows nodes are not published yet: a Windows build has no reveal proof
 verifier, so it would reject every block that holds a reveal and split off the
