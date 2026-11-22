@@ -326,6 +326,13 @@ func newHandler(config *handlerConfig) (*handler, error) {
 		n, err := h.chain.InsertChain(blocks)
 		// PTAL(meowsbits) This chunk was removed upstream. (No acceptTxs.Store...)
 		if err == nil {
+			// A propagated block imports only onto a chain that holds its
+			// parent, so the node is at the network's head: snap sync is
+			// over for it, as it is for a node started on a chain past its
+			// genesis.
+			if h.snapSync.Load() {
+				h.enableSyncedFeatures()
+			}
 			h.eventMux.Post(fetcher.InsertChainEvent{Blocks: blocks})
 		}
 		return n, err
@@ -870,6 +877,39 @@ func (h *handler) txBroadcastLoop() {
 			return
 		}
 	}
+}
+
+// startMining readies the sync state for a node that starts mining. A miner
+// must import the blocks its peers propagate, so the node counts as synced.
+// Snap sync stays on while it is still enabled, as it is on an empty data
+// directory: such a node joins a longer chain by snap sync instead of
+// replaying it block by block from genesis, and it turns snap sync off once
+// a sync completes or a propagated block imports onto its chain.
+func (h *handler) startMining() {
+	if h.snapSync.Load() {
+		h.synced.Store(true)
+		log.Info("Mining with snap sync kept on until the chain reaches the network's head")
+		return
+	}
+	h.enableSyncedFeatures()
+}
+
+// snapSyncPending reports whether snap sync is still on and a peer has a
+// heavier chain than the local head. A miner holds its sealing meanwhile,
+// so a node that has yet to sync mines no fork of its own while it waits for
+// the sync to start. Once snap sync is off it reports false for good.
+func (h *handler) snapSyncPending() bool {
+	if !h.snapSync.Load() {
+		return false
+	}
+	peer := h.peers.peerWithHighestTD()
+	if peer == nil {
+		return false
+	}
+	_, peerTD, _ := peer.Head()
+	head := h.chain.CurrentBlock()
+	localTD := h.chain.GetTd(head.Hash(), head.Number.Uint64())
+	return peerTD != nil && localTD != nil && peerTD.Cmp(localTD) > 0
 }
 
 // enableSyncedFeatures enables the post-sync functionalities when the initial

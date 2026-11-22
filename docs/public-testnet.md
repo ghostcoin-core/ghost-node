@@ -199,6 +199,49 @@ connected that completed the eth handshake on this chain, which
 `eth/backend.go` passes to the miner; `miner/peergate_test.go` checks the
 gate.
 
+## Mining and snap sync
+
+A node started with `--mine` on an empty data directory keeps snap sync on.
+Starting the miner marks the node synced, so it imports the blocks its peers
+propagate, but it no longer turns snap sync off: a node joining a long chain
+takes the recent state by snap sync instead of replaying every block from
+genesis. It logs `Mining with snap sync kept on until the chain reaches the
+network's head`.
+
+Snap sync ends, with `Snap sync complete, auto disabling`, when a sync
+completes or when a block a peer propagated imports onto the node's chain.
+The second covers nodes started together on a new network: their chains
+never fall behind by more than a block or two, so they may never run a sync,
+and a propagated block can import only onto a chain that holds its parent,
+which means the node is at the network's head. That is the rule a restart
+applies too: a chain past its genesis, with its state, full-syncs.
+
+While snap sync is on and a peer has a heavier chain, the miner on the public
+test network seals nothing, as when it has no peers. It logs `Not mining: a
+peer is ahead and snap sync has not finished`, at most once a minute, and
+seals within a recommit interval once the sync ends. So a joining node mines
+no fork of its own on genesis in the seconds before its sync starts, nor on
+a half-synced chain if a sync fails. Once snap sync is off the hold never
+applies again, so a peer that announces a heavier chain it cannot serve
+cannot stop a synced miner. The hold is `snapSyncPending` in
+`eth/handler.go`, passed to the miner in `eth/backend.go`;
+`miner/peergate_test.go` checks it.
+
+## Consensus changes on the test network
+
+From the next reset on, a change to the consensus rules (what a block, a
+commit or a reveal must be for a node to accept it) reaches the running test
+network in one of two ways, never silently:
+
+- with an activation height, so a node checks blocks below it by the old
+  rules and full sync from genesis still works; or
+- with a new genesis, so every test node moves its old chain aside (see
+  below) and the network starts again.
+
+A change that does neither leaves old blocks that new nodes refuse, as build
+79 refused block 1394 of the chain before this reset, and only snap sync
+can join such a chain.
+
 ## Stored chains are kept
 
 The built-in genesis is written only when the data directory holds no genesis.
@@ -232,3 +275,15 @@ empty data directory with only local networking flags (`--datadir`,
 `--port 0`, `--authrpc.port 0`, `--nat none`). The test binary, never the
 shipped `geth`, replaces `TestNetBootnodes` with the local seeds, so the tests
 never contact the seed hosts above.
+
+`cmd/geth/publictestnet_mining_test.go` runs mining nodes the same way, as
+"geth-test-mining", which also lowers the test network's difficulty floor to
+64 through a function only test builds have (release builds always use the
+floor above). The genesis is unchanged, and blocks carry real RandomX seals
+that every node checks. `TestPublicTestNetMiningNodeSnapSyncsLongChain` has
+two seeds mine 160 blocks and then starts a node with mining on, on an empty
+data directory: it must commit a snap sync pivot, seal nothing before that,
+reach the seeds' chain and get a block of its own into it.
+`TestPublicTestNetMiningNodesStartTogether` starts three such nodes together
+at genesis: they must build one chain with blocks from more than one of them,
+each must leave snap sync, and they must keep going.

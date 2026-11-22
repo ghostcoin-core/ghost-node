@@ -311,6 +311,9 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	// connected that run this chain; unlike the server's own count, it never
 	// waits on a server that has not started.
 	eth.miner.SetPeerCount(eth.handler.peers.len)
+	// Nor does it mine while a peer is ahead of a node that has yet to
+	// finish its snap sync.
+	eth.miner.SetSyncPending(eth.handler.snapSyncPending)
 
 	eth.APIBackend = &EthAPIBackend{stack.Config().ExtRPCEnabled(), stack.Config().AllowUnprotectedTxs, eth, nil}
 	if eth.APIBackend.allowUnprotectedTxs {
@@ -523,8 +526,8 @@ func (s *Ethereum) StartMining(threads int) error {
 			cli.Authorize(eb, wallet.SignData)
 		}
 		// If mining is started, we can disable the transaction rejection mechanism
-		// introduced to speed sync times.
-		s.handler.enableSyncedFeatures()
+		// introduced to speed sync times. Snap sync stays on if it still is.
+		s.handler.startMining()
 
 		go s.miner.Start()
 	}

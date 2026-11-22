@@ -132,3 +132,60 @@ func TestMinerWaitsForPeersOnPublicTestNet(t *testing.T) {
 		})
 	}
 }
+
+// TestMinerWaitsForSyncOnPublicTestNet checks that a mining node on the
+// public test network with peers seals nothing while a peer is ahead of a
+// node that has yet to finish its snap sync, seals the work it held back
+// once that ends, and that the internal network mines regardless.
+func TestMinerWaitsForSyncOnPublicTestNet(t *testing.T) {
+	t.Run("public test network", func(t *testing.T) {
+		var peers atomic.Int32
+		peers.Store(1)
+		var pending atomic.Bool
+		pending.Store(true)
+		w, tasks := startPeerGatedWorker(t, ghost.TestNetChainID, &peers, true)
+		w.setSyncPending(pending.Load)
+		for len(tasks) > 0 {
+			<-tasks
+		}
+		w.start()
+		time.Sleep(200 * time.Millisecond)
+		for len(tasks) > 0 {
+			<-tasks
+		}
+		w.start()
+		select {
+		case task := <-tasks:
+			t.Fatalf("sealed block %d while a peer is ahead and snap sync has not finished", task.block.NumberU64())
+		case <-time.After(2500 * time.Millisecond):
+		}
+		if !w.isRunning() {
+			t.Fatal("the worker stopped running while it waits for the sync")
+		}
+
+		// The sync ends; nothing else arrives: the recommit timer seals the
+		// work held back.
+		pending.Store(false)
+		select {
+		case <-tasks:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the worker did not seal once the sync ended")
+		}
+	})
+
+	t.Run("internal network", func(t *testing.T) {
+		var peers atomic.Int32
+		peers.Store(1)
+		w, tasks := startPeerGatedWorker(t, ghost.InternalNetChainID, &peers, true)
+		w.setSyncPending(func() bool { return true })
+		for len(tasks) > 0 {
+			<-tasks
+		}
+		w.start()
+		select {
+		case <-tasks:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the internal network's worker did not seal")
+		}
+	})
+}
