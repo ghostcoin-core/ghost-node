@@ -201,7 +201,9 @@ gate.
 
 ## Mining and snap sync
 
-A node started with `--mine` on an empty data directory keeps snap sync on.
+A node started with `--mine` on an empty data directory keeps snap sync on,
+with the default hash-based state database (`--state.scheme=hash`, which the
+installer uses).
 Starting the miner marks the node synced, so it imports the blocks its peers
 propagate, but it no longer turns snap sync off: a node joining a long chain
 takes the recent state by snap sync instead of replaying every block from
@@ -223,20 +225,16 @@ seals within a recommit interval once the sync ends. So a joining node mines
 no fork of its own on genesis in the seconds before its sync starts, nor on
 a half-synced chain if a sync fails. Once snap sync is off the hold never
 applies again, so a peer that announces a heavier chain it cannot serve
-cannot stop a synced miner. The miner also holds while snap sync is on and
-the head's state cannot be read.
+cannot stop a synced miner. The hold is `snapSyncPending` in
+`eth/handler.go`, passed to the miner in `eth/backend.go`;
+`miner/peergate_test.go` checks it.
 
-With `--state.scheme=path` a snap sync turns the state database off as it
-starts. If the sync fails before its state syncer ran, for example against a
-peer that announced a heavier chain and served nothing, the node turns the
-database back on at its head's root (and does so again when the miner
-starts), so it can mine on. Once the state syncer has run, the database
-stays off until a sync finishes. The default hash-based database is never
-turned off.
-
-The hold is `snapSyncPending` and the restore `restoreStateAfterSnapAbort`,
-both in `eth/handler.go`; `eth/backend.go` passes the hold to the miner.
-`miner/peergate_test.go` and `eth/snap_mining_test.go` check them.
+With `--state.scheme=path` starting the miner still turns snap sync off, as
+before: a snap sync turns the path-based database off until it finishes,
+which a miner cannot mine through. Such a node full-syncs from genesis,
+which works on the test network from the next reset on (see below). Start
+it without mining, or with the hash-based database, to snap sync.
+`eth/snap_mining_test.go` checks both.
 
 ## Consensus changes on the test network
 
