@@ -291,6 +291,9 @@ func (h *handler) doSync(op *chainSyncOp) error {
 	// Run the sync cycle, and disable snap sync if we're past the pivot block
 	err := h.downloader.LegacySync(op.peer.ID(), op.head, op.td, h.chain.Config().GetEthashTerminalTotalDifficulty(), op.mode)
 	if err != nil {
+		if op.mode == downloader.SnapSync {
+			h.restoreStateAfterSnapAbort()
+		}
 		return err
 	}
 	h.enableSyncedFeatures()
