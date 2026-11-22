@@ -61,6 +61,10 @@ const (
 	TestNetMinDifficulty = 1 << 12
 )
 
+// testNetMinDifficulty is the floor TestNetParams gives. It is always
+// TestNetMinDifficulty in a release build; only a test build can lower it.
+var testNetMinDifficulty int64 = TestNetMinDifficulty
+
 // TestNetGenesisHash is the hash of the public test network's first block.
 var TestNetGenesisHash = common.HexToHash("0x1beeb3088d741bdde1f5285fec7fea05b2d598237657e37741099d3e82867176")
 
@@ -83,7 +87,7 @@ func TestNetParams() ghostrules.Params {
 		BlockTime:       launch.BlockTime,
 		HalfLife:        launch.HalfLife,
 		StartDifficulty: big.NewInt(TestNetStartDifficulty),
-		MinDifficulty:   big.NewInt(TestNetMinDifficulty),
+		MinDifficulty:   big.NewInt(testNetMinDifficulty),
 		FutureDrift:     launch.FutureDrift,
 		FirstReward:     launch.FirstReward,
 		TailReward:      launch.TailReward,

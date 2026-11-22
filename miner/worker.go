@@ -286,8 +286,14 @@ type worker struct {
 	// that reached nobody does not mine a fork of its own. Unset, the worker
 	// seals as it always has.
 	peerCount    atomic.Pointer[func() int]
-	heldForPeers atomic.Bool // Whether the last work was held back for want of a peer.
-	peerWaitLog  time.Time   // When the worker last logged that it waits for peers.
+	heldForPeers atomic.Bool // Whether the last work was held back for want of a peer or a sync.
+	peerWaitLog  time.Time   // When the worker last logged that it waits for peers or a sync.
+
+	// syncPending reports whether a peer is ahead of a node that has yet to
+	// finish its snap sync. On the public test network the worker seals no
+	// block while it reports true, so a joining node mines no fork of its
+	// own before the sync starts. Unset, it never holds.
+	syncPending atomic.Pointer[func() bool]
 
 	// Test hooks
 	newTaskHook  func(*task)                        // Method to call upon receiving a new sealing task.
@@ -469,19 +475,48 @@ func (w *worker) setPeerCount(count func() int) {
 	w.peerCount.Store(&count)
 }
 
+// setSyncPending sets the function that reports whether a peer is ahead of a
+// node that has yet to finish its snap sync.
+func (w *worker) setSyncPending(pending func() bool) {
+	if pending == nil {
+		w.syncPending.Store(nil)
+		return
+	}
+	w.syncPending.Store(&pending)
+}
+
+// onTestNet reports whether the worker's chain is the public test network.
+func (w *worker) onTestNet() bool {
+	id := w.chainConfig.GetChainID()
+	return id != nil && id.IsUint64() && id.Uint64() == ghost.TestNetChainID
+}
+
 // waitingForPeers reports whether the worker must hold off sealing because it
 // runs on the public test network with no peers. Developer mode, the internal
 // network and any other chain are never held.
 func (w *worker) waitingForPeers() bool {
 	count := w.peerCount.Load()
-	if count == nil {
-		return false
-	}
-	id := w.chainConfig.GetChainID()
-	if id == nil || !id.IsUint64() || id.Uint64() != ghost.TestNetChainID {
+	if count == nil || !w.onTestNet() {
 		return false
 	}
 	return (*count)() == 0
+}
+
+// waitingForSync reports whether the worker must hold off sealing because it
+// runs on the public test network, has yet to finish its snap sync and a
+// peer is ahead.
+func (w *worker) waitingForSync() bool {
+	pending := w.syncPending.Load()
+	if pending == nil || !w.onTestNet() {
+		return false
+	}
+	return (*pending)()
+}
+
+// heldBack reports whether the worker must hold off sealing, for want of a
+// peer or of a sync.
+func (w *worker) heldBack() bool {
+	return w.waitingForPeers() || w.waitingForSync()
 }
 
 // close terminates all background threads maintained by the worker.
@@ -569,7 +604,7 @@ func (w *worker) newWorkLoop(recommit time.Duration) {
 			// higher priced transactions. Disable this overhead for pending blocks.
 			if w.isRunning() && (!w.chainConfig.GetConsensusEngineType().IsClique() || w.chainConfig.GetCliquePeriod() > 0) {
 				// Work held back for want of a peer is sealed once one connects.
-				if w.heldForPeers.Load() && !w.waitingForPeers() {
+				if w.heldForPeers.Load() && !w.heldBack() {
 					commit(false, commitInterruptResubmit)
 					continue
 				}
@@ -1514,10 +1549,15 @@ func (w *worker) commitWork(interrupt *atomic.Int32, noempty bool, timestamp int
 
 	// On the public test network a node with no peers builds its pending
 	// block but seals nothing until a peer connects.
-	held := w.isRunning() && w.waitingForPeers()
+	noPeers := w.isRunning() && w.waitingForPeers()
+	held := noPeers || (w.isRunning() && w.waitingForSync())
 	w.heldForPeers.Store(held)
 	if held && time.Since(w.peerWaitLog) >= time.Minute {
-		log.Warn("Not mining: waiting for a peer on the public test network")
+		if noPeers {
+			log.Warn("Not mining: waiting for a peer on the public test network")
+		} else {
+			log.Warn("Not mining: a peer is ahead and snap sync has not finished")
+		}
 		w.peerWaitLog = start
 	}
 	// Set the coinbase if the worker is running or it's required
@@ -1592,7 +1632,7 @@ func (w *worker) commitWork(interrupt *atomic.Int32, noempty bool, timestamp int
 func (w *worker) commit(env *environment, interval func(), update bool, start time.Time) error {
 	// The last peer may leave after commitWork looked, so work turned away
 	// here for want of a peer is marked held too, to be sealed once one returns.
-	held := w.isRunning() && w.waitingForPeers()
+	held := w.isRunning() && w.heldBack()
 	if held {
 		w.heldForPeers.Store(true)
 	}

@@ -197,6 +197,13 @@ func (miner *Miner) SetPeerCount(count func() int) {
 	miner.worker.setPeerCount(count)
 }
 
+// SetSyncPending sets the function that reports whether a peer is ahead of
+// a node that has yet to finish its snap sync. On the public test network
+// the miner seals no block while it reports true.
+func (miner *Miner) SetSyncPending(pending func() bool) {
+	miner.worker.setSyncPending(pending)
+}
+
 func (miner *Miner) Hashrate() uint64 {
 	if pow, ok := miner.engine.(consensus.PoW); ok {
 		return uint64(pow.Hashrate())

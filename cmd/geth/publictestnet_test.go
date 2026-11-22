@@ -40,21 +40,25 @@ import (
 // switch.
 func init() {
 	ghost.TestNetBootnodes = nil
-	reexec.Register("geth-test-seeds", func() {
-		if len(os.Args) < 2 {
-			fmt.Fprintln(os.Stderr, "geth-test-seeds: no seed list")
-			os.Exit(1)
-		}
-		if os.Args[1] != "" {
-			ghost.TestNetBootnodes = strings.Split(os.Args[1], ",")
-		}
-		args := append([]string{"geth"}, os.Args[2:]...)
-		if err := app.Run(args); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		os.Exit(0)
-	})
+	reexec.Register("geth-test-seeds", runWithTestSeeds)
+}
+
+// runWithTestSeeds runs geth with its first argument, a comma-separated list
+// of local seeds, as the built-in seed list.
+func runWithTestSeeds() {
+	if len(os.Args) < 2 {
+		fmt.Fprintf(os.Stderr, "%s: no seed list\n", os.Args[0])
+		os.Exit(1)
+	}
+	if os.Args[1] != "" {
+		ghost.TestNetBootnodes = strings.Split(os.Args[1], ",")
+	}
+	args := append([]string{"geth"}, os.Args[2:]...)
+	if err := app.Run(args); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	os.Exit(0)
 }
 
 // localNetFlags are the only flags a "no flags" node gets: the operating
@@ -74,13 +78,24 @@ type testNode struct {
 // its IPC endpoint.
 func startTestNode(t *testing.T, name, datadir string, seeds []string, args ...string) *testNode {
 	t.Helper()
+	if seeds == nil {
+		return startNodeAs(t, "geth-test", name, datadir, nil, args...)
+	}
+	return startNodeAs(t, "geth-test-seeds", name, datadir, seeds, args...)
+}
+
+// startNodeAs starts geth on datadir as the reexec command cmd, with seeds,
+// if cmd takes a seed list, as its first argument, and dials its IPC
+// endpoint.
+func startNodeAs(t *testing.T, cmd, name, datadir string, seeds []string, args ...string) *testNode {
+	t.Helper()
 	args = append([]string{"--datadir", datadir}, args...)
 	g := &testgeth{Datadir: datadir}
 	g.TestCmd = cmdtest.NewTestCmd(t, g)
-	if seeds == nil {
-		g.Run("geth-test", args...)
+	if cmd == "geth-test" {
+		g.Run(cmd, args...)
 	} else {
-		g.Run("geth-test-seeds", append([]string{strings.Join(seeds, ",")}, args...)...)
+		g.Run(cmd, append([]string{strings.Join(seeds, ",")}, args...)...)
 	}
 	n := &testNode{name: name, geth: g}
 	t.Cleanup(func() {
