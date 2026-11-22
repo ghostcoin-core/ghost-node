@@ -886,6 +886,7 @@ func (h *handler) txBroadcastLoop() {
 // replaying it block by block from genesis, and it turns snap sync off once
 // a sync completes or a propagated block imports onto its chain.
 func (h *handler) startMining() {
+	h.restoreStateAfterSnapAbort()
 	if h.snapSync.Load() {
 		h.synced.Store(true)
 		log.Info("Mining with snap sync kept on until the chain reaches the network's head")
@@ -894,22 +895,54 @@ func (h *handler) startMining() {
 	h.enableSyncedFeatures()
 }
 
-// snapSyncPending reports whether snap sync is still on and a peer has a
-// heavier chain than the local head. A miner holds its sealing meanwhile,
-// so a node that has yet to sync mines no fork of its own while it waits for
-// the sync to start. Once snap sync is off it reports false for good.
+// snapSyncPending reports whether snap sync is still on and either a peer
+// has a heavier chain than the local head or the head's state cannot be read
+// (a snap sync has turned the state database off). A miner holds its sealing
+// meanwhile, so a node that has yet to sync mines no fork of its own while it
+// waits for the sync to start, nor builds on state it cannot read. Once snap
+// sync is off it reports false for good.
 func (h *handler) snapSyncPending() bool {
 	if !h.snapSync.Load() {
 		return false
+	}
+	head := h.chain.CurrentBlock()
+	if !h.chain.HasState(head.Root) {
+		return true
 	}
 	peer := h.peers.peerWithHighestTD()
 	if peer == nil {
 		return false
 	}
 	_, peerTD, _ := peer.Head()
-	head := h.chain.CurrentBlock()
 	localTD := h.chain.GetTd(head.Hash(), head.Number.Uint64())
 	return peerTD != nil && localTD != nil && peerTD.Cmp(localTD) > 0
+}
+
+// restoreStateAfterSnapAbort turns the path-based state database back on
+// when a snap sync stopped before its state syncer ever ran, so it wrote no
+// state: the state syncer records its progress whenever it stops, and there
+// is no record. A snap sync turns that database off as it starts; one that
+// failed early, against a peer that announced a heavier chain and then
+// served nothing, would otherwise leave the node unable to read or commit
+// state until another sync starts, which on a network still at genesis may
+// never happen. Once the state syncer has run, or if the
+// stored state root is not the head's, the database stays off until a later
+// sync finishes. The hash-based database, the default, is never turned off.
+func (h *handler) restoreStateAfterSnapAbort() {
+	triedb := h.chain.TrieDB()
+	if triedb.Scheme() != rawdb.PathScheme || rawdb.ReadSnapSyncStatusFlag(h.database) != rawdb.StateSyncRunning ||
+		rawdb.ReadSnapshotSyncStatus(h.database) != nil {
+		return
+	}
+	head := h.chain.CurrentBlock()
+	if err := triedb.Enable(head.Root); err != nil {
+		log.Debug("State database stays off until a snap sync finishes", "err", err)
+		return
+	}
+	if snapshots := h.chain.Snapshots(); snapshots != nil {
+		snapshots.Rebuild(head.Root)
+	}
+	log.Info("State database turned back on after a snap sync that wrote no state", "number", head.Number, "root", head.Root)
 }
 
 // enableSyncedFeatures enables the post-sync functionalities when the initial

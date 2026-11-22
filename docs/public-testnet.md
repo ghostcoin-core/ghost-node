@@ -223,9 +223,20 @@ seals within a recommit interval once the sync ends. So a joining node mines
 no fork of its own on genesis in the seconds before its sync starts, nor on
 a half-synced chain if a sync fails. Once snap sync is off the hold never
 applies again, so a peer that announces a heavier chain it cannot serve
-cannot stop a synced miner. The hold is `snapSyncPending` in
-`eth/handler.go`, passed to the miner in `eth/backend.go`;
-`miner/peergate_test.go` checks it.
+cannot stop a synced miner. The miner also holds while snap sync is on and
+the head's state cannot be read.
+
+With `--state.scheme=path` a snap sync turns the state database off as it
+starts. If the sync fails before its state syncer ran, for example against a
+peer that announced a heavier chain and served nothing, the node turns the
+database back on at its head's root (and does so again when the miner
+starts), so it can mine on. Once the state syncer has run, the database
+stays off until a sync finishes. The default hash-based database is never
+turned off.
+
+The hold is `snapSyncPending` and the restore `restoreStateAfterSnapAbort`,
+both in `eth/handler.go`; `eth/backend.go` passes the hold to the miner.
+`miner/peergate_test.go` and `eth/snap_mining_test.go` check them.
 
 ## Consensus changes on the test network
 
